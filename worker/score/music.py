@@ -23,7 +23,8 @@ marks: {dur_s (the programme, without the end card), words [(t0, t1)], cuts [t] 
 and designed landings, optional), accents [t] (the moments the film itself sounds: the music swells into each),
 turn_s (where the story turns: the build starts there), payoff_s (where it pays off: the drop lands there, on the
 picture cut within SNAP_S of it unless snap is False; with only turn_s the drop lands on it), end_hit_s (where the last hit lands, or None: after the last word), quiet [(t0, t1)]
-(held low)}.
+(held low), drop_landing (optional: the sound's own turn hit, a hit carrying `drop` in the film's sound, screen
+placement only; within DROP_REACH_S of the mark the drop lands on it, so the impact and the drop are one landing)}.
 
 Numbers are the judge's: the 28 @metromedia.house reels on Demucs stems, K-weighted every 10 ms, read against their
 words and story turns (.valmera/week-1112/lanes/MUSIC2/refs/FLOW.json, 14 Nov; PROFILE below). numpy, ffmpeg and the
@@ -46,6 +47,7 @@ VOICE_SPEECH_DB = 2.5              # a levelled voice's frames while it speaks s
 VOICED = 0.2                       # a bar whose voice holds this share of its 250-4000 Hz is sung in
 CUT_TOL_S = 0.045                  # a picture cut within this of a beat is on it (a frame and a third at 30 fps)
 SNAP_S = 0.3                       # the drop takes the picture cut this near the story's mark: the visual turn
+DROP_REACH_S = 1.5                 # the sound's turn hit (marks["drop_landing"]) this near the mark: the drop lands with it
 JUMP_MIN = 0.7                     # what any join costs the arrangement, so a song is cut only where the film needs it
 BUILD_BARS = (2, 4)                # the build before the drop: never under two bars, never a stretch over four
 
@@ -518,37 +520,53 @@ def arrange(song, marks, profile=None, arc=None):
     drop_t = payoff if payoff is not None else turn                # the drop lands on the payoff; on the turn when it is all the film names
     build_from = turn if (payoff is not None and turn is not None and turn < payoff) else None
     lands = sorted(set(cuts) | {float(x) for x in marks.get("landings") or []})
-    if drop_t is not None and lands and marks.get("snap", True):   # the drop on the visual turn: the landing or the cut the mark sits on
-        near = min(lands, key=lambda c: abs(c - drop_t))
-        if abs(near - drop_t) <= SNAP_S:
-            drop_t = near
+    dl = marks.get("drop_landing")
+
+    def _snap(t, after=None):
+        """The drop on the visual turn: the sound's own turn hit when it sits within DROP_REACH_S (the workflow films:
+        the hit and the drop are one landing, never a flam), else the landing or the cut the mark sits on."""
+        if not marks.get("snap", True):
+            return t
+        if dl is not None and abs(float(dl) - t) <= DROP_REACH_S and (after is None or float(dl) - after >= B):
+            return float(dl)
+        if lands:
+            near = min(lands, key=lambda c: abs(c - t))
+            if abs(near - t) <= SNAP_S:
+                return near
+        return t
+    if drop_t is not None:
+        drop_t = _snap(drop_t, build_from)
     if drop_t is not None and not (2.0 * B <= drop_t <= t_end - 2.0 * B):
         drop_t = None                                              # no room for a build before it or a phrase after it
     drop_on = ("payoff" if payoff is not None else "turn") if drop_t is not None else None
+
+    def _payoff_drop():
+        """The payoff takes the drop, the last hit moved into the film's tail: (drop, last hit) or None."""
+        p2 = _snap(payoff)
+        n_after = int(math.floor((dur - P["end_gap_s"] - tail - p2) / beat + 1e-6))
+        if p2 >= 2.0 * B and n_after >= 4:
+            return p2, max(t_end, p2 + min(n_after, 8) * beat)
+        return None
+    if drop_t is None and marks.get("turn_drop") and payoff is not None and dl is not None and abs(float(dl) - payoff) <= DROP_REACH_S:
+        # the sound's turn hit sits on the payoff (screen placement): the payoff takes the drop with it when the song's
+        # last hit stays where the film's close lands, so the hit and the drop are one before the story's earlier turn
+        got = _payoff_drop()
+        if got is not None and got[1] <= t_end + 1e-6:
+            drop_t, drop_on = got[0], "payoff"
     if drop_t is None and marks.get("turn_drop") and turn is not None and payoff is not None and turn < payoff:
         # A short's payoff is often its last sentence, too close to the last hit for a phrase after it. When the
         # caller handed the story's own turn (opt-in: the podcast workflow), the drop lands there and the payoff
         # keeps the last hit, so the film still has its build and drop instead of a flat bed (round1 thin-sound).
-        t2 = turn
-        if lands and marks.get("snap", True):
-            near = min(lands, key=lambda c: abs(c - t2))
-            if abs(near - t2) <= SNAP_S:
-                t2 = near
+        t2 = _snap(turn)
         if 2.0 * B <= t2 <= t_end - 2.0 * B:
             drop_t, build_from, drop_on = t2, None, "turn"
     if drop_t is None and marks.get("turn_drop") and payoff is not None:
         # No turn the drop can stand on (none named or read, or too close to the start): the payoff takes the drop and
         # the last hit moves into the tail the film already has, up to the end card's gap, so a bar or two plays after
         # it. The hit moves only later, never before the last word's breath.
-        p2 = payoff
-        if lands and marks.get("snap", True):
-            near = min(lands, key=lambda c: abs(c - p2))
-            if abs(near - p2) <= SNAP_S:
-                p2 = near
-        n_after = int(math.floor((dur - P["end_gap_s"] - tail - p2) / beat + 1e-6))
-        if p2 >= 2.0 * B and n_after >= 4:
-            drop_t, drop_on = p2, "payoff"
-            t_end = max(t_end, p2 + min(n_after, 8) * beat)
+        got = _payoff_drop()
+        if got is not None:
+            (drop_t, t_end), drop_on = got, "payoff"
     has_entry = bool(entry.any())
     # ---- the film's beats: one stretch to the drop, one from it to the last hit
     spans = []
@@ -1243,12 +1261,28 @@ def fit_cuts(cuts_f, plan, marks, fps, max_frames=3, word_guard_s=0.3):
 
 def sounds_on_the_drop(sounds, plan, fps):
     """The turn's own sounds land with the song's drop when the two are a few frames apart (the tempo could not bend
-    far enough to put the drop on the turn): one hit to the ear, not two. Only for the mix with the song."""
+    far enough to put the drop on the turn): one hit to the ear, not two. Only for the mix with the song. The sound's
+    own turn hit (a hit carrying `drop`, the workflow films) is found by its part, not by its frame: when the drop is
+    not already on it and sits within SNAP_S of it, the hit and what lands with it move onto the drop."""
     d = plan.get("drop_at")
+    if d is None:
+        return list(sounds)
+    own = [s for s in sounds if s.get("drop") and s.get("start_s") is not None and s.get("event_f") is not None]
+    if own:
+        tf = int(own[0]["event_f"])
+        t = tf / float(fps)
+        if abs(d - t) < 0.5 / fps or abs(d - t) > SNAP_S:
+            return list(sounds)
+        out = []
+        for s in sounds:
+            if s.get("start_s") is not None and int(s.get("event_f", -99)) == tf:
+                s = dict(s, start_s=round(max(0.0, float(s["start_s"]) + (d - t)), 4), event_f=int(round(d * fps)))
+            out.append(s)
+        return out
     t = plan.get("payoff_s") if plan.get("payoff_s") is not None else plan.get("turn_s")
     if plan.get("drop_on") == "turn":
         t = plan.get("turn_s")
-    if d is None or t is None or abs(d - t) < 0.5 / fps or abs(d - t) > 0.35:
+    if t is None or abs(d - t) < 0.5 / fps or abs(d - t) > 0.35:
         return list(sounds)
     tf, out = int(round(t * fps)), []
     for s in sounds:
@@ -1285,6 +1319,11 @@ def marks_from_l1(l1, index=None, turn_s=None, prog_end_f=None, payoff_s=None):
     placed = sorted({round(float(p["t"]), 3) for p in (l1.get("sound_design") or {}).get("placed") or [] if p.get("t") is not None and 0 < float(p["t"]) < end_f / fps})
     out = {"dur_s": end_f / fps, "words": words, "cuts": cuts, "landings": [round(t, 4) for t in ev if 0 < t < end_f / fps], "accents": placed,
            "turn_s": turn_s, "payoff_s": payoff_s, "end_hit_s": min(after) if after else None, "quiet": []}
+    # the sound's own turn hit (screen placement, the workflow films: score.sound_screen): the drop lands with it
+    own_turn = sorted(int(s["event_f"]) for s in l1.get("sound") or [] if s.get("drop") and s.get("layer") == "hit"
+                      and s.get("event_f") is not None and 0 < int(s["event_f"]) < end_f)
+    if own_turn:
+        out["drop_landing"] = round(own_turn[0] / fps, 4)
     if own.get("joints"):                 # a narrated story's section joints (valmera-stories): the bed breathes at them (flow)
         out["joints"] = [dict(j) for j in own["joints"] if isinstance(j, dict)]
     return out
@@ -1383,7 +1422,7 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
     prof = profile_for(kind)
     plan = arrange(song, marks, profile=prof)
     rep = {"song": os.path.basename(song_path), "supplied": bool(supplied), "words": len(marks["words"]),
-           "marks": {k: marks[k] for k in ("dur_s", "turn_s", "payoff_s", "end_hit_s")}, "plan": {k: v for k, v in plan.items() if k != "grid"}}
+           "marks": {k: marks.get(k) for k in ("dur_s", "turn_s", "payoff_s", "end_hit_s", "drop_landing")}, "plan": {k: v for k, v in plan.items() if k != "grid"}}
     if not plan.get("ok"):
         return rep
     from . import sound as SD
@@ -1407,11 +1446,13 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
         # the voice as each channel plays it: ffmpeg's stereo-to-mono sums a centred voice 3 dB over either channel,
         # and every sound was levelled against the voice per channel (sound.voice_shift) (lane sfx-moments)
         lv_ar = to_ar(lv.mean(axis=1) if np.ndim(lv) == 2 else lv)
-        l1["sound"] = SD.present_over(l1["sound"], lv_ar, to_ar(music), float(l1["fps"]))
+        music_ar = to_ar(music)
+        l1["sound"] = SD.present_over(l1["sound"], lv_ar, music_ar, float(l1["fps"]))
         if kind == 'podcast':
             l1['sound'] = audibility.present_hits(l1['sound'], lv, music,
                 lambda items: AU.split_audio(_Plan(dict(l1,sound=items),src))[1], alternatives=audibility.recording_alternatives)
-            l1['sound'] = SD.screen_restrain(l1['sound'], lv_ar, fps=float(l1["fps"]))     # the workflow films: the ceilings are the final level
+            # the workflow films: the ceilings are the final level, and each sound's own level fields are read there
+            l1['sound'] = SD.screen_restrain(l1['sound'], lv_ar, fps=float(l1["fps"]), bed=music_ar, words=marks["words"])
         rep["lifted_for_bed"] = sum(1 for x in l1["sound"] if x.get("lifted_for_bed_db"))
         rep['final_sounds'] = l1['sound']
         _v, fx, _ = AU.split_audio(_Plan(l1, src))
@@ -1455,7 +1496,8 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
                         lambda items: np.asarray(AU.split_audio(_Plan(dict(l1,sound=items),src))[1])*(b/a),
                         alternatives=audibility.recording_alternatives)
                     # the workflow films: the ceilings stay the final level after this lift too (lane sfx-moments)
-                    l1['sound'] = SD.screen_restrain(l1['sound'], lv_ar, fps=float(l1["fps"]))
+                    l1['sound'] = SD.screen_restrain(l1['sound'], lv_ar, fps=float(l1["fps"]), bed=to_ar(bed) if SD.SCR.on() else None,
+                                                     words=marks["words"])
                     _v,own,_=AU.split_audio(_Plan(l1,src))
                 rep['master']=AU.master(voice,np.asarray(own)+bed,m4a,tmp,total)
                 actual=audibility.verified_mix(lv,own,bed,_decode(m4a,SR,1))

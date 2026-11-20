@@ -39,7 +39,8 @@ were audible, "most sit under speech", the hook, the turn and the payoff were dr
 in-shot camera drifts, and nothing sounded the paper or the money a picture showed). Fewer sounds, each heard:
   moments    the hook's landing, the turn and the close are found among every landing on screen (a new picture on
              the story's beat sounds even when it is a plain cut): the hook on an opening landing in a breath first, the
-             turn SNAP_S either side of its mark, the close on the song's last hit; each hero tries HERO_TRIES
+             turn on the landing nearest its mark within SNAP_S (music.arrange's own snap), else the nearest within
+             TURN_REACH_S, its hit marked `drop` so the song's drop lands with it; the close on the song's last hit; each hero tries HERO_TRIES
              recordings and keeps the one heard best (an impact whose body sits in the speech band is held under the
              word and lost); the rest of the film
              ranks its moments (matters): an object the picture shows (paper, or the family a model named for the
@@ -55,8 +56,13 @@ in-shot camera drifts, and nothing sounded the paper or the money a picture show
              loudest 50 ms stands under HEARD_AIM over the median of what plays around it (the voice, and the song once
              it is known), never into the speech band (the voice's own masking check; a hero's attack may sit at the
              syllable it lands on, HERO_MASK_DB) and never a 2-8 kHz spike (HF_OVER over the voice's own top band). A
-             sound the voice still hides gives its place to the next moment; a hero keeps its landing and is raised to
-             its ceiling. The ceilings are applied again after any later lift (restrain), so they are the final level.
+             sound the voice still hides gives its place to the next moment; a hero is raised to its ceiling inside
+             the masking bound, never over the word, and one still unheard there moves its landing (HERO_MOVE_S) into a
+             breath or a syllable gap. The ceilings are applied again after any later lift (restrain), so they are the
+             final level, and each item's own over_voice_db and heard_db are read again at that level.
+  rest       once the shaped sections are placed, what the film's amount still allows goes only to moments that matter
+             (worth_the_rest: matters >= MATTERS_REST, an object, a glitch, typing, a hard landing, real travel, or a
+             whip); a plain display pop is the music's, and a display word sounds only when it is typed in.
 """
 import hashlib
 import math
@@ -81,8 +87,14 @@ GAIN_MAX = -2.0             # score.sound.GAIN_MAX
 # moments and amount (lane sfx-moments)
 RATE_10S = 2.0              # sounds a 10 s at most besides the hook, the turn and the close (the judge's median, 3.6 audible
                             # a 10 s, counts those three and the sounds under the bed's own hits)
-SNAP_S = 0.35               # the turn takes a landing this near its mark (music.sounds_on_the_drop joins a hit this near the drop)
+SNAP_S = 0.3                # the turn takes the landing nearest its mark within this, the rule music.arrange snaps its drop by
+                            # (music.SNAP_S); the hit carries `drop` and the song's drop lands on it (music.marks_from_l1)
+TURN_REACH_S = 1.5          # no landing that near: the nearest within this (the turn's sentence), and the drop joins it there
+HERO_MOVE_S = 0.5           # a hero the voice's syllables would cover inside the masking bound moves its landing this far at
+CLOSE_MOVE_S = 0.1          # most: to a landing in a breath, else a few frames into the syllable gap (the close: the song's
+                            # last hit is read on its frame, so it moves only a few frames)
 HERO_TRIES = 4              # recordings a hero tries for the one heard best
+MATTERS_REST = 2.0          # the rest pass (after the shaped sections) takes only moments that ask this much for a sound
 WHIP_V = 0.6                # a crop travelling this share of a whip's speed is a cut that travels; an in-shot move sounds only as fast
 # heard (lane sfx-moments): the judge's ruler, a 50 ms K-weighted peak against the voice's 400 ms level
 LEVEL = {"hero": 4.0, "accent": 2.0, "body": 0.0, "tick": -2.0}        # where a hit starts (the references' median: about +2)
@@ -337,6 +349,13 @@ def matters(e):
     if e.get("kind") in ("card", "page", "display", "counter", "flash", "burst"):
         return 1.0
     return 0.5
+
+
+def worth_the_rest(e):
+    """A moment the rest pass (after the shaped sections) may still sound: one that matters (MATTERS_REST: an object,
+    a glitch, typing, a hard landing, a cut that really travels) or an in-shot move as fast as a whip. A plain display
+    pop, a card or a still picture landing is the music's."""
+    return matters(e) >= MATTERS_REST or whip_move(e)
 
 
 # ----------------------------------------------------------------- the choice
@@ -635,18 +654,28 @@ def voice_hf(voice, rate, shift_db=0.0):
     return float(np.percentile(hi[spoken], 90)) + float(shift_db)
 
 
-def restrain(sounds, voice, rate, shift_db, lib, report=None, fps=None, sample=None, srate=None):
+def restrain(sounds, voice, rate, shift_db, lib, report=None, fps=None, sample=None, srate=None, bed=None, masking=None):
     """The ceilings, the final word on every set recording's level: its 2-8 kHz level (its measured hf_db plus its
     gain) never more than HF_OVER over the voice's own top band (a spike), and, with fps and sample, its 50 ms
     K-weighted peak never more than LEVEL_TOP over the voice's 400 ms level (the judge's ruler: a hit that loud is a
-    cringe, whatever lifted it; score.audibility's broadband lift rides up to the voice's loudest syllables)."""
+    cringe, whatever lifted it; score.audibility's broadband lift rides up to the voice's loudest syllables).
+    Each hit read there gets its own level fields again at the level it now plays: over_voice_db, and heard_db on the
+    same ruler against what plays around it (the voice, and with `bed`, the song at the rate of `voice`, which is
+    also written as over_bed_db), so the film's record of its sounds is the levels the film plays. masking(item): the
+    dB a hit sits over the voice's speech band (score.sound._mask_need; a hero's bound is the syllable it lands on):
+    a later lift that put one over a word comes down by it, so the word stays clear at the final level too."""
     ref = voice_hf(voice, rate, shift_db)
     done = []
     if ref is None:
         return sounds
-    v = None
+    v = under = None
     if fps and sample is not None:
         v = np.asarray(voice, np.float64) * (10 ** (float(shift_db) / 20))
+        under = v
+        if bed is not None and len(bed):
+            b = np.asarray(bed, np.float64)[:len(v)]
+            under = v.copy()
+            under[:len(b)] += b
     for s in sounds:
         x = lib.get(s.get("s")) or {}
         hf = _scr(x).get("hf_db")
@@ -660,13 +689,30 @@ def restrain(sounds, voice, rate, shift_db, lib, report=None, fps=None, sample=N
             over = float(hf) + float(s["db"]) - (ref + HF_OVER.get(tier, 8.0))
             if over > 0:
                 s["db"] = round(max(GAIN_MIN, float(s["db"]) - over), 1)
-        if v is not None and s.get("layer") in ("hit", "accent") and s.get("for") not in ("counter", "burst") \
+        if masking is not None and s.get("layer") in ("hit", "accent") and s.get("for") not in ("counter", "burst") \
+                and s.get("start_s") is not None:
+            for _ in range(4):
+                need = masking(s)
+                if need <= 0 or float(s["db"]) <= GAIN_MIN:
+                    break
+                s["db"] = round(max(GAIN_MIN, float(s["db"]) - need), 1)
+        read = False
+        if v is not None and s.get("layer") in ("hit", "accent") and s.get("for") != "counter" \
                 and s.get("start_s") is not None and s.get("event_f") is not None:
-            r = reading(s, sample(s["s"]), v, rate, fps, srate=srate)
+            r = reading(s, sample(s["s"]), under, rate, fps, voice=v, srate=srate)
             if r is not None and r[5] is not None:
-                top = r[5] + LEVEL_TOP.get(tier, 3.0) - float(_db(r[2][r[3]].max()))
-                if float(s["db"]) > top + 0.05:
+                own0 = float(_db(r[2][r[3]].max()))
+                top = r[5] + LEVEL_TOP.get(tier, 3.0) - own0
+                if float(s["db"]) > top + 0.05 and s.get("for") != "burst":     # a train's clicks keep their own level
                     s["db"] = round(max(GAIN_MIN, top), 1)
+                s["over_voice_db"] = round(own0 + float(s["db"]) - r[5], 1)
+                s["heard_db"] = round(prominence(r, float(s["db"])), 1)
+                if under is not v:
+                    s["over_bed_db"] = s["heard_db"]
+                read = True
+        if s["db"] != was and not read:               # a level it no longer plays at is not kept on the item
+            for k in ("over_voice_db", "heard_db", "over_bed_db"):
+                s.pop(k, None)
         if s["db"] != was:
             done.append(dict(id=s.get("id"), s=s.get("s"), tier=s.get("tier"), db=[was, s["db"]]))
     if report is not None:
@@ -818,8 +864,12 @@ def level(group, under, rate, sample, fps, voice=None, masking=None, hf_ref=None
             p = prominence(r, g)
         if p < HEARD_DB and it.get("tier") == "hero":
             # the hook, the turn and the close land where the story does, often on a word: heard there, up to its
-            # ceiling, for its attack over the syllable it lands on (the references' hero hits sit at or over the voice)
+            # ceiling, its attack up to the syllable it lands on (HERO_MASK_DB) and never over the word. One still
+            # unheard inside that bound moves its landing (score.sound.plan_sounds: into a breath or a syllable gap).
             while p < HEARD_AIM and g + STEP_DB <= ceiling + 1e-6:
+                it["db"] = round(g + STEP_DB, 1)
+                if masking is not None and masking(it) > 0:
+                    break
                 g += STEP_DB
                 p = prominence(r, g)
         it["db"] = round(g, 1)

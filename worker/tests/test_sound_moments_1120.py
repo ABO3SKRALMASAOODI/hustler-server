@@ -221,3 +221,165 @@ def test_a_beat_the_director_held_lands_a_dry_hit_not_a_trailer_impact():
     it = dict(_item("hero", db=-40.0), soft=True)
     SCR.level([it], voice, AR, lambda sid: smp, 30.0, srate=SR)
     assert it["over_voice_db"] <= SCR.LEVEL_TOP["accent"] + 0.2
+
+
+# ----------------------------------------------------------------- round 2 (review of 20 Nov): never over the word,
+# one landing for the turn and the drop, levels the film plays, no filler
+
+def test_a_hero_is_raised_inside_its_masking_bound_never_over_the_word():
+    """A hero still under HEARD_DB is raised toward its ceiling only while the voice's masking check (MASK_DB less
+    HERO_MASK_DB for a hero) stays clear: unheard there, it stays under the word (plan_sounds then moves it)."""
+    voice = _voice()
+    smp = _click()
+    free = _item("hero", db=-40.0)
+    SCR.level([free], voice, AR, lambda sid: smp, 30.0, srate=SR)
+    bound = free["db"] - 12.0
+    held = _item("hero", db=-40.0)
+    p = SCR.level([held], voice, AR, lambda sid: smp, 30.0, srate=SR, masking=lambda it: max(0.0, float(it["db"]) - bound))
+    assert held["db"] <= bound + 0.05 and p < SCR.HEARD_DB
+
+
+def test_the_signal_check_holds_a_hero_to_its_bound(monkeypatch):
+    """No hero is exempt from the final masking check: its bound is the margin less HERO_MASK_DB, and it is eased by
+    what it still needs, never set to zero need."""
+    monkeypatch.setattr(SD, "_voice_levels", lambda ctx: (np.zeros(2000), None))
+    monkeypatch.setattr(SD, "_masking", lambda it, vb, speech, fps: 9.0)
+    it = {"id": "snd.j0.0", "s": "nope", "layer": "hit", "tier": "hero", "for": "picture", "event_f": 30, "start_s": 1.0, "db": -5.0}
+    placed = [{"t": 1.0, "ev": {"kind": "picture", "f": 30}, "part": "hook", "tier": "hero", "items": [it], "ref": -20.0}]
+    out, rep = SD._signal_check(placed, {"fps": 30.0, "speech": np.ones(2000, bool), "screen": True}, {"dropped": []})
+    assert out and out[0]["db"] == round(-5.0 - (9.0 - SCR.HERO_MASK_DB), 1)
+
+
+def _heard_by_frame(clear):
+    """A stand-in for score.sound._heard: a hit is heard (9 dB) on the frames in `clear` (a breath, a syllable gap),
+    held under the word everywhere else (2 dB)."""
+    def heard(group, ctx, ref, under, structural, tier="body"):
+        p = None
+        for it in group:
+            if it.get("layer") == "hit":
+                it["heard_db"] = 9.0 if int(it["event_f"]) in clear else 2.0
+                p = it["heard_db"] if p is None else min(p, it["heard_db"])
+        return None if p is None or p >= SCR.HEARD_DB else "held under the word"
+    return heard
+
+
+def test_a_hero_the_word_keeps_unheard_moves_into_the_syllable_gap(monkeypatch):
+    """The hook lands on a picture on the first word: inside its masking bound no recording is heard there. It is
+    never lifted over the word; it moves a few frames into the gap after the syllable, where it is heard."""
+    monkeypatch.setattr(SD, "_heard", _heard_by_frame({51, 52, 53}))
+    l1 = _plain_l1()
+    ev = SCR.annotate(SD.l1_events(l1), l1)
+    sounds, rep = SD.plan_sounds(ev, _ctx(l1))
+    hook = next(s for s in sounds if s.get("part") == "hook" and s.get("layer") == "hit")
+    assert hook["event_f"] == 51 and hook["heard_db"] >= SCR.HEARD_DB
+    mv = next(m for m in rep["moved"] if m["part"] == "hook")
+    assert mv["from_f"] == 45 and mv["to_f"] == 51
+    # nowhere near is clear: the hero stays on its landing, heard best of its tries, still under the word's bound
+    monkeypatch.setattr(SD, "_heard", _heard_by_frame(set()))
+    sounds2, rep2 = SD.plan_sounds(SCR.annotate(SD.l1_events(l1), l1), _ctx(l1))
+    hook2 = next(s for s in sounds2 if s.get("part") == "hook" and s.get("layer") == "hit")
+    assert hook2["event_f"] == 45 and not rep2.get("moved")
+
+
+def test_the_turn_takes_the_landing_the_music_snaps_to_and_carries_the_drop():
+    """One rule with music.arrange: the nearest landing within SNAP_S (0.3 s); none there, the nearest within the
+    turn's sentence, never left dry. Its hit carries `drop`, which the music's drop lands on."""
+    l1 = _plain_l1()
+    ev = SCR.annotate(SD.l1_events(l1), l1)
+    assert SCR.SNAP_S == SD.SNAP_S
+    near, _ = SD.plan_sounds([dict(e) for e in ev], _ctx(l1, turn_f=274))
+    turn = next(s for s in near if s.get("part") == "payoff" and s.get("layer") == "hit")
+    assert turn["event_f"] == 270 and turn.get("drop")
+    off, rep = SD.plan_sounds([dict(e) for e in ev], _ctx(l1, turn_f=292))       # 0.73 s from 270, 0.77 s from 315
+    turn = next(s for s in off if s.get("part") == "payoff" and s.get("layer") == "hit")
+    assert turn["event_f"] == 270 and turn.get("drop")
+    assert sum(1 for s in off if s.get("drop")) == sum(1 for s in off if s.get("drop") and s["event_f"] == 270)
+
+
+def test_the_close_is_found_among_every_landing_so_the_turn_never_falls_after_it():
+    l1 = _plain_l1()
+    ev = SCR.annotate(SD.l1_events(l1), l1)
+    sounds, rep = SD.plan_sounds(ev, _ctx(l1, close_s=None, words=[(0.2, 17.95)], turn_f=480))
+    parts = {s.get("part"): s["event_f"] for s in sounds if s.get("layer") == "hit"}
+    assert "payoff" in parts or parts.get("close") == 495          # the turn lands, or it is the close (one landing)
+    assert all(f <= parts["close"] for f in parts.values())
+
+
+def test_the_music_drop_lands_on_the_sounds_turn_hit():
+    l1 = dict(_plain_l1(), sound=[{"id": "snd.j1.0", "s": "x", "layer": "hit", "part": "payoff", "tier": "hero", "drop": True,
+                                   "event_f": 292, "start_s": 9.7}])
+    from score import music as MU
+    marks = MU.marks_from_l1(l1, None, payoff_s=9.4)
+    assert abs(marks["drop_landing"] - 292 / 30) < 1e-3
+    assert "drop_landing" not in MU.marks_from_l1(dict(l1, sound=[dict(l1["sound"][0], drop=None)]), None, payoff_s=9.4)
+
+
+def test_sounds_on_the_drop_find_the_turn_hit_by_its_part():
+    from score import music as MU
+    plan = {"drop_at": 14.2, "drop_on": "payoff", "turn_s": None, "payoff_s": 13.0}
+    sounds = [{"id": "snd.j1.0", "event_f": 420, "start_s": 13.9, "drop": True, "layer": "hit"},
+              {"id": "snd.j1.1", "event_f": 420, "start_s": 12.4, "layer": "lead"},
+              {"id": "snd.j2.0", "event_f": 391, "start_s": 13.0, "layer": "hit"}]
+    out = MU.sounds_on_the_drop(sounds, plan, 30.0)
+    assert [s["event_f"] for s in out] == [426, 426, 391]
+    assert abs(out[1]["start_s"] - 12.6) < 1e-6
+    # the drop already on the hit: nothing moves
+    assert MU.sounds_on_the_drop(sounds, dict(plan, drop_at=14.0), 30.0)[0]["event_f"] == 420
+
+
+def test_restrain_writes_the_levels_the_film_plays():
+    """rep['final_sounds'] records each item: after a lift and the ceilings, over_voice_db and heard_db are read again
+    at the level that plays (they were left at the plan's)."""
+    voice = _voice()
+    smp = _click()
+    lib = {"c": {"id": "c", "file": "c.flac"}}
+    it = _item("accent", db=-40.0)
+    SCR.level([it], voice, AR, lambda sid: smp, 30.0, srate=SR, lib=lib)
+    stale = dict(it, db=it["db"] + 12.0, over_voice_db=9.5, heard_db=30.0)
+    bed = 0.3 * _voice(seed=7)
+    out = SCR.restrain([stale], voice, AR, 0.0, lib, fps=30.0, sample=lambda sid: smp, srate=SR, bed=bed)[0]
+    r = SCR.reading(out, smp, voice + bed, AR, 30.0, voice=voice, srate=SR)
+    assert out["over_voice_db"] == round(float(SCR._db(r[2][r[3]].max())) + out["db"] - r[5], 1)
+    assert out["over_voice_db"] <= SCR.LEVEL_TOP["accent"] + 0.1
+    assert out["heard_db"] == round(SCR.prominence(r, out["db"]), 1) == out["over_bed_db"]
+    # a later lift that put it over a word comes down by what the voice's masking check asks
+    lifted = dict(it, db=it["db"] + 2.0)
+    got = SCR.restrain([lifted], voice, AR, 0.0, lib, fps=30.0, sample=lambda sid: smp, srate=SR,
+                       masking=lambda x: max(0.0, float(x["db"]) - (it["db"] - 3.0)))[0]
+    assert got["db"] <= it["db"] - 3.0 + 0.05
+
+
+def test_display_pops_and_low_moments_are_the_musics():
+    """Raters: 'ticks on display words', the same generic click on every display word. A display word sounds only
+    when it is typed in; the rest pass takes only the moments that matter (an object, a glitch, typing, a hard
+    landing, real travel, a whip)."""
+    l1 = _plain_l1()
+    ev = SCR.annotate(SD.l1_events(l1), l1)
+    shown = [{"f": 30 * k + 7, "kind": "display", "id": f"w{k}"} for k in range(2, 16, 2)]
+    sounds, rep = SD.plan_sounds(sorted(ev + shown, key=lambda e: e["f"]), _ctx(l1))
+    assert rep["display_pops"] == len(shown)
+    assert not any(s["event_f"] in {e["f"] for e in shown} for s in sounds)
+    assert not SCR.worth_the_rest({"kind": "display"}) and not SCR.worth_the_rest({"kind": "card"})
+    assert SCR.worth_the_rest({"kind": "display", "typed": True}) and SCR.worth_the_rest({"kind": "picture", "slam": True})
+    assert SCR.worth_the_rest({"kind": "move", "speed": 0.9}) and SCR.worth_the_rest({"kind": "picture", "foley": "paper"})
+
+
+def test_arrange_lands_the_drop_on_the_sounds_turn_hit(tmp_path_factory):
+    """The drop takes the sound's own turn hit (marks drop_landing, within DROP_REACH_S of the mark) over the nearest
+    cut, so the impact and the drop are one landing; a hit far from the mark, or one with no bar of build after the
+    story's turn, leaves today's snap."""
+    import shutil
+    import pytest
+    from score import music as MU
+    if shutil.which(os.environ.get("FFMPEG_BIN", "ffmpeg")) is None:
+        pytest.skip("needs ffmpeg")
+    from tests.test_music_turn_drop import _marks
+    from tests.test_music_film import _wav
+    song = MU.analyse(_wav(tmp_path_factory.mktemp("drop"), "full", bars=40, intro_bars=8), sung=False)
+    base = MU.arrange(song, _marks(32.0, 8.0, 16.0, turn_drop=True))
+    plan = MU.arrange(song, _marks(32.0, 8.0, 16.0, turn_drop=True, drop_landing=16.6))
+    assert plan["ok"] and plan["drop_on"] == "payoff" and plan["drop_at"] == 16.6 and base["drop_at"] != 16.6
+    far = MU.arrange(song, _marks(32.0, 8.0, 16.0, turn_drop=True, drop_landing=16.0 + MU.DROP_REACH_S + 0.5))
+    assert far["drop_at"] == base["drop_at"]
+    no_build = MU.arrange(song, _marks(32.0, 15.5, 16.0, turn_drop=True, drop_landing=15.6))
+    assert no_build["drop_at"] != 15.6
