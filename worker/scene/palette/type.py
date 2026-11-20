@@ -125,7 +125,7 @@ def counter(l1, work, ask, sense=None):
         p = j / max(len(steps) - 1, 1)
         vals.append(v0 * (v1 / v0) ** p if geo else v0 + (v1 - v0) * p)
     texts = [cased(fmt_value(v, o, final=(j == len(vals) - 1)), o) for j, v in enumerate(vals)]
-    font = o.get("font") or pal["font"]
+    font = pal["font"]      # palette_of resolves the ask's font word
     v = K.voice(font, 100, track=int(o.get("track", -1)), shadow=0.5)
     wide = max(texts, key=lambda t: K.ink_box(v, t)[1][2] - K.ink_box(v, t)[1][0])
     v = K.fit(v, wide, float(o.get("width", 0.80)) * W, cap_px=float(o.get("cap", 0.17)) * H)
@@ -203,7 +203,7 @@ def staircase(l1, work, ask, sense=None):
         return {"skip": "staircase needs lines"}
     full = " ".join(x["t"] for x in lines)
     a, z, hit = K.span(l1, ask, need=int(o.get("hold", 36)), text=full)
-    font = o.get("font") or pal["font"]
+    font = pal["font"]      # palette_of resolves the ask's font word
     big = [i for i, x in enumerate(lines) if x.get("size", "big") == "big"] or [0]
     vb = K.voice(font, 100, track=-1, shadow=0.5)
     wid = max((lines[i]["t"] for i in big), key=lambda t: K.ink_box(vb, t)[1][2])
@@ -266,7 +266,7 @@ def name(l1, work, ask, sense=None):
     ws = nm.split()
     if layout == "split" and len(ws) < 2:
         layout = "stack"
-    font = o.get("font") or pal["font"]
+    font = pal["font"]      # palette_of resolves the ask's font word
     rows = []
     if layout == "split":
         rows.append((" ".join(ws[:-1]), "small"))
@@ -353,7 +353,7 @@ def ladder(l1, work, ask, sense=None):
         max(rows, key=lambda r: len(r["t"]) <= 12)["w"] = "shout"
     full = " ".join(r["t"] for r in rows)
     a, z, hit = K.span(l1, ask, need=int(o.get("hold", 30)), text=full)
-    font = o.get("font") or pal["font"]
+    font = pal["font"]      # palette_of resolves the ask's font word
     vsh = K.voice(font, 100, track=-2, shadow=0.55)
     loud = [r for r in rows if r["w"] == "shout"]
     vsh = K.fit(vsh, max((cased(r["t"], o, "upper") for r in loud), key=lambda t: K.ink_box(vsh, t)[1][2]),
@@ -629,7 +629,7 @@ def typewriter(l1, work, ask, sense=None):
     t = cased(t, o)
     a, z, hit = K.span(l1, ask, need=int(o.get("hold", 30)), text=t)
     mono = o.get("font") in (None, "mono")
-    v = dict(K.MONO) if mono else K.voice(o.get("font"), 100, shadow=0.5)
+    v = dict(K.MONO) if mono else K.voice(pal["font"], 100, shadow=0.5)
     v["px"] = K.px(o.get("px") or 64)
     lines = K.wrap(v, t, 0.84 * W)
     while len(lines) > 4 and v["px"] > K.px(K.FLOOR_PX + 4):
@@ -696,7 +696,7 @@ def redact(l1, work, ask, sense=None):
     t = cased(t, o, "upper")
     a, z, hit = K.span(l1, ask, need=int(o.get("hold", 30)), text=t)
     mode = o.get("mode") or K.rng_of(l1, ask).choice(["reveal", "strike"])
-    v = K.mono(o.get("px") or 66) if o.get("font") in (None, "mono") else K.voice(o["font"], K.px(o.get("px") or 80), shadow=0.4)
+    v = K.mono(o.get("px") or 66) if o.get("font") in (None, "mono") else K.voice(pal["font"], K.px(o.get("px") or 80), shadow=0.4)
     lines = K.wrap(v, t, 0.84 * W)
     while len(lines) > 4 and v["px"] > K.px(K.FLOOR_PX + 4):
         v["px"] = round(v["px"] * 0.88, 2)
@@ -771,7 +771,7 @@ def chapter(l1, work, ask, sense=None):
     keep, gone, was = _carve(l1, a, z)
     ci, cd = K.clear_captions(l1, a, z)                  # the page says its own words: no caption over it
     keep, gone = keep + ci, gone + cd
-    font = o.get("font") or pal["font"]
+    font = pal["font"]      # palette_of resolves the ask's font word
     vt = K.fit(K.voice(font, 100, track=-1, shadow=0), t, 0.80 * W, cap_px=0.16 * H)
     lines = [t]
     if vt["px"] < 0.06 * H and len(t.split()) > 1:
@@ -830,7 +830,7 @@ def type_run(l1, work, ask, sense=None):
     keep, gone, was = _carve(l1, a, z)
     ci, cd = K.clear_captions(l1, a, z)                  # the pages are the words: no caption over them
     keep, gone = keep + ci, gone + cd
-    font = o.get("font") or pal["font"]
+    font = pal["font"]      # palette_of resolves the ask's font word
     rng = K.rng_of(l1, ask)
     grounds = [("#0D0C0B", pal["ink"]), (pal["accent"], K.DARK if K.lum(pal["accent"]) > 0.45 else pal["ink"]), ("#EDE7DB", K.DARK)]
     items, voices = list(keep), {}
@@ -881,7 +881,7 @@ def marquee(l1, work, ask, sense=None):
     if not t:
         return {"skip": "marquee needs a word"}
     a, z, hit = K.span(l1, ask, need=int(o.get("hold", 40)), text=t)
-    font = o.get("font") or pal["font"]
+    font = pal["font"]      # palette_of resolves the ask's font word
     v = K.voice(font, float(o.get("size", 0.34)) * H, track=-2, shadow=0.0)
     _, b = K.ink_box(v, t)
     wd = (b[2] - b[0]) / W
@@ -932,7 +932,7 @@ def verb(l1, work, ask, sense=None):
     a = min(a, land)
     rng = K.rng_of(l1, ask)
     vb = o.get("verb") if o.get("verb") in VERBS else rng.choice(VERBS[:4])
-    font = o.get("font") or pal["font"]
+    font = pal["font"]      # palette_of resolves the ask's font word
     v = K.fit(K.voice(font, 100, track=-1, shadow=0.55, glow=0.5 if vb == "burn" else None), t, float(o.get("width", 0.80)) * W,
               cap_px=float(o.get("cap", 0.14)) * H)
     lines = [t]

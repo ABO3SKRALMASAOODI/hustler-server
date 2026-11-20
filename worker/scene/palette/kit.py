@@ -602,7 +602,24 @@ def palette_of(l1, o=None):
             accent = c
     dsp = (l1.get("voices") or {}).get("dsp") or {}
     return {"ink": o.get("ink") or LIGHT, "accent": o.get("accent") or accent or "#F2C14E",
-            "font": o.get("font") or dsp.get("font") or font or SANS}
+            "font": font_file(o.get("font")) or dsp.get("font") or font or SANS}
+
+
+def font_file(name):
+    """The font file a device's ``font`` word names, or None for the film's own display face. The cards offer roles
+    ('mono', 'display'); the director may also name a family or a file that is not on this machine. 20 Nov
+    (Alexandr Wang m03): a typewriter asked for font 'display', the word reached the renderer as a file name and the
+    strict plan stopped the short; a role or a missing file now draws in the film's own face."""
+    if not name or not isinstance(name, str):
+        return None
+    if name.strip().lower() == "mono":
+        return MONO["font"]
+    from ..type import find_font
+    try:
+        find_font(name)
+    except FileNotFoundError:
+        return None
+    return name
 
 
 def rgb(hexc):

@@ -654,3 +654,22 @@ def test_readalong_asked_by_its_frames_ends_with_them(tmp_path):
     out, log = laid(l1, tmp_path, [{"dev": "readalong", "id": "r", "f": [20, 70]}])
     assert log[0]["done"]
     assert all(i["f"][1] <= 72 for i in mine(out, "r"))
+
+
+def test_a_font_role_or_a_missing_font_draws_in_the_films_own_face(tmp_path):
+    """20 Nov (Alexandr Wang m03): the director asked a typewriter for font 'display' (a role its card offers); the word
+    reached the renderer as a file name and the strict plan stopped the short."""
+    from scene.type import find_font
+    l1 = film(tmp_path)
+    assert K.palette_of(l1, {"font": "display"})["font"] == "InterDisplay-Black.ttf"          # the film's own display face
+    assert K.palette_of(l1, {"font": "NoSuchFamily-Bold.ttf"})["font"] == "InterDisplay-Black.ttf"
+    assert K.palette_of(l1, {"font": "mono"})["font"] == K.MONO["font"]
+    assert K.palette_of(l1, {"font": "InterDisplay-Bold.ttf"})["font"] == "InterDisplay-Bold.ttf"
+    for font in ("display", "NoSuchFamily-Bold.ttf"):
+        for dev in ("typewriter", "redact"):
+            out, log = laid(l1, tmp_path, [{"dev": dev, "id": "tw", "at": {"word": "the lowest"},
+                                            "args": {"t": "the lowest moment of my life", "font": font}}])
+            used = {out["voices"][i["v"]]["font"] for i in mine(out, "tw") if i["k"] == "word" and out["voices"].get(i["v"], {}).get("font")}
+            assert used, (dev, font, log)
+            for f in used:
+                find_font(f)                                                               # every face is installed

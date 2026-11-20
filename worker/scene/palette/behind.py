@@ -240,7 +240,7 @@ def behind(l1, work, ask, sense=None):
         return {"skip": f"behind: {got.get('log')}"}
     S = K.Sense(l1, work, sense)
     pal = K.palette_of(l1, o)
-    font = o.get("font") or pal["font"]
+    font = pal["font"]      # palette_of resolves the ask's font word
     v = K.fit(K.voice(font, 100, track=-2, shadow=0.0), t, float(o.get("width", 0.94)) * W, cap_px=float(o.get("cap", 0.24)) * H)
     _, b = K.ink_box(v, t)
     bh = (b[3] - b[1]) / H
