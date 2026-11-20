@@ -168,8 +168,14 @@ four seconds). Its asks ride the scene under `devices` and the palette lays them
 an ask that cannot stand on the film runs its device's fallback chain, and `supply/devices_log.json` says what landed for
 each. No device is banned or gated. A bad answer is repaired (a word not said is snapped to the nearest said word, an
 unknown device maps to its family, an answer with no JSON is asked again), and a provider that fails gives the signal
-director's seeded devices on the voice's stress peaks, so no short is ever just a take with captions. The style keeps the
-type and the colour identity; the Director chooses the devices. No device makes a sound: every landing is an event in
+director's seeded devices on the voice's stress peaks, so no short is ever just a take with captions; that answer is cached
+with `retry`, and a resumed run asks the model again. The cache (`supply/director.json`) is keyed on the words, pictures
+and contact sheet the model read. The sheet tells the model what the material can hold (pictures with a round shape,
+faces, the speaker on camera) and every card states its numbers' units and ranges; there is no fixed ask count. Devices
+that stand on the speaker (lamp, neg_world, a spotlight, anything behind him) keep the take on screen over their span:
+the cutaways step round it (`director.take_spans`, `hold_take`, `beats.coverage.take_held`). A word device sets its word
+once: the builder's display copy leaves while it stands, and two word devices at once take distinct seats. The style keeps
+the type and the colour identity; the Director chooses the devices. No device makes a sound: every landing is an event in
 `devices` for the music and sound workflow.
 
 ## The delivered folder

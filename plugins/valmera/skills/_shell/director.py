@@ -14,7 +14,10 @@ name nothing knows is mapped to its family (the palette resolves it), an answer 
 parse error shown, and when the provider still fails a signal director lays seeded devices on the voice's stress peaks
 and the beats it can find by signal, away from the ledger's recent sequences, so the film still carries devices. Every
 repair is logged in the answer. The call goes through llm.ask (the run's provider, its dollars recorded) and is cached
-at supply/director.json.
+at supply/director.json, keyed on what the model read (the numbered words, the pictures and their contact sheet, the
+take): words scored again are directed again, and a signal answer laid because the provider failed is asked of the model
+again on resume (kept as the answer only if the model fails again). The sheet also says, measured, what this material
+can hold (pictures with a round shape, faces, the speaker on camera), so the model asks for devices that can stand.
 
 No reference's timeline is ever in the prompt (owner, 14 Nov 2026: things are spontaneous): principles only.
 """
@@ -48,10 +51,13 @@ PRINCIPLES = """How the best vertical edits keep a stranger watching (principles
 - Lists burst: one picture or one hit per item, fast.
 - The pace alternates strobe against hold: some 3 s windows carry one cut, others ten or twelve.
 - The payoff slows down, holds, and calls back to the opening.
-- Stack devices on one moment (a flip, then a duotone echo, then a word cut through the picture), and use most of the
-  palette over a film rather than one device repeated.
+- Stack devices on a moment that deserves it (a flip, then a duotone echo, then a word cut through the picture); choose
+  each device for what this moment and this story need, never a set you bring to every film.
 - At least one moment combines devices in a way you have not seen any editor do.
-- Restraint is also a device: a hold after a burst lands harder than a burst after a burst. Never decorate every word."""
+- Restraint is also a device: a hold after a burst lands harder than a burst after a burst. Never decorate every word;
+  a stretch with no device at all is often what makes the next one land.
+- The sheet says what this material can hold (how many pictures have a round shape, whether the speaker is on camera):
+  a device the material cannot hold falls back to a plainer one, so ask for what can stand here."""
 
 SYSTEM = ("You are the Director of a vertical short film. You choose, moment by moment, which devices of the engine's "
           "palette land on which spoken word, so the film is the most creative edit of this material anyone has made: "
@@ -70,8 +76,9 @@ SYSTEM = ("You are the Director of a vertical short film. You choose, moment by 
           "number, \"word\": the word}, \"until\": {\"w\": word number, \"word\": the word} (spans only), \"args\": {the "
           "device's own fields from its card, e.g. \"mode\", \"surface\", \"run\", \"n\", \"c\", \"part\"; every time field of a card "
           "(f, at, until, cuts, steps, from, stress, sections[].at, marks[].f, picks[].f) is a WORD NUMBER, a [first, last] pair of "
-          "word numbers is a stretch, and any picture field (pic, pool) a picture id: the engine turns them into frames and assets}, \"pics\": [picture ids it uses]}; 10 to 30 asks for a minute, stacked where a "
-          "moment deserves it], "
+          "word numbers is a stretch, and any picture field (pic, pool) a picture id: the engine turns them into frames and assets; "
+          "numbers in the units and ranges the card gives}, \"pics\": [picture ids it uses]}; as many asks as this material earns, "
+          "stacked where a moment deserves it, none where restraint serves it], "
           "\"display\": [up to six words or short phrases to set large, ranked best first: {\"seg\": sentence number, \"text\": "
           "one to three consecutive words exactly as said, \"role\": hook|turn|payoff|figure|name|contrast, \"key\": the "
           "one word set largest}], \"past_segs\": [sentence numbers that tell of the past], \"payoff_seg\": the sentence "
@@ -94,8 +101,8 @@ def shell_llm():
 
 # --------------------------------------------------------------------- the sheet
 
-def _palette():
-    """The engine's palette module (worker/scene/palette), or None when the worker is not at hand."""
+def palette_module():
+    """worker/scene/palette, or None where the engine cannot be imported."""
     try:
         import brand
         wk = brand.worker_dir()
@@ -105,23 +112,87 @@ def _palette():
         from scene import palette
         palette._discover()
         return palette
-    except Exception:      # noqa: BLE001 - the caller reads the fixed defaults
+    except Exception:      # noqa: BLE001
         return None
+
+
+
+
+_palette = palette_module      # the name palette_asks reads the registry's word fields through
 
 
 def palette_menu():
     """The palette's cards from the engine itself (worker/scene/palette), so the Director never sees a device the
-    engine cannot draw."""
+    engine cannot draw. Each card carries its fields' units and drawable ranges."""
+    pal = palette_module()
+    if pal is None:
+        return "(palette menu unavailable: the engine could not be imported)", []
+    return pal.menu(), sorted(pal.DEVICES)
+
+
+def round_count(path, side=480):
+    """How many round shapes a picture holds that the engine's rhyme would cut on: its own circle finder and its support
+    floor (worker/scene/alien/rhyme), on the still; Hough alone where the engine cannot be imported."""
     try:
-        import brand
-        wk = brand.worker_dir()
-        for p in (os.path.dirname(wk), wk):
-            if p not in sys.path:
-                sys.path.append(p)
-        from scene import palette
-        return palette.menu(), sorted(palette.DEVICES)
-    except Exception as e:      # noqa: BLE001 - the cards are fixed text; without the engine the model reads the names alone
-        return f"(palette menu unavailable: {e!r})", []
+        import cv2
+        im = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if im is None:
+            return None
+        if palette_module() is not None:
+            from scene.alien import rhyme
+            k = rhyme.SIDE / min(im.shape[:2])
+            g = cv2.resize(im, (max(int(im.shape[1] * k) // 2 * 2, 2), max(int(im.shape[0] * k) // 2 * 2, 2)), interpolation=cv2.INTER_AREA)
+            cs, _ = rhyme.circles(g)
+            return int(sum(1 for c in cs if c[3] >= rhyme.MIN_SUPPORT))
+        k = side / max(im.shape[:2])
+        g = cv2.GaussianBlur(cv2.resize(im, (max(int(im.shape[1] * k), 2), max(int(im.shape[0] * k), 2))), (5, 5), 1.5)
+        h, w = g.shape
+        c = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, dp=1.2, minDist=min(w, h) * 0.25, param1=120, param2=40,
+                             minRadius=int(min(w, h) * 0.06), maxRadius=int(min(w, h) * 0.45))
+        return 0 if c is None else int(len(c[0][:4]))
+    except Exception:      # noqa: BLE001 - not measured: the sheet says so
+        return None
+
+
+RHYME_PICTURES = 4          # the rhyme chain cuts on one round shape through at least this many pictures
+
+
+def capability(pictures, take, pal=None):
+    """What this material can hold, measured, as lines for the moment sheet: information for the model, never a gate
+    (a device asked for anyway runs and falls back to its next device where it cannot stand)."""
+    pics = list(pictures or [])
+    rounds = [p for p in pics if isinstance(p.get("rounds"), int) and p["rounds"] > 0]
+    faces = [p for p in pics if isinstance(p.get("faces"), int) and p["faces"] > 0]
+    clips = [p for p in pics if p.get("kind") == "clip"]
+    tk = take or {}
+    on_cam = bool(tk) and tk.get("on_camera") is not False
+    matte = depth = None
+    if pal is not None:
+        try:
+            from scene.palette import sense as SN
+            matte = os.path.exists(SN.RVM)
+        except Exception:      # noqa: BLE001
+            matte = None
+    depth = bool(os.environ.get("VALMERA_DEPTH_PY"))
+    have = {"pictures": len(pics) > 0, "rounds": len(rounds) >= RHYME_PICTURES, "faces": bool(faces) or on_cam,
+            "take": on_cam, "matte": on_cam and matte is not False, "depth": depth}
+    lines = [f"- pictures: {len(pics)} on the contact sheet ({len(clips)} moving clips, {len(pics) - len(clips)} stills)",
+             f"- round shapes: {len(rounds)} of the pictures show one the engine can register (a rhyme chain cuts through "
+             f"{RHYME_PICTURES} or more that share one seat)",
+             f"- faces: {len(faces)} pictures show a face" + ("; the speaker's face is in the take" if on_cam else ""),
+             "- the speaker: " + ("on camera; a device that stands on him (lamp, neg_world, a spotlight on his face) keeps "
+                                  "him on screen over its span" if on_cam else "not on camera: devices that stand on him fall back"),
+             "- depth of a still: " + ("measured where asked" if depth else "not on this machine (devices that need it fall back)")]
+    short = []
+    if pal is not None:
+        for name in sorted(pal.DEVICES):
+            miss = [n for n in pal.DEVICES[name].get("needs") or () if n in have and not have[n]]
+            if miss:
+                fb = (pal.DEVICES[name].get("fallback") or ("white",))[0]
+                short.append(f"{name} (needs {', '.join(miss)}; would land as {fb})")
+    if short:
+        lines.append("- cannot stand on this material: " + "; ".join(short))
+    return lines
 
 
 def contact_sheet(pictures, out, side=220, cols=6, most=36):
@@ -167,7 +238,8 @@ def words_sheet(sentences, stress_w=()):
     return "\n".join(out)
 
 
-def moment_sheet(sentences, stress_w, pictures, take, style, workflow, dur_s, recent, title=None, hook=None, payoff=None):
+def moment_sheet(sentences, stress_w, pictures, take, style, workflow, dur_s, recent, title=None, hook=None, payoff=None,
+                 can=None):
     pics = []
     for p in pictures:
         tags = [p.get("kind") or "photo"]
@@ -189,6 +261,9 @@ def moment_sheet(sentences, stress_w, pictures, take, style, workflow, dur_s, re
     lines.append(words_sheet(sentences, stress_w))
     lines.append("\n# Pictures (ids on the contact sheet)")
     lines.append("\n".join(pics) if pics else "(none: the film stands on the take, type and treatments of the take)")
+    if can:
+        lines.append("\n# What this material can hold (measured; a device it cannot hold lands as its fallback)")
+        lines.extend(can)
     lines.append("\n# What the films delivered lately did (do something else)")
     lines.append("\n".join(f"- {r}" for r in recent) if recent else "- (nothing recorded yet)")
     return "\n".join(lines)
@@ -490,32 +565,49 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
     stress_t   [(seconds, strength)]; pictures [{"id", "path", "label", "kind", "motion", "faces", "luma", ...}];
     ask        llm.ask (the run's provider); recent: the ledger's recent sequences (devices_ledger.recent)."""
     path = os.path.join(supply, cache_name)
-    if os.path.exists(path):
-        try:
-            got = json.load(open(path))
-            if got.get("contract") == CONTRACT:
-                return got
-        except (OSError, ValueError):
-            pass
     say = log or (lambda m: None)
     sents, words = numbered(sentences, word_rows)
     hot = stress_words(words, stress_t)
+    pictures = [dict(p) for p in pictures or ()]
+    for p in pictures:                       # what signal reads of each picture's shapes, for the sheet and the cards' needs
+        if "rounds" not in p and p.get("path"):
+            p["rounds"] = round_count(p["path"])
+    dur = float(dur_s or (words[-1]["t1"] if words else 0.0))
+    pal = palette_module()
+    can = capability(pictures, take, pal)
+    cs = contact_sheet(list(pictures), os.path.join(supply, "director_sheet.jpg")) if pictures else None
+    # the cache is keyed on what the model reads (the numbered words, the pictures and their contact sheet, the take):
+    # a short whose lines were scored again never reads an answer that addresses words it no longer has
+    key = hashlib.sha1(json.dumps([CONTRACT, words_sheet(sents, hot),
+                                   [{k: p.get(k) for k in ("id", "path", "label", "kind", "rounds", "faces", "seg")} for p in pictures],
+                                   take, hashlib.sha1(open(cs, "rb").read()).hexdigest() if cs else None],
+                                  sort_keys=True, default=str).encode()).hexdigest()[:16]
+    prior = None
+    if os.path.exists(path):
+        try:
+            got = json.load(open(path))
+        except (OSError, ValueError):
+            got = {}
+        if got.get("contract") == CONTRACT and got.get("key") == key:
+            if not (got.get("by") == "signal" and got.get("retry")):
+                return got
+            prior = got                       # the provider failed last time: the model is asked again on resume
+            say("director: the cached answer is the signal director's after a provider failure; asking the model again")
     if recent is None:
         try:
             import devices_ledger
             recent = devices_ledger.recent(12)
         except Exception:      # noqa: BLE001 - no ledger yet
             recent = []
-    dur = float(dur_s or (words[-1]["t1"] if words else 0.0))
     menu, names = palette_menu()
-    sheet = moment_sheet(sents, hot, list(pictures), take, style, workflow, dur, recent, title, hook, payoff)
-    content = [{"type": "text", "text": sheet + "\n\n# The palette (one card a device: its fields, then what it does and the moment it amplifies)\n" + menu}]
-    cs = contact_sheet(list(pictures), os.path.join(supply, "director_sheet.jpg")) if pictures else None
+    sheet = moment_sheet(sents, hot, pictures, take, style, workflow, dur, recent, title, hook, payoff, can)
+    content = [{"type": "text", "text": sheet + "\n\n# The palette (one card a device: its fields with their units, then what it does and the moment it amplifies)\n" + menu}]
     if cs:
         content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                                     "data": base64.b64encode(open(cs, "rb").read()).decode()}})
-    seed = int(seed) or int(hashlib.sha1(sheet.encode()).hexdigest()[:8], 16)
+    seed = int(seed) or int(prior.get("seed") if prior else 0) or int(hashlib.sha1(sheet.encode()).hexdigest()[:8], 16)
     spend, repairs, d, by = [], [], None, "model"
+    failed = False
     if ask is None and os.environ.get("PYTEST_CURRENT_TEST"):
         repairs.append("a test never reaches a real model: the signal director")
     elif ask is None:
@@ -523,6 +615,7 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
             ask = shell_llm().ask
         except Exception as e:      # noqa: BLE001
             repairs.append(f"no model client: {e!r}")
+            failed = True
     if ask is not None:
         msg = content
         for attempt in range(2):
@@ -531,6 +624,7 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
                 spend.append(dict(stage="score", what="director: devices by moment", **(use or {})))
             except Exception as e:      # noqa: BLE001 - a provider failure: the signal director lays the devices
                 repairs.append(f"provider failed: {type(e).__name__}: {str(e)[:200]}")
+                failed = True
                 break
             try:
                 d = shell_llm().json_block(text)
@@ -541,6 +635,12 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
                                                           "with the JSON object only."}]
                 d = None
     if not isinstance(d, dict):
+        if prior is not None:                # the model failed again: the signal answer it had is kept, and asked again next time
+            out = dict(prior, repairs=list(prior.get("repairs") or []) + repairs, retry=True)
+            for r in repairs:
+                say(f"director repair: {r}")
+            json.dump(out, open(path, "w"), ensure_ascii=False, indent=1)
+            return out
         d = signal_director(sents, words, hot, pictures, seed, recent, dur)
         by = "signal"
     out, rep = repair(d, sents, words, names, seed)
@@ -548,7 +648,8 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
         sig = signal_director(sents, words, hot, pictures, seed, recent, dur)
         out["asks"], out["beats"] = sig["asks"], out["beats"] or sig["beats"]
         rep.append("the answer laid no device: the signal director's asks were laid")
-    out.update(by=by, repairs=repairs + rep, seed=seed, recent=recent, stress_words=hot,
+    out.update(by=by, repairs=repairs + rep, seed=seed, recent=recent, stress_words=hot, key=key, can=can,
+               retry=bool(by == "signal" and failed),
                spend=spend[-1] if len(spend) == 1 else (dict(spend[-1], usd=round(sum(float(s.get("usd") or 0) for s in spend), 5)) if spend else None))
     for r in out["repairs"]:
         say(f"director repair: {r}")
@@ -781,6 +882,83 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
     if marks:
         out.append(dict(dev="arc", id="darc", marks=sorted(marks, key=lambda m: m["f"]), bars=0.085, develop=6))
     return out, notes
+
+
+ON_HIM = ("spotlight",)       # devices that stand on the speaker by their kind, beside those whose card needs the take
+
+
+def take_spans(asks, dur_f=None, most=90):
+    """[[a, b]] programme frames over which the speaker must stay on screen: the spans of the asks that stand on him (a
+    device whose card needs the take or his matte, such as lamp and neg_world; a spotlight on his face; any ask marked
+    ``behind``), merged. The builder keeps the take on screen there instead of a cutaway, so the device lands on him."""
+    pal = palette_module()
+    out = []
+    for a in asks or []:
+        dev = str(a.get("dev") or "")
+        name = pal.resolve(dev) if pal is not None else dev
+        needs = set((pal.DEVICES.get(name) or {}).get("needs") or ()) if pal is not None else (
+            {"take"} if dev in ("lamp", "neg_world") else set())
+        if not ({"take", "matte"} & needs or name in ON_HIM or a.get("behind")):
+            continue
+        f = a.get("at") if name in ("lamp", "diecut", "answer") and isinstance(a.get("at"), list) else a.get("f")
+        if isinstance(f, list) and len(f) >= 2:
+            lo, hi = int(f[0]), int(f[1])
+        elif isinstance(f, (int, float)):
+            lo, hi = int(f), int(f) + 30
+        else:
+            continue
+        if name == "lamp":                   # the light dies over the frames after its word
+            hi += int(a.get("tail") if isinstance(a.get("tail"), (int, float)) else 10)
+        hi = min(hi, lo + most)
+        if dur_f:
+            hi = min(hi, int(dur_f))
+        if hi > lo:
+            out.append([max(lo - 1, 0), hi])
+    out.sort()
+    merged = []
+    for lo, hi in out:
+        if merged and lo <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    return merged
+
+
+def hold_take(ins, spans, min_f=8, fps=30.0):
+    """Cutaway rows (f0, f1, kind, name, rec) with the frames of ``spans`` given back to the take: a row inside a span
+    leaves, a row across one is cut round it (a clip's source time cut with it, so it plays at its own speed), and a
+    piece shorter than ``min_f`` leaves. Returns (rows, frames cleared)."""
+    out, cleared = [], 0
+    for row in ins:
+        f0, f1, kind, name, rec = row[0], row[1], row[2], row[3], row[4]
+        pieces = [(f0, f1)]
+        for a, b in spans:
+            nxt = []
+            for lo, hi in pieces:
+                if hi <= a or lo >= b:
+                    nxt.append((lo, hi))
+                    continue
+                if lo < a:
+                    nxt.append((lo, a))
+                if hi > b:
+                    nxt.append((b, hi))
+            pieces = nxt
+        pieces = [(lo, hi) for lo, hi in pieces if hi - lo >= min_f]
+        kept = sum(hi - lo for lo, hi in pieces)
+        cleared += (f1 - f0) - kept
+        if pieces == [(f0, f1)]:
+            out.append(row)
+            continue
+        for lo, hi in pieces:
+            r = dict(rec)
+            src = rec.get("src")
+            if isinstance(src, (list, tuple)) and len(src) == 2 and f1 > f0:
+                rate = (float(src[1]) - float(src[0])) / (f1 - f0)
+                r["src"] = [round(float(src[0]) + rate * (lo - f0), 4), round(float(src[0]) + rate * (hi - f0), 4)]
+            if isinstance(r.get("audit_until"), (int, float)):
+                r["audit_until"] = min(int(r["audit_until"]), hi)
+            out.append(type(row)([lo, hi, kind, name, r] + list(row[5:])) if isinstance(row, (list, tuple)) else row)
+    return out, cleared
 
 
 STRENGTH = {"white": 0.9, "neg": 0.8, "black": 0.6, "neg_hold": 0.7, "neg_world": 0.7, "rhyme": 0.7, "answer": 0.7, "lamp": 0.6,

@@ -107,7 +107,7 @@ def test_every_device_of_this_lane_keeps_the_contract():
         assert palette.DEVICES[name]["layer"] in palette.LAYERS, name
         assert e["card"].startswith(name), name
         assert all(f in palette.DEVICES for f in e.get("fallback") or ()), name
-    assert palette.resolve("speed_ramp") == "ramp" and palette.resolve("split_screen") == "split" and palette.resolve("list burst") == "burst"
+    assert palette.resolve("speed_ramp") == "ramp" and palette.resolve("split") == "split" and palette.resolve("list burst") == "burst"
 
 
 def test_the_palette_imports_no_model_code():
@@ -355,11 +355,10 @@ def test_a_rhyme_without_round_shapes_falls_back_to_a_match(tmp_path):
     assets = {k: {"kind": "image", "path": picture(os.path.join(work, f"{k}.png"), g)} for k, g in (("a", 40), ("b", 120), ("c", 200))}
     l1 = {"l1": 1, "sid": "t", "seed": 3, "fps": FPS, "frame": [W, H], "dur_f": 90, "assets": assets, "spine": [], "voices": dict(VOICES),
           "film": {}, "items": [{"id": "s0", "k": "shot", "f": [0, 90], "pic": "a"}], "sound": []}
-    patch = rhyme.plan(l1, work, {"dev": "rhyme", "id": "rh", "at": [10, 70], "n": 3})
-    assert not patch.get("skip"), patch
-    assert patch["log"]["fell_back_to"] == "position" and "round" in patch["log"]["rhyme"]
-    out = palette.merge(l1, patch)
-    assert ok(out) and len([i for i in out["items"] if i["id"].startswith("rh.m")]) == 3
+    assert rhyme.plan(l1, work, {"dev": "rhyme", "id": "rh", "at": [10, 70], "n": 3}).get("skip")     # no round shapes
+    out, log = palette.apply(l1, work, [{"dev": "rhyme", "id": "rh", "at": [10, 70], "n": 3, "pics": ["a", "b", "c"]}])
+    assert log[0]["done"] and log[0]["landed"] == "match_pos" and [t["dev"] for t in log[0]["tried"]] == ["rhyme", "rhyme_eyes"]
+    assert ok(out) and len([i for i in out["items"] if i["id"].startswith("rh.m")]) == 3       # the registry's chain, not a refusal
 
 
 def test_the_opening_returns_at_the_payoff_and_the_end_loops(film):

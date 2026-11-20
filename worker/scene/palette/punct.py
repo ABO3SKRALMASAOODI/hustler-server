@@ -25,6 +25,8 @@ DUO = {"cyan": "#22E4FF", "magenta": "#FF2D95", "yellow": "#FFD21F", "red": "#FF
 VARIANTS = ("thermal", "threshold", "halftone", "xray", "blueprint", "posterise", "solarise", "night_vision", "line",
             "mosaic", "recolour", "kaleidoscope", "pixel_stretch", "burn", "complement", "mono")
 GAP = 10                   # frames between two full-frame light changes: under three a second
+SEEN_F = 12                # frames a device that needs the speaker must cover on him to be seen at all (0.4 s)
+FULL = 0.8                 # a card clipped flash that covers this share of the frame is a full-frame flash
 
 
 def r4(x):
@@ -109,6 +111,15 @@ def neg_hold(l1, work, ask, sense):
     a, b = span(ask, l1)
     b = max(b, a + 6)
     b = min(b, int(l1["dur_f"]))
+    pol = sense.negative(a, b)
+    if pol and sum(pol) >= 0.5 * len(pol):
+        # the frames are already negative (a section printed negative): a second negative would print them positive
+        # and the hold would vanish into the section. Its visible counterpart: a band of the picture punches through
+        # positive over the hold
+        rect = band_rect("band", float(ask.get("y", 0.5)), float(ask.get("h", 0.34)))
+        return {"items": [flash(f"{ask['id']}nh", a, b, "neg", 1.0, rect=rect)],
+                "events": [{"f": a, "kind": "neg_hold_punch", "strength": 0.6}],
+                "log": {"f": [a, b], "counterpart": "positive band through a negative section", "negative_share": round(sum(pol) / len(pol), 2)}}
     a2 = sense.spaced(sense.on_cut(a), GAP)
     if a2 is None:
         return neg_split(l1, work, dict(ask, part="band"), sense)
@@ -136,27 +147,32 @@ def neg_world(l1, work, ask, sense):
     def take(sh):
         return sense.is_take(sh) and sh.get("src") and (str(sh.get("pic")) == "main" or str(sh.get("pic")).startswith("own:cut"))
     shots = [sh for sh in sense.shots() if sh["f"][0] < b and sh["f"][1] > a]
-    if not any(take(sh) for sh in shots):
-        return {"skip": "the speaker is not on screen in this span"}
+    on_him = sum(min(b, sh["f"][1]) - max(a, sh["f"][0]) for sh in shots if take(sh))
+    if on_him < SEEN_F:
+        # a world negative round a speaker seen for a few frames is not seen at all: the fallback lands instead, and the
+        # log says how many frames he was on screen
+        return {"skip": f"the speaker is on screen {on_him} of the span's {b - a} frames (needs {SEEN_F})"}
     got = sense.matte()
     if not got:
         return {"skip": "no matte of the take"}
     items = []
     for k, sh in enumerate(shots):
         lo, hi = max(a, sh["f"][0]), min(b, sh["f"][1])
-        if hi - lo < 1:
-            continue
-        if take(sh):
-            piece = AS.slice_shot(sh, lo, hi)
-            card = {"id": f"{ask['id']}nw{k}", "k": "card", "f": [lo, hi], "pic": sh["pic"], "src": piece["src"], "x": 0.5, "y": 0.5,
-                    "w": 1.0, "h": 1.0, "s": 1, "rot": 0, "op": 1, "z": 1, "behind": True, "treat": {"mode": "neg"}}
-            if piece.get("crop") is not None:
-                card["crop"] = piece["crop"]
-            items.append(card)
-        else:
-            items.append(flash(f"{ask['id']}nw{k}", lo, hi, "neg", 1.0))
-    return {"items": items, "assets": {} if "matte" in (l1.get("assets") or {}) else got, "lum": [a],
-            "events": [{"f": a, "kind": "neg_world", "strength": 0.7}], "log": {"f": [a, b], "pieces": len(items)}}
+        if hi - lo < 1 or not take(sh):
+            continue                        # the device is the world round him: drawn where he is on screen
+        piece = AS.slice_shot(sh, lo, hi)
+        card = {"id": f"{ask['id']}nw{k}", "k": "card", "f": [lo, hi], "pic": sh["pic"], "src": piece["src"], "x": 0.5, "y": 0.5,
+                "w": 1.0, "h": 1.0, "s": 1, "rot": 0, "op": 1, "z": 1, "behind": True, "treat": {"mode": "neg"}}
+        if piece.get("crop") is not None:
+            card["crop"] = piece["crop"]
+        for key in ("look", "grade"):
+            if sh.get(key) is not None:
+                card[key] = sh[key]
+        items.append(card)
+    first = min(it["f"][0] for it in items)
+    return {"items": items, "assets": {} if "matte" in (l1.get("assets") or {}) else got, "lum": [first],
+            "events": [{"f": first, "kind": "neg_world", "strength": 0.7}],
+            "log": {"f": [a, b], "pieces": len(items), "frames": on_him}}
 
 
 # --------------------------------------------------------------------- light
@@ -168,11 +184,15 @@ def white(l1, work, ask, sense):
     alpha = [1.0, 0.55, 0.22, 0.08, 0.0][:n]
     i = ask["id"]
     if ask.get("card") or ask.get("clip"):
+        # the pictures' cards only (not the palette's overlays): a card as large as the frame is a full-frame white,
+        # spaced and recorded like one
         cards = [c for c in sense.cards_at(f) if c.get("pic") not in (None, "plate")]
         if cards:
             big = max(cards, key=lambda c: float(c.get("w", 0)) * float(c.get("h", 0)))
-            return {"items": [flash(f"{i}wc", f, f + n, "fill", alpha, c="#FFFFFF", rect=card_rect(big))],
-                    "events": [{"f": f, "kind": "white_card", "strength": 0.6}], "log": {"card": big["id"]}}
+            r = card_rect(big)
+            if (r[2] - r[0]) * (r[3] - r[1]) < FULL:
+                return {"items": [flash(f"{i}wc", f, f + n, "fill", alpha, c="#FFFFFF", rect=r)],
+                        "events": [{"f": f, "kind": "white_card", "strength": 0.6}], "log": {"card": big["id"]}}
     g = sense.spaced(f, GAP)
     if g is None:
         return {"items": [flash(f"{i}wb", f, f + n, "fill", alpha, c="#FFFFFF", rect=band_rect("band", 0.5, 0.3))],
@@ -221,8 +241,7 @@ def tint(l1, work, ask, sense):
 def variant(l1, work, ask, sense):
     a, b = span(ask, l1)
     mode = str(ask.get("mode") or ask.get("as") or "thermal").lower().replace("-", "_").replace(" ", "_")
-    mode = {"x_ray": "xray", "posterize": "posterise", "solarize": "solarise", "pixelate": "mosaic", "pixel": "mosaic",
-            "nightvision": "night_vision", "schematic": "blueprint", "recolor": "recolour"}.get(mode, mode)
+    mode = SPELLED.get(mode, mode)
     if mode not in MODES:
         mode = "thermal"
     b = max(b, a + 3)
@@ -336,33 +355,55 @@ def word_blend(l1, work, ask, sense):
             "log": {"words": [w["id"] for w in out], "blend": mode}}
 
 
+SPELLED = {"x_ray": "xray", "posterize": "posterise", "solarize": "solarise", "pixelate": "mosaic", "pixel": "mosaic",
+           "pixelated": "mosaic", "nightvision": "night_vision", "night": "night_vision", "schematic": "blueprint",
+           "recolor": "recolour", "glitch": "pixel_stretch", "datamosh": "pixel_stretch", "smear": "pixel_stretch",
+           "kaleido": "kaleidoscope", "mirror": "kaleidoscope", "sketch": "line", "lines": "line", "outline": "line",
+           "edges": "line", "infrared": "thermal", "heat": "thermal", "heatmap": "thermal", "dots": "halftone",
+           "print": "halftone", "poster": "posterise", "invert_colour": "complement", "complementary": "complement"}
+
 DEVICES = {
-    "neg": {"plan": neg, "layer": "look", "fallback": ("neg_split",),
+    "neg": {"plan": neg, "layer": "look", "fallback": ("neg_split",), "ranges": {"n": (1, 2, 1, "frames a flip"), "run": (1, 8, 1, "flips")},
             "card": "neg at n(1-2) run(1-8). A polarity flip: 1-2 inverted frames on the cut; run>1 accelerates into the drop at the ask's end. Hook, before a name, a drop, the close"},
     "neg_hold": {"plan": neg_hold, "layer": "surface", "fallback": ("neg_split",),
                  "card": "neg_hold f[a,b]. The picture held in negative over a span. Erasure, loss, 'as if it never existed', the turn"},
     "neg_split": {"plan": neg_split, "layer": "look", "fallback": ("white",),
+                  "ranges": {"y": (0.05, 0.95, 0.5, "the band's centre, of the frame's height"), "h": (0.05, 0.6, 0.16, "the band's height, of the frame's")},
                   "card": "neg_split f[a,b] part(left|right|top|bottom|band) y h. Half the frame, or a band of it, negative. Two sides, a split, a tear"},
-    "neg_world": {"plan": neg_world, "layer": "surface", "needs": ("take", "matte"), "fallback": ("neg_split",),
-                  "card": "neg_world f[a,b]. The world round the speaker inverts while he stays (his matte). Isolation, 'everyone else', a verdict on the world"},
-    "white": {"plan": white, "layer": "look", "fallback": ("neg_split",),
+    "neg_world": {"plan": neg_world, "layer": "look", "needs": ("take", "matte"), "fallback": ("neg_split",),
+                  "card": "neg_world f[a,b]. The world round the speaker inverts while he stays (his matte). Isolation, 'everyone else', a verdict on the world. Needs the speaker on screen for at least half a second of the span"},
+    "white": {"plan": white, "layer": "look", "fallback": ("neg_split",), "ranges": {"n": (1, 5, 3, "frames")},
               "card": "white at n(1-5) card(bool). One white frame with a fast decay, full frame or clipped to the card on screen. Payoff join, a name reveal, a drop"},
-    "black": {"plan": black, "layer": "look", "fallback": ("white",),
+    "black": {"plan": black, "layer": "look", "fallback": ("white",), "ranges": {"n": (1, 4, 2, "frames")},
               "card": "black at n(1-4). A dip to black on a phrase boundary. Before the payoff, between two thoughts, the close"},
-    "tint": {"plan": tint, "layer": "surface", "fallback": ("variant",),
+    "tint": {"plan": tint, "layer": "surface", "fallback": ("variant",), "ranges": {"n": (4, 14, 8, "frames of the echo")},
              "card": "tint at n c(cyan|magenta|#hex). The shot before the cut plays its last frames again in a duotone. Emphasis on a repeated word, a chapter"},
-    "variant": {"plan": variant, "layer": "surface", "fallback": ("tint", "white"),
+    "variant": {"plan": variant, "layer": "surface", "fallback": ("tint", "white"), "ranges": {"flips": (1, 6, 1, "flips")},
                 "card": "variant f[a,b] mode(thermal|threshold|halftone|xray|blueprint|posterise|solarise|night_vision|line|mosaic|recolour|kaleidoscope|pixel_stretch) flips rect. The picture re-rendered for a few frames or flips. Military, tech, science, surveillance, the hook strobe"},
     "spotlight": {"plan": spotlight, "layer": "surface", "needs": ("faces",), "fallback": ("blur_in",),
+                  "ranges": {"amount": (0.3, 1.0, 0.9, "how dark the ring falls")},
                   "card": "spotlight f[a,b] amount. A vignette pushes in round the face over the shot. Confession, focus, a single person against everything"},
     "blur_in": {"plan": blur_in, "layer": "surface", "fallback": ("white",),
                 "card": "blur_in at. The new picture opens defocused and is sharp by its fourth frame. Section openers, after a flash, 'focus', 'realised'"},
     "word_blend": {"plan": word_blend, "layer": "type", "needs": ("words",), "fallback": ("white",),
                    "card": "word_blend f[a,b] blend(difference|multiply). The display words cut through the picture (difference) or print on it (multiply). A word that must feel part of the picture"},
 }
-ALIASES = {"negative": "neg", "polarity": "neg", "invert": "neg", "flip": "neg", "flash": "white", "white_flash": "white",
-           "black_dip": "black", "dip": "black", "cut_to_black": "black", "duotone": "tint", "tint_echo": "tint", "echo": "tint",
-           "thermal": "variant", "threshold": "variant", "halftone": "variant", "xray": "variant", "blueprint": "variant",
-           "vignette": "spotlight", "blur": "blur_in", "defocus": "blur_in", "difference": "word_blend", "multiply": "word_blend",
-           "split_polarity": "neg_split", "band": "neg_split", "negative_hold": "neg_hold", "punct": "white"}
+ALIASES = {"negative": "neg", "polarity": "neg", "invert": "neg", "flip": "neg", "inverse": "neg", "strobe": "neg",
+           "flash": "white", "white_flash": "white", "flash_frame": "white", "black_dip": "black", "dip": "black",
+           "cut_to_black": "black", "blackout": "black", "duotone": "tint", "tint_echo": "tint", "echo": "tint",
+           "freeze": "tint", "freeze_frame": "tint", "repeat": "tint", "vignette": "spotlight", "blur": "blur_in",
+           "defocus": "blur_in", "rack_focus": "blur_in", "whip": "blur_in", "swish": "blur_in", "shake": "blur_in",
+           "difference": "word_blend", "multiply": "word_blend", "split_polarity": "neg_split", "band": "neg_split",
+           "negative_hold": "neg_hold", "hold_negative": "neg_hold", "world_negative": "neg_world", "punct": "white",
+           # layouts and moves a model may name as a device: the nearest device that draws something like them
+           "split": "neg_split", "split_screen": "neg_split", "window": "spotlight", "bleed": "spotlight",
+           "zoom": "spotlight", "zoom_in": "spotlight", "punch_in": "spotlight", "push_in": "spotlight",
+           "crash_zoom": "spotlight", "push": "spotlight", "focus": "spotlight", "type": "word_blend", "text": "word_blend",
+           "word": "word_blend", "title": "word_blend", "kinetic_type": "word_blend", "collage": "answer", "grid": "answer",
+           "prints": "answer", "montage": "answer", "burst": "answer", "list": "answer", "match_cut": "rhyme",
+           "shape_match": "rhyme"}
+# every re-render the variant card names (the engine's own modes), in every spelling a model writes, is the variant
+# device with the mode carried in "as"
+ALIASES.update({m: "variant" for m in tuple(MODES) + VARIANTS + tuple(SPELLED)
+                if m not in ("neg", "tint", "fill", "pool", "mono") and m not in ALIASES})
 _ = TREATS
