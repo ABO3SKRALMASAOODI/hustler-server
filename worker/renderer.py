@@ -334,7 +334,42 @@ GRADE_FILTERS = {
 CUTAWAY_TEXTURES = ("grain", "vignette")
 
 
-def cutaway_look_chain(edl, o_start, o_dur):
+def _frame_aspect(edl):
+    """Width / height of the film's frame from its ratio ("9:16" -> 0.5625),
+    or None when the film keeps the source's frame."""
+    ratio = str(((edl or {}).get("frame") or {}).get("ratio") or "")
+    try:
+        w, h = ratio.split(":")
+        return float(w) / float(h)
+    except (TypeError, ValueError):
+        return None
+
+
+def vignette_filter(intensity, aspect=None, en=""):
+    """The vignette at ``intensity`` (0..1): an edge falloff that follows the
+    frame (aspect = width / height) and never darkens the picture's middle.
+
+    It was ``vignette=a=PI/(4.8 - 2.2 i)``, a circle on any frame: at 0.25 a
+    9:16 picture lost 32% of its mean light and the top and bottom thirds
+    went to a third (measured on flat grey: mean 0.68, top edge 0.35); p5744
+    v2c's "softer, lighter" lofi grade came out L 50 -> 31 and p5873 v2b's
+    warm grade 31% darker, from the vignette alone. Now, on 9:16: 0.15 keeps
+    mean 0.96 with corners 0.86, 0.25 mean 0.94 / corners 0.82, 0.5 mean
+    0.89 / corners 0.70, 1.0 mean about 0.80 / corners 0.45."""
+    try:
+        i_ = max(0.0, min(1.0, float(intensity)))
+    except (TypeError, ValueError):
+        i_ = 0.5
+    asp = ""
+    if aspect:
+        try:
+            asp = f":aspect={max(0.2, min(5.0, float(aspect))):.4f}"
+        except (TypeError, ValueError):
+            asp = ""
+    return f"vignette=a={0.30 + 0.55 * i_:.3f}{asp}{en}"
+
+
+def cutaway_look_chain(edl, o_start, o_dur, aspect=None):
     """Filters that give a FULL-FRAME cutaway (an overlay with fit
     'cover' or 'picture': b-roll that replaces the speaker) the Look the
     footage around it has: the grade preset and grade_custom, the Look's
@@ -395,8 +430,88 @@ def cutaway_look_chain(edl, o_start, o_dur):
         if kind == "grain":
             out.append(f"noise=alls={5 + int(25 * i_)}:allf=t+u{en}")
         else:
-            out.append(f"vignette=a=PI/{4.8 - 2.2 * i_:.2f}{en}")
+            out.append(vignette_filter(i_, aspect or _frame_aspect(edl), en))
     return out
+
+
+# warmth (grade_custom), per unit: the red and blue curves' mid-grey and white
+# points, as a white balance. temperature/tint above lean the shadows only:
+# ffmpeg's colorbalance weighs by max + min of the pixel, so its shadow and
+# midtone ranges end near a code value of 0.4 and mid-grey and whites never
+# move (measured on p5873's frames: temperature 1.0 left whites and mid-tones
+# at the same a*/b*; the Director's shadow hue relies on exactly that).
+# Warmth moves the whole picture, blacks fixed, toward amber rather than
+# yellow (p5873 v2c read "yellow, not sun-touched": mid-tones a* fell): on
+# p5873 +1.0 raises whites b* by about 10 with a* near +1, and mid-tones a*
+# by about 5 and b* by about 8, lightness kept.
+WARMTH_WARM = {"r_mid": 0.065, "g_white": 0.035, "b_mid": 0.06,
+               "b_white": 0.10}
+WARMTH_COOL = {"r_mid": 0.044, "r_white": 0.062, "g_mid": 0.019,
+               "g_white": 0.037, "b_mid": 0.075}
+
+
+def warmth_curves(warmth):
+    """The curves filter for grade_custom.warmth (-1 cool .. 1 warm): the
+    picture's white balance, black kept black. '' when neutral."""
+    try:
+        w = max(-1.0, min(1.0, float(warmth or 0.0)))
+    except (TypeError, ValueError):
+        return ""
+    if abs(w) < 1e-4:
+        return ""
+    if w > 0:
+        k = WARMTH_WARM
+        r = (0.5 + k["r_mid"] * w, 1.0)
+        g = (0.5, 1.0 - k["g_white"] * w)
+        b = (0.5 - k["b_mid"] * w, 1.0 - k["b_white"] * w)
+    else:
+        c, k = -w, WARMTH_COOL
+        r = (0.5 - k["r_mid"] * c, 1.0 - k["r_white"] * c)
+        g = (0.5 - k["g_mid"] * c, 1.0 - k["g_white"] * c)
+        b = (0.5 + k["b_mid"] * c, 1.0)
+    return ("curves=" + ":".join(
+        f"{n}='0/0 0.5/{p[0]:.3f} 1/{p[1]:.3f}'"
+        for n, p in (("r", r), ("g", g), ("b", b))))
+
+
+def gain_curves(gain):
+    """The curves filter for grade_custom.gain (-1 .. 1 stops): exposure as
+    light, multiplied in linear light with a soft shoulder, so black stays
+    black and the brightest detail rolls off instead of clipping. '' when
+    neutral.
+
+    grade_custom.exposure is eq brightness, an offset: p5873 v2c's exposure
+    0.8 put black at Y 53 (the dips to black passed through a muddy olive),
+    lifted p5 L from 20 to 28, pushed the whites into the clip (their own
+    texture and the grain flattened: frame-to-frame noise 3.5 against the
+    source's 5.4) and lowered the contrast it had raised."""
+    try:
+        g = max(-1.0, min(1.0, float(gain or 0.0)))
+    except (TypeError, ValueError):
+        return ""
+    if abs(g) < 1e-3:
+        return ""
+    k = 2.0 ** g
+    knee = 0.75
+
+    def lin(v):
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+    def srgb(v):
+        return 12.92 * v if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055
+
+    pts, last = [], -1.0
+    for i in range(17):
+        x = i / 16.0
+        y = lin(x) * k
+        if y > knee:
+            # soft shoulder: approaches 1.0, never past it
+            y = knee + (1 - knee) * (1 - math.exp(-(y - knee) / (1 - knee)))
+        y = min(1.0, srgb(max(0.0, y)))
+        y = max(y, last + 1e-3) if i else 0.0
+        last = y
+        pts.append(f"{x:.4f}/{min(1.0, y):.4f}")
+    return "curves=master='" + " ".join(pts) + "'"
 
 
 def grade_custom_chain(gc):
@@ -434,6 +549,12 @@ def grade_custom_chain(gc):
         chain.append("eq=" + ":".join(eq_bits))
     if cb_bits:
         chain.append("colorbalance=" + ":".join(cb_bits))
+    warm = warmth_curves(gc.get("warmth"))
+    if warm:
+        chain.append(warm)
+    lift = gain_curves(gc.get("gain"))
+    if lift:
+        chain.append(lift)
     # shadows/highlights are TONAL-REGION controls, so they are a master
     # curve, not eq: a fixed midpoint (0.5) and a moved quarter-point is
     # what makes "lift the shadows" brighten the dark corners without
@@ -450,6 +571,26 @@ def grade_custom_chain(gc):
         chain.append(f"curves=master='0/{y0:.3f} 0.25/{y1:.3f} 0.5/0.5 "
                      f"0.75/{y2:.3f} 1/{y3:.3f}'")
     return ",".join(chain)
+
+
+def measured_duck(spans, depth_db, origin=0.0, ramp=0.15):
+    """The volume filter that dips a music item by ``depth_db`` over each
+    spoken span (program seconds), easing in and out over ``ramp`` seconds.
+    It runs after adelay, where t is the program clock (``origin`` 0), like
+    the step duck's enable windows: a bed seated for the words it plays
+    under (MusicItem.duck_db)."""
+    terms = []
+    for a, b in spans[:60]:
+        a, b = float(a) - origin, float(b) - origin
+        terms.append(f"clip((t-({a - ramp:.3f}))/{ramp:.3f},0,1)*"
+                     f"clip(({b + ramp:.3f}-t)/{ramp:.3f},0,1)")
+    if not terms:
+        return "anull"
+    env = terms[0]
+    for t in terms[1:]:
+        env = f"max({env},{t})"
+    return (f"volume=volume='pow(10,({float(depth_db):.2f}*({env}))/20)'"
+            ":eval=frame")
 
 
 def _enable_expr(spans):
@@ -5891,8 +6032,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append(f"[{vlabel}]noise=alls={5 + int(25 * i_)}"
                          f":allf=t+u{en}[{out_lab}]")
         elif kind == "vignette":
-            parts.append(f"[{vlabel}]vignette=a=PI/{4.8 - 2.2 * i_:.2f}"
-                         f"{en}[{out_lab}]")
+            parts.append(f"[{vlabel}]"
+                         f"{vignette_filter(i_, (W / H) if W and H else None, en)}"
+                         f"[{out_lab}]")
         elif kind == "chromatic":
             r = 2 + int(10 * i_)
             parts.append(f"[{vlabel}]rgbashift=rh={r}:bh=-{r}{en}"
@@ -6884,7 +7026,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             if item.get("duck", True) and not smooth and speech:
                 win = [(max(s, m_start), min(e, m_end)) for s, e in speech
                        if min(e, m_end) - max(s, m_start) > 0.05]
-                if win:
+                if win and item.get("duck_db") is not None:
+                    duck = "," + measured_duck(win, float(item["duck_db"]))
+                elif win:
                     duck = f",volume={DUCK_DB}dB:enable='{_enable_expr(win)}'"
             # Fades are the music item's OWN, and must land before adelay
             # while t=0 still means "the music's first sample". Clamped to
@@ -10012,6 +10156,34 @@ def _concat_check_pieces(pieces, out_path, workdir, durations=None):
                "+faststart", out_path], timeout=180)
 
 
+def _concat_check_pieces_exact(pieces, out_path, workdir, durations):
+    """The proof pieces joined by re-encoding, each cut to its own measured
+    length with its timestamps from zero. The stream-copy join can carry a
+    piece's stray packets past its length (p5744 v2a, job 14: six windows
+    that each measured right joined into 20.04 s against 8.00 s and the
+    first film's proof failed); this join cannot."""
+    n = len(pieces)
+    with_audio = all(media.has_audio_stream(p) for p in pieces)
+    args = ["ffmpeg", "-y", "-v", "error"]
+    for p in pieces:
+        args += ["-i", p]
+    parts, labels = [], ""
+    for i, d in enumerate(durations):
+        parts.append(f"[{i}:v]trim=0:{d:.6f},setpts=PTS-STARTPTS[v{i}]")
+        labels += f"[v{i}]"
+        if with_audio:
+            parts.append(f"[{i}:a]atrim=0:{d:.6f},asetpts=PTS-STARTPTS[a{i}]")
+            labels += f"[a{i}]"
+    parts.append(f"{labels}concat=n={n}:v=1:a={1 if with_audio else 0}"
+                 + ("[v][a]" if with_audio else "[v]"))
+    args += ["-filter_complex", ";".join(parts), "-map", "[v]"]
+    if with_audio:
+        args += ["-map", "[a]", "-c:a", "aac", "-b:a", "160k"]
+    args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+             "-pix_fmt", "yuv420p", "-movflags", "+faststart", out_path]
+    media.run(args, timeout=300)
+
+
 def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
                              patch_locals, out_path, raw_ranges,
                              verify_times, progress_cb=None, raw_pages=None, proof_segments=None,
@@ -10128,6 +10300,12 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
         proof_segments.extend(dict(start=a, end=b, reel_start=offset)
                               for a,b,offset in offsets)
     out_dur = media.duration_of(out_path)
+    if abs(out_dur - elapsed) > max(0.25, elapsed * 0.03) and len(pieces) > 1:
+        print(f"[render] proof reel joined at {out_dur:.2f}s against "
+              f"{elapsed:.2f}s: joined again piece by piece", flush=True)
+        _concat_check_pieces_exact(pieces, out_path, workdir,
+                                   [b - a for a, b, _o in offsets])
+        out_dur = media.duration_of(out_path)
     if abs(out_dur - elapsed) > max(0.25, elapsed * 0.03):
         raise RenderVerificationError(
             f"changed-section reel rendered {out_dur:.2f}s, expected "

@@ -8,7 +8,10 @@ eyes. Descriptions come from the library's own text, then the vision chain
 is remembered with its query group, so ``place`` takes the exact item seen
 and a failed download takes the next result of the same search. Music comes
 only from the reference-grade set (or the library tracks the signal gate
-passed), so the owner's music policy holds without a refusal.
+passed), so the owner's music policy holds without a refusal. A music query
+ranks the tracks whose catalogue words it names first, and says plainly when
+none of reference grade matches (and which matching tracks the gate held
+back), so the model can tell the customer the truth once.
 """
 import json
 import os
@@ -222,7 +225,17 @@ def find(ctx, kind="stock_video", query="", count=6, orientation=None,
             text = _text_kind(ctx, kind, q, count)
         except Exception as exc:  # noqa: BLE001
             text = f"search failed ({type(exc).__name__}: {str(exc)[:160]})"
-        body.append(f"[{q}]\n{_facts(text)}")
+        text = _facts(text)
+        if kind == "footage":
+            # The links are placeable as they are: edit's place op
+            # downloads, stores and places one (p5744 said "no tool").
+            text = "\n".join(
+                line for line in text.splitlines()
+                if "fetch_url(" not in line)
+            text += ("\nplace a link with edit: {'place': {'id': '<link>', "
+                     "'at': <film s>, 'dur': <s>, 'mode': 'overlay'}}; it "
+                     "is downloaded, stored and placed in one op")
+        body.append(f"[{q}]\n{text}")
     for label, path in list(getattr(ctx, "pending_images", None) or []):
         env.image(label, path)
     ctx.pending_images = []
@@ -244,11 +257,11 @@ def _facts(text):
 # music: the reference-grade set only
 
 def _music_pool():
+    """The reference-grade tracks (music_choose.reference_pool): the library
+    rows that passed the full signal gate, the reference music set's rows
+    among them, identical on every worker."""
     import music_choose
-    pool = music_choose.set_tracks()
-    if pool:
-        return pool, "the reference music set"
-    return music_choose.choosable(strict=True), "library tracks the gate passed"
+    return music_choose.reference_pool(), "the reference-grade music library"
 
 
 def _music(ctx, queries, count):
@@ -273,13 +286,58 @@ def _music(ctx, queries, count):
     film = {"kind": "longform" if program > 120 else "story",
             "duration_s": program}
     try:
-        options, _prof = music_choose.shortlist(film, n=n, pool=pool)
-        tracks = [o["track"] for o in options]
+        options, _prof = music_choose.shortlist(film, n=len(pool), pool=pool)
+        ranked = [o["track"] for o in options]
     except Exception:  # noqa: BLE001 - the pool itself, unranked
-        tracks = pool[:n]
-    lines = [f"{len(tracks)} track(s) from {basis}, ranked by fit to this "
-             f"film's length and pace" + (f" (asked: {', '.join(queries)})"
-                                          if queries else "") + ":"]
+        ranked = list(pool)
+    # The shortlist keeps at most three tracks of one style; the asked words
+    # search every track (p5744's "chill lofi": 11 lofi tracks, 3 ranked).
+    seen = {t["cid"] for t in ranked}
+    ranked += [t for t in pool if t["cid"] not in seen]
+    # The asked genre or title comes first (p5744 asked for lofi three
+    # times and got the same film-fit list each time, its words unread).
+    lines, matched, hits = [], {}, []
+    for q in queries:
+        for row in _named_cc0(q):
+            fails = _cc0_gate().get(row["slug"]) or []
+            lines.append(
+                f"[{q}] names the track \"{row['title']}\" "
+                f"(cc0:{row['slug']}, {row.get('mood')}, CC0 library"
+                + (f"; under the music bar: {'; '.join(fails[:2])}" if fails
+                   else "")
+                + "). A track the person names is theirs: place it with "
+                f"{{'music': {{'id': 'cc0:{row['slug']}'}}}}")
+        names_track = any(f"[{q}] names the track" in ln for ln in lines)
+        found = _matching(ranked, q)
+        matched[q] = len(found)
+        hits.extend(t for t in found if t not in hits)
+        if found:
+            lines.append(f"[{q}] {len(found)} match(es) of reference "
+                         "grade: " + ", ".join(
+                             f"{LIB_PREFIX}{t['cid']}" for t in found[:6]))
+            continue
+        lines.append(f"[{q}] no track of reference grade matches; "
+                     "the list below is the closest by film fit")
+        below = [] if names_track else _below_bar(q)
+        if below:
+            lines.append("  held back, under the music bar: " + "; ".join(
+                f"{t} (fails: {why})" for t, why in below[:4])
+                + "; the reference-grade track of the same mood plays in "
+                  "its place")
+        # p5744 said "Bubbles" among its music asks: a word that names no
+        # track may name what the person wants to SEE.
+        if not names_track:
+            lines.append(f"  if '{q}' is something to see rather than hear, "
+                         "the same words find it as a picture: find(kind="
+                         "'stock_video') placed as an overlay, or a drawn "
+                         "element ({'tool': 'add_element', 'args': {'kind': ...}}"
+                         "; particles: embers, sparks, dust, confetti, snow, "
+                         "fireworks, bubbles)")
+    tracks = (hits + [t for t in ranked if t not in hits])[:n]
+    lines.insert(0, f"{len(tracks)} track(s) from {basis}, asked words "
+                    "first, then ranked by fit to this film's length and "
+                    "pace" + (f" (asked: {', '.join(queries)})"
+                              if queries else "") + ":")
     for t in tracks:
         bits = [f"{LIB_PREFIX}{t['cid']}"]
         for key in ("title", "style", "mood", "bpm", "duration_s",
@@ -288,8 +346,167 @@ def _music(ctx, queries, count):
                 bits.append(f"{key}={t[key]}")
         lines.append("  " + " | ".join(str(b) for b in bits)[:300])
     env.body = "\n".join(lines)
-    env.measured = {"tracks": len(tracks)}
+    env.measured = {"tracks": len(tracks), "pool": len(pool)}
+    if matched:
+        env.measured["matched"] = matched
     return env
+
+
+def _norm_title(text):
+    text = "".join(c if c.isalnum() else " " for c in str(text or "").lower())
+    return " ".join(text.split())
+
+
+def _stems(text):
+    return {w[:-1] if len(w) > 3 and w.endswith("s") else w
+            for w in _norm_title(text).split()}
+
+
+def _named_cc0(query):
+    """CC0 library tracks whose title the query names (p5744: "Calm
+    current" is "Calm Currents"): the title read closely, or every word of
+    a title of up to four words in the query. Catalogue search over the
+    model's own query."""
+    import difflib
+    try:
+        import music_library
+        rows = music_library.catalog()
+    except Exception:  # noqa: BLE001
+        return []
+    q = _norm_title(query)
+    if not q:
+        return []
+    qs = _stems(q)
+    out = []
+    for r in rows:
+        t = _norm_title(r.get("title"))
+        ts = _stems(t)
+        close = difflib.SequenceMatcher(None, q, t).ratio() >= 0.85
+        whole = bool(ts) and len(ts) <= 4 and ts <= qs
+        if close or whole:
+            out.append(r)
+    return out[:3]
+
+
+def named_tracks(text):
+    """Library tracks whose title ``text`` names, by the catalogue's own
+    title search: [{"id", "title", "mood", "library"}]. The CC0 library by
+    _named_cc0; the reference-grade library when the text reads as the
+    title or holds every word of a title of two words or more (its one-word
+    titles, "You" and "Alone", are words of any sentence). p5744 v2b: the
+    person said "Calm current" and "Bubbles", the library's own titles, and
+    v2 heard a calmer look and floating bubbles while v1 had listed the
+    chill tracks by title the turn before."""
+    out = []
+    for row in _named_cc0(text):
+        out.append({"id": f"cc0:{row['slug']}", "title": row.get("title"),
+                    "mood": row.get("mood"), "library": "CC0 library"})
+    q = _norm_title(text)
+    if not q:
+        return out
+    try:
+        pool, _basis = _music_pool()
+    except Exception:  # noqa: BLE001
+        pool = []
+    import difflib
+    qs = _stems(q)
+    seen = {_norm_title(r["title"]) for r in out}
+    for t in pool or []:
+        title = _norm_title(t.get("title"))
+        if not title or title in seen:
+            continue
+        ts = _stems(title)
+        close = difflib.SequenceMatcher(None, q, title).ratio() >= 0.85
+        whole = 2 <= len(ts) <= 4 and ts <= qs
+        if close or whole:
+            seen.add(title)
+            out.append({"id": f"{LIB_PREFIX}{t['cid']}",
+                        "title": t.get("title"),
+                        "mood": t.get("mood") or t.get("style"),
+                        "library": "reference-grade library"})
+    return out[:4]
+
+
+def named_lines(text):
+    """The project-state lines for library tracks the request names ('' when
+    none): information, the model decides whether the person means them."""
+    rows = named_tracks(text)
+    if not rows:
+        return []
+    return ["The request's words are the title of a library track: "
+            + "; ".join(f"\"{r['title']}\" ({r['id']}, {r['mood']}, "
+                        f"{r['library']})" for r in rows)
+            + ". When the person means the track, it is their pick: "
+              "{'music': {'id': '<that id>'}} places it in place of the "
+              "bed (find(kind='music', query=[their words]) shows it too)."]
+
+
+def _words(text):
+    """Search words of a catalogue field or a query: lower-case runs of
+    letters and digits; 'lo-fi' also reads as 'lofi'."""
+    text = str(text or "").lower()
+    out = set()
+    for variant in (text, text.replace("-", "")):
+        word = "".join(c if c.isalnum() else " " for c in variant)
+        out.update(w for w in word.split() if len(w) >= 3)
+    return out
+
+
+def _track_words(t):
+    fields = [t.get("cid"), t.get("title"), t.get("author"), t.get("mood")]
+    if isinstance(t.get("style"), str):
+        fields.append(t["style"])
+    fields.extend(t.get("tags") or [])
+    return _words(" ".join(str(f) for f in fields if f))
+
+
+def _matching(tracks, query):
+    """Tracks whose catalogue words share any of the query's words, most
+    shared first (catalogue search over the model's own query)."""
+    want = _words(query)
+    if not want:
+        return []
+    scored = []
+    for rank, t in enumerate(tracks):
+        n = len(want & _track_words(t))
+        if n:
+            scored.append((-n, rank, t))
+    return [t for _n, _r, t in sorted(scored, key=lambda x: x[:2])]
+
+
+def _below_bar(query):
+    """[(title, why)] of catalogue tracks matching ``query`` that the music
+    gate failed, closest first: they exist, and are never placed (owner,
+    15 Nov)."""
+    rows = []
+    try:
+        import music_choose
+        fails = music_choose.gate()["fail"]
+        rows.extend(dict(t, _label=t["title"], _why=fails[t["cid"]])
+                    for t in music_choose.tracks() if t["cid"] in fails)
+    except Exception:  # noqa: BLE001 - the facts we have
+        pass
+    try:
+        import music_library
+        verdicts = _cc0_gate()
+        rows.extend(dict(r, cid=r["slug"], _label=f"{r['title']} (CC0)",
+                         _why=verdicts[r["slug"]])
+                    for r in music_library.catalog() if r["slug"] in verdicts)
+    except Exception:  # noqa: BLE001
+        pass
+    return [(t["_label"], "; ".join(t["_why"][:2]))
+            for t in _matching(rows, query)]
+
+
+def _cc0_gate():
+    """{slug: [fails]} of the CC0 pack under the same gate (music/gate.json)."""
+    path = os.path.join(os.path.dirname(agent_tools.__file__), "music",
+                        "gate.json")
+    try:
+        with open(path) as fh:
+            return dict(json.load(fh).get("fail") or {})
+    except (OSError, ValueError):
+        return {}
 
 
 def music_asset(stage, rid):

@@ -45,7 +45,7 @@ import source_layout
 import spend_ledger
 import storage
 from psycopg2.extras import Json
-from schemas import GRADE_PRESETS, Frame
+from schemas import GRADE_PRESETS, Frame, program_duration
 
 CLIP_MIN_S = 10.0          # technical floor; the scout still judges the story
 CLIP_MAX_S = 120.0         # complete social stories may need more than 60s
@@ -1141,6 +1141,67 @@ def _seed_story_child(worker_db, job, child_id, index, clip, workdir,
         shutil.rmtree(wd, ignore_errors=True)
 
 
+def _deliver_child(worker_db, job, child_id, index, clip, workdir, deliver):
+    """A caller-authored clip carried through to a clip that plays (harness
+    v2, p5760: "ten vertical clips with a title for each" came back as ten
+    locked raw cards). What the caller asked for and nothing else: its title
+    on screen over the opening (``title``), captions from the transcript
+    (``captions``, in ``caption_style`` when given), then a draft preview of
+    that version (``render``), so the board shows a rendered clip.
+    Returns (edl_version, preview_job_id, notes). Never raises: a step that
+    cannot land is noted and the next still runs."""
+    child = worker_db.run(dbx.get_project, child_id)
+    wd = os.path.join(workdir, f"deliver_{child_id}")
+    os.makedirs(wd, exist_ok=True)
+    ctx = agent_tools.ToolContext(worker_db, job, child, index, wd)
+    ctx.harness = "v2"
+    notes, preview_job = [], None
+    try:
+        try:
+            prog = float(program_duration(ctx.latest_edl()["json"]) or 0.0)
+        except Exception:  # noqa: BLE001
+            prog = float(clip.get("end", 0) or 0) - float(clip.get("start", 0) or 0)
+        title = str(clip.get("title") or "").strip()
+        if deliver.get("title", True) and title and prog > 1.0:
+            try:
+                res = agent_tools.execute(ctx, "add_text", {
+                    "text": title[:90], "start": 0.0,
+                    "end": round(min(3.2, prog - 0.2), 2),
+                    "template": "title", "entrance": "pop", "exit": "fade"})
+                notes.append("title: " + str(res).splitlines()[0][:160])
+            except Exception as exc:  # noqa: BLE001
+                notes.append(f"title not placed ({type(exc).__name__}: {str(exc)[:120]})")
+        has_words = bool((index or {}).get("words"))
+        if deliver.get("captions", True) and has_words:
+            style = deliver.get("caption_style") \
+                if isinstance(deliver.get("caption_style"), dict) \
+                else {"motion_look": "editorial"}
+            try:
+                res = agent_tools.execute(ctx, "add_captions", {
+                    "mode": "from_transcript", "style": style})
+                notes.append("captions: " + str(res).splitlines()[0][:160])
+            except Exception as exc:  # noqa: BLE001
+                notes.append(f"captions not placed ({type(exc).__name__}: {str(exc)[:120]})")
+        row = ctx.latest_edl()
+        if deliver.get("render", True):
+            try:
+                payload = agent_tools._child_payload(ctx, {
+                    "edl_version": row["version"], "source": "agent_preview",
+                    "quality": "draft", "audio_model_review": False,
+                    "harness": "v2", "render_signature":
+                        agent_tools._render_signature(
+                            row, "preview", audio_model_review=False,
+                            quality="draft")})
+                preview_job, _created = worker_db.run(
+                    dbx.get_or_enqueue_preview_job, child_id,
+                    job["user_id"], payload)
+            except Exception as exc:  # noqa: BLE001
+                notes.append(f"render not queued ({type(exc).__name__}: {str(exc)[:120]})")
+        return row["version"], preview_job, notes
+    finally:
+        shutil.rmtree(wd, ignore_errors=True)
+
+
 def _seed_frame(ctx):
     """The story cut's 9:16 frame — never none: a child cut with no frame
     rendered 16:9 and searched landscape stock (the Diamandis run). Framed
@@ -1490,6 +1551,16 @@ def run_shorts_plan(worker_db, job):
             if line:
                 clip["source_layout"] = line
             clip["edit_status"] = "locked"
+            deliver = payload.get("deliver")
+            if isinstance(deliver, dict) and caller_planned is not None \
+                    and not clip.get("delivered_edl_version"):
+                version, preview_job, notes = _deliver_child(
+                    worker_db, job, clip["child_project_id"], index, clip,
+                    workdir, deliver)
+                clip["delivered_edl_version"] = version
+                clip["delivered_notes"] = notes[:4]
+                if preview_job:
+                    clip["preview_job_id"] = preview_job
             worker_db.run(_save_shorts_meta, project_id, shorts_meta)
             worker_db.run(dbx.set_progress, job_id,
                           35 + int(58 * position / n))
@@ -1498,7 +1569,19 @@ def run_shorts_plan(worker_db, job):
         shorts_meta["finished_at"] = _now_iso()
         worker_db.run(_save_shorts_meta, project_id, shorts_meta)
 
-        if session_id:
+        delivered = sum(1 for c in clips if c.get("delivered_edl_version"))
+        if session_id and delivered:
+            lens = [c["end"] - c["start"] for c in clips]
+            worker_db.run(
+                dbx.add_message, session_id, "assistant",
+                f"{n} clip{'s' if n != 1 else ''} "
+                f"({min(lens):.0f}-{max(lens):.0f}s), each in its own "
+                "project with its title on screen and captions; each one is "
+                "rendering now and plays on its card when it lands. Edit on "
+                "a card opens that clip's editor for more.",
+                {"kind": "shorts_candidates", "clips": n, "delivered": delivered,
+                 "parent_project_id": project_id})
+        elif session_id:
             mins = duration / 60.0
             lens = [c["end"] - c["start"] for c in clips]
             worker_db.run(
@@ -1512,7 +1595,7 @@ def run_shorts_plan(worker_db, job):
                  "parent_project_id": project_id})
 
         worker_db.run(dbx.set_progress, job_id, 97)
-        return {"clips": n, "rendered_clips": 0, "billable": True,
+        return {"clips": n, "rendered_clips": delivered, "billable": True,
                 "reference": bool(ref),
                 "children": [c.get("child_project_id") for c in clips]}
     except Exception:

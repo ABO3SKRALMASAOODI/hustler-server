@@ -212,11 +212,15 @@ def _final(ctx, version, wait_s):
 
 
 def _stills(ctx, times):
+    """Frames of the head version as it renders: look(target='render')
+    starts the render when there is none and waits on it, and only a render
+    still running says its frames are assembled from source. Stills of an
+    unrendered version were taken from source frames, which show no
+    transition, junction dip, grain or drawn layer: p5873 v2c's model read
+    the 0.4 s dips it had just made as hard cuts and told the person they
+    were unconfirmed."""
     from harness2 import look
-    row = ctx.latest_edl()
-    target = "render" if ctx.db.run(read_tools.find_render_asset,
-                                    ctx.project_id, "preview",
-                                    int(row["version"])) else "program"
-    env = look.look(ctx, target=target, show="frames", times=times or [0.5])
+    env = look.look(ctx, target="render", show="frames",
+                    times=times or [0.5])
     env.tool = "render"
     return env

@@ -103,6 +103,14 @@ def state_text(ctx):
                  + (f", {100 * (measured['kept_share'] or 0):.1f}% of the "
                     "source kept" if measured.get("kept_share") else "")
                  + ". timeline() gives the whole of it.")
+    try:
+        shown = measure_mod.on_screen(edl)
+    except Exception:  # noqa: BLE001
+        shown = []
+    if shown:
+        lines.append("On screen now (film seconds; every edit's envelope "
+                     "repeats this):")
+        lines.extend(f"- {line}" for line in shown)
     assets = _assets(ctx)
     if assets:
         lines.append("Uploads:")
@@ -120,6 +128,26 @@ def state_text(ctx):
     return "\n".join(lines)
 
 
+def _first_cut_left(ctx, worker_db, session_id, user_message):
+    """The first cut's items still in the film (measure.first_cut_left), from
+    the version the session's first-cut message names."""
+    try:
+        rows = worker_db.run(dbx.recent_chat, session_id, 400,
+                             user_message.get("id")) or []
+        version = next((int((r.get("meta") or {}).get("edl_version"))
+                        for r in rows
+                        if (r.get("meta") or {}).get("kind") == "first_cut"
+                        and (r.get("meta") or {}).get("edl_version")), None)
+        if version is None:
+            return []
+        first = ctx.db.run(dbx.get_edl_version, ctx.project_id, version)
+        head = ctx.latest_edl()
+        return measure_mod.first_cut_left(head["json"] or {},
+                                          (first or {}).get("json") or {})
+    except Exception:  # noqa: BLE001 - the history is information
+        return []
+
+
 def initial_messages(ctx, worker_db, session_id, user_message):
     messages = [{"role": "system", "content": kernel_text()}]
     try:
@@ -134,8 +162,22 @@ def initial_messages(ctx, worker_db, session_id, user_message):
         if text and row.get("role") in ("user", "assistant"):
             messages.append({"role": row["role"], "content": text[:4000]})
     request = str(user_message.get("content") or "").strip()
+    state = state_text(ctx)
+    try:
+        from harness2 import find_tool
+        named = find_tool.named_lines(request)
+    except Exception:  # noqa: BLE001 - the library search is information
+        named = []
+    if named:
+        state += "\n" + "\n".join(named)
+    left = _first_cut_left(ctx, worker_db, session_id, user_message)
+    if left:
+        state += ("\nMade by the automatic first cut, not asked for by the "
+                  "person, and still in the film (keep what the request "
+                  "wants, remove what it excludes):\n"
+                  + "\n".join(f"- {line}" for line in left))
     messages.append({"role": "user", "content": (
-        state_text(ctx) + "\n\n# The request\n" + request)})
+        state + "\n\n# The request\n" + request)})
     return messages
 
 

@@ -22,8 +22,10 @@ class Envelope:
     def __init__(self, tool="", changed="", measured=None, repairs=None,
                  not_applied=None, running=None, findings=None, see=None,
                  check=None, undo_to=None, version=None, body="",
-                 failed=False, applied=0, data=None):
+                 failed=False, applied=0, data=None, on_screen=None):
         self.tool = tool
+        # on_screen: what the film shows and plays now, one line per layer
+        self.on_screen = list(on_screen or [])
         self.changed = changed or ""
         self.measured = dict(measured or {})
         self.repairs = list(repairs or [])
@@ -91,7 +93,7 @@ class Envelope:
                 "running": self.running, "findings": self.findings,
                 "see": [label for label, _ in self.see],
                 "check": self.check, "undo_to": self.undo_to,
-                "version": self.version}
+                "version": self.version, "on_screen": self.on_screen}
 
     def text(self):
         """The compact copy the model reads (images travel separately)."""
@@ -120,6 +122,9 @@ class Envelope:
         if self.findings:
             lines.append("findings:")
             lines.extend(f"- {f}" for f in self.findings[:_MAX_LINES])
+        if self.on_screen:
+            lines.append("on screen now (film seconds):")
+            lines.extend(f"- {line}" for line in self.on_screen[:24])
         if self.body:
             lines.append(self.body)
         if self.see:

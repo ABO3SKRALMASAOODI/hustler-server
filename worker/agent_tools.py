@@ -12343,7 +12343,12 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
         eligible_count = hit
 
     prog = program_duration(edl)
+    # Harness v2 places what the model asked for and shows it the pixels;
+    # the spacing taste is the model's call (p5873: "make the transitions
+    # more elevated" on 11 shots in 35 s was refused here, reported as
+    # "already so", and the film went back to hard cuts).
     if sc == "scene" and limit is None and window is None and hit >= 3 \
+            and getattr(ctx, "harness", None) != "v2" \
             and prog > 0 and prog / hit < TRANSITION_MIN_SPACING_S:
         safe_max = max(1, int(prog / TRANSITION_MIN_SPACING_S))
         return (f"NOT APPLIED: {hit} eligible scene changes across {prog:.0f}s "
@@ -21603,17 +21608,22 @@ def remove_custom_filter(ctx, id):
 _GRADE_AXES = {"exposure": (-1.0, 1.0, 0.0), "contrast": (0.5, 1.6, 1.0),
                "shadows": (-1.0, 1.0, 0.0), "highlights": (-1.0, 1.0, 0.0),
                "saturation": (0.0, 2.0, 1.0), "temperature": (-1.0, 1.0, 0.0),
-               "tint": (-1.0, 1.0, 0.0)}
+               "tint": (-1.0, 1.0, 0.0), "warmth": (-1.0, 1.0, 0.0),
+               "gain": (-1.0, 1.0, 0.0)}
 
 
 def set_grade_custom(ctx, exposure=None, contrast=None, saturation=None,
                      temperature=None, tint=None, shadows=None,
-                     highlights=None):
+                     highlights=None, warmth=None, gain=None):
     """Continuous color controls, merged axis-by-axis into
-    effects.grade_custom — None leaves an axis alone, its neutral clears it."""
+    effects.grade_custom — None leaves an axis alone, its neutral clears it.
+    warmth is the whole picture's white balance (-1 cool .. 1 warm);
+    temperature and tint lean the shadows. gain is exposure as light (-1 ..
+    1 stops, black kept black); exposure is an offset that lifts black."""
     vals = {"exposure": exposure, "contrast": contrast,
             "saturation": saturation, "temperature": temperature,
-            "tint": tint, "shadows": shadows, "highlights": highlights}
+            "tint": tint, "shadows": shadows, "highlights": highlights,
+            "warmth": warmth, "gain": gain}
     if all(v is None for v in vals.values()):
         return ("REJECTED: pass at least one axis — exposure -1..1, "
                 "contrast/saturation as a small signed delta (0 clears) "
@@ -28197,7 +28207,7 @@ def _normalize_tool_call(name, args, dialect=True):
         # effects compose and should remain two explicit operations.
         preset = str(args.get("preset") or "").strip().lower()
         axes = {"exposure", "contrast", "saturation", "temperature", "tint",
-                "shadows", "highlights"}
+                "shadows", "highlights", "warmth", "gain"}
         if "brightness" in args and "exposure" not in args:
             args["exposure"] = args.pop("brightness")
             notes.append("brightness -> exposure")
@@ -31149,7 +31159,8 @@ def _direct_short_clips(ctx, clips, snap="none"):
     return planned, [], moves
 
 
-def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None):
+def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None,
+                deliver=None):
     """Kick off the shorts pipeline for THIS project — the chat-path twin of
     the studio's Make shorts button. The heavy work runs as its own
     shorts_plan job so this turn can answer immediately; the board on the
@@ -31245,6 +31256,14 @@ def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None):
     if planned:
         payload["clips"] = planned
         payload["count"] = len(planned)
+        if authored_v2 and isinstance(deliver, dict):
+            # Harness v2 carries the ask to rendered clips (p5760: ten titled
+            # vertical clips came back as locked raw cards): each child gets
+            # what its caller wrote (title on screen, captions) and a preview
+            # render, so the board shows clips that play.
+            payload["deliver"] = {k: deliver[k] for k in (
+                "title", "captions", "caption_style", "render")
+                if k in deliver}
     if ctx.job.get("type") == "agent_turn" and ctx.job.get("id"):
         payload["parent_agent_job_id"] = ctx.job["id"]
     job_id = ctx.db.run(dbx.enqueue_job, ctx.project_id,

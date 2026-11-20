@@ -19,9 +19,14 @@ decides whether to keep it, and the clean export without it is always kept.
   MUSIC-SET, `.valmera/week-1112/lanes/MUSIC-SET/tools/gate.py`): `pass` (full gate), `fail` (with its reasons; such a
   track is never chosen again, anywhere) and `provisional` (passed the partial measures only). The workflow films take
   only `pass` tracks, after the reference music set.
-- The reference music set is NOT here: its audio and `index.json` live only on the owner's Mac
-  (`.valmera/models/music_ref`, read through `VALMERA_MUSIC_SET`). This repository is public: no audio file of either
-  is ever committed (`.gitignore`, `worker/tests/test_music_ref_set.py`).
+- The reference music set's audio and its own `index.json` live only on the owner's Mac (`.valmera/models/music_ref`,
+  read through `VALMERA_MUSIC_SET` by the workflow films). Since 19 Nov 2026 its rows are ALSO library rows here
+  (`reference_set: true`, every one under `pass` in `gate.json`; built by `.valmera/week-1119/music/build_ref_rows.py`
+  with the embedding from `embed_ref.py`), so every customer's worker chooses from it (`music_choose.reference_pool`,
+  harness v2's `find(kind="music")`, `list_music_library`'s "lib:<cid>" rows, the looks' and the Director's beds).
+  Their audio is kept in storage at `music-library/<cid>.mp3` (`upload_ref_b2.py`); Pixabay tracks registered with
+  YouTube Content ID are left out. This repository is public: no audio file of either is ever committed
+  (`.gitignore`, `worker/tests/test_music_ref_set.py`).
 
 Code: `worker/music_choose.py` (the chooser; read its module doc). Study and build tools:
 `.valmera/week-1112/lanes/MUSIC/tools/`. Notes: `.valmera/week-1112/notes/MUSIC.md`.

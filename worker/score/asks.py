@@ -133,12 +133,51 @@ def _label(lane, it, names=None):
     if lane == "overlays":
         return f"overlay {it.get('kind') or it.get('type') or ''} {_t(it.get('start'))}-{_t(_end(it))} s{named}"
     if lane == "music":
-        return f"music {_t(it.get('start'))}-{_t(it.get('end'))} s at {it.get('gain_db')} dB{' muted' if it.get('mute') else ''}{named}"
+        picked = (" (a music track laid over the film; the person picked it)"
+                  if str(it.get("provenance") or "").startswith("user")
+                  else " (a music track laid over the film)")
+        return (f"music {_t(it.get('start'))}-{_t(it.get('end'))} s at {it.get('gain_db')} dB"
+                f"{' muted' if it.get('mute') else ''}{named}{picked}")
     if lane == "sfx":
         return f"sound effect at {_t(it.get('at'))} s ({str(it.get('purpose') or '')[:40]})"
     if lane == "voiceover":
         return f"voiceover from {_t(it.get('start_output_s'))} s"
     return f"{lane[:-1] if lane.endswith('s') else lane} {str(it.get('type') or it.get('kind') or it.get('template') or '')[:30]} {_t(it.get('start'))}-{_t(it.get('end'))} s"
+
+
+def sound_layers(edl, index=None):
+    """The film's sound, layer by layer, measured from the EDL and the
+    upload's transcript: the upload's own sound (its speech and, around it,
+    its room tone and background noise, with the noise cleaning's state)
+    apart from each music track laid over the film and whether the person
+    picked it. p5744: "Background noise ko mute kar do" after the person had
+    picked the Bubbles track was read as "remove the music" in three replays
+    of four: the reading had the music's own label ("calm chill background
+    bed") and nothing that said where the upload's noise lives."""
+    edl = edl if isinstance(edl, dict) else {}
+    words = [w for w in (index or {}).get("words") or [] if isinstance(w, dict)]
+    nc = edl.get("noise_clean") if isinstance(edl.get("noise_clean"), dict) else None
+    spoken = (f"{len(words)} spoken word(s), {_t(words[0].get('t0', words[0].get('start')))}-"
+              f"{_t(words[-1].get('t1', words[-1].get('end')))} s of the upload"
+              if words else "no speech")
+    clean = ("noise cleaning off: its background noise plays as recorded" if not nc
+             else f"noise cleaning on (strength {nc.get('strength')}"
+                  + (f", measured noise floor {nc.get('floor_db')} dBFS" if nc.get("floor_db") is not None else "")
+                  + ")")
+    vol = [v for v in edl.get("volume") or [] if isinstance(v, dict)]
+    gain = (f"; its level changed on {len(vol)} stretch(es)" if vol else "")
+    lines = [f"the upload's own sound (the recording itself): {spoken}, and around it the "
+             f"recording's room tone and background noise; {clean}{gain}"]
+    for m in edl.get("music") or []:
+        if not isinstance(m, dict):
+            continue
+        name = str(m.get("storage_key") or "").rsplit("/", 1)[-1]
+        who = ("the person picked this track" if str(m.get("provenance") or "").startswith("user")
+               else "the product chose this track")
+        lines.append(f"music {m.get('id')}: a track laid over the film ({name}, "
+                     f"{m.get('gain_db')} dB{', muted' if m.get('mute') else ''}); {who}; it is "
+                     "not the recording's background noise")
+    return lines
 
 
 def digest(edl, names=None):
@@ -448,6 +487,7 @@ def build(ctx, request, history=None, edl=None):
         "Where the current film came from: " + json.dumps(origin or "the customer's own edits", ensure_ascii=False, default=str)[:400],
         f"The current film is {program_seconds(edl) or 0:.1f} s of the {float(video.get('duration') or getattr(ctx, 'duration', 0) or 0):.1f} s "
         f"upload, frame {((edl.get('frame') if isinstance(edl.get('frame'), dict) else {}) or {}).get('ratio') or 'source'}.",
+        "The film's sound, layer by layer:\n" + "\n".join(sound_layers(edl, index)),
         "The current film, digest (id then what it is):\n" + text,
     ])
     from . import patch

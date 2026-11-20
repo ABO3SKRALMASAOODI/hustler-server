@@ -45,7 +45,9 @@ SCHEMAS = [
         "returns the measured result. Ops: keep, cut, restore (source "
         "seconds), speed, fit_length, card, text, captions, place, scenes, "
         "voiceover, music, sfx, audio, frame, grade, transition, zoom, "
-        "clips, layer set/upsert/remove, tool. It repairs what it can and "
+        "element, clips, finish (the craft departments the cut lacks: look, "
+        "captions, moves, pictures, music, sound, master), direct (the "
+        "Director's whole film), layer set/upsert/remove, tool. It repairs what it can and "
         "says so; anything impossible is listed under not_applied with what "
         "works instead, and the rest lands. timeline(schema='ops') shows "
         "every op's shape."),
