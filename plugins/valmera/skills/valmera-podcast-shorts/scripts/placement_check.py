@@ -209,10 +209,78 @@ def _overlay():
     return overlay
 
 
+STILL_SD, STILL_ROWS = 1.0, 0.8       # a pixel that holds within 1 grey level across the cut; a row 80% made of them
+BAND_H = (0.035, 0.35)                # a lower third or a top banner: between 3.5% and 35% of the frame's height
+
+
+def static_bands(overlay, path, n=10):
+    """Boxes [0, y0, 1, y1] (frame fractions) of bands another editor laid over a clip: rows that hold pixel for pixel
+    through the cut (graphics never move) while the picture round them changes, that carry edges (type, logos, bars), at
+    the top or the bottom of the frame. Signal only: a lower third with its bar, a channel's banner or a corner mark's
+    strip, whatever words it holds (footage.overlay finds text lines; a full-width bar with a logo beside the words is
+    found here). [] for a shot that is still everywhere, or holds nothing laid over it."""
+    import cv2
+    import numpy as np
+    fs = overlay.frames(path, n=n)
+    if len(fs) < 4:
+        return []
+    g = np.stack([cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).astype(np.float32) for f in fs])
+    H = g.shape[1]
+    sd = g.std(0)
+    still = sd < STILL_SD
+    edges = np.stack([cv2.Canny(f, 80, 160) > 0 for f in g.astype(np.uint8)]).mean(0) > 0.5
+    frac, inked = still.mean(1), (edges & still).mean(1)
+    out, y = [], 0
+    while y < H:
+        if frac[y] < STILL_ROWS:
+            y += 1
+            continue
+        y0 = y
+        while y < H and frac[y] >= STILL_ROWS:
+            y += 1
+        h = (y - y0) / H
+        rest = np.concatenate([sd[:y0], sd[y:]])
+        moving = float(rest.mean()) if rest.size else 0.0
+        if BAND_H[0] <= h <= BAND_H[1] and float(inked[y0:y].mean()) >= 0.04 and moving >= 1.5 and \
+                float(sd[y0:y].mean()) < 0.4 * moving and (y0 / H >= 0.55 or y / H <= 0.25):
+            out.append([0.0, round(y0 / H, 4), 1.0, round(y / H, 4)])
+    return out + still_marks(still, edges, sd, [b[1:4:2] for b in out])
+
+
+def still_marks(still, edges, sd, rows_taken=()):
+    """Boxes of marks laid over part of a row (a channel's logo, a corner bug, a lower third that does not span the
+    frame): clusters of pixels that hold still and carry edges, in the top or bottom zone, while the pixels round them
+    change. Frame fractions."""
+    import cv2
+    import numpy as np
+    H, W = still.shape
+    mark = (still & edges).astype(np.uint8)
+    zone = np.zeros_like(mark)
+    zone[:int(0.25 * H)] = 1
+    zone[int(0.55 * H):] = 1
+    mark = cv2.dilate(mark * zone, np.ones((max(H // 60, 3), max(W // 40, 3)), np.uint8))
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(mark)
+    out = []
+    for k in range(1, n):
+        x, y, w, h, _a = stats[k]
+        if w < 0.08 * W or not (0.02 * H <= h <= 0.2 * H):
+            continue
+        y0, y1 = y / H, (y + h) / H
+        if any(a <= y0 and y1 <= b for a, b in rows_taken):
+            continue
+        inside = float(edges[y:y + h, x:x + w].mean())
+        ring = sd[max(y - h, 0):min(y + 2 * h, H), max(x - w // 4, 0):min(x + w + w // 4, W)]
+        if inside < 0.12 or float(ring.mean()) < 2.0 + 2.0 * float(sd[y:y + h, x:x + w].mean()):
+            continue
+        out.append([round(x / W, 4), round(y0, 4), round((x + w) / W, 4), round(y1, 4)])
+    return out
+
+
 def clear_seated_text(rec, ffmpeg, work):
     """A supply clip no check has looked at (one the film did not place, offered to the palette's devices) loses another
-    editor's seated text the same way a placed one does (repair_text), on the text lines measured on the clip alone:
-    subtitles and labels that hold their seat across the cut (footage.overlay; nothing reads what they say). Returns
+    editor's seated text the same way a placed one does (repair_text), on what is measured on the clip alone: subtitles
+    and labels that hold their seat across the cut (footage.overlay) and the still bands laid over it (static_bands: a
+    lower third's bar, a channel's banner). Nothing reads what they say. Returns
     (record, how): the cleared copy, the clip as it was when it carries no such text ("clean"), or the clip with its
     text recorded ("text_kept") when no band of the picture can shed it: it is offered last, never lost."""
     overlay = _overlay()
@@ -221,7 +289,16 @@ def clear_seated_text(rec, ffmpeg, work):
         m = overlay.measure(path)
     except Exception:  # noqa: BLE001 - an unreadable clip is offered as it is, last
         return dict(rec, text_kept="unread"), "text_kept"
-    boxes = [s_["box"] for s_ in m.get("seated") or [] if s_.get("kind") in ("subtitles", "label")]
+    # subtitles and labels; and text that holds its glyphs in the graphics zones (the bottom or top band of the frame,
+    # where a lower third or a banner sits) even when the footage engine could not tell it from a sign in the scene
+    boxes = [s_["box"] for s_ in m.get("seated") or [] if s_.get("kind") in ("subtitles", "label") or
+             (s_.get("kind") == "still_text" and float(s_.get("glyphs_hold") or 0) >= 0.9 and
+              (s_["box"][1] >= 0.55 or s_["box"][3] <= 0.25) and s_["box"][2] - s_["box"][0] >= 0.25)]
+    try:
+        bands = static_bands(overlay, path)
+    except Exception:  # noqa: BLE001 - the text lines alone
+        bands = []
+    boxes += bands
     if not boxes:
         return rec, "clean"
     w, h = rec.get("w"), rec.get("h")
@@ -237,7 +314,8 @@ def clear_seated_text(rec, ffmpeg, work):
     rect = overlay.clear_rect(w, h, [[max(b[0] - 0.01, 0.0), max(b[1] - 0.01, 0.0), min(b[2] + 0.01, 1.0), min(b[3] + 0.01, 1.0)]
                                      for b in boxes], x) if w and h else None
     if not rect:
-        return dict(rec, text_kept=", ".join(sorted({s_["kind"] for s_ in m["seated"] if s_.get("kind") in ("subtitles", "label")}))), "text_kept"
+        kinds = sorted({s_["kind"] for s_ in m["seated"] if s_.get("kind") in ("subtitles", "label", "still_text")} | ({"band"} if bands else set()))
+        return dict(rec, text_kept=", ".join(kinds)), "text_kept"
     os.makedirs(os.path.join(work, "text-cleared"), exist_ok=True)
     stem = hashlib.sha256(json.dumps([path, rect]).encode()).hexdigest()[:16]
     dst = os.path.join(work, "text-cleared", f"{stem}.mp4")
@@ -250,7 +328,7 @@ def clear_seated_text(rec, ffmpeg, work):
     size = overlay.crop_size(w, h, rect)
     return dict(rec, path=dst, w=size[0], h=size[1], x=overlay.remap(rect, x),
                 faces=[f for f in (overlay.remap(rect, f) for f in rec.get("faces") or []) if f],
-                text_cleared=dict(from_path=path, rect=rect, boxes=boxes, by="signal")), "cleared"
+                text_cleared=dict(from_path=path, rect=rect, boxes=boxes, bands=bands, by="signal")), "cleared"
 
 
 def accepted(answer, ids):

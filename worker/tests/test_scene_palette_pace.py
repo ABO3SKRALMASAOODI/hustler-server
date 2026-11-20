@@ -171,6 +171,7 @@ def test_the_contour_runs_strobe_against_hold(film):
     assert len(held) == 1                                                    # the hold is one picture
 
 
+@needs_ffmpeg                      # the take is a video: without ffmpeg the fixture has none
 def test_the_contour_breaks_a_long_take_with_pictures_and_its_own_tighter_framing(film):
     l1, work = film
     out, patch = lay(l1, work, {"dev": "contour", "id": "ct", "f": [180, 330], "energy": "brisk"})
@@ -294,6 +295,7 @@ def test_a_grid_can_resolve_one_picture_through_its_tiles(film):
     assert len({tuple(t["crop"]) for t in tiles}) == 6
 
 
+@needs_ffmpeg                      # the take is a video: without ffmpeg the fixture has none
 def test_a_split_keeps_the_speaker_on_his_own_clock(film):
     l1, work = film
     out, patch = lay(l1, work, {"dev": "split", "id": "sp", "f": [200, 260], "pics": ["p2"]})
@@ -433,10 +435,12 @@ def test_a_placed_clip_is_shown_only_inside_its_checked_slice(film):
     for s in shots(out, 120, 180):
         if s["pic"] == "v1":
             assert 0.5 - 1e-6 <= s["src"][0] and s["src"][1] <= 2.5 + 1e-6, s["src"]
-    w = K.window(pic, 30, FPS, random.Random(1))
-    assert abs((w[1] - w[0]) - 1.0) < 1e-3 and 0.5 <= w[0] and w[1] <= 2.5          # real speed inside the slice
-    w = K.window(pic, 90, FPS, random.Random(1))
-    assert w == [0.5, 2.5]                                                        # a 2 s slice over 3 s: 0.67x, never slower than half
+    one = K.clocked({"id": "c", "k": "card", "f": [0, 30], "s": [1.0] * 30}, pic, FPS, random.Random(1))
+    assert len(one) == 1 and abs((one[0]["src"][1] - one[0]["src"][0]) - 1.0) < 1e-3 and 0.5 <= one[0]["src"][0] and one[0]["src"][1] <= 2.5
+    two = K.clocked({"id": "c", "k": "card", "f": [0, 90], "s": [1.0] * 90}, pic, FPS, random.Random(1))
+    head, tail = two                                                              # a 2 s slice under 3 s: 2 s at real speed, then held
+    assert head["f"] == [0, 60] and head["src"] == [0.5, 2.5] and len(head["s"]) == 60
+    assert tail["f"] == [60, 90] and tail["src"] == [2.5, 2.5] and len(tail["s"]) == 30
 
 
 @needs_ffmpeg
@@ -486,3 +490,20 @@ def test_the_loop_returns_to_the_first_held_picture_not_a_sliver(film):
     assert patch["log"]["opening_shot"] == "t1" and patch["log"]["end_card_follows"] is True
     end = [i for i in out["items"] if i["id"] == "lp.end"][0]
     assert end["pic"] == "t1" or end["pic"] == next(i["pic"] for i in items if i["id"] == "t1")
+
+
+def test_a_chosen_picture_whose_text_stayed_on_is_offered_last(film):
+    l1, work = _pool_film(film)
+    pool = [dict(r, text_kept="label") if r["id"] == "pl0" else r for r in l1["pool"]]
+    l1 = dict(l1, pool=pool)
+    pics = K.pictures(l1, work, {"dev": "match", "f": [200, 260], "pool": ["pl0", "pl1", "pl2"]}, least=2)
+    assert [p.aid for p in pics] == ["pl1", "pl2"]                                   # enough without it
+    pics = K.pictures(l1, work, {"dev": "match", "f": [200, 260], "pool": ["pl0", "pl1", "pl2"]}, least=6)
+    assert pics[-1].aid == "pl0" or "pl0" not in [p.aid for p in pics[:2]]          # reached only when the rest run out
+
+
+def test_shrink_never_lifts_a_layouts_ground_away_from_its_cards(film):
+    l1, work = film
+    out, _ = lay(l1, work, {"dev": "split", "id": "sp", "f": [120, 180], "pics": ["p1", "p2"]})
+    patch = palette.plan(out, work, {"dev": "shrink", "id": "sh", "at": 180, "frames": 14})
+    assert patch.get("skip")

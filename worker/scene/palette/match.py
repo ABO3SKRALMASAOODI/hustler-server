@@ -95,12 +95,9 @@ def plan(l1, work, ask, sense_=None, pool=None, by="any"):
                 c = crop
             crops.append(K.r5(c))
         it = dict(look, id=f"{args.get('id', 'match')}.m{i}", k="shot", f=[s, e], pic=pic.aid, crop=crops)
-        src = K.window(pic, m, fps, rng, i)
-        if src:
-            it["src"] = src
         if mono:
             it["treat"] = {"mode": "mono"}
-        items.append(it)
+        items += K.clocked(it, pic, fps, rng, i)
         if i:
             marks.append({"f": s, "what": "match cut", "kind": "cut", "strength": 0.5})
         chain.append({"pic": pic.aid, "how": how})

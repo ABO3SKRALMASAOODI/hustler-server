@@ -125,7 +125,7 @@ def test_an_unplaced_clip_loses_another_editors_seated_text_before_a_device_uses
     again = cov.device_pool(pack, {}, work=str(work), ffmpeg=FF, placed=set())
     assert again[0]["path"] == r["path"]
     placed = cov.device_pool(pack, {}, work=str(work), ffmpeg=FF, placed={clip})
-    assert placed[0]["path"] == clip                                        # a placed clip was checked by the model already
+    assert placed[0]["path"] == r["path"]           # a placed clip's lower third goes too: a device shows it beside our own label
 
 
 def test_a_clip_whose_text_cannot_be_cut_away_is_offered_last_not_lost(tmp_path, monkeypatch):
@@ -134,3 +134,36 @@ def test_a_clip_whose_text_cannot_be_cut_away_is_offered_last_not_lost(tmp_path,
     pack = dict(coverage=dict(windows=[]), footage=[dict(i=None, clips=[dict(path=f["a.mp4"], seconds=1.5)])], pictures={})
     pool = cov.device_pool(pack, {}, work=str(tmp_path), placed=set())
     assert len(pool) == 1 and pool[0]["text_kept"] == "label"
+
+
+def test_a_lower_third_on_a_still_shot_is_found_by_its_still_band(tmp_path):
+    """An interview with a channel's lower third (a bar and a logo beside the words): the bar holds pixel for pixel while
+    the picture moves round it, and the clip is cut down above it."""
+    import pytest
+    import subprocess
+    import numpy as np
+    if not os.path.exists(FF):
+        pytest.skip("no ffmpeg")
+    W, H = 1920, 1080
+    path = str(tmp_path / "talk.mp4")
+    p = subprocess.Popen([FF, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", "30", "-i", "-",
+                          "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", path], stdin=subprocess.PIPE)
+    rng = np.random.default_rng(2)
+    wall = (rng.random((H // 40, W // 40, 3)) * 120 + 40).astype(np.uint8)
+    bar = np.zeros((130, W, 3), np.uint8)
+    bar[:] = (40, 20, 70)
+    bar[30:100:10, 200:900] = 255                                       # rows of type on the bar
+    bar[20:110, 1500:1520] = 230                                        # the channel's logo block
+    for i in range(45):
+        im = np.roll(np.kron(wall, np.ones((40, 40, 1), np.uint8)), i * 7, axis=1).copy()      # a handheld camera drifting
+        x = 700 + int(60 * np.sin(i / 5))
+        im[250:850, x:x + 420] = (200, 160, 140)                        # the speaker moving
+        im[900:1030] = bar
+        p.stdin.write(im.tobytes())
+    p.stdin.close()
+    p.wait()
+    overlay = pc._overlay()
+    bands = pc.static_bands(overlay, path)
+    assert bands and 0.82 <= min(b[1] for b in bands) <= 0.84 and 0.94 <= max(b[3] for b in bands) <= 0.97
+    new, how = pc.clear_seated_text(dict(path=path, w=W, h=H), FF, str(tmp_path))
+    assert how == "cleared" and new["text_cleared"]["rect"][3] <= 0.84 and os.path.isfile(new["path"])

@@ -214,7 +214,9 @@ def contour(l1, work, ask, sense_=None, pool=None):
         base = [sh for sh in K.shots(cur) if sh["f"][0] < z and sh["f"][1] > a]
         own = [K.pic_of_asset(cur, work, sh["pic"]) for sh in base if not K.is_take(sh.get("pic"))]
         own = [p for p in own if p]
-        pics = list({p.aid: p for p in own + pics_all}.values())
+        # the caller's chosen pictures first, then the pictures the base already placed on these words, then the rest
+        chosen = [p for p in pics_all if p.chosen is not None]
+        pics = list({p.aid: p for p in chosen + own + [p for p in pics_all if p.chosen is None]}.values())
         keep, gone, was = K.carve(cur, a, z)
         items, pos, used = [], a, []
         look = K.inherit(was)
@@ -231,29 +233,32 @@ def contour(l1, work, ask, sense_=None, pool=None):
                 sh = next((q for q in was if q["f"][0] <= pos < q["f"][1]), None)
                 take = sh is not None and K.is_take(sh.get("pic"))
                 pid = f"{args.get('id', 'ct')}.s{len(log)}.{i}"
+                clip = None
                 if i % 2 == 1 and pics and (take or energy == "strobe" or rng.random() < 0.5):
                     pic = pics[(turn + k_pic) % len(pics)]
                     k_pic += 1
-                    src = K.window(pic, n, fps, rng, k_pic)
                     name, crop = _framing(pic, W, H, k_pic, rng) if not pic.video else ("wide", K.cover_on(pic, W, H))
                     it = dict(look, id=pid, k="shot", f=[pos, pos + n], pic=pic.aid,
                               crop=[K.r5(K.scale_crop(crop, 1.0 / (1.0 + 0.04 * j / max(n - 1, 1)))) for j in range(n)])
-                    if src:
-                        it["src"] = src
+                    clip = pic
                     used.append(pic)
                 elif sh is not None:
-                    it = sense.slice_shot(sh, pos, pos + n, pid)
-                    if take and i % 2 == 1:
-                        c = K.crops(cur, work, sh)[pos - sh["f"][0]:pos - sh["f"][0] + n]
-                        tight = []
-                        for q in c:
-                            t_ = K.scale_crop(q, 0.78, (q[0] + q[2]) / 2, q[1] + 0.36 * (q[3] - q[1]))
-                            tight.append(K.r5(t_))
-                        it["crop"] = tight
+                    # the base where it is: every base shot this stretch crosses keeps its own piece (a stretch that
+                    # crosses a base cut is never cut short at it)
+                    under = [q for q in was if q["f"][0] < pos + n and q["f"][1] > pos]
+                    parts = []
+                    for j, q in enumerate(under):
+                        a_, b_ = max(pos, q["f"][0]), min(pos + n, q["f"][1])
+                        piece = sense.slice_shot(q, a_, b_, pid if j == 0 else f"{pid}.{j}")
+                        if take and i % 2 == 1 and K.is_take(q.get("pic")):
+                            c = K.crops(cur, work, q)[a_ - q["f"][0]:b_ - q["f"][0]]
+                            piece["crop"] = [K.r5(K.scale_crop(c_, 0.78, (c_[0] + c_[2]) / 2, c_[1] + 0.36 * (c_[3] - c_[1]))) for c_ in c]
+                        parts.append(piece)
+                    it = parts
                 else:
                     pos += n
                     continue
-                items.append(it)
+                items += (K.clocked(it, clip, fps, rng, k_pic) if clip is not None else [it]) if isinstance(it, dict) else it
                 marks.append({"f": pos, "what": f"{energy} cut", "kind": "cut", "strength": 0.4})
                 pos += n
             turn = (turn + k_pic) % max(len(pics), 1)

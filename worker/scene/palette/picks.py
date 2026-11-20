@@ -7,8 +7,14 @@ pictures the scene already holds); nothing here reads a meaning.
 A pool entry (what the workflows hand in beside the scene, ``apply(..., pool=...)`` or ``l1["pool"]``) is a dict:
     {"id"?: str, "path": str, "kind": "clip"|"video"|"photo"|"image", "w"?, "h"?, "seconds"?: float,
      "faces"?: [[x, y, w, h(, eyes_y)]] or [{"box": [x0, y0, x1, y1], "eyes": [[x, y], [x, y]]}],
-     "regions"?: [[x0, y0, x1, y1]], "seg"?: int, "subject"?: str}
+     "regions"?: [[x0, y0, x1, y1]], "seg"?: int, "subject"?: str, "window"?: int, "t"?: [s0, s1] (programme seconds),
+     "rng"?: [t0, t1] (the checked slice), "from_path"?: str (the original a cleared copy stands for), "text_kept"?: str}
 A device never needs more than "path"; the rest is read from the file when it is missing.
+
+What a viewer may see of a clip is its verified range: the src its placed shots show (written on its asset as ``rng``
+before any device runs, stamp_ranges), or its pool record's checked slice, else the whole cut file the supply checked.
+Every device draws moments inside it and runs a clip at real speed, holding its last verified frame when the range is
+shorter than the moment (clocked); nothing is slowed down to fit.
 """
 import hashlib
 import math
@@ -48,8 +54,21 @@ def shot_at(l1, f):
 
 
 def cuts(l1):
-    """Frames where the base picture changes to another item (every shot start but the first)."""
-    return [s["f"][0] for s in shots(l1)][1:]
+    """Frames where the base picture changes to another picture (a shot that runs on into its own held frame, or a
+    picture cut into pieces of itself, is no cut)."""
+    sh = shots(l1)
+    return [b["f"][0] for a, b in zip(sh, sh[1:]) if a.get("pic") != b.get("pic") or a.get("plate") != b.get("plate")]
+
+
+def run_start(l1, c):
+    """The first frame of the outgoing picture at a cut c: the run of shots of one picture that ends at c."""
+    sh = [s for s in shots(l1) if s["f"][1] <= c]
+    if not sh:
+        return 0
+    k = len(sh) - 1
+    while k > 0 and sh[k - 1].get("pic") == sh[k].get("pic") and sh[k - 1]["f"][1] == sh[k]["f"][0]:
+        k -= 1
+    return sh[k]["f"][0]
 
 
 def seed_of(l1, ask, salt=""):
@@ -222,6 +241,21 @@ def placed_range(l1, aid):
     return [lo, hi] if lo is not None and hi > lo else None
 
 
+def stamp_ranges(l1):
+    """Every clip the scene shows gets its verified range written on its asset (``rng``: the hull of the src its shots
+    and cards show), once, before any device runs: a device that later carves a placed shot away must not free the
+    next device to show seconds of that clip nobody checked. Changes l1's assets in place; returns how many were set."""
+    n = 0
+    for aid, a in (l1.get("assets") or {}).items():
+        if a.get("kind") != "video" or is_take(aid) or a.get("rng"):
+            continue
+        r = placed_range(l1, aid)
+        if r:
+            a["rng"] = [round(r[0], 4), round(r[1], 4)]
+            n += 1
+    return n
+
+
 def pic_of_asset(l1, work, aid, meta=None):
     a = (l1.get("assets") or {}).get(aid)
     if not a or a.get("kind") not in ("image", "video") or not a.get("path"):
@@ -350,10 +384,18 @@ def pictures(l1, work, ask, pool=None, take=False, least=0, sense_=None, need=0,
         a = assets.get(aid) or {}
         return meta.get(aid) or by_path.get(_key(work, a.get("path"))) or by_path.get(_key(work, a.get("from")))
 
+    def of_asset(aid):
+        """An asset as a picture: the pool's cleared copy when the pool cut its other editor's text away."""
+        rec = rec_of_asset(aid)
+        if rec and rec.get("path") and _key(work, rec["path"]) != _key(work, assets[aid].get("path")):
+            rng_ = assets[aid].get("rng")         # the copy is the same frames, cut: the placed shot's checked slice holds
+            return pic_of_pool(l1, work, dict(rec, rng=rng_) if rng_ and not rec.get("rng") else rec)
+        return pic_of_asset(l1, work, aid, rec)
+
     def from_ref(ref):
         ref = str(ref)
         if ref in assets:
-            return pic_of_asset(l1, work, ref, rec_of_asset(ref))
+            return of_asset(ref)
         if ref in by_id:
             return pic_of_pool(l1, work, by_id[ref])
         if _key(work, ref) in by_path:
@@ -372,9 +414,19 @@ def pictures(l1, work, ask, pool=None, take=False, least=0, sense_=None, need=0,
         return 1e9
 
     chosen = list(ask.get("pics") or []) + [p for p in (ask.get("pool") or []) if isinstance(p, str)]
+    late = []
     for n_, ref in enumerate(chosen):
-        if add(from_ref(ref)):
+        pic = from_ref(ref)
+        if pic is not None and pic.meta.get("text_kept"):
+            late.append((n_, pic))           # another editor's text no band could shed: the caller's, but offered last
+            continue
+        if add(pic):
             out[-1].chosen = n_
+    if late and not out:
+        for n_, pic in late:
+            if add(pic):
+                out[-1].chosen = n_
+        late = []
     if chosen and out:
         if ask.get("only"):
             return out
@@ -392,14 +444,17 @@ def pictures(l1, work, ask, pool=None, take=False, least=0, sense_=None, need=0,
         kin = [r for r in clean_ if (str(r.get("subject") or "").lower() in subjects and r.get("subject")) or r.get("window") in windows]
         rest = [r for r in clean_ if r not in kin]
         steps = [("pool", r) for r in sorted(kin, key=far)] + [("pool", r) for r in sorted(rest, key=far)]
-        steps += [("scene", aid) for aid in scene_pool(l1, sense_) or sorted(assets) if aid != "matte"]
+        steps += [("scene", aid) for aid in scene_pool(l1, sense_) or sorted(assets) if aid != "matte" and not (rec_of_asset(aid) or {}).get("text_kept")]
         steps += [("pool", r) for r in sorted((r for r in recs if r.get("text_kept")), key=far)]
+        steps += [("late", x) for x in late]
         for kind, x in steps:
             if not short():
                 break
-            pic = pic_of_pool(l1, work, x) if kind == "pool" else pic_of_asset(l1, work, x, rec_of_asset(x))
+            pic = pic_of_pool(l1, work, x) if kind == "pool" else of_asset(x) if kind == "scene" else x[1]
             if add(pic):
                 have += cap(out[-1])
+                if kind == "late":
+                    out[-1].chosen = x[0]
         return out
     if ask.get("only") and out:
         return out
@@ -407,9 +462,9 @@ def pictures(l1, work, ask, pool=None, take=False, least=0, sense_=None, need=0,
     for r in sorted((r for r in recs if not r.get("text_kept")), key=far):
         add(pic_of_pool(l1, work, r))
     for aid in scene_pool(l1, sense_) or sorted(assets):
-        if aid == "matte":
+        if aid == "matte" or (rec_of_asset(aid) or {}).get("text_kept"):
             continue
-        add(pic_of_asset(l1, work, aid, rec_of_asset(aid)))
+        add(of_asset(aid))
     for r in sorted((r for r in recs if r.get("text_kept")), key=far):
         add(pic_of_pool(l1, work, r))
     return out
@@ -462,27 +517,48 @@ def capacity(pic, length_s):
     return int(min(max((hi - lo) // max(length_s, 1.0 / 30), 1), 4))
 
 
-def window(pic, n, fps, rng, k=0, slowest=0.5):
-    """[t0, t1] of a clip to show over n programme frames, inside its verified range and at real speed when the range is
-    long enough; a shorter range plays whole, eased down to no slower than ``slowest`` (a tile or a print a little slow
-    reads as chosen; 0.23x reads as a fault), and only past that does the window reach beyond the range, centred on it.
-    None for a still."""
-    if not pic.video:
-        return None
+def split_frames(it, at, tail_id):
+    """An item cut in two ``at`` frames in: its per-frame lists divided between the halves, single values kept.
+    (head, tail); head is None when at <= 0, tail None when at reaches its end."""
+    f0, f1 = it["f"]
+    n = f1 - f0
+    if at <= 0:
+        return None, it
+    if at >= n:
+        return it, None
+    head, tail = dict(it, f=[f0, f0 + at]), dict(it, id=tail_id, f=[f0 + at, f1])
+    for k, v in it.items():
+        if k in ("f", "src") or not isinstance(v, list) or len(v) != n:
+            continue
+        if k == "crop" and not isinstance(v[0], (list, tuple)):
+            continue                                 # one crop for every frame, not a list of them
+        head[k], tail[k] = v[:at], v[at:]
+    return head, tail
+
+
+def clocked(it, pic, fps, rng, k=0):
+    """An item showing a clip, on the clip's own clock: real speed inside its verified range, at the k-th moment the range
+    offers. When the range is shorter than the item, the range plays whole at real speed and its last verified frame
+    holds for the rest (a freeze, never a slow-down and never a second nobody checked). Returns the items (one, or the
+    running head and the held tail). A still is returned as it is."""
+    if pic is None or not pic.video:
+        return [it]
+    n = it["f"][1] - it["f"][0]
     need = n / fps
     lo, hi = pic.span()
-    have = hi - lo
-    if have >= need:
+    if hi - lo >= need - 1e-6:
         t0 = moments(pic, 3, need, rng)[k % 3][0]
         t0 = min(max(t0, lo), hi - need)
-        return [round(t0, 4), round(t0 + need, 4)]
-    if have >= need * slowest:
-        return [round(lo, 4), round(hi, 4)]
-    take = need * slowest
-    mid = (lo + hi) / 2
-    end = pic.dur or hi
-    t0 = min(max(mid - take / 2, 0.0), max(end - take, 0.0))
-    return [round(t0, 4), round(min(t0 + take, end), 4)]
+        it["src"] = [round(t0, 4), round(t0 + need, 4)]
+        return [it]
+    run = int((hi - lo) * fps + 1e-6)
+    if run < 2:
+        it["src"] = [round(lo, 4), round(lo, 4)]
+        return [it]
+    head, tail = split_frames(it, run, f"{it['id']}~h")
+    head["src"] = [round(lo, 4), round(lo + run / fps, 4)]
+    tail["src"] = [round(lo + run / fps, 4)] * 2
+    return [head, tail]
 
 
 def cam_of(pic, W, H, max_up=None):

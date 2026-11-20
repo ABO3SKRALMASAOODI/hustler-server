@@ -577,9 +577,11 @@ def device_pool(pack, report=None, fps=30, lead=3, work=None, ffmpeg='ffmpeg', p
     The devices draw from it (a burst, a grid, a collage, panels): a moment is never left to the few pictures the
     windows placed (20 Nov: m02 placed 22 of 65 pictures and 43 sat unused). A picture the check cut clear of another
     editor's text is offered as its cleared copy. report: the build's placement report (rejected paths, cleared text).
-    work: when given, a clip the film did not place (``placed``: the scene's asset paths) has its seated text measured
-    and cut away first (placement_check.clear_seated_text), measured once and kept in work/pool_text.json; a clip whose
-    text no band can shed rides as ``text_kept`` and the devices offer it last."""
+    work: when given, every clip has its seated text and still bands measured and cut away first
+    (placement_check.clear_seated_text; a placed clip too: the model check counts a name lower third as attribution, but
+    a device that shows it again beside the film's own name label stacks two), measured once and kept in
+    work/pool_text.json; a clip whose text no band can shed rides as ``text_kept`` and the devices offer it last.
+    ``placed`` is accepted for callers that pass it and no longer narrows the measure."""
     report = report or {}
     placed = set(placed or ())
     memo_path = os.path.join(work, 'pool_text.json') if work else None
@@ -591,7 +593,7 @@ def device_pool(pack, report=None, fps=30, lead=3, work=None, ffmpeg='ffmpeg', p
     def unseated(rec):
         """The record with another editor's seated text cut away (or recorded), for a clip no check looked at."""
         p = rec.get('path')
-        key = f"{p}|{os.path.getsize(p) if p and os.path.isfile(p) else 0}"
+        key = f"v4|{p}|{os.path.getsize(p) if p and os.path.isfile(p) else 0}"       # v4: text lines, still bands and marks, held text in the graphics zones
         if key in memo:
             got = memo[key]
             return dict(rec, **got) if got.get('path') is None or os.path.isfile(got['path']) else rec
@@ -617,7 +619,7 @@ def device_pool(pack, report=None, fps=30, lead=3, work=None, ffmpeg='ffmpeg', p
             return
         seen.add(path)
         orig = rec.get('path')
-        if work and kind == 'clip' and path == orig and orig not in placed:
+        if work and kind == 'clip' and path == orig:
             rec = unseated(rec)
             path = rec['path']
         row = dict(id='pl' + hashlib.sha256(path.encode()).hexdigest()[:8], path=path, kind=kind, subject=subject,

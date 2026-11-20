@@ -49,11 +49,6 @@ def _arrive(n, frames=5, s0=1.08):
     return [round(s0 - (s0 - 1.0) * k[j], 5) if j < frames else 1.0 for j in range(n)]
 
 
-def _src(pic, rng, n, fps, k=0):
-    """A clip's clock over n frames: inside its verified range, at real speed when the range holds it (picks.window)."""
-    return K.window(pic, n, fps, rng, k)
-
-
 def verified_lo(l1, work, aid):
     """The earliest source second of an asset a viewer may see: its verified range's start (0 for the take, whose every
     frame is the speaker's own)."""
@@ -75,19 +70,8 @@ def preroll(l1, work, q, n):
 
 
 def split_at(card, hold, tail_id):
-    """A card cut in two at ``hold`` frames in: per-frame lists are divided between them, single values kept. Returns
-    (head, tail); head is None when hold is 0."""
-    if hold <= 0:
-        return None, card
-    f0, f1 = card["f"]
-    n = f1 - f0
-    if hold >= n:
-        return card, None
-    head, tail = dict(card, f=[f0, f0 + hold]), dict(card, id=tail_id, f=[f0 + hold, f1])
-    for k, v in card.items():
-        if isinstance(v, list) and len(v) == n and k not in ("f", "src"):
-            head[k], tail[k] = v[:hold], v[hold:]
-    return head, tail
+    """A card cut in two at ``hold`` frames in (picks.split_frames): (head, tail)."""
+    return K.split_frames(card, hold, tail_id)
 
 
 def _n_chosen(args):
@@ -97,7 +81,7 @@ def _n_chosen(args):
 
 def _steps(a, z, k, args, frac=0.7):
     """Frames each of k elements arrives on: the caller's (word frames), else even steps over the first ``frac``."""
-    st = sorted(int(f) for f in (args.get("steps") or []) if a <= int(f) < z)
+    st = sorted(int(f) for f in (args.get("steps") or []) if isinstance(f, (int, float)) and a <= int(f) < z)
     if len(st) >= k:
         return st[:k]
     span_ = max(int((z - a) * frac), k)
@@ -182,13 +166,10 @@ def grid(l1, work, ask, sense_=None, pool=None):
                 s[j] = round(max(s[j] * (1.0 - u ** 1.6), 0.02), 5)
         it = dict(id=f"{args.get('id', 'grid')}.t{i}", k="card", f=[f0, z], pic=pic.aid, x=round(cx, 5), y=round(cy, 5),
                   w=round(tw, 5), h=round(th, 5), s=s, rot=0, op=1, z=2 + i, crop=crop, radius=0.006, shutter=0.2)
-        src = _src(pic, rng, n_f, fps, i)
-        if src:
-            it["src"] = src
-        items.append(it)
+        items += K.clocked(it, pic, fps, rng, i)          # its own clock: real speed, or run then held
         marks.append({"f": f0, "what": "tile lands", "kind": "tile", "strength": 0.4})
     return {"items": keep + items, "drop": gone, "assets": K.new_assets(pics[:n] if not args.get("resolve") else pics[:1]),
-            "events": marks, "log": {"rows": rows, "cols": cols, "tiles": len(items) - 1, "resolve": bool(args.get("resolve"))}}
+            "events": marks, "log": {"rows": rows, "cols": cols, "tiles": len(marks), "resolve": bool(args.get("resolve"))}}
 
 
 # ----------------------------------------------------------------- split screen and panels
@@ -240,6 +221,7 @@ def split(l1, work, ask, sense_=None, pool=None):
             slots.append((g + w_ / 2 + i * (w_ + g), 0.5, w_, 1.0 - 2 * g * W / H))
     stagger = max(int(0.12 * fps), 2)
     for i, (cx, cy, w_, h_) in enumerate(slots):
+        clip = None
         f0 = min(a + i * stagger, z - 4)
         n = z - f0
         asp = w_ * W / (h_ * H)
@@ -258,21 +240,19 @@ def split(l1, work, ask, sense_=None, pool=None):
         else:
             pic = pics[(i - (1 if with_take else 0)) % len(pics)]
             it = dict(id=f"{args.get('id', 'split')}.p{i}", k="card", f=[f0, z], pic=pic.aid, crop=_cover_for(pic, asp))
-            src = _src(pic, rng, n, fps, i)
-            if src:
-                it["src"] = src
+            clip = pic
         # in from its own edge: the first panel from the top (or left), the next from the bottom (or right)
         sgn = -1 if i % 2 == 0 else 1
         m = min(8, n)
         kk = K.decel(m, 0.12)
         if stacked:
-            ys = [round(cy + sgn * (1.0 - kk[j]) * (h_ + 0.1), 5) if j < m else round(cy, 5) for j in range(n)]
+            ys = [round(cy + sgn * (1.0 - kk[j]) * 0.6 * h_, 5) if j < m else round(cy, 5) for j in range(n)]      # already entering on its first frame
             it.update(x=round(cx, 5), y=ys)
         else:
-            xs = [round(cx + sgn * (1.0 - kk[j]) * (w_ + 0.1), 5) if j < m else round(cx, 5) for j in range(n)]
+            xs = [round(cx + sgn * (1.0 - kk[j]) * 0.6 * w_, 5) if j < m else round(cx, 5) for j in range(n)]
             it.update(x=xs, y=round(cy, 5))
         it.update(w=round(w_, 5), h=round(h_, 5), s=1, rot=0, op=1, z=3 + i, radius=0.008, shadow={"a": 0.5, "blur": 0.02, "dx": 0, "dy": 0.008})
-        items.append(it)
+        items += K.clocked(it, clip, fps, rng, i) if clip is not None else [it]
         marks.append({"f": f0, "what": "panel lands", "kind": "panel", "strength": 0.45})
     used = [p for p in pics[:need]]
     return {"items": keep + items, "drop": gone, "assets": K.new_assets(used), "events": marks,
@@ -321,12 +301,9 @@ def collage(l1, work, ask, sense_=None, pool=None):
                   z=2 + i, crop=_cover_for(pic, w_ * W / (h_ * H)),
                   border={"w": float(args.get("border", 0.012)), "c": "#F7F4EC"},
                   shadow={"a": 0.55, "blur": 0.02, "dx": 0.004, "dy": 0.012})
-        src = _src(pic, rng, n, fps, i)
-        if src:
-            it["src"] = src
-        items.append(it)
+        items += K.clocked(it, pic, fps, rng, i)
         marks.append({"f": f0, "what": "print lands", "kind": "drop", "strength": 0.5})
-    return {"items": keep + items, "drop": gone, "assets": K.new_assets(pics), "events": marks, "log": {"prints": len(items) - 1}}
+    return {"items": keep + items, "drop": gone, "assets": K.new_assets(pics), "events": marks, "log": {"prints": len(marks)}}
 
 
 # ----------------------------------------------------------------- photo-in-photo, shrink exit
@@ -383,9 +360,12 @@ def shrink(l1, work, ask, sense_=None, pool=None):
     if c is None:
         return {"skip": "no join near to exit through"}
     p, q = K.shot_at(l1, c - 1), K.shot_at(l1, c)
-    n = int(args.get("frames", 14))
-    if p is None or q is None or c - p["f"][0] < n + 2 or K.is_take(q.get("pic")) and not q.get("src"):
+    n = min(int(args.get("frames", 14)), c - K.run_start(l1, c) - 2)
+    if p is None or q is None or n < 6 or c - p["f"][0] < n + 2 or K.is_take(q.get("pic")) and not q.get("src"):
         return {"skip": "the outgoing shot is too short to shrink away"}
+    if p.get("pic") == "plate" or any(it.get("k") == "card" and it.get("pic") not in (None, "plate") and it["f"][0] < c and it["f"][1] > c - n
+                                      for it in l1.get("items") or []):
+        return {"skip": "the outgoing picture is a layout (a ground under cards): it leaves by its own cut"}
     f0 = c - n
     card, _ = _full_card(p, l1, work, f0, c, f"{args.get('id', 'shrink')}.out")
     k = K.decel(n, 0.15)
@@ -452,10 +432,7 @@ def pip(l1, work, ask, sense_=None, pool=None):
     card = dict(id=f"{args.get('id', 'pip')}.in", k="card", f=[a, z], pic=pic.aid, x=wx, y=wy, w=w_, h=round(min(h_, 0.4), 5), s=s, rot=0, op=1,
                 z=4, crop=_cover_for(pic, w_ * W / (min(h_, 0.4) * H)), border={"w": 0.008, "c": "#F7F4EC"},
                 shadow={"a": 0.6, "blur": 0.03, "dx": 0.0, "dy": 0.014})
-    src = _src(pic, rng, m, fps)
-    if src:
-        card["src"] = src
-    return {"items": [card], "drop": [], "assets": K.new_assets([pic]), "events": [{"f": a, "what": "inset", "kind": "pop", "strength": 0.45}],
+    return {"items": K.clocked(card, pic, fps, rng), "drop": [], "assets": K.new_assets([pic]), "events": [{"f": a, "what": "inset", "kind": "pop", "strength": 0.45}],
             "log": {"inset": pic.aid}}
 
 
@@ -478,18 +455,18 @@ def dissolve(l1, work, ask, sense_=None, pool=None):
         ramp = [round(op * min(j / 6, 1.0, (m - 1 - j) / 6), 4) for j in range(m)]
         card = dict(id=f"{args.get('id', 'dx')}.over", k="card", f=[a, z], pic=pic.aid, x=0.5, y=0.5, w=1.0, h=1.0, s=1, rot=0, op=ramp, z=1,
                     crop=_cover_for(pic, W / H))
-        src = _src(pic, K.rng_of(l1, args), m, fps)
-        if src:
-            card["src"] = src
-        return {"items": [card], "drop": [], "assets": K.new_assets([pic]), "events": [{"f": a, "what": "double exposure", "kind": "soft", "strength": 0.2}],
+        return {"items": K.clocked(card, pic, fps, K.rng_of(l1, args)), "drop": [], "assets": K.new_assets([pic]),
+                "events": [{"f": a, "what": "double exposure", "kind": "soft", "strength": 0.2}],
                 "log": {"double": pic.aid}}
     c = _cut_near(l1, f)
     if c is None:
         return {"skip": "no join near to dissolve"}
     p, q = K.shot_at(l1, c - 1), K.shot_at(l1, c)
     n = int(args.get("frames", 10))
-    if p is None or q is None or c - p["f"][0] < n + 1:
-        return {"skip": "the outgoing shot is too short to dissolve"}
+    room = c - K.run_start(l1, c) - 1                     # the outgoing picture's frames before the join
+    n = min(n, room)
+    if p is None or q is None or n < 4:
+        return {"skip": "the outgoing picture is too short to dissolve"}
     f0 = c - n
     cs = K.crops(l1, work, q)
     card = dict(id=f"{args.get('id', 'dx')}.in", k="card", f=[f0, c], pic=q["pic"], x=0.5, y=0.5, w=1.0, h=1.0, s=1, rot=0,

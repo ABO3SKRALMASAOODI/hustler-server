@@ -305,6 +305,8 @@ def apply(l1, work, asks=None, pool=None):
     from .sense import Sense
     asks = asks_of(l1) if asks is None else [dict(a) for a in asks]
     cur = copy.deepcopy({k: v for k, v in l1.items() if k not in ("devices", "alien")})
+    from .picks import stamp_ranges
+    stamp_ranges(cur)            # each clip's checked slice, kept on its asset before any device carves its shots away
     sense = Sense(cur, work, pool=pool)
     log, events = [], []
 
