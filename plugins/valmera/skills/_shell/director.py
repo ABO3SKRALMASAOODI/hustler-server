@@ -41,19 +41,38 @@ LAYOUTS = ("bleed", "window", "prints", "collage", "grid", "split", "type")
 SURFACES = ("colour", "mono", "gate", "crt", "bloom", "thermal", "threshold", "halftone", "xray", "blueprint", "night_vision",
             "posterise", "solarise", "line", "neg", "rew", "paper", "xerox", "led", "projector", "vhs", "thermal_hud")
 # seconds one framing may hold, by a section's energy (scene.pace's band): strobe down to two frames, hold up to about 4 s
-BAND_OF = {"strobe": (0.067, 0.6), "brisk": (0.5, 1.6), "hold": (1.4, 4.0)}
+# (the strobe floor is the judge's p10 shot, 0.13 s: shots of 1-2 frames are punctuation the devices place, about 8.6% of
+# the judge's shots; a 0.067 s floor cut whole strobe sections into 2-frame framings, 21% of one Cuban film's shots)
+BAND_OF = {"strobe": (0.13, 0.6), "brisk": (0.5, 1.6), "hold": (1.4, 4.0)}
 
 PRINCIPLES = """How the best vertical edits keep a stranger watching (principles, never a template; every film finds its own):
-- The strangest device of the film is on screen at frame 0, and the hook sentence is over by 3-4 s.
+- Every device says what he says, literally, on the word that says it: real yearbook pages landing as prints for "they
+  circled it as being me", a grid of four phones for "four different answers", the real guide dog at the kerb for "a
+  guide dog". A device with no reason in the words is decoration: leave that moment plain.
+- The first second shows the speaker or the true subject of his first words, and the hook sentence is over by 3-4 s.
+  Nothing on screen then says what he does not say: no number, counter or title he does not say, one piece of display
+  type at a time, and no picture that carries another editor's own words or logo fighting the captions.
 - The name lands second (3-10 s), in two sizes.
-- Every figure performs: it counts, stacks or lands with a hit; never a figure as small caption words.
+- A figure he says performs: it counts, stacks or lands with a hit on the word that says it; a counter counts only to
+  the figure he says, in his units. Never a figure he does not say.
 - Every turn changes something you can see: the surface, the polarity, the pace, or a type card.
-- Lists burst: one picture or one hit per item, fast.
-- The pace alternates strobe against hold: some 3 s windows carry one cut, others ten or twelve.
+- Lists burst: one picture or one hit per item, fast, for as long as the list is said (about a second), then it lands.
+- The pace alternates fast against hold: some 3 s windows carry one cut, others six to ten. Shots of 1-2 frames are
+  punctuation (a white, black or negative frame on a hit, a glimpse): about one shot in twelve, never a section's
+  texture.
+- Pictures move inside their shots: a push, a drift, a settle on the word; a still never just sits.
+- Premium, never cringe: one look carries the film (its colour; black and white for the past against colour for the
+  present; a film gate, a tape or a page for an era the story names), and a surface changes where the story changes.
+  A treatment that replaces the picture's own tones (thermal, threshold, x-ray, blueprint, line, night vision,
+  solarise, posterise, negative) is a beat of a second or less on the word it literally means (thermal on heat or
+  surveillance, a blueprint on a plan, an x-ray on what is hidden, a negative on a reversal): never a section, never
+  over the speaker's face or a face the story hangs on, never where words must be read.
+- A stranger never stands for the speaker: when he tells of himself, show him, his own archive, or the thing he names,
+  never another person who could read as him.
 - The payoff slows down, holds, and calls back to the opening.
 - Stack devices on a moment that deserves it (a flip, then a duotone echo, then a word cut through the picture); choose
   each device for what this moment and this story need, never a set you bring to every film.
-- At least one moment combines devices in a way you have not seen any editor do.
+- At least one moment combines devices in a way you have not seen any editor do, and it says what is said there.
 - Restraint is also a device: a hold after a burst lands harder than a burst after a burst. Never decorate every word;
   a stretch with no device at all is often what makes the next one land.
 - The sheet says what this material can hold (how many pictures have a round shape, whether the speaker is on camera):
@@ -68,17 +87,19 @@ SYSTEM = ("You are the Director of a vertical short film. You choose, moment by 
           "Return JSON only: {\"beats\": [{\"role\": one of hook|name|figure|list|turn|past|quote|contrast|payoff|close, "
           "\"w\": the word number it lands on, \"word\": that word as said, \"energy\": strobe|brisk|hold}], "
           "\"sections\": [{\"from\": first word number, \"to\": last word number (runs of words in order, covering the film "
-          "from word 0 to the last word, no gaps; a section is often a few seconds: surfaces switch, colour is the base they "
-          "cut away from), \"surface\": "
+          "from word 0 to the last word, no gaps; sections are the story's parts (the hook, the past, the turn, the "
+          "payoff): the film keeps one look, and a surface changes only where the story does), \"surface\": "
           "colour|mono|gate|crt|bloom|thermal|threshold|halftone|xray|blueprint|night_vision|posterise|solarise|line|neg|"
           "rew|vhs|projector|led|xerox|paper|thermal_hud, "
           "\"layout\": bleed|window|prints|collage|grid|split|type, \"energy\": strobe|brisk|hold}], "
           "\"asks\": [{\"dev\": a device name from the palette, \"beat\": index into beats or null, \"at\": {\"w\": word "
           "number, \"word\": the word}, \"until\": {\"w\": word number, \"word\": the word} (spans only), \"args\": {the "
           "device's own fields from its card, e.g. \"mode\", \"surface\", \"run\", \"n\", \"c\", \"part\"; every time field of a card "
-          "(f, at, until, cuts, steps, from, stress, sections[].at, marks[].f, picks[].f) is a WORD NUMBER, a [first, last] pair of "
-          "word numbers is a stretch, and any picture field (pic, pool) a picture id: the engine turns them into frames and assets; "
-          "numbers in the units and ranges the card gives}, \"pics\": [picture ids it uses]}; as many asks as this material earns, "
+          "(f, at, until, lands, cuts, steps, stress, sections[].at, lines[].at, marks[].f, picks[].f, a callback's from) is a WORD "
+          "NUMBER, a [first, last] pair of word numbers is a stretch, and any picture field (pic, pool) a picture id: the engine "
+          "turns them into frames and assets; a text field (t, text, words, lines, name, title, label) holds the words as he "
+          "says them, never a word number; a counter's from and to are the figures themselves; numbers in the units and "
+          "ranges the card gives}, \"pics\": [picture ids it uses]}; as many asks as this material earns, "
           "stacked where a moment deserves it, none where restraint serves it], "
           "\"display\": [up to six words or short phrases to set large, ranked best first: {\"seg\": sentence number, \"text\": "
           "one to three consecutive words exactly as said, \"role\": hook|turn|payoff|figure|name|contrast, \"key\": the "
@@ -328,6 +349,81 @@ def snap(addr, sentences, words):
     return dict(w=best["n"], seg=best["seg"], word=best["w"]), f"snapped {addr} to word {best['n']} '{best['w']}'"
 
 
+# The words a device sets on the frame are words he says (20 Nov rating: ladders printed '3 4 5 11' and type pages '0 1 2 3'
+# where the answer gave word numbers in a text field, and type_run, ladder and redact asked with no words landed nothing).
+TEXT_FIELDS = ("t", "text", "word", "name", "title", "kicker")
+TEXT_LISTS = ("words", "lines", "struck")
+SETS_SAID = ("ladder", "type_run", "verb", "brackets", "highlight", "flip", "typewriter", "redact", "marquee", "behind",
+             "lamp", "diecut", "staircase", "name", "chapter")
+SAID_SPAN = {"ladder": 4, "type_run": 6, "typewriter": 8, "redact": 8, "staircase": 4, "marquee": 3, "chapter": 4, "name": 3}
+
+
+def said_text(dev, args, at, until, words):
+    """An ask's text fields as the words said. A word number written where text belongs (7, "7", [7, 9], a ladder row
+    {"t": 7}) becomes the word or words said there, unless that number is itself said in the ask's own sentences (then it
+    is the figure); a device that sets the words he says and was given none sets the words said over its span (its word,
+    or from its word to its until). Returns (args, repairs)."""
+    args = dict(args or {})
+    if not words or not isinstance(at, dict):
+        return args, []
+    rep = []
+    seg = int(at.get("seg") or 0)
+    near = {_norm(x["w"]) for x in words if abs(int(x["seg"]) - seg) <= 1}
+
+    def run(a, b):
+        a, b = max(min(a, b), 0), min(max(a, b), len(words) - 1)
+        return " ".join(str(words[n]["w"]) for n in range(a, b + 1)).strip(" ,.;:!?")
+
+    def number(v):
+        """The word number v names, or None when v is text (or a figure said here)."""
+        n = _word_no(v)
+        if n is None or not 0 <= n < len(words):
+            return None
+        return None if _norm(v) in near else n
+
+    def one(v):
+        if isinstance(v, (list, tuple)) and len(v) == 2 and all(number(x) is not None for x in v):
+            return run(number(v[0]), number(v[1]))
+        n = number(v)
+        return v if n is None else run(n, n)
+    for key in TEXT_FIELDS:
+        if args.get(key) is not None and not isinstance(args[key], dict):
+            new = one(args[key])
+            if new != args[key]:
+                rep.append(f"{key} {args[key]!r} was a word number: the words said there, {new!r}")
+                args[key] = new
+    for key in TEXT_LISTS:
+        if not isinstance(args.get(key), list):
+            continue
+        out = []
+        for el in args[key]:
+            if isinstance(el, dict):
+                el = dict(el)
+                for f in ("t", "text"):
+                    if el.get(f) is not None:
+                        el[f] = one(el[f])
+            elif isinstance(el, (list, tuple)) and len(el) == 2 and isinstance(el[1], str) and not str(el[1]).strip().isdigit():
+                el = {"t": one(el[0]), "w": el[1]}         # a [word, whisper|shout] pair
+            else:
+                el = one(el)
+            out.append(el)
+        if out != args[key]:
+            rep.append(f"{key} held word numbers: the words said there, {out!r}"[:240])
+            args[key] = out
+    has = any(str(args.get(k) or "").strip() for k in TEXT_FIELDS) or any(args.get(k) for k in TEXT_LISTS)
+    if dev in SETS_SAID and not has:
+        a = int(at["w"])
+        if isinstance(until, dict) and isinstance(until.get("w"), int) and until["w"] > a:
+            b = min(until["w"], a + SAID_SPAN.get(dev, 0))
+        elif dev in SAID_SPAN:
+            b = max([x["n"] for x in words if x["seg"] == words[a]["seg"] and x["n"] <= a + SAID_SPAN[dev] - 1] + [a])
+        else:
+            b = a
+        args["t"] = run(a, b)
+        rep.append(f"set no words: the words said over its span, {args['t']!r}")
+    return args, rep
+
+
 def repair(d, sentences, words, names=(), seed=0):
     """The model's answer made usable, every change logged. Never refuses: what cannot be read is replaced."""
     rep = []
@@ -405,6 +501,8 @@ def repair(d, sentences, words, names=(), seed=0):
                 rep.append(f"ask {k} {a.get('dev')}: until before at, dropped the until")
         if known and row["dev"] not in known:
             rep.append(f"ask {k}: device {row['dev']!r} is not in the palette; the palette maps it to its family")
+        row["args"], why = said_text(row["dev"], row["args"], row["at"], row.get("until"), words)
+        rep += [f"ask {k} {row['dev']}: {w_}" for w_ in why]
         asks.append(row)
     display = []
     for r in d.get("display") or []:
@@ -439,7 +537,9 @@ def repair(d, sentences, words, names=(), seed=0):
 POOL = ("white", "neg", "tint", "blur_in", "spotlight", "neg_split", "variant", "word_blend", "black", "snap", "settle", "whip", "glimpse")
 SPREADS = ("grid", "collage")      # a sentence dense with stress fills a layout one tile (or print) per stressed word
 VARIANT_MODES = ("thermal", "threshold", "halftone", "xray", "blueprint", "posterise", "solarise", "line", "mosaic", "night_vision")
-FINISHES = ("mono", "gate", "crt", "bloom", "thermal", "halftone", "threshold", "xray")
+# a section's surface keeps the picture's own tones (faces and words read through it); the treatments that replace them
+# (thermal, threshold, x-ray) are beats of the variant device, never a section
+FINISHES = ("mono", "gate", "crt", "bloom", "vhs", "projector")
 
 
 def _least_used(choices, recent, rng):
@@ -756,7 +856,10 @@ def film_pictures(l1, placed, out_dir, ffmpeg="ffmpeg", fps=30.0, most=36):
 
 SPAN_DEVICES = ("finish", "neg_hold", "neg_split", "neg_world", "variant", "spotlight", "word_blend", "tint", "lamp", "diecut",
                 "keep_hue", "colour_bloom", "tear", "keep_colour", "parallax", "proof_object")
-WORD_FIELDS = ("marks[].f", "picks[].f", "cuts[]")      # time fields every card may carry; a device declares more (palette "words")
+# time fields every card may carry; a device declares more (palette "words"). "lands" (a counter's figure word) and
+# "lines[].at" (a staircase line's word) are words on every worker: a counter read word 36 as frame 36 and counted in the
+# first second of five Cuban films (20 Nov rating)
+WORD_FIELDS = ("marks[].f", "picks[].f", "cuts[]", "lands", "lines[].at")
 
 
 def _word_no(v):
@@ -1053,7 +1156,7 @@ def around(asks, spans, dur_f=None):
 
 def energy_band(energy, base=None, take=False):
     """The pace band of a section's energy (scene.pace's hold, seconds). A strobe section cuts its pictures into framings
-    down to two frames and its moving footage into new framings too (not one eased move); the speaker's own take is cut
+    down to four frames (the judge's p10 shot) and its moving footage into new framings too (not one eased move); the speaker's own take is cut
     into punch-in framings no shorter than a third of a second, so his words stay readable. A hold section keeps a
     framing up to about four seconds."""
     lo, hi = BAND_OF.get(energy, BAND_OF["brisk"])
