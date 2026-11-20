@@ -357,6 +357,15 @@ def test_cluster_reads_render_the_identical_programme(tmp_path, monkeypatch):
     def capture(cmd, **kw):
         if "[adlg]" in cmd:                 # the dialogue-leveling probe
             return real_run(cmd, **kw)
+        cmd = list(cmd)
+        # A graph over GRAPH_ARG_MAX_BYTES is passed as a file (the 10-bit
+        # tables of 3c21e7af made graded graphs that long): read it back
+        # inline, so the test sees the graph the render runs either way.
+        for flag in ("-/filter_complex", "-filter_complex_script"):
+            if flag in cmd:
+                i = cmd.index(flag)
+                with open(cmd[i + 1], encoding="utf-8") as fh:
+                    cmd[i:i + 2] = ["-filter_complex", fh.read()]
         commands["cmd"] = [c for c in cmd
                            if c not in ("-progress", "pipe:1", "-nostats")]
         raise StopIteration
@@ -462,6 +471,15 @@ def test_end_card_join_keeps_the_programme_colour(frame, tmp_path,
     def capture(cmd, **kw):
         if "[adlg]" in cmd:                 # the dialogue-leveling probe
             return real_run(cmd, **kw)
+        cmd = list(cmd)
+        # A graph over GRAPH_ARG_MAX_BYTES is passed as a file (the 10-bit
+        # tables of 3c21e7af made graded graphs that long): read it back
+        # inline, so the test sees the graph the render runs either way.
+        for flag in ("-/filter_complex", "-filter_complex_script"):
+            if flag in cmd:
+                i = cmd.index(flag)
+                with open(cmd[i + 1], encoding="utf-8") as fh:
+                    cmd[i:i + 2] = ["-filter_complex", fh.read()]
         commands["cmd"] = [c for c in cmd
                            if c not in ("-progress", "pipe:1", "-nostats")]
         raise StopIteration
@@ -530,6 +548,15 @@ def test_cluster_reads_keep_peak_memory_bounded(tmp_path, monkeypatch):
     def capture(cmd, **kw):
         if "[adlg]" in cmd:                 # the dialogue-leveling probe
             return real_run(cmd, **kw)
+        cmd = list(cmd)
+        # A graph over GRAPH_ARG_MAX_BYTES is passed as a file (the 10-bit
+        # tables of 3c21e7af made graded graphs that long): read it back
+        # inline, so the test sees the graph the render runs either way.
+        for flag in ("-/filter_complex", "-filter_complex_script"):
+            if flag in cmd:
+                i = cmd.index(flag)
+                with open(cmd[i + 1], encoding="utf-8") as fh:
+                    cmd[i:i + 2] = ["-filter_complex", fh.read()]
         commands["cmd"] = [c for c in cmd
                            if c not in ("-progress", "pipe:1", "-nostats")]
         raise StopIteration
