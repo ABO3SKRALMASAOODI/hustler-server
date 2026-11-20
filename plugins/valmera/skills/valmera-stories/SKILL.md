@@ -76,8 +76,13 @@ The owner rated the first three story films 4-5 of 10 (`week-1112/lanes/RATINGS/
   half the lines, orange serif), `archive` (the past in a film gate with projector flashes, cream serif italic), `window`
   (each picture in a framed window over itself out of focus, cyan condensed capitals). The older `character-sheet`,
   `whole-page` and `one-photograph` (`film.py`) run only when named: `run.py run --args '{"style": "..."}'`.
-- **Alien devices** (`worker/scene/alien`, verdict of 14 Nov): never `diecut`, `answer` or `lamp`; `rhyme` and `arc` only,
-  only when a direction asks (`direction.json` `alien`), never in a first film.
+- **The Director** (`_shell/director.py`, owner 20 Nov 2026: maximum creativity in the edits): after the build, one model
+  call reads the narration's words and stress, the pictures the film placed (one contact sheet) and the device sequences
+  of the films delivered lately, and chooses devices for every moment from the whole palette (`worker/scene/palette`:
+  negative flips and runs, white and black hits, duotone echoes, variant renders, spotlight, blur-in, word blends,
+  finishes by section, and the alien bank's rhyme, diecut, lamp, arc and answer). Its asks ride the scene under `devices`
+  and `_shell/chain.lay_devices` lays them at the render; an ask that cannot stand falls back to its next device
+  (`supply/devices_log.json`). No device is banned or gated; a direction's own `alien` asks are laid the same way.
 
 ## The narrator (`voice.py`)
 

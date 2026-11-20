@@ -450,26 +450,65 @@ def sound(ctx, l1_path):
     return out
 
 
-def alien_bank(ctx, l1_path):
-    """A scene that asks for devices of the engine's alien bank (worker/scene/alien: rhyme, diecut, lamp, arc,
-    answer) is laid out before the engine draws it. The asks ride the scene under ``alien``: a style or a
-    direction writes them, or the Director's ``alien`` gesture. Returns the path of the scene to draw (the same
-    path when it asks for nothing). A device that cannot stand on this film leaves it as it was and says why in
-    ``alien_bank.json``; it is never the reason a film does not render."""
+def lay_devices(ctx, l1_path):
+    """The devices a scene asks for are laid out before the engine draws it (worker/scene/palette: the Director's
+    per-moment asks under ``devices``, and the alien bank's asks under ``alien``). Every render path of every workflow
+    calls this, so whatever the engine can draw is reachable from all four. Returns the path of the scene to draw (the
+    same path when it asks for nothing). An ask that cannot stand on this film runs its device's fallback chain; what
+    landed for each ask is written to ``devices_log.json`` (and ``alien_bank.json`` for the older field). A fault of
+    the palette itself is logged and the film is drawn as scored: devices are never the reason a film does not render."""
     try:
-        asks = json.load(open(l1_path)).get("alien")
+        doc = json.load(open(l1_path))
     except (OSError, ValueError):
         return l1_path
-    if not asks or engine_kind() != "scene":
+    if not (doc.get("devices") or doc.get("alien")) or engine_kind() != "scene":
         return l1_path
-    out = os.path.splitext(l1_path)[0] + ".alien.json"
+    import glob
+    import hashlib
+    # named by the scene's own bytes and the palette's code: a scene scored again, or a palette that changed, is laid
+    # again, never drawn from a stale layout
+    h = hashlib.sha256(open(l1_path, "rb").read())
+    for src in sorted(glob.glob(os.path.join(brand.worker_dir(), "scene", "palette", "*.py")) +
+                      glob.glob(os.path.join(brand.worker_dir(), "scene", "alien", "*.py"))):
+        h.update(open(src, "rb").read())
+    out = os.path.splitext(l1_path)[0] + f".devices.{h.hexdigest()[:10]}.json"
     if not os.path.exists(out):
         wk = brand.worker_dir()
-        sh(ctx, ["zsh", "-c", f"cd {wk} && PYTHONPATH=..:{SLICE}/pylib {PY} -m scene.alien.run apply --l1 {l1_path} --work {ctx.supply} "
-                              f"--out {out}.part --log {os.path.join(ctx.supply, 'alien_bank.json')}"],
-           label=f"wf-alien-{ctx.run_id}", heavy=True, timeout=1800)
-        os.replace(out + ".part", out)
+        log = os.path.join(ctx.supply, "devices_log.json")
+        try:
+            sh(ctx, ["zsh", "-c", f"cd '{wk}' && PYTHONPATH=..:{SLICE}/pylib FFMPEG_BIN='{brand.FF}' '{PY}' -m scene.palette.run apply "
+                                  f"--l1 '{l1_path}' --work '{ctx.supply}' --out '{out}.part' --log '{log}'"],
+               label=f"wf-devices-{ctx.run_id}", heavy=True, timeout=3600)
+            os.replace(out + ".part", out)
+        except (RuntimeError, subprocess.SubprocessError, OSError) as e:
+            ctx.log(f"devices could not be laid, the film is drawn as scored: {str(e)[:300]}")
+            return l1_path
+        if doc.get("alien"):
+            try:
+                rows = json.load(open(log))
+                json.dump([r for r in rows if r.get("dev") in ("rhyme", "diecut", "lamp", "arc", "answer", "arc_stakes")
+                           or str(r.get("asked")) in ("rhyme", "diecut", "lamp", "arc", "answer")],
+                          open(os.path.join(ctx.supply, "alien_bank.json"), "w"), indent=1)
+            except (OSError, ValueError):
+                pass
     return out
+
+
+alien_bank = lay_devices          # the older name: every caller now lays the whole palette
+
+
+def measure_devices(ctx, film, scene_path):
+    """What the drawn film did, by signal, beside the bar (worker/scene/palette/measure.py): cuts, flips, white and
+    black frames, the 3 s contour, layers, the device sequence's distance to the recent films. Written to
+    ``devices_measure.json`` (film.json carries it). A record only: never a veto, never a stop."""
+    try:
+        import devices_ledger
+        wk = brand.worker_dir()
+        sh(ctx, ["zsh", "-c", f"cd '{wk}' && PYTHONPATH=.. FFMPEG_BIN='{brand.FF}' '{PY}' -m scene.palette.measure --film '{film}' "
+                              f"--l1 '{scene_path}' --log '{os.path.join(ctx.supply, 'devices_log.json')}' "
+                              f"--ledger '{devices_ledger.path()}' --out '{os.path.join(ctx.supply, 'devices_measure.json')}'"], timeout=900)
+    except Exception as e:  # noqa: BLE001 - a measure is never the reason a film is not delivered
+        getattr(ctx, "log", print)(f"devices measure not written: {str(e)[:200]}")
 
 
 def render(ctx, script, sc):
@@ -479,12 +518,15 @@ def render(ctx, script, sc):
     if not os.path.exists(out):
         if kind == "scene":
             wk = brand.worker_dir()
-            sh(ctx, ["zsh", "-c", f"cd {wk} && PYTHONPATH=.. {PY} -m scene.run --local --l1 {alien_bank(ctx, sc['l1'])} --work {ctx.supply} --out {out}.part.mp4"],
+            scene = lay_devices(ctx, sc['l1'])
+            sh(ctx, ["zsh", "-c", f"cd {wk} && PYTHONPATH=.. {PY} -m scene.run --local --l1 {scene} --work {ctx.supply} --out {out}.part.mp4"],
                label=f"wf-render-{ctx.run_id}", heavy=True, timeout=7200)
+            os.replace(out + ".part.mp4", out)
+            measure_devices(ctx, out, scene)
         else:
             sh(ctx, [PY, "engine.py", "render", "--l1", sc["l1"], "--work", ctx.supply, "--out", out + ".part.mp4"],
                label=f"wf-render-{ctx.run_id}", heavy=True, timeout=7200)
-        os.replace(out + ".part.mp4", out)
+            os.replace(out + ".part.mp4", out)
     chk = {}
     if kind == "slice":
         try:

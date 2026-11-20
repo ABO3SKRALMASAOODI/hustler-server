@@ -24,6 +24,7 @@ import numpy as np
 from . import glyphs, sense
 
 K = 0.25                      # light is low frequency: it is solved on a quarter-size grid
+SEEN_F = 12                   # frames a lamp must light to be seen at all: fewer, and the ask's fallback lands instead
 
 
 def _hex(c):
@@ -121,8 +122,20 @@ def plan(l1, work, ask):
     if sh0 is None or not sense.path_of(l1, work, sh0.get("pic")):
         return {"skip": "lamp needs a picture under its word"}
     tail = int(ask.get("tail") if ask.get("tail") is not None else 10)
-    z2 = min(z + tail, sh0["f"][1], int(l1["dur_f"]))                 # the light dies inside the shot it was lit in
+    # the light dies inside the take it was lit in: the shots that follow on the same source (the speaker's framings,
+    # punch-ins cut from one take) are one lit set, so the lamp carries through their cuts
+    p0 = sense.path_of(l1, work, sh0.get("pic"))
+    run, end = [sh0], sh0["f"][1]
+    while end < z + tail:
+        nx = sense.shot_at(l1, end)
+        if nx is None or nx is run[-1] or not nx.get("src") or not sh0.get("src") or sense.path_of(l1, work, nx.get("pic")) != p0:
+            break
+        run.append(nx)
+        end = nx["f"][1]
+    z2 = min(z + tail, end, int(l1["dur_f"]))
     a2 = max(a - 1, sh0["f"][0])
+    if z2 - a2 < SEEN_F:
+        return {"skip": f"the lamp would light {z2 - a2} frames of the picture under its word (needs {SEEN_F})"}
     voice = {"font": ask.get("font") or "InterDisplay-Black.ttf", "track": 0, "glow": {"a": 0.55, "blur": 0.03}}
     voice["px"] = round(glyphs.fit_px(voice, text, float(ask.get("width") or 0.62) * W, cap_px=0.16 * H), 2)
     _, b = glyphs.box(voice, text, voice["px"])
@@ -149,7 +162,7 @@ def plan(l1, work, ask):
         return {"skip": "the take could not be read under the lamp"}
     matte, mp = {}, sense.path_of(l1, work, "matte")
     if mp and os.path.exists(mp) and sh0.get("src"):
-        on_matte = dict(l1, items=[dict(sh0, pic="matte")])          # the matte lies on the take: same clock, same crop
+        on_matte = dict(l1, items=[dict(sh, pic="matte") for sh in run if sh.get("src")])   # the matte lies on the take: same clock, same crop
         matte = {f: m.astype(np.float32) / 255.0 for f, m in sense.shot_frames(on_matte, work, a2, z2, size=(gw, gh), gray=True).items()}
     rel = os.path.join("alien", f"{ask['id']}.mp4")
     os.makedirs(os.path.join(work, "alien"), exist_ok=True)

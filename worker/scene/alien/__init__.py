@@ -14,10 +14,8 @@ which year come from the caller, a model that read the script. A device that can
     patch = alien.plan(l1, work, ask)   # one device, nothing merged
 
 An ask is {"dev": name, "id": "a1", ...}; frames are programme frames. ``apply`` checks the scene after each
-device with the engine's own ``eligible`` and takes a device back out if it broke the scene's contract.
+device with the engine's own ``eligible``; a device that would break the scene's contract runs its fallback instead.
 """
-import copy
-
 from ..plan import eligible
 from . import answer, arc, diecut, lamp, rhyme
 
@@ -68,27 +66,19 @@ def merge(l1, patch):
 
 
 def apply(l1, work, asks=None):
-    """(scene, log). Every ask in a safe order; one that cannot stand, or would break the scene, is left out and
-    says why in the log. The scene handed in is not changed."""
+    """(scene, log). Every ask laid by the palette (worker/scene/palette) in its layer order: a device that cannot stand,
+    or would break the scene, runs its fallback chain (rhyme to a position match or a flip, diecut to a word blend,
+    lamp to a spotlight, answer to a diecut, arc to the arc on its stakes), so the moment keeps a device; the log says
+    what landed and why the asked device could not. The scene handed in is not changed."""
+    from .. import palette
     asks = list(asks if asks is not None else (l1.get("alien") or []))
-    cur = copy.deepcopy({k: v for k, v in l1.items() if k != "alien"})
+    out, plog = palette.apply({k: v for k, v in l1.items() if k not in ("alien", "devices")}, work, asks=asks)
     log = []
-    seq = sorted(enumerate(asks), key=lambda t: (ORDER.index(t[1].get("dev")) if t[1].get("dev") in ORDER else 99, t[0]))
-    for n, ask in seq:
-        ask = dict(ask, id=str(ask.get("id") or f"al{n}"))
-        row = {"id": ask["id"], "dev": ask.get("dev")}
-        try:
-            patch = plan(cur, work, ask)
-        except Exception as e:      # noqa: BLE001 - a device is never the reason a film does not render
-            patch = {"skip": f"{type(e).__name__}: {e}"}
-        if patch.get("skip"):
-            log.append(dict(row, done=False, why=patch["skip"], log=patch.get("log")))
-            continue
-        nxt = merge(cur, patch)
-        ok, why = eligible(nxt)
-        if not ok:
-            log.append(dict(row, done=False, why="would break the scene: " + "; ".join(why[:3])))
-            continue
-        cur = nxt
-        log.append(dict(row, done=True, marks=patch.get("marks") or [], seat=patch.get("seat"), log=patch.get("log")))
-    return cur, log
+    for r in plog:
+        tried = r.get("tried") or []
+        row = {"id": r["id"], "dev": r.get("asked") or r.get("dev"), "done": bool(r.get("done")), "landed": r.get("landed"),
+               "fallback": bool(r.get("fallback")), "marks": r.get("marks") or [], "seat": r.get("seat"), "log": r.get("log")}
+        if tried:
+            row["why"] = "; ".join(f"{t['dev']}: {t['why']}" for t in tried)
+        log.append(row)
+    return out, log

@@ -322,7 +322,7 @@ def render(ctx, script, sc):
     sound = os.path.join(ctx.supply, "sound.m4a")
     mix = F.audio_master(pack["ffmpeg"], l1, sound, ctx.tmp) if not os.path.exists(sound) else {}
     if not os.path.exists(out):
-        log = chain.sh(ctx, ["env", f"PYTHONPATH={env_path}", f"VALMERA_SCENE_CACHE={cache}", chain.PY, "-m", "scene.run", "render", "--l1", chain.alien_bank(ctx, sc["l1"]),
+        log = chain.sh(ctx, ["env", f"PYTHONPATH={env_path}", f"VALMERA_SCENE_CACHE={cache}", chain.PY, "-m", "scene.run", "render", "--l1", chain.lay_devices(ctx, sc["l1"]),
                              "--work", ctx.supply, "--out", out + ".part.mp4", "--tier", "master", "--strict", "--cache", cache, "--audio", sound],
                        label=f"wf2-render-{ctx.run_id}", heavy=True, timeout=7200)
         os.replace(out + ".part.mp4", out)

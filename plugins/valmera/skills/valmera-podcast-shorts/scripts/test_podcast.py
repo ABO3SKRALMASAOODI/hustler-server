@@ -81,19 +81,16 @@ def test_every_style_is_in_the_registry_as_an_engine_style():
     assert ids == set(wf1_film.STYLES) == set(wf1_film.ORDER)
 
 
-def test_alien_gate_never_asks_for_the_gimmicks_and_arc_needs_two_years():
-    frame_of = lambda seg, word: 30 * (seg + 1)  # noqa: E731
-    one = dict(arc=[dict(seg=0, word="1999", year=1999, stakes=-0.5)])
-    assert wf1_film.alien_asks(one, "footage-cut", frame_of)[0] == []
-    two = dict(arc=[dict(seg=0, word="1999", year=1999, stakes=-0.5), dict(seg=3, word="2010", year=2010, stakes=0.8)])
-    asks, why = wf1_film.alien_asks(two, "footage-cut", frame_of)
-    assert [a["dev"] for a in asks] == ["arc"] and [m["year"] for m in asks[0]["marks"]] == [1999, 2010] and "passed" in why
-    for style in ("archive-reel", "window", "prints"):         # a style with its own finish keeps it
-        assert wf1_film.alien_asks(two, style, frame_of)[0] == []
-    assert wf1_film.alien_asks(dict(arc=[dict(seg=0, year="soon"), dict(seg=1, year=99999)]), "footage-cut", frame_of)[0] == []
-    mixed = [dict(dev="diecut"), dict(dev="answer"), dict(dev="lamp"), dict(dev="arc", marks=[]), dict(dev="rhyme"), "x", dict(dev="new")]
-    assert [a["dev"] for a in wf1_film.clean_asks(mixed)] == ["arc", "rhyme"]
-    assert set(wf1_film.ALIEN_NEVER) == {"diecut", "answer", "lamp"}
+def test_no_device_is_gated_any_more():
+    """Owner, 20 Nov 2026: maximum creativity in the edits. The Director chooses from the whole palette; nothing here
+    bans or gates a device (the palette lays it or falls back to its next device)."""
+    for gone in ("alien_asks", "clean_asks", "ALIEN_NEVER", "ALIEN_GATED"):
+        assert not hasattr(wf1_film, gone), gone
+    DR = wf1_film._director()
+    d = dict(asks=[dict(dev=x, at=dict(w=0, seg=0, word="a"), args={}, pics=[]) for x in ("diecut", "answer", "lamp", "rhyme")],
+             sections=[], arc=[dict(w=0, year=1999, stakes=-0.5)])
+    asks, _ = DR.palette_asks(d, lambda w: 30 * (w + 1), lambda i: (0, 90), None, 300)
+    assert [a["dev"] for a in asks] == ["diecut", "answer", "lamp", "rhyme", "arc"]            # one year is enough for the arc
 
 
 def _film(folder, title, style, music=True):
