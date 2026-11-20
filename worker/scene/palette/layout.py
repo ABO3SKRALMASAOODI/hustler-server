@@ -50,10 +50,49 @@ def _arrive(n, frames=5, s0=1.08):
 
 
 def _src(pic, rng, n, fps, k=0):
-    if not pic.video:
-        return None
-    t0 = K.moments(pic, 3, n / fps + 0.05, rng)[k % 3][0]
-    return [round(t0, 4), round(t0 + n / fps, 4)]
+    """A clip's clock over n frames: inside its verified range, at real speed when the range holds it (picks.window)."""
+    return K.window(pic, n, fps, rng, k)
+
+
+def verified_lo(l1, work, aid):
+    """The earliest source second of an asset a viewer may see: its verified range's start (0 for the take, whose every
+    frame is the speaker's own)."""
+    if K.is_take(aid):
+        return 0.0
+    pic = K.pic_of_asset(l1, work, aid)
+    return pic.span()[0] if pic is not None else 0.0
+
+
+def preroll(l1, work, q, n):
+    """(hold, start): an incoming shot ``q`` seen n frames before its cut, at real speed. Its clock runs back from its own
+    src start as far as its verified range allows; the frames before that hold its first verified frame. hold frames
+    hold on ``start``; then it runs from ``start`` into the cut unbroken."""
+    fps = K.geometry(l1)[2]
+    s0 = float(q["src"][0])
+    lo = verified_lo(l1, work, q.get("pic"))
+    run = int(min(n, max(int((s0 - lo) * fps + 1e-6), 0)))
+    return n - run, round(s0 - run / fps, 5)
+
+
+def split_at(card, hold, tail_id):
+    """A card cut in two at ``hold`` frames in: per-frame lists are divided between them, single values kept. Returns
+    (head, tail); head is None when hold is 0."""
+    if hold <= 0:
+        return None, card
+    f0, f1 = card["f"]
+    n = f1 - f0
+    if hold >= n:
+        return card, None
+    head, tail = dict(card, f=[f0, f0 + hold]), dict(card, id=tail_id, f=[f0 + hold, f1])
+    for k, v in card.items():
+        if isinstance(v, list) and len(v) == n and k not in ("f", "src"):
+            head[k], tail[k] = v[:hold], v[hold:]
+    return head, tail
+
+
+def _n_chosen(args):
+    """How many pictures the caller chose (``pics``, or picture ids in ``pool``): a layout's count when no beat sets it."""
+    return len(list(args.get("pics") or []) + [p for p in (args.get("pool") or []) if isinstance(p, str)])
 
 
 def _steps(a, z, k, args, frac=0.7):
@@ -88,15 +127,15 @@ def grid(l1, work, ask, sense_=None, pool=None):
     args = K.args_of(ask)
     a, z = K.span(l1, args, default_s=2.4, least=12)
     rng = K.rng_of(l1, args)
+    given = sorted(int(f) for f in (args.get("steps") or []) if isinstance(f, (int, float)) and a <= int(f) < z)
     if args.get("resolve"):
         pics = K.pictures(l1, work, dict(args, pics=[args["resolve"]], only=True), pool, sense_=sense_)
     else:
-        pics = K.pictures(l1, work, args, pool, sense_=sense_)
+        want = int(args.get("tiles") or len(given) or (int(args.get("rows") or 0) * int(args.get("cols") or 0)) or _n_chosen(args) or 6)
+        pics = K.pictures(l1, work, args, pool, sense_=sense_, need=want, length_s=(z - a) / fps * 0.5, distinct=True)
     if not pics:
         return {"skip": "no pictures for a grid"}
-    given = sorted(int(f) for f in (args.get("steps") or []) if a <= int(f) < z)
-    n_want = int(args.get("tiles") or (len(given) if given else 0) or (len(args.get("pics") or []) if not args.get("resolve") else 0)
-                 or (len(pics) if not args.get("resolve") else 6))
+    n_want = int(args.get("tiles") or (len(given) if given else 0) or (len(pics) if not args.get("resolve") else 6))
     n_want = min(max(n_want, 2), 12)
     rows, cols = int(args.get("rows") or 0), int(args.get("cols") or 0)
     if not rows or not cols:
@@ -165,8 +204,8 @@ def split(l1, work, ask, sense_=None, pool=None):
     under = K.shot_at(l1, a)
     take_on = under is not None and K.is_take(under.get("pic"))
     with_take = bool(args.get("take", take_on)) and take_on
-    pics = K.pictures(l1, work, args, pool, sense_=sense_)
-    given = len(args.get("pics") or [])
+    pics = K.pictures(l1, work, args, pool, sense_=sense_, least=2 if not with_take else 1)
+    given = len([p for p in pics if p.chosen is not None])
     k = int(args.get("panels") or ((given + (1 if with_take else 0)) if given else (2 if with_take else min(max(len(pics), 2), 3))))
     k = min(max(k, 2), 3)
     need = k - (1 if with_take else 0)
@@ -250,10 +289,11 @@ def collage(l1, work, ask, sense_=None, pool=None):
     args = K.args_of(ask)
     a, z = K.span(l1, args, default_s=2.4, least=12)
     rng = K.rng_of(l1, args)
-    pics = K.pictures(l1, work, args, pool, sense_=sense_)
+    want = int(args.get("prints") or len([f for f in args.get("steps") or [] if isinstance(f, (int, float))]) or _n_chosen(args) or 6)
+    pics = K.pictures(l1, work, args, pool, sense_=sense_, need=min(want, 9), length_s=(z - a) / fps * 0.5, distinct=True)
     if not pics:
         return {"skip": "no pictures for a pile"}
-    k = min(int(args.get("prints") or len(args.get("pics") or []) or len(pics)), 9)
+    k = min(want, len(pics), 9)
     k = max(k, min(3, len(pics)))
     pics = pics[:k]
     steps = _steps(a, z, k, args, frac=0.8)
@@ -316,19 +356,21 @@ def _full_card(sh, l1, work, f0, f1, cid):
 
 
 def _early(q, f0, l1, work):
-    """The incoming shot started early, on [f0, its end): its clock moved back so it runs into its own cut unbroken."""
-    fps = K.geometry(l1)[2]
+    """The incoming shot started early, on [f0, its end), at its own speed: its clock runs back as far as its verified
+    range allows and the frames before that hold its first verified frame (preroll). Returns its items (the held head,
+    when there is one, then the shot under its own id)."""
     lo, hi = q["f"]
-    it = dict(q, f=[f0, hi])
-    if q.get("src"):
-        back = (lo - f0) / fps
-        t0 = float(q["src"][0]) - back
-        it["src"] = [round(max(t0, 0.0), 5), q["src"][1]]
-        if t0 < 0 and not K.is_take(q.get("pic")):
-            it["src"] = [0.0, round(float(q["src"][1]) - t0, 5)]
     cs = K.crops(l1, work, q)
-    it["crop"] = [cs[0]] * (lo - f0) + cs
-    return it
+    it = dict(q, f=[f0, hi], crop=[cs[0]] * (lo - f0) + cs)
+    if not q.get("src"):
+        return [it]
+    hold, start = preroll(l1, work, q, lo - f0)
+    it["src"] = [start, q["src"][1]]
+    if hold <= 0:
+        return [it]
+    head, tail = split_at(dict(it, id=f"{q['id']}~h"), hold, q["id"])
+    head["src"] = [start, start]
+    return [x for x in (head, tail) if x is not None]
 
 
 def shrink(l1, work, ask, sense_=None, pool=None):
@@ -356,8 +398,8 @@ def shrink(l1, work, ask, sense_=None, pool=None):
     card["radius"] = 0.01
     rest = sense.slice_shot(p, p["f"][0], f0, p["id"])
     new_q = _early(q, f0, l1, work)
-    return {"items": [rest, new_q, card], "drop": [], "assets": {}, "events": [{"f": f0, "what": "shrink exit", "kind": "move", "strength": 0.4}],
-            "log": {"join": c, "frames": n}}
+    return {"items": [rest] + new_q + [card], "drop": [], "assets": {}, "events": [{"f": f0, "what": "shrink exit", "kind": "move", "strength": 0.4}],
+            "log": {"join": c, "frames": n, "held": new_q[0]["f"][1] - new_q[0]["f"][0] if new_q[0]["id"] != q["id"] else 0}}
 
 
 def pip(l1, work, ask, sense_=None, pool=None):
@@ -377,9 +419,10 @@ def pip(l1, work, ask, sense_=None, pool=None):
         card, _ = _full_card(q, l1, work, c, c + 1, "tmp")
         cs = K.crops(l1, work, q)
         card = dict(card, id=f"{args.get('id', 'pip')}.in", f=[f0, c], crop=[cs[0]] * n)
+        still = 0
         if q.get("src"):
-            t0 = float(q["src"][0]) - n / fps
-            card["src"] = [round(max(t0, 0.0), 5), round(float(q["src"][0]), 5)]
+            still, start = preroll(l1, work, q, n)       # real speed into its own cut; the head holds its first verified frame
+            card["src"] = [start, round(float(q["src"][0]), 5)]
         hold = int(n * 0.6)
         kk = K.decel(n - hold, 0.2)
         s = [0.42] * hold + [round(0.42 + 0.58 * kk[j], 5) for j in range(n - hold)]
@@ -387,9 +430,13 @@ def pip(l1, work, ask, sense_=None, pool=None):
         card["x"] = [round(wx + (0.5 - wx) * (0 if j < hold else kk[j - hold]), 5) for j in range(n)]
         card["y"] = [round(wy + (0.5 - wy) * (0 if j < hold else kk[j - hold]), 5) for j in range(n)]
         card.update(border={"w": 0.008, "c": "#F7F4EC"}, shadow={"a": 0.6, "blur": 0.03, "dx": 0.0, "dy": 0.014}, z=4)
-        return {"items": [card], "drop": [], "assets": {}, "events": [{"f": f0, "what": "window opens", "kind": "pop", "strength": 0.45},
-                                                                      {"f": c, "what": "window takes the frame", "kind": "cut", "strength": 0.4}],
-                "log": {"join": c, "frames": n}}
+        head, tail = split_at(card, still, f"{card['id']}~run")
+        if head is not None:
+            head["src"] = [card["src"][0], card["src"][0]]
+        return {"items": [x for x in (head, tail) if x is not None], "drop": [], "assets": {},
+                "events": [{"f": f0, "what": "window opens", "kind": "pop", "strength": 0.45},
+                           {"f": c, "what": "window takes the frame", "kind": "cut", "strength": 0.4}],
+                "log": {"join": c, "frames": n, "held": still}}
     pics = K.pictures(l1, work, args, pool, sense_=sense_)
     if not pics:
         return {"skip": "no join and no picture for a window"}
@@ -447,14 +494,18 @@ def dissolve(l1, work, ask, sense_=None, pool=None):
     cs = K.crops(l1, work, q)
     card = dict(id=f"{args.get('id', 'dx')}.in", k="card", f=[f0, c], pic=q["pic"], x=0.5, y=0.5, w=1.0, h=1.0, s=1, rot=0,
                 op=[round(((j + 1) / (n + 1)) ** 1.2, 4) for j in range(n)], z=1, crop=[cs[0]] * n)
+    still = 0
     if q.get("src"):
-        t0 = float(q["src"][0]) - n / fps
-        card["src"] = [round(max(t0, 0.0), 5), round(float(q["src"][0]), 5)]
+        still, start = preroll(l1, work, q, n)           # real speed into its own cut; the head holds its first verified frame
+        card["src"] = [start, round(float(q["src"][0]), 5)]
     for k in ("look", "grade", "treat"):
         if q.get(k):
             card[k] = q[k]
-    return {"items": [card], "drop": [], "assets": {}, "events": [{"f": f0, "what": "dissolve", "kind": "soft", "strength": 0.2}],
-            "log": {"join": c, "frames": n}}
+    head, tail = split_at(card, still, f"{card['id']}~run")
+    if head is not None:
+        head["src"] = [card["src"][0], card["src"][0]]
+    return {"items": [x for x in (head, tail) if x is not None], "drop": [], "assets": {},
+            "events": [{"f": f0, "what": "dissolve", "kind": "soft", "strength": 0.2}], "log": {"join": c, "frames": n, "held": still}}
 
 
 ALIASES = {"tiles": "grid", "tile_grid": "grid", "grid_reveal": "grid", "split_screen": "split", "panels": "split",
@@ -462,11 +513,11 @@ ALIASES = {"tiles": "grid", "tile_grid": "grid", "grid_reveal": "grid", "split_s
            "shrink_exit": "shrink", "double_exposure": "dissolve", "crossfade": "dissolve"}
 
 DEVICES = {
-    "grid": {"plan": grid, "layer": "rhythm", "needs": ("pictures",), "fallback": ("collage", "burst"),
+    "grid": {"plan": grid, "layer": "rhythm", "needs": ("pictures",), "fallback": ("collage", "burst"), "span": True, "words": ("steps[]",),
              "card": "grid at until pics[] rows cols steps[] ground collapse resolve. A grid that fills one tile per beat and collapses; or one picture resolving through its tiles; the hook, 'seven founders', who's who"},
-    "split": {"plan": split, "layer": "rhythm", "needs": ("pictures",), "fallback": ("pip",),
+    "split": {"plan": split, "layer": "rhythm", "needs": ("pictures",), "fallback": ("pip",), "span": True,
               "card": "split at until pics[] dir:h|v take. Panels: the speaker on his own clock beside what he names, or two or three pictures side by side; contrasts, comparisons"},
-    "collage": {"plan": collage, "layer": "rhythm", "needs": ("pictures",), "fallback": ("grid", "burst"),
+    "collage": {"plan": collage, "layer": "rhythm", "needs": ("pictures",), "fallback": ("grid", "burst"), "span": True, "words": ("steps[]",),
                 "card": "collage at until pics[] steps[] ground. A scrapbook pile on paper: prints land one per beat, turned, bordered, dropping in; archive, a life in pictures"},
     "pip": {"plan": pip, "layer": "surface", "needs": (), "fallback": ("dissolve",),
             "card": "pip at frames pics[] at_xy. Photo-in-photo: the next picture arrives as a window inside this one and grows to take the frame; name intros, archive"},

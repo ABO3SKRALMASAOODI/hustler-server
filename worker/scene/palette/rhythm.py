@@ -75,13 +75,15 @@ def _clip_shots(seq, a, lens, fps, look, mono, ask_id, tag):
     return items, marks
 
 
-def _strobe_seq(pics, k, lens, W, H, fps, rng, order=None):
+def _strobe_seq(pics, k, lens, W, H, fps, rng, order=None, land=None):
     """k (pic, t0, crop, gain): every picture in turn, a clip at a new moment each time it returns, a still at a new
-    framing; laid on a path of light unless the order is the caller's."""
+    framing; laid on a path of light unless the order is the caller's. ``land``: the picture the run lands on and holds
+    (the caller's last chosen one); the others run down then up in light into it, so it stays last and the strobe keeps
+    to one turn of light."""
     uses = {}
     raw = []
     for i in range(k):
-        pic = pics[i % len(pics)]
+        pic = land if (land is not None and i == k - 1) else pics[i % len(pics)]
         j = uses.get(pic.aid, 0)
         uses[pic.aid] = j + 1
         raw.append((pic, j))
@@ -105,7 +107,25 @@ def _strobe_seq(pics, k, lens, W, H, fps, rng, order=None):
             crop = _framing(pic, W, H, j, rng)[1]
         seq.append([pic, t0, list(crop), 1.0])
     lum = [K.luminance(p, t0 + 0.02, c) for p, t0, c, _ in seq]
-    if order is None:
+    if order is None and land is not None and len(seq) > 2:
+        # the brighter ones falling, the darker ones rising into the landing: one turn of light, the landing last
+        L = lum[-1]
+        hi_ = sorted((i for i in range(len(seq) - 1) if lum[i] > L), key=lambda i: -lum[i])
+        lo_ = sorted((i for i in range(len(seq) - 1) if lum[i] <= L), key=lambda i: lum[i])
+        idx = hi_ + lo_ + [len(seq) - 1]
+        seq = [seq[i] for i in idx]
+        lum = [lum[i] for i in idx]
+        for i in range(1, len(seq) - 2):             # a picture never follows itself when another of like light can
+            if seq[i][0].aid == seq[i - 1][0].aid:
+                for j in range(i + 1, min(i + 4, len(seq) - 1)):
+                    if seq[j][0].aid != seq[i - 1][0].aid and abs(lum[j] - lum[i]) < K.FLASH_STEP:
+                        seq[i], seq[j] = seq[j], seq[i]
+                        lum[i], lum[j] = lum[j], lum[i]
+                        break
+        _, gains = K.flash_safe(lum, lens, fps, order=list(range(len(seq))))
+        if [i for i in _] != list(range(len(seq))):    # no grade brings them together: the light path stands ungraded
+            gains = [1.0] * len(seq)
+    elif order is None:
         idx, gains = K.flash_safe(lum, lens, fps)
         seq = [seq[i] for i in idx]
         lum = [lum[i] for i in idx]
@@ -131,20 +151,24 @@ def burst(l1, work, ask, sense_=None, pool=None):
     W, H, fps = K.geometry(l1)
     args = K.args_of(ask)
     a, z = K.span(l1, args, default_s=1.2, least=6)
-    pics = K.pictures(l1, work, args, pool, sense_=sense_)
-    if not pics:
-        return {"skip": "no pictures to burst"}
     rng = K.rng_of(l1, args)
     land = min(int(args.get("land", 6)), max((z - a) // 3, 2))
     fixed = args.get("frames")
     lo, hi = (int(fixed), int(fixed)) if fixed else BURST_F
     lens = _lengths(z - a - land, lo, hi, rng) + [land]
-    seq, lum = _strobe_seq(pics, len(lens), lens, W, H, fps, rng, order=args.get("order"))
+    pics = K.pictures(l1, work, args, pool, sense_=sense_, need=len(lens), length_s=hi / fps + 0.05)
+    if not pics:
+        return {"skip": "no pictures to burst"}
+    picked = [p for p in pics if p.chosen is not None]
+    landing = max(picked, key=lambda p: p.chosen) if picked else None      # the caller's last chosen picture lands and holds
+    seq, lum = _strobe_seq(pics, len(lens), lens, W, H, fps, rng, order=args.get("order"), land=landing)
     keep, gone, was = K.carve(l1, a, z)
     items, marks = _clip_shots(seq, a, lens, fps, K.inherit(was), bool(args.get("mono")), args.get("id", "burst"), "b")
     used = list({p.aid: p for p, *_ in seq}.values())
     return _patch(keep, gone, items, used, marks,
-                  {"shots": len(items), "pictures": len(used), "lengths": lens, "flashes": K.flashes(lum, lens, fps)})
+                  {"shots": len(items), "pictures": len(used), "lengths": lens, "flashes": K.flashes(lum, lens, fps),
+                   "chosen": len(picked), "pool_added": len(pics) - len(picked),
+                   "lands_on": seq[-1][0].aid})
 
 
 # ----------------------------------------------------------------- contour
@@ -161,8 +185,17 @@ def contour(l1, work, ask, sense_=None, pool=None):
     cur = l1
     out_items, out_drop, out_assets, marks, log = {}, set(), {}, [], []
     rng = K.rng_of(l1, args)
-    stress = args.get("stress") or []
-    pics_all = K.pictures(l1, work, args, pool, sense_=sense_)
+    spans = [(K.span(l1, dict(s_), default_s=2.0, least=4), str(s_.get("energy") or "brisk")) for s_ in secs]
+    stress = [(int(q[0]), float(q[1])) for q in args.get("stress") or [] if isinstance(q, (list, tuple)) and len(q) >= 2]
+    stress += [(int(q), 1.0) for q in args.get("stress") or [] if isinstance(q, (int, float)) and not isinstance(q, bool)]
+    heard = "ask"
+    if not stress and spans:
+        # the cuts land on the voice's stress: read off the take's sound (else the words' timing) when the ask gave none
+        lo_, hi_ = min(a for (a, z), _ in spans), max(z for (a, z), _ in spans)
+        stress = K.voice_stress(l1, work, lo_, hi_)
+        heard = "voice" if stress else "none"
+    need = sum((z - a) // 4 if en == "strobe" else (z - a) // (2 * BRISK_F[0]) for (a, z), en in spans if en != "hold")
+    pics_all = K.pictures(l1, work, args, pool, sense_=sense_, need=need, length_s=STROBE_F[1] / fps + 0.05)
     turn = 0
     for s_ in secs:
         a, z = K.span(cur, dict(s_), default_s=2.0, least=4)
@@ -201,12 +234,12 @@ def contour(l1, work, ask, sense_=None, pool=None):
                 if i % 2 == 1 and pics and (take or energy == "strobe" or rng.random() < 0.5):
                     pic = pics[(turn + k_pic) % len(pics)]
                     k_pic += 1
-                    t0 = K.moments(pic, 3, n / fps + 0.05, rng)[k_pic % 3][0]
+                    src = K.window(pic, n, fps, rng, k_pic)
                     name, crop = _framing(pic, W, H, k_pic, rng) if not pic.video else ("wide", K.cover_on(pic, W, H))
                     it = dict(look, id=pid, k="shot", f=[pos, pos + n], pic=pic.aid,
                               crop=[K.r5(K.scale_crop(crop, 1.0 / (1.0 + 0.04 * j / max(n - 1, 1)))) for j in range(n)])
-                    if pic.video:
-                        it["src"] = [round(t0, 4), round(t0 + n / fps, 4)]
+                    if src:
+                        it["src"] = src
                     used.append(pic)
                 elif sh is not None:
                     it = sense.slice_shot(sh, pos, pos + n, pid)
@@ -235,7 +268,8 @@ def contour(l1, work, ask, sense_=None, pool=None):
     drop = [g for g in out_drop if g not in final_ids and g in {i["id"] for i in l1.get("items") or []}]
     if not items and not drop:
         return {"skip": "the contour changed nothing"}
-    return {"items": items, "drop": drop, "assets": out_assets, "events": marks, "log": {"sections": log}}
+    return {"items": items, "drop": drop, "assets": out_assets, "events": marks,
+            "log": {"sections": log, "stress": heard, "stress_peaks": len([q for q in stress if q[1] >= 0.5])}}
 
 
 def _merge(l1, items, gone):
@@ -617,13 +651,14 @@ ALIASES = {"list_burst": "burst", "strobe": "burst", "montage": "burst", "strobe
            "speed_ramp": "ramp", "freeze_frame": "freeze", "screen_shake": "shake", "jolt": "shake", "glimpse_cut": "glimpse"}
 
 DEVICES = {
-    "burst": {"plan": burst, "layer": "rhythm", "needs": ("pictures",), "fallback": ("contour", "snap"),
+    "burst": {"plan": burst, "layer": "rhythm", "needs": ("pictures",), "fallback": ("contour", "snap"), "span": True,
               "card": "burst at until pics[] frames land mono order. A list burst: 8-45 related pictures at 2-5 frames each, the last one held; for figures, enumerations, the hook"},
-    "contour": {"plan": contour, "layer": "rhythm", "needs": (), "fallback": ("snap",),
-                "card": "contour sections[{at energy:strobe|brisk|hold}] stress. The pace contour: strobe stretches of 2-8 frame shots against brisk ones and holds; lists and the hook strobe, the turn and payoff hold"},
+    "contour": {"plan": contour, "layer": "rhythm", "needs": (), "fallback": ("snap",), "span": True,
+                "words": ("sections[].at", "sections[].f", "sections[].until", "stress[]"),
+                "card": "contour sections[{at:[first last] energy:strobe|brisk|hold}] stress[]. The pace contour: strobe stretches of 2-8 frame shots against brisk ones and holds; lists and the hook strobe, the turn and payoff hold"},
     "glimpse": {"plan": glimpse, "layer": "surface", "needs": ("cut",), "fallback": ("whip",),
                 "card": "glimpse at frames lead. 1-2 frames of the incoming picture shown just before its cut: a promise, then the cut"},
-    "settle": {"plan": settle, "layer": "surface", "needs": ("picture",), "fallback": (),
+    "settle": {"plan": settle, "layer": "surface", "needs": ("picture",), "fallback": (), "span": True,
                "card": "settle at until dir:in|out size peak. A fast rigid push in (5-12%) or pull out (20%) whose speed peaks early and dies; almost every still and archive picture"},
     "snap": {"plan": snap, "layer": "surface", "needs": ("picture",), "fallback": ("settle",),
              "card": "snap at size hold back. A snap zoom: the framing jumps 1.2-1.5x tighter on the stressed word, lands past and settles; the hook, the drop"},
@@ -633,7 +668,7 @@ DEVICES = {
                "card": "streak at. One streaked frame either side of a join"},
     "shake": {"plan": shake, "layer": "look", "needs": (), "fallback": ("snap",),
               "card": "shake at frames amp. A 2-6 frame jolt of the whole picture on an impact word or a hit; rare"},
-    "ramp": {"plan": ramp, "layer": "surface", "needs": ("clip",), "fallback": ("freeze", "settle"),
+    "ramp": {"plan": ramp, "layer": "surface", "needs": ("clip",), "fallback": ("freeze", "settle"), "span": True,
              "card": "ramp at until low shape:dip|into. A speed ramp on a clip: real speed easing into slow motion on the moment and back; the payoff, an athletic or emotional peak"},
     "freeze": {"plan": freeze, "layer": "surface", "needs": ("clip",), "fallback": ("snap",),
                "card": "freeze at frames push. The picture stops on the moment while the camera keeps pushing, then runs again"},

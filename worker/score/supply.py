@@ -729,20 +729,6 @@ VIEW_CALL_S = 22.0         # sixteen frames read and up to six boxes written: 11
 HOOK_TOKENS, VIEW_TOKENS = 1200, 3000     # room to answer: at 900 the views call spent every token before its first word and returned nothing (13 Nov, five uploads of five)
 HOOK_SYSTEM = """You help a film editor open a short film of a person talking. You get what the film is about and its first words, each with its number. Name the one picture a viewer should see in the film's first three seconds, before or beside the speaker: the very thing the film is about, as its first words or its subject name it. A named person, team, company, place, product, animal, object or event that a photograph or a clip can show. Never a mood, a metaphor or a feeling, never the speaker, never a generic picture of the topic's field. When the thing is the speaker's own (their product, shop, vehicle, workplace), set "mine" true: only the upload can show it. When the first words and the subject name nothing a picture can show, answer {"hook":null}.
 Answer with one JSON object and nothing else: {"hook":{"w":"first-last word number the picture lands on, inside the first three seconds","want":"what the picture shows, with the full name of who or what it is","q":["a short stock search","a second, broader one"],"kind":"photo or video","mine":false}}."""
-HOOK_NEVER = "Never a mood, a metaphor or a feeling, never the speaker, never a generic picture of the topic's field."
-# Workflow films only (allow_association): the opening may be a picture of what the first words MEAN when they name
-# nothing a picture can show. A customer's film keeps HOOK_SYSTEM exactly; changing that default is EDIT-CORE's call.
-HOOK_ASSOCIATION = ("Never the speaker, never a generic picture of the topic's field. When the first words make an abstract claim, "
-                    "a verdict or a feeling and name nothing a picture can show, name instead the picture of what they mean (a "
-                    "cheetah at full speed for 'no plan B', falling dominoes for 'it all collapsed', an empty arena at night for a "
-                    "lowest moment) and set \"association\" true; it is a picture of the meaning, never presented as the event.")
-
-
-def hook_system(allow_association=False):
-    """The hook prompt: the customer's (literal pictures only) unless a workflow allows an association picture."""
-    return HOOK_SYSTEM.replace(HOOK_NEVER, HOOK_ASSOCIATION) if allow_association else HOOK_SYSTEM
-
-
 VIEW_SYSTEM = """You help a film editor cut a short film from one upload that has no words to follow. You see numbered frames from the upload with their times. Find up to six details that deserve a shot of their own, the way an editor cuts in an insert: the thing the clip is about seen closer (a label, hands at work, a face reacting, the flame, the tool, the plate, the screen), or a second subject the wide frame holds. Give the box around each detail as fractions of the frame, x0 y0 x1 y1 from the top left, tight on it but never cutting it, never through a head or through printed words. Only a detail that is plainly there, sharp, and still reads when enlarged up to 2 times. Take details from different moments and different parts of the frame, and leave out a frame that only repeats another. When the frames are already close on one thing and hold nothing else to cut to, answer {"own":[]}.
 Answer with one JSON object and nothing else: {"own":[{"c":frame number,"box":[x0,y0,x1,y1],"what":"at most eight plain words"}]}."""
 
@@ -756,7 +742,7 @@ def _first_words(work, until_s=7.0, most=24):
     return [(i, w) for i, w in enumerate(words[:most]) if float(w.get("t0") or 0.0) < until_s]
 
 
-def hook_wish(work, scout, wishes, per, deadline, allow_association=False):
+def hook_wish(work, scout, wishes, per, deadline):
     """(wish or None, usd): the picture a talking film opens on, when no wish of the Scout's lands inside its first
     3 s. One model call reads what the film is about and its first words; nothing here reads them. The wish joins
     the others and takes the same route: the libraries, a named search, the check."""
@@ -769,8 +755,8 @@ def hook_wish(work, scout, wishes, per, deadline, allow_association=False):
             return None, 0.0
     lines = ["The film is about: " + str((scout or {}).get("about") or "not known"),
              "First words: " + " ".join(f"{i}:{w.get('w')}" for i, w in first)]
-    r = call.stream(LOOK_MODEL, hook_system(allow_association), [{"type": "text", "text": "\n".join(lines)}], max_tokens=HOOK_TOKENS,
-                    effort="low", purpose="director_hook", deadline=deadline, thinking=False)
+    r = call.stream(LOOK_MODEL, HOOK_SYSTEM, [{"type": "text", "text": "\n".join(lines)}], max_tokens=HOOK_TOKENS, effort="low",
+                    purpose="director_hook", deadline=deadline, thinking=False)
     txt = r.text or ""
     try:
         o = json.JSONDecoder().raw_decode(txt, max(txt.find("{"), 0))[0].get("hook")
@@ -783,11 +769,8 @@ def hook_wish(work, scout, wishes, per, deadline, allow_association=False):
     if not a.isdigit() or int(a) > first[-1][0] or wish_second(work, ref) > HOOK_S + 1.0:
         ref = "0-1"
     q = [str(x)[:80] for x in (o.get("q") or []) if isinstance(x, str) and x.strip()][:2]
-    out = dict(w=ref if "-" in ref else f"{ref}-{ref}", at=None, want=str(o["want"])[:160], own=bool(o.get("mine")), mine=bool(o.get("mine")),
-               q=q, kind="video" if o.get("kind") == "video" else "photo", hook=True)
-    if allow_association and o.get("association") is True:
-        out["association"] = True
-    return out, float(r.usd or 0.0)
+    return dict(w=ref if "-" in ref else f"{ref}-{ref}", at=None, want=str(o["want"])[:160], own=bool(o.get("mine")), mine=bool(o.get("mine")),
+                q=q, kind="video" if o.get("kind") == "video" else "photo", hook=True), float(r.usd or 0.0)
 
 
 def _own_cuts(per):
@@ -882,7 +865,7 @@ def own_cells(work, rows, cw, ch):
     return out
 
 
-def run(work, scout, per, acquire, deadline, foot=None, allow_association=False):
+def run(work, scout, per, acquire, deadline, foot=None):
     """acquire(candidate) -> {"storage_key","w","h","dur","fps"} or None. Writes bin.json and the board.
     foot: the film's footage box (score.film.footage_start), when the footage switch opens this account: the clips
     the shelf already holds of the film's subjects join the Bin here, so the first film has them.
@@ -906,8 +889,7 @@ def run(work, scout, per, acquire, deadline, foot=None, allow_association=False)
     talk = words_n / max(float((per or {}).get("dur") or 0.0), 1.0) >= 1.0
     if talk:
         try:
-            hook, hook_usd = hook_wish(work, scout, wishes, per or {}, min(deadline, time.monotonic() + HOOK_CALL_S),
-                                       allow_association=allow_association)
+            hook, hook_usd = hook_wish(work, scout, wishes, per or {}, min(deadline, time.monotonic() + HOOK_CALL_S))
             usd += hook_usd
             if hook:
                 wishes = [hook] + list(wishes)

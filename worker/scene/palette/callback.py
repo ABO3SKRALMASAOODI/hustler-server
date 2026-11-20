@@ -1,12 +1,12 @@
 """callback: the opening comes back. At the payoff the film's first pictures return (a fast recap, in the order they
-were first seen, or a grid of them), and a loop sets the last frames on the picture the film opened on, so the end
-runs into the start.
+were first seen, or a grid of them), and a loop returns the last frames to the first picture the opening held (a
+bookend before the brand's end card; a seamless loop only when nothing follows the film).
 
 The opening is read off the scene itself (its first shots); which moment is the payoff is the caller's.
 
 ask {"dev": "callback", "at": [a, z], "from": [a0, z0] (the opening, default its first 4 s), "mode": "burst"|"grid",
      "frames": 4 (a recap picture's length)}
-ask {"dev": "loop", "frames": 15}
+ask {"dev": "loop", "frames": 15, "end_card": true}
 """
 from ..alien import sense
 from . import layout
@@ -78,14 +78,32 @@ def callback(l1, work, ask, sense_=None, pool=None):
             "log": {"returned": [p.aid for p, _, _ in seq[:-1]], "lands_on": seq[-1][0].aid}}
 
 
+HELD_F = 8                 # a shot this long or longer is a picture the viewer held, not a sliver of a strobe
+
+
+def held_opening(l1, a0=0, z0=None, least=HELD_F):
+    """The first picture of the opening a viewer held: the first shot inside [a0, z0) of ``least`` frames or more that
+    shows a picture (a strobe's slivers and plates are passed over), else the opening's longest shot."""
+    fps = float(l1.get("fps") or 30)
+    z0 = int(z0 if z0 is not None else 4 * fps)
+    cand = [s for s in K.shots(l1) if s["f"][0] < z0 and s["f"][1] > a0 and s.get("pic") != "plate"]
+    if not cand:
+        return None
+    held = [s for s in cand if s["f"][1] - s["f"][0] >= least]
+    return held[0] if held else max(cand, key=lambda s: s["f"][1] - s["f"][0])
+
+
 def loop(l1, work, ask, sense_=None, pool=None):
-    """The last frames set on the picture the film opened on, at the moment just before its first frame, so a viewer who
-    watches again goes on unbroken. ask: frames (default 15, never over the words: after the last caption word)."""
+    """The last frames return to the first picture the opening held, in the framing the viewer first saw it. Workflow
+    films are followed by the brand's end card (joined after the programme, never drawn here), so by default this is a
+    bookend: the held picture comes back on the moment it opened with and the end card follows it. With
+    ``end_card: false`` (a film with nothing after it) the frames are the ones just before the opening's own, so a replay
+    runs on unbroken. ask: frames (default 15, never over the words: after the last caption word), end_card."""
     W, H, fps = K.geometry(l1)
     args = K.args_of(ask)
     dur = int(l1["dur_f"])
-    first = K.shots(l1)[0] if K.shots(l1) else None
-    if first is None or first.get("pic") == "plate":
+    first = held_opening(l1)
+    if first is None:
         return {"skip": "the film opens on no picture"}
     words_end = max((w["f"][1] for w in l1.get("items") or [] if w.get("k") == "word" and w.get("role") == "cap"), default=0)
     n = int(args.get("frames", 15))
@@ -93,28 +111,39 @@ def loop(l1, work, ask, sense_=None, pool=None):
     n = min(n, room) if room >= 6 else min(n, 8)
     if n < 4 or dur - n <= first["f"][1]:
         return {"skip": "no room after the last word for a loop"}
-    pic = K.pic_of_asset(l1, work, first["pic"])
+    end_card = bool(args.get("end_card", l1.get("end_card", True)))
     c0 = K.crops(l1, work, first)[0]
     it = dict(id=f"{args.get('id', 'loop')}.end", k="shot", f=[dur - n, dur], pic=first["pic"], crop=[c0] * n)
     for k in ("look", "grade", "treat"):
         if first.get(k):
             it[k] = first[k]
+    held = False
     if first.get("src"):
         t0 = float(first["src"][0])
-        t_a = t0 - n / fps
-        it["src"] = [round(t_a, 5), round(t0, 5)] if t_a >= 0 else [round(t0, 5), round(t0, 5)]
-        if t_a < 0:                                   # nothing before the first frame: it is held and pulled to the first framing
-            it["crop"] = [K.r5(K.scale_crop(c0, 1.0 / (1.0 + 0.05 * (1 - j / max(n - 1, 1))))) for j in range(n)]
+        if end_card:
+            # the moment it opened with, at its own speed, pushing in a little so the end card lands on a move
+            t1 = min(t0 + n / fps, float(first["src"][1]) if float(first["src"][1]) > t0 else t0 + n / fps)
+            it["src"] = [round(t0, 5), round(t1, 5)]
+            it["crop"] = [K.r5(K.scale_crop(c0, 1.0 / (1.0 + 0.04 * j / max(n - 1, 1)))) for j in range(n)]
+            held = t1 - t0 < n / fps - 1e-3
+        else:
+            lo = 0.0 if K.is_take(first.get("pic")) else (K.placed_range(l1, first["pic"]) or [0.0])[0]
+            t_a = t0 - n / fps
+            held = t_a < lo
+            it["src"] = [round(t_a, 5), round(t0, 5)] if not held else [round(t0, 5), round(t0, 5)]
+            if held:                             # nothing verified before its first frame: held, pulled to its first framing
+                it["crop"] = [K.r5(K.scale_crop(c0, 1.0 / (1.0 + 0.05 * (1 - j / max(n - 1, 1))))) for j in range(n)]
     keep, gone, _ = K.carve(l1, dur - n, dur)
     return {"items": keep + [it], "drop": gone, "assets": {}, "events": [{"f": dur - n, "what": "loop", "kind": "cut", "strength": 0.4}],
-            "log": {"frames": n, "pic": first["pic"], "held": bool(first.get("src")) and float(first["src"][0]) - n / fps < 0, "pic_ok": pic is not None}}
+            "log": {"frames": n, "pic": first["pic"], "opening_shot": first["id"], "opening_f": list(first["f"]),
+                    "end_card_follows": end_card, "held": held}}
 
 
 ALIASES = {"bookend": "callback", "recap": "callback"}
 
 DEVICES = {
-    "callback": {"plan": callback, "layer": "rhythm", "needs": ("opening",), "fallback": ("burst",),
+    "callback": {"plan": callback, "layer": "rhythm", "needs": ("opening",), "fallback": ("burst",), "span": True, "words": ("from",),
                  "card": "callback at until from[a0 z0] mode:burst|grid frames. The opening's pictures return at the payoff, as a fast recap or a grid, landing on the first one"},
     "loop": {"plan": loop, "layer": "rhythm", "needs": ("opening",), "fallback": (),
-             "card": "loop frames. The last frames set on the opening picture just before its first frame, so the end runs into the start"},
+             "card": "loop frames end_card. The last frames return to the first picture the opening held, in its first framing: a bookend before the end card (a seamless loop only when nothing follows the film)"},
 }

@@ -141,7 +141,9 @@ def test_the_directors_pictures_come_first_whichever_field_carries_them(film):
     l1, work = film
     for field in ("pics", "pool"):
         pics = K.pictures(l1, work, {"dev": "burst", "f": [30, 60], field: ["p2", "p1"]})
-        assert [p.aid for p in pics[:2]] == ["p2", "p1"] and len(pics) > 2          # then the pool and the scene
+        assert [p.aid for p in pics] == ["p2", "p1"] and [p.chosen for p in pics] == [0, 1]     # nothing else when nothing more is needed
+        more = K.pictures(l1, work, {"dev": "burst", "f": [30, 60], field: ["p2", "p1"]}, need=8)
+        assert [p.aid for p in more[:2]] == ["p2", "p1"] and len(more) > 2                       # extended only to what the device lays
     near = K.pictures(dict(l1, pool=[dict(r, t=[9.0, 11.0]) if i == 3 else r for i, r in enumerate(l1["pool"])]), work, {"dev": "burst", "f": [290, 320]})
     assert near[0].path == l1["pool"][3]["path"]                                  # the pool found for these words first
 
@@ -385,3 +387,102 @@ def test_every_device_stands_on_the_film_and_keeps_its_contract(film):
     landed = [r for r in log if r["done"]]
     assert len(landed) >= len(asks) - 2, [(r["dev"], r.get("tried")) for r in log if not r["done"]]
     assert all(e.get("kind") for e in out["device_events"])
+
+
+# ------------------------------------------------------------------ the Director's pictures, kin before strangers (review 20 Nov)
+
+def _pool_film(film):
+    """The film with a pool of two subjects in two windows, the way wf1_coverage.device_pool writes it."""
+    l1, work = film
+    pool = []
+    for i, r in enumerate(l1["pool"]):
+        subj, win, t = ("Mark Cuban", 0, [0.0, 4.0]) if i < 3 else ("Hiring and sales interview", 1, [8.0, 11.0])
+        pool.append(dict(r, id=f"pl{i}", subject=subj, window=win, t=t))
+    return dict(l1, pool=pool), work
+
+
+def test_a_burst_of_the_directors_pictures_grows_from_their_own_moments_then_their_subject_and_lands_on_the_last(film):
+    l1, work = _pool_film(film)
+    # the Director chose two pool pictures of one subject; palette_asks writes them in the pool field, never "only"
+    ask = {"dev": "burst", "id": "who", "f": [200, 245], "pool": ["pl0", "pl2"]}
+    pics = K.pictures(l1, work, ask, need=12)
+    subj = [p.meta.get("subject") for p in pics]
+    assert [p.aid for p in pics[:2]] == ["pl0", "pl2"]
+    k = subj.index("Hiring and sales interview") if "Hiring and sales interview" in subj else len(subj)
+    assert all(s_ == "Mark Cuban" for s_ in subj[:k])               # the same subject before any neighbouring window's
+    out, patch = lay(l1, work, ask)
+    bs = [s for s in shots(out) if s["id"].startswith("who.b")]
+    assert out["assets"][bs[-1]["pic"]]["path"] == l1["pool"][2]["path"]           # it lands on the last chosen picture
+    assert patch["log"]["lands_on"] == bs[-1]["pic"] and patch["log"]["flashes"] <= K.FLASH_PER_S
+    kin = {r["path"] for r in l1["pool"][:3]}
+    ours = sum(1 for s in bs if out["assets"][s["pic"]]["path"] in kin)
+    assert ours >= len(bs) - ours                                                 # the Director's subject carries the burst
+    alone = K.pictures(l1, work, dict(ask, f=[200, 212]), need=4)
+    assert {p.meta.get("subject") for p in alone} == {"Mark Cuban"}               # a short burst never reaches a stranger
+
+
+@needs_ffmpeg
+def test_a_placed_clip_is_shown_only_inside_its_checked_slice(film):
+    l1, work = film
+    pic = K.pic_of_asset(l1, work, "v1")
+    assert pic.rng == [0.5, 2.5] and pic.span() == [0.5, 2.5]                     # the placed shot's src, not the whole 4 s file
+    import random
+    for t0, t1 in K.moments(pic, 6, 0.15, random.Random(3)):
+        assert 0.5 <= t0 and t1 <= 2.5
+    out, _ = lay(l1, work, {"dev": "contour", "id": "c", "sections": [{"f": [120, 180], "energy": "strobe"}], "pics": ["v1"]})
+    for s in shots(out, 120, 180):
+        if s["pic"] == "v1":
+            assert 0.5 - 1e-6 <= s["src"][0] and s["src"][1] <= 2.5 + 1e-6, s["src"]
+    w = K.window(pic, 30, FPS, random.Random(1))
+    assert abs((w[1] - w[0]) - 1.0) < 1e-3 and 0.5 <= w[0] and w[1] <= 2.5          # real speed inside the slice
+    w = K.window(pic, 90, FPS, random.Random(1))
+    assert w == [0.5, 2.5]                                                        # a 2 s slice over 3 s: 0.67x, never slower than half
+
+
+@needs_ffmpeg
+def test_pip_dissolve_and_shrink_keep_the_incoming_clip_at_real_speed(film):
+    l1, work = film
+    # a placed clip's checked slice is its src: nothing before it was checked, so the window holds its first frame
+    for dev, n in (("pip", 24), ("dissolve", 10), ("shrink", 14)):
+        out, patch = lay(l1, work, {"dev": dev, "id": dev, "at": 112, "frames": n})
+        assert patch["log"]["held"] == n, (dev, patch["log"])
+        for it in (i for i in out["items"] if i.get("pic") == "v1" and i["f"][0] < 120):
+            assert it["src"][1] - it["src"][0] < 1e-6 and it["src"][0] >= 0.5 - 1e-6, (dev, it)
+    # a clip whose checked slice is the whole cut (a pool clip) starting 0.1 s in: 3 frames of pre-roll run at real speed
+    l1 = dict(l1, assets=dict(l1["assets"], v1=dict(l1["assets"]["v1"], rng=[0.0, 4.0])),
+              items=[dict(i, src=[0.1, 2.1]) if i["id"] == "s1" else i for i in l1["items"]])
+    for dev, n in (("pip", 24), ("dissolve", 10), ("shrink", 14)):
+        out, patch = lay(l1, work, {"dev": dev, "id": dev, "at": 112, "frames": n})
+        moving = [i for i in out["items"] if i.get("pic") == "v1" and i["f"][0] < 120 and i.get("src")]
+        assert moving, dev
+        for it in moving:
+            frames = it["f"][1] - it["f"][0]
+            rate = (it["src"][1] - it["src"][0]) * FPS / frames
+            assert rate < 1e-6 or abs(rate - 1.0) < 0.02, (dev, it["id"], it["src"], it["f"])     # held, or real speed
+            assert it["src"][0] >= 0.0 and it["src"][1] <= 2.1 + 1e-6, (dev, it["src"])             # never past its slice
+        assert patch["log"]["held"] == n - 3, (dev, patch["log"])
+
+
+@needs_ffmpeg
+def test_the_contour_cuts_on_the_voices_stress_when_the_ask_gives_none(film, monkeypatch):
+    l1, work = film
+    from scene import pace
+    peaks = [(f, 0.9) for f in (40, 61, 77, 95)]
+    monkeypatch.setattr(pace, "stress", lambda path, fps=30.0, t0=0.0, dur=None: [(f - int(round(t0 * fps)), s) for f, s in peaks])
+    got = K.voice_stress(l1, work, 30, 110)
+    assert [f for f, _ in got] == [40, 61, 77, 95]
+    out, patch = lay(l1, work, {"dev": "contour", "id": "c", "sections": [{"f": [30, 110], "energy": "brisk"}]})
+    assert patch["log"]["stress"] == "voice"
+    cuts = {s["f"][0] for s in shots(out, 30, 110)}
+    assert len(cuts & {61, 77, 95}) >= 2                                          # the section's cuts land on the peaks
+
+
+def test_the_loop_returns_to_the_first_held_picture_not_a_sliver(film):
+    l1, work = film
+    items = [dict(i, f=[3, 120]) if i["id"] == "t1" else i for i in l1["items"]]
+    items.insert(0, {"id": "sliver", "k": "shot", "f": [0, 3], "pic": "p2"})
+    l1 = dict(l1, items=items)
+    out, patch = lay(l1, work, {"dev": "loop", "id": "lp", "frames": 12})
+    assert patch["log"]["opening_shot"] == "t1" and patch["log"]["end_card_follows"] is True
+    end = [i for i in out["items"] if i["id"] == "lp.end"][0]
+    assert end["pic"] == "t1" or end["pic"] == next(i["pic"] for i in items if i["id"] == "t1")

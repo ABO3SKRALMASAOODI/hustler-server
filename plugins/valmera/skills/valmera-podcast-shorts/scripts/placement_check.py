@@ -192,6 +192,67 @@ def repair_text(row, decision, ffmpeg, work):
     return new
 
 
+def _overlay():
+    """footage.overlay from the worker, its folder put at the END of the path: this runs inside a workflow whose own
+    modules (llm, film) share names with the worker's, and they must keep resolving to the workflow's."""
+    if "footage.overlay" in sys.modules:
+        return sys.modules["footage.overlay"]
+    here = os.path.dirname(os.path.realpath(__file__))
+    shell = os.path.join(os.path.dirname(os.path.dirname(here)), "_shell")
+    if shell not in sys.path:
+        sys.path.append(shell)
+    import brand
+    root = brand.worker_dir()
+    if root and root not in sys.path:
+        sys.path.append(root)
+    from footage import overlay
+    return overlay
+
+
+def clear_seated_text(rec, ffmpeg, work):
+    """A supply clip no check has looked at (one the film did not place, offered to the palette's devices) loses another
+    editor's seated text the same way a placed one does (repair_text), on the text lines measured on the clip alone:
+    subtitles and labels that hold their seat across the cut (footage.overlay; nothing reads what they say). Returns
+    (record, how): the cleared copy, the clip as it was when it carries no such text ("clean"), or the clip with its
+    text recorded ("text_kept") when no band of the picture can shed it: it is offered last, never lost."""
+    overlay = _overlay()
+    path = rec.get("path")
+    try:
+        m = overlay.measure(path)
+    except Exception:  # noqa: BLE001 - an unreadable clip is offered as it is, last
+        return dict(rec, text_kept="unread"), "text_kept"
+    boxes = [s_["box"] for s_ in m.get("seated") or [] if s_.get("kind") in ("subtitles", "label")]
+    if not boxes:
+        return rec, "clean"
+    w, h = rec.get("w"), rec.get("h")
+    if not (w and h):
+        try:
+            import cv2
+            cap = cv2.VideoCapture(path)
+            w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+        except Exception:  # noqa: BLE001
+            w, h = 0, 0
+    x = rec.get("x") if rec.get("x") is not None else 0.5
+    rect = overlay.clear_rect(w, h, [[max(b[0] - 0.01, 0.0), max(b[1] - 0.01, 0.0), min(b[2] + 0.01, 1.0), min(b[3] + 0.01, 1.0)]
+                                     for b in boxes], x) if w and h else None
+    if not rect:
+        return dict(rec, text_kept=", ".join(sorted({s_["kind"] for s_ in m["seated"] if s_.get("kind") in ("subtitles", "label")}))), "text_kept"
+    os.makedirs(os.path.join(work, "text-cleared"), exist_ok=True)
+    stem = hashlib.sha256(json.dumps([path, rect]).encode()).hexdigest()[:16]
+    dst = os.path.join(work, "text-cleared", f"{stem}.mp4")
+    if not os.path.exists(dst):
+        try:
+            overlay.crop_clip(path, dst + ".part.mp4", rect, ffmpeg)
+            os.replace(dst + ".part.mp4", dst)
+        except Exception:  # noqa: BLE001 - the clip is offered with its text recorded, last
+            return dict(rec, text_kept="crop failed"), "text_kept"
+    size = overlay.crop_size(w, h, rect)
+    return dict(rec, path=dst, w=size[0], h=size[1], x=overlay.remap(rect, x),
+                faces=[f for f in (overlay.remap(rect, f) for f in rec.get("faces") or []) if f],
+                text_cleared=dict(from_path=path, rect=rect, boxes=boxes, by="signal")), "cleared"
+
+
 def accepted(answer, ids):
     """Missing, duplicated, or malformed decisions are never approvals. They are marked `missing`: a model that did not
     answer is asked again and its silence is never kept as a verdict (a cached 'no' for a dropped answer was a picture

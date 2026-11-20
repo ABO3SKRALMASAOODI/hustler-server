@@ -55,7 +55,7 @@ def plan(l1, work, ask, sense_=None, pool=None, by="any"):
     args = K.args_of(ask)
     a, z = K.span(l1, args, default_s=1.6, least=6)
     cuts = sorted(int(f) for f in (args.get("cuts") or []) if a < int(f) < z)
-    pics = K.pictures(l1, work, args, pool, sense_=sense_)
+    pics = K.pictures(l1, work, args, pool, sense_=sense_, least=max(len(cuts) + 1, 3))
     if not cuts:
         n = int(args.get("n") or min(max(len(pics), 2), max((z - a) // 6, 2)))
         cuts = [a + int(round((z - a) * i / n)) for i in range(1, n)]
@@ -95,9 +95,9 @@ def plan(l1, work, ask, sense_=None, pool=None, by="any"):
                 c = crop
             crops.append(K.r5(c))
         it = dict(look, id=f"{args.get('id', 'match')}.m{i}", k="shot", f=[s, e], pic=pic.aid, crop=crops)
-        if pic.video:
-            t0 = K.moments(pic, 1, m / fps + 0.05, rng)[0][0]
-            it["src"] = [round(t0, 4), round(t0 + m / fps, 4)]
+        src = K.window(pic, m, fps, rng, i)
+        if src:
+            it["src"] = src
         if mono:
             it["treat"] = {"mode": "mono"}
         items.append(it)
@@ -124,10 +124,10 @@ ALIASES = {"match_cut": "match", "eye_match": "rhyme_eyes", "eyes": "rhyme_eyes"
            "position_match": "match_pos", "shape_match": "match_pos"}
 
 DEVICES = {
-    "rhyme_eyes": {"plan": rhyme_eyes, "layer": "rhythm", "needs": ("pictures", "faces"), "fallback": ("match_pos",),
+    "rhyme_eyes": {"plan": rhyme_eyes, "layer": "rhythm", "needs": ("pictures", "faces"), "fallback": ("match_pos",), "span": True, "words": ("cuts[]",),
                    "card": "rhyme_eyes at until pics[] cuts[]|n seat face_h grow. A chain of faces cut on the eyes: each face's eyes on one seat, one height, growing through every cut"},
-    "match_pos": {"plan": match_pos, "layer": "rhythm", "needs": ("pictures",), "fallback": ("burst",),
+    "match_pos": {"plan": match_pos, "layer": "rhythm", "needs": ("pictures",), "fallback": ("burst",), "span": True, "words": ("cuts[]",),
                   "card": "match_pos at until pics[] cuts[]|n seat grow. A position-match chain: every picture's busiest region on one seat, so the eye stays put while the world changes"},
-    "match": {"plan": plan, "layer": "rhythm", "needs": ("pictures",), "fallback": ("burst",),
+    "match": {"plan": plan, "layer": "rhythm", "needs": ("pictures",), "fallback": ("burst",), "span": True, "words": ("cuts[]",),
               "card": "match at until pics[] cuts[]|n seat face_h grow mono. A match-cut chain: faces registered on the eyes (or pictures on their busiest region) on one seat, growing through every cut; 'again', sameness, the turn"},
 }

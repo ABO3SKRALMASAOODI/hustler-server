@@ -570,14 +570,36 @@ def require_coverage(ins, coverage, duration, fps=30, final=False):
     return report
 
 
-def device_pool(pack, report=None, fps=30, lead=3):
+def device_pool(pack, report=None, fps=30, lead=3, work=None, ffmpeg='ffmpeg', placed=()):
     """Every picture the supply holds for this short, as the palette's pool (worker/scene/palette/picks): the clips and
     photographs research found and the checks did not turn down, each with what the supply measured of it (size,
     length, faces, the subject's place across the frame) and the programme seconds of the window it was found for.
     The devices draw from it (a burst, a grid, a collage, panels): a moment is never left to the few pictures the
     windows placed (20 Nov: m02 placed 22 of 65 pictures and 43 sat unused). A picture the check cut clear of another
-    editor's text is offered as its cleared copy. report: the build's placement report (rejected paths, cleared text)."""
+    editor's text is offered as its cleared copy. report: the build's placement report (rejected paths, cleared text).
+    work: when given, a clip the film did not place (``placed``: the scene's asset paths) has its seated text measured
+    and cut away first (placement_check.clear_seated_text), measured once and kept in work/pool_text.json; a clip whose
+    text no band can shed rides as ``text_kept`` and the devices offer it last."""
     report = report or {}
+    placed = set(placed or ())
+    memo_path = os.path.join(work, 'pool_text.json') if work else None
+    try:
+        memo = json.load(open(memo_path)) if memo_path and os.path.exists(memo_path) else {}
+    except (OSError, ValueError):
+        memo = {}
+
+    def unseated(rec):
+        """The record with another editor's seated text cut away (or recorded), for a clip no check looked at."""
+        p = rec.get('path')
+        key = f"{p}|{os.path.getsize(p) if p and os.path.isfile(p) else 0}"
+        if key in memo:
+            got = memo[key]
+            return dict(rec, **got) if got.get('path') is None or os.path.isfile(got['path']) else rec
+        import placement_check
+        new, how = placement_check.clear_seated_text(rec, ffmpeg, work)
+        got = {k: new[k] for k in ('path', 'w', 'h', 'x', 'faces', 'text_kept', 'text_cleared') if k in new and new.get(k) != rec.get(k)}
+        memo[key] = got
+        return dict(rec, **got)
     rejected = set(report.get('rejected_paths') or [])
     cleared = {r.get('from_path'): r.get('path') for r in report.get('text_cleared') or [] if r.get('from_path') and r.get('path')}
     windows = (pack.get('coverage') or {}).get('windows') or []
@@ -594,16 +616,24 @@ def device_pool(pack, report=None, fps=30, lead=3):
         if not path or path in seen or rec.get('path') in rejected or path in rejected or rec.get('dull') or not os.path.isfile(str(path)):
             return
         seen.add(path)
+        orig = rec.get('path')
+        if work and kind == 'clip' and path == orig and orig not in placed:
+            rec = unseated(rec)
+            path = rec['path']
         row = dict(id='pl' + hashlib.sha256(path.encode()).hexdigest()[:8], path=path, kind=kind, subject=subject,
                    shows=str(rec.get('shows') or rec.get('title') or '')[:120], window=window, t=span(window))
-        if path == rec.get('path'):
+        if path != orig:
+            row['from_path'] = orig                     # the cleared copy answers for its original
+        if path == orig or rec.get('text_cleared'):
             row.update({k: rec[k] for k in ('w', 'h') if rec.get(k)})
         if kind == 'clip' and rec.get('seconds'):
             row['seconds'] = float(rec['seconds'])
-        if rec.get('faces') and path == rec.get('path'):
+        if rec.get('faces') and (path == orig or rec.get('text_cleared')):
             row['faces'] = rec['faces']
         if isinstance(rec.get('x'), (int, float)):
             row['x'] = float(rec['x'])
+        if rec.get('text_kept'):
+            row['text_kept'] = str(rec['text_kept'])[:80]
         out.append(row)
     for ln in pack.get('footage') or []:
         i = ln.get('i')
@@ -613,6 +643,12 @@ def device_pool(pack, report=None, fps=30, lead=3):
         wins = [k for k, w in enumerate(windows) if w.get('name') == name or name in (w.get('subjects') or [])]
         for r in recs:
             add(r, 'photo', wins[0] if wins else None, name)
+    if memo_path and memo:
+        try:
+            json.dump(memo, open(memo_path + '.part', 'w'))
+            os.replace(memo_path + '.part', memo_path)
+        except OSError:
+            pass
     return out
 
 

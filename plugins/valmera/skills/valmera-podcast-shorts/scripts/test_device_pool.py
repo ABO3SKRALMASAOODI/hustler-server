@@ -1,6 +1,8 @@
 """The supply that never leaves a moment bare (creativity lane B, 20 Nov 2026): every picture the supply holds rides the
-scene as the palette's pool, the chooser keeps a picture in every window that has candidates, and a picture of what
-the words mean is a workflow's own choice."""
+scene as the palette's pool (a clip the film did not place loses another editor's seated text first), a contradicted
+first candidate gives its window the next one, and a picture of what the words mean is a workflow's own choice. (The
+per-window chooser that ranks association, type-only beats and take treatments as alternatives is not built yet.)"""
+import json
 import os
 import sys
 
@@ -45,7 +47,7 @@ def test_every_supply_picture_reaches_the_pool_with_what_was_measured_of_it(tmp_
     assert len({r["id"] for r in pool}) == len(pool)
 
 
-def test_the_chooser_keeps_a_picture_in_every_window_that_has_candidates(tmp_path):
+def test_a_contradicted_first_candidate_gives_its_window_the_next_one(tmp_path):
     f = _files(tmp_path, [f"w{i}c{k}.jpg" for i in range(3) for k in range(3)])
     windows = [dict(first=i * 4, last=i * 4 + 3, name=f"S{i}", t0=i * 3.0, t1=i * 3.0 + 2.5, say=f"words {i}", must_show="x") for i in range(3)]
     pictures = {f"S{i}": [dict(path=f[f"w{i}c{k}.jpg"], w=800, h=800) for k in range(3)] for i in range(3)}
@@ -77,3 +79,58 @@ def test_the_coverage_director_may_plan_a_picture_of_what_the_words_mean():
     import inspect
     src = inspect.getsource(cov.plan)
     assert '"association": true' in src and "never in place of a named subject's own picture" in src
+
+
+FF = os.environ.get("FFMPEG_BIN") or "/Users/masaoodi/Documents/Valmera/.valmera/week-1106/gauntlet/tools/ff/ffmpeg"
+
+
+def _label_clip(path):
+    """A moving picture with another channel's lower third seated on it for the whole cut."""
+    import subprocess
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFont
+    W, H = 1920, 1080
+    p = subprocess.Popen([FF, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", "30", "-i", "-",
+                          "-c:v", "libx264", "-pix_fmt", "yuv420p", path], stdin=subprocess.PIPE)
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 90)
+    except OSError:
+        font = ImageFont.load_default()
+    base = (np.random.default_rng(1).random((H // 24, W // 24, 3)) * 255).astype(np.uint8)
+    for i in range(45):
+        im = Image.fromarray(np.roll(np.kron(base, np.ones((24, 24, 1), np.uint8)), i * 18, axis=1))
+        d = ImageDraw.Draw(im)
+        d.rectangle([90, 840, 1260, 990], fill=(10, 10, 10))
+        d.text((120, 855), "TALKS ABOUT TANK", font=font, fill=(255, 255, 255))
+        p.stdin.write(np.asarray(im).tobytes())
+    p.stdin.close()
+    p.wait()
+    return path
+
+
+def test_an_unplaced_clip_loses_another_editors_seated_text_before_a_device_uses_it(tmp_path):
+    import pytest
+    if not os.path.exists(FF):
+        pytest.skip("no ffmpeg")
+    clip = _label_clip(str(tmp_path / "tank.mp4"))
+    pack = dict(coverage=dict(windows=[dict(first=0, last=3, name="Shark Tank", t0=0.0, t1=2.0)]),
+                footage=[dict(i=0, clips=[dict(path=clip, seconds=1.5, w=1920, h=1080, subject="Shark Tank")])], pictures={})
+    work = tmp_path / "supply"
+    work.mkdir()
+    pool = cov.device_pool(pack, {}, work=str(work), ffmpeg=FF, placed=set())
+    r = pool[0]
+    assert r["path"] != clip and r["from_path"] == clip and "text-cleared" in r["path"] and os.path.isfile(r["path"])
+    assert r["h"] < 1080 * 0.85 and not r.get("text_kept")                  # cut down to the band above the lower third
+    assert json.load(open(work / "pool_text.json"))                         # measured once
+    again = cov.device_pool(pack, {}, work=str(work), ffmpeg=FF, placed=set())
+    assert again[0]["path"] == r["path"]
+    placed = cov.device_pool(pack, {}, work=str(work), ffmpeg=FF, placed={clip})
+    assert placed[0]["path"] == clip                                        # a placed clip was checked by the model already
+
+
+def test_a_clip_whose_text_cannot_be_cut_away_is_offered_last_not_lost(tmp_path, monkeypatch):
+    f = _files(tmp_path, ["a.mp4"])
+    monkeypatch.setattr(pc, "clear_seated_text", lambda rec, ffmpeg, work: (dict(rec, text_kept="label"), "text_kept"))
+    pack = dict(coverage=dict(windows=[]), footage=[dict(i=None, clips=[dict(path=f["a.mp4"], seconds=1.5)])], pictures={})
+    pool = cov.device_pool(pack, {}, work=str(tmp_path), placed=set())
+    assert len(pool) == 1 and pool[0]["text_kept"] == "label"

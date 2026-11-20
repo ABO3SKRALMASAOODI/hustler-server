@@ -1239,7 +1239,8 @@ def build(script, sup, style_id, direction=None):
     notes, asks = [], []
     if dr:
         DR = _director()
-        by_id = {pid: keys.get(path) for pid, path in (dr.get("pictures") or {}).items()}
+        # a picture the film placed is its scene asset; one it did not is its path, which the palette reads from the pool
+        by_id = {pid: keys.get(path) or path for pid, path in (dr.get("pictures") or {}).items()}
         asks, notes = DR.palette_asks(dr, word_frame, seg_span, by_id.get, f_end)
         if asks:
             l1["devices"] = asks
