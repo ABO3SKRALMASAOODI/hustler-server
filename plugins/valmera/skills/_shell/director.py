@@ -39,7 +39,7 @@ ROLES = ("hook", "name", "figure", "list", "turn", "past", "quote", "contrast", 
 ENERGIES = ("strobe", "brisk", "hold")
 LAYOUTS = ("bleed", "window", "prints", "collage", "grid", "split", "type")
 SURFACES = ("colour", "mono", "gate", "crt", "bloom", "thermal", "threshold", "halftone", "xray", "blueprint", "night_vision",
-            "posterise", "solarise", "line", "neg", "rew", "paper", "xerox", "led", "projector")
+            "posterise", "solarise", "line", "neg", "rew", "paper", "xerox", "led", "projector", "vhs", "thermal_hud")
 # seconds one framing may hold, by a section's energy (scene.pace's band): strobe down to two frames, hold up to about 4 s
 BAND_OF = {"strobe": (0.067, 0.6), "brisk": (0.5, 1.6), "hold": (1.4, 4.0)}
 
@@ -70,7 +70,8 @@ SYSTEM = ("You are the Director of a vertical short film. You choose, moment by 
           "\"sections\": [{\"from\": first word number, \"to\": last word number (runs of words in order, covering the film "
           "from word 0 to the last word, no gaps; a section is often a few seconds: surfaces switch, colour is the base they "
           "cut away from), \"surface\": "
-          "colour|mono|gate|crt|bloom|thermal|threshold|halftone|xray|blueprint|night_vision|posterise|solarise|line|neg, "
+          "colour|mono|gate|crt|bloom|thermal|threshold|halftone|xray|blueprint|night_vision|posterise|solarise|line|neg|"
+          "rew|vhs|projector|led|xerox|paper|thermal_hud, "
           "\"layout\": bleed|window|prints|collage|grid|split|type, \"energy\": strobe|brisk|hold}], "
           "\"asks\": [{\"dev\": a device name from the palette, \"beat\": index into beats or null, \"at\": {\"w\": word "
           "number, \"word\": the word}, \"until\": {\"w\": word number, \"word\": the word} (spans only), \"args\": {the "
@@ -126,7 +127,11 @@ def palette_menu():
     engine cannot draw. Each card carries its fields' units and drawable ranges."""
     pal = palette_module()
     if pal is None:
-        return "(palette menu unavailable: the engine could not be imported)", []
+        try:            # a worker that has not shipped the palette yet: the alien bank it has (scene.alien) is the menu
+            from scene import alien
+            return alien.menu(), sorted(alien.DEVICES)
+        except Exception:      # noqa: BLE001
+            return "(palette menu unavailable: the engine could not be imported)", []
     return pal.menu(), sorted(pal.DEVICES)
 
 
@@ -748,7 +753,8 @@ def film_pictures(l1, placed, out_dir, ffmpeg="ffmpeg", fps=30.0, most=36):
 
 # --------------------------------------------------------------------- to the palette
 
-SPAN_DEVICES = ("finish", "neg_hold", "neg_split", "neg_world", "variant", "spotlight", "word_blend", "tint", "lamp", "diecut")
+SPAN_DEVICES = ("finish", "neg_hold", "neg_split", "neg_world", "variant", "spotlight", "word_blend", "tint", "lamp", "diecut",
+                "keep_hue", "colour_bloom", "tear", "keep_colour", "parallax", "proof_object")
 WORD_FIELDS = ("marks[].f", "picks[].f", "cuts[]")      # time fields every card may carry; a device declares more (palette "words")
 
 
@@ -985,7 +991,9 @@ def hold_take(ins, spans, min_f=8, fps=30.0):
     return out, cleared
 
 
-STRENGTH = {"white": 0.9, "neg": 0.8, "black": 0.6, "neg_hold": 0.7, "neg_world": 0.7, "rhyme": 0.7, "answer": 0.7, "lamp": 0.6,
+STRENGTH = {"rgb_split": 0.7, "slice": 0.8, "smear": 0.8, "glitch": 1.0, "tear": 0.6, "filmburn": 0.9, "bg_swap": 0.8,
+            "silhouette": 0.9, "poster": 0.8, "sticker": 0.7, "clones": 0.7, "parallax": 0.5, "proof_object": 0.6,
+            "white": 0.9, "neg": 0.8, "black": 0.6, "neg_hold": 0.7, "neg_world": 0.7, "rhyme": 0.7, "answer": 0.7, "lamp": 0.6,
             "diecut": 0.6, "tint": 0.5, "variant": 0.5, "finish": 0.4, "arc": 0.3, "spotlight": 0.3, "word_blend": 0.4,
             "blur_in": 0.25, "neg_split": 0.5}
 

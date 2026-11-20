@@ -116,6 +116,14 @@ beside it (`*.devices.<sha>.json`) and `supply/devices_log.json` says what lande
 runs its device's fallback chain). Every render path of all four workflows calls it. `chain.measure_devices` records
 what the drawn film did by signal (`supply/devices_measure.json`, carried into film.json), never a veto.
 
+`chain.hear_devices(ctx, l1, beats, replan)`: the sound design hears the Director's devices. Stories (`wf3.score`), podcast
+shorts (`wf1_short.score`) and marketing proof reels (`wf3.with_director`) lay the scene's asks at score time, copy the
+palette's landings (`device_events`: frame, kind, strength) onto the scene and its beats, and plan the sound again on them
+with the film's own turn and words (`film.replan_sound`; `worker/score/sound.py` reads `device_events`: a tear sounds as a
+glitch, a world swapped behind the speaker as a landing, a leak or a halo not at all, and a landing never widens the
+film's allowance). No device makes a sound itself. `chain.model_env()` names this Mac's signal models
+(`VALMERA_MODELS`, `VALMERA_TORCH_PY` for the depth child) to the palette; the worker reads them from its environment only.
+
 **Every film gets music** (owner, 13 Nov 2026; `chain.music_version`, after the render, on a copy of the
 engine's film). `worker/music_film.py` reads the story's turn and payoff from the film's own lines (a model;
 a workflow may name the landing as `score.turn_s`), chooses a track the way the references do, first from the

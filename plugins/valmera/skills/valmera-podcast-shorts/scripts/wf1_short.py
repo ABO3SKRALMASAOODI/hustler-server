@@ -1099,6 +1099,22 @@ def score(ctx, script):
     else:
         knobs["coverage_final"] = True
         l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
+    # every picture the supply holds rides the scene as the palette's pool: the devices the director asks for (a burst,
+    # a grid, a collage, panels) draw from all of it, never only the pictures the windows placed; set before the
+    # devices are heard, so the sound hears the same landings the render draws
+    # (a clip no shot or card of the film shows has another editor's seated text cut away first, by signal: the builder
+    # registers every supply clip as an asset, so "placed" is what the items show)
+    l1["pool"] = wf1_coverage.device_pool(pack, beats.get("placement_check"), work=ctx.supply, ffmpeg=pack.get("ffmpeg") or "ffmpeg",
+                                          placed={(l1.get("assets") or {}).get(it.get("pic"), {}).get("path") for it in l1["items"]
+                                                  if it.get("k") in ("shot", "card") and it.get("pic")} - {None})
+    if l1.get("devices") or l1.get("alien"):
+        # the sound design hears the Director's devices: laid now on the scene the render draws (one base picture on
+        # every frame first), their landings planned again with the take's own turn and words, before the taste check
+        # counts what lands with every sound
+        healed = wf1_film.heal_base(l1)
+        if healed:
+            beats["base_healed"] = healed
+        beats["devices_heard"] = chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))
     taste = F.taste_check(l1, beats)
     dropped = 0
     if not taste["ok"]:
@@ -1106,14 +1122,7 @@ def score(ctx, script):
         taste = dict(F.taste_check(l1, beats), repaired=dropped)
     healed = wf1_film.heal_base(l1)                          # one base picture on every frame, the renderer's rule
     if healed:
-        beats["base_healed"] = healed
-    # every picture the supply holds rides the scene as the palette's pool: the devices the director asks for (a burst,
-    # a grid, a collage, panels) draw from all of it, never only the pictures the windows placed
-    # (a clip no shot or card of the film shows has another editor's seated text cut away first, by signal: the builder
-    # registers every supply clip as an asset, so "placed" is what the items show)
-    l1["pool"] = wf1_coverage.device_pool(pack, beats.get("placement_check"), work=ctx.supply, ffmpeg=pack.get("ffmpeg") or "ffmpeg",
-                                          placed={(l1.get("assets") or {}).get(it.get("pic"), {}).get("path") for it in l1["items"]
-                                                  if it.get("k") in ("shot", "card") and it.get("pic")} - {None})
+        beats["base_healed"] = (beats.get("base_healed") or []) + healed if isinstance(healed, list) else healed
     out = os.path.join(ctx.supply, "l1.json")
     json.dump(l1, open(out, "w"), ensure_ascii=False)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")       # the same scene with the take's sound as its spine: what the music is cut to

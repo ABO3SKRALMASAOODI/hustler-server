@@ -23,6 +23,8 @@ ATLAS_PY = f"{VV}/week-1106/atlas/venv/bin/python"        # mlx_whisper
 CREDIT = f"{VV}/claude_trial_env.sh"                      # the credited Claude key, this process only
 SOUNDS = f"{VV}/../worktrees/ops-loop-main/worker/sound_library/manifest.json"
 NOTES_C = f"{VV}/week-1112/notes/C.md"
+MODELS_DIR = f"{VV}/models"                               # the palette's signal models (RVM, YuNet, Depth Anything V2), this Mac only
+TORCH_PY = f"{VV}/venv-narrate/bin/python"                # a Python with torch, for the palette's depth child
 
 
 def engine_kind():
@@ -450,6 +452,16 @@ def sound(ctx, l1_path):
     return out
 
 
+def model_env():
+    """The palette's signal models on this Mac, for the worker, which reads their place from its environment only
+    (VALMERA_MODELS, VALMERA_TORCH_PY): an explicit setting wins. A shell fragment of assignments."""
+    env = {"VALMERA_MODELS": os.environ.get("VALMERA_MODELS") or MODELS_DIR}
+    torch_py = os.environ.get("VALMERA_TORCH_PY") or (TORCH_PY if os.path.exists(TORCH_PY) else "")
+    if torch_py:
+        env["VALMERA_TORCH_PY"] = torch_py
+    return " ".join(f"{k}='{v}'" for k, v in env.items())
+
+
 def lay_devices(ctx, l1_path):
     """The devices a scene asks for are laid out before the engine draws it (worker/scene/palette: the Director's
     per-moment asks under ``devices``, and the alien bank's asks under ``alien``). Every render path of every workflow
@@ -482,7 +494,7 @@ def lay_devices(ctx, l1_path):
             # the Director's asks for the bank's own devices are handed to it, the rest wait for the palette's release
             src, mod = alien_only(doc, l1_path), "scene.alien.run"
         try:
-            sh(ctx, ["zsh", "-c", f"cd '{wk}' && PYTHONPATH=..:{SLICE}/pylib FFMPEG_BIN='{brand.FF}' '{PY}' -m {mod} apply "
+            sh(ctx, ["zsh", "-c", f"cd '{wk}' && {model_env()} PYTHONPATH=..:{SLICE}/pylib FFMPEG_BIN='{brand.FF}' '{PY}' -m {mod} apply "
                                   f"--l1 '{src}' --work '{ctx.supply}' --out '{out}.part' --log '{log}'"],
                label=f"wf-devices-{ctx.run_id}", heavy=True, timeout=3600)
             os.replace(out + ".part", out)
@@ -530,6 +542,48 @@ def alien_only(doc, l1_path):
     with open(path, "w") as f:
         json.dump(out, f)
     return path
+
+
+def hear_devices(ctx, l1, beats, replan, name="l1_heard.json"):
+    """The film's sound design hears the devices its Director chose. The scene's asks are laid now (lay_devices: the
+    same palette, its matte and depth cached in the supply for the render), the landings the palette reports
+    (``device_events``: frame, kind, strength) are copied onto ``l1`` and ``beats`` (the taste check's events), and the
+    sound design is planned again on them: ``replan(l1) -> (sounds, report)`` with the film's own turn and words
+    (score.sound reads ``device_events``: a tear sounds as a glitch, a world swapped behind the speaker as a landing,
+    a soft change not at all). A reel's own device sounds (``device: true``) stay. No device makes a sound itself.
+    Returns a record; on any fault the film keeps the sound it has."""
+    if not (l1.get("devices") or l1.get("alien")) or engine_kind() != "scene":
+        return {}
+    try:
+        path = os.path.join(ctx.supply, name)
+        json.dump({k: v for k, v in l1.items() if k != "device_events"}, open(path, "w"), ensure_ascii=False)
+        laid = lay_devices(ctx, path)
+        if laid == path:
+            return dict(heard=0, why="the devices were not laid")
+        ev = [e for e in json.load(open(laid)).get("device_events") or [] if isinstance(e, dict) and isinstance(e.get("f"), (int, float))]
+    except Exception as e:  # noqa: BLE001 - the film keeps its sound
+        ctx.log(f"sound on the devices skipped: {str(e)[:300]}")
+        return dict(fault=str(e)[:300])
+    if not ev:              # nothing landed that the sound could hear (a worker without the palette): the first plan stands
+        return dict(events=0)
+    l1["device_events"] = ev
+    if beats is not None:
+        beats["device_events"] = ev
+        beats["events"] = sorted(set(int(f) for f in beats.get("events") or []) | {int(e["f"]) for e in ev})
+    try:
+        sounds, rep = replan(l1)
+    except Exception as e:  # noqa: BLE001
+        sounds, rep = [], {"fault": repr(e)[:300]}
+    if rep.get("fault"):
+        ctx.log(f"sound on the devices kept the first plan: {rep['fault'][:300]}")
+        return dict(events=len(ev), fault=rep["fault"][:300])
+    own = [s for s in l1.get("sound") or [] if s.get("device")]
+    sounds = [s for s in sounds if not any(abs(int(s.get("event_f", -99)) - int(o.get("event_f", -99))) <= 2 for o in own)]
+    l1["sound"] = sorted(own + list(sounds), key=lambda s: (int(s.get("event_f", 0)), str(s.get("id"))))
+    l1["sound_design"] = rep
+    on = {int(e["f"]) for e in ev}
+    heard = sorted({int(s["event_f"]) for s in sounds if any(abs(int(s.get("event_f", -99)) - f) <= 2 for f in on)})
+    return dict(events=len(ev), sounds=len(l1["sound"]), on_devices=len(heard), frames=heard)
 
 
 def measure_devices(ctx, film, scene_path):

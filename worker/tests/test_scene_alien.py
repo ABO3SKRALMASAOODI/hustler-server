@@ -298,7 +298,7 @@ def test_lamp_relights_the_take_and_leaves_the_rest(tmp_path, monkeypatch):
     import cv2
     from scene.alien import lamp
     from scene.palette import sense as PS
-    monkeypatch.setattr(PS, "RVM", str(tmp_path / "no-matte-model.onnx"))      # the take without a matte: the word stands in front
+    monkeypatch.setattr(PS, "rvm_path", lambda: None)      # the take without a matte: the word stands in front
     clip(str(tmp_path / "take.mp4"), n=45, size=(270, 480), move=0.0)
     l1 = scene_of([{"id": "s0", "k": "shot", "f": [0, 45], "pic": "main", "src": [0.0, 1.5]}], 45, {"main": {"kind": "video", "path": "take.mp4"}})
     l1["frame"] = [270, 480]

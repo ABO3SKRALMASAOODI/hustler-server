@@ -90,7 +90,21 @@ def looked(l1, a, b, ident, look=None, treat=None):
     return keep + inside, gone
 
 
+# a section printed on one of the surface family's own surfaces (worker/scene/palette/surface.py) is laid by that
+# device: the tape, the projector's gate, the lamp board, the photocopy, the page, the thermal scope
+OWN_SURFACES = {"rew": "rew", "vhs": "vhs", "tape": "vhs", "projector": "projector", "led": "led", "xerox": "xerox",
+                "photocopy": "xerox", "paper": "paper", "thermal_hud": "thermal_hud", "hud": "thermal_hud"}
+
+
 def finish(l1, work, ask, sense):
+    asked = str(ask.get("surface") or ask.get("mode") or ask.get("as") or "").lower().replace("-", "_").replace(" ", "_")
+    own = OWN_SURFACES.get(asked)
+    if own:
+        from . import DEVICES
+        if own in DEVICES:
+            got = DEVICES[own]["plan"](l1, work, dict(ask, dev=own), sense)
+            if isinstance(got, dict) and not got.get("skip"):
+                return dict(got, log=dict(got.get("log") or {}, surface=own))
     a, b = AS_span(ask, l1)
     b = max(b, a + 12)
     b = min(b, int(l1["dur_f"]))

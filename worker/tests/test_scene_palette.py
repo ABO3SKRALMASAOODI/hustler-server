@@ -29,7 +29,7 @@ def picture(path, col):
 
 @pytest.fixture
 def film(tmp_path, monkeypatch):
-    monkeypatch.setattr(SENSE, "RVM", str(tmp_path / "no-model.onnx"))      # no matte: neg_world must fall back
+    monkeypatch.setattr(SENSE, "rvm_path", lambda: None)      # no matte: neg_world must fall back
     assets = {k: {"kind": "image", "path": picture(str(tmp_path / f"{k}.png"), c)}
               for k, c in (("p1", (40, 60, 90)), ("p2", (90, 50, 30)), ("p3", (20, 90, 40)), ("p4", (70, 70, 70)))}
     items = [{"id": "s1", "k": "shot", "f": [0, 40], "pic": "p4", "crop": [0, 0, 1, 1]},

@@ -149,11 +149,14 @@ def _discover():
             e.setdefault("family", m.name)
             e.setdefault("fallback", ())
             e.setdefault("needs", ())
-            e.setdefault("layer", "surface")
+            e.setdefault("layer", getattr(mod, "LAYER", "surface"))
             if isinstance(e["layer"], int):         # a family that numbers its layers (1 = rhythm ... 6 = look)
                 e["layer"] = LAYERS[min(max(e["layer"], 1), len(LAYERS)) - 1]
             e.setdefault("words", ())
             e.setdefault("span", False)
+            card = str(e.get("card") or "")
+            if card.split(" ", 1)[0].rstrip(".") != name:        # every card opens with its device's name, then its fields
+                e["card"] = f"{name} {card}"
             found[name] = e
         FAMILY_OF.update(getattr(mod, "ALIASES", None) or {})
     for name, e in _alien_entries().items():
@@ -398,7 +401,12 @@ def _try(cur, work, ask, sense):
     nxt = merge(cur, patch)
     ok, why = eligible(nxt)
     if not ok:
-        return None, "would break the scene: " + "; ".join(why[:3])
+        # a fault the scene already carried before this device (a frame its builder left without a base picture) is
+        # not this device's: only a problem the patch adds sends the ask to its fallback
+        _, was = eligible(cur)
+        why = [w for w in why if w not in set(was)]
+        if why:
+            return None, "would break the scene: " + "; ".join(why[:3])
     return (patch, nxt), None
 
 
@@ -572,11 +580,20 @@ def apply(l1, work, asks=None, pool=None):
     sense = Sense(cur, work, pool=pool)
     log, events, made, seats = [], [], set(), []
 
+    from ..alien import ORDER as ALIEN_ORDER
+
     def order(t):
+        """Layer first; inside a layer the palette's own devices in the order asked, then the alien bank's in the bank's
+        own order (answer, rhyme, lamp, diecut, arc: base pictures first, then what reads them), each in the order asked,
+        as the bank lays them itself (scene.alien.apply)."""
         n, a = t
-        dev = resolve(a.get("dev"))
-        e = DEVICES[dev]
-        return (LAYERS.index(e["layer"]) if e["layer"] in LAYERS else len(LAYERS), 0 if dev == "finish" else 1, n)
+        name = resolve(a.get("dev"))
+        e = DEVICES[name]
+        lay = LAYERS.index(e["layer"]) if e["layer"] in LAYERS else len(LAYERS)
+        if e.get("family") == "alien":
+            base = name if name in ALIEN_ORDER else {"arc_stakes": "arc"}.get(name)
+            return (lay, 1, ALIEN_ORDER.index(base) if base in ALIEN_ORDER else len(ALIEN_ORDER), n)
+        return (lay, 0, 0 if name == "finish" else 1, n)         # a section's finish first: the surface the others stand on
     for n, ask in sorted(enumerate(asks), key=order):
         asked = ask.get("dev")
         name = resolve(asked)

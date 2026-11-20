@@ -1776,6 +1776,7 @@ def with_director(ctx, script, sc):
         pack = load_pack(ctx)
         hero = [list(x["frames"]) for x in ((sc.get("devices") or {}).get("laid") or []) if x.get("frames")]
         rec = director_devices(ctx, script, script["script"], pack, l1, beats, around=hero)
+        rec["heard"] = chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))     # the sound hears them
         json.dump(l1, open(out, "w"), ensure_ascii=False)
         ctx.log(f"director: {len(rec['asked'])} devices round the hero device ({rec.get('by')})")
         return out
@@ -1851,6 +1852,9 @@ def score(ctx, script):
             beats["devices"] = director_devices(ctx, script, sc, pack, l1, beats)
         except Exception as e:  # noqa: BLE001 - the film keeps what its builder laid
             ctx.log(f"director: the film keeps its builder's devices: {e!r}"[:300])
+    if l1.get("devices") or l1.get("alien"):
+        # the sound design hears the devices: laid now, their landings planned again with the film's own turn and words
+        beats["devices_heard"] = chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))
     out = os.path.join(ctx.supply, "l1.json")
     json.dump(l1, open(out, "w"), ensure_ascii=False)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")       # the same scene with the narration as its spine: what the song is cut to
@@ -2381,13 +2385,14 @@ def topup_from_score(ctx, script_rec, pack, lines):
 def render(ctx, script, sc):
     out = os.path.join(ctx.supply, "film_engine.mp4")
     cache = os.path.join(ctx.tmp, "scene-cache")
-    l1 = json.load(open(sc["l1"]))
+    drawn = with_director(ctx, script, sc)            # the scene to draw (a marketing reel's Director laid round its hero device)
+    l1 = json.load(open(drawn))                       # its sound, which heard those devices, is the mix
     pack = load_pack(ctx)
     sound = os.path.join(ctx.supply, "sound.m4a")
     mix = F.audio_master(pack["ffmpeg"], l1, pack["narration"], sound, ctx.tmp) if not os.path.exists(sound) else {}
     settle = os.environ.get("SHELL_RENDER_CMD")       # a renderer in place of the Mac engine: the box image's, where a film is settled
     if not os.path.exists(out):
-        scene = chain.lay_devices(ctx, with_director(ctx, script, sc))     # the scene to draw: every device it asks for laid out first
+        scene = chain.lay_devices(ctx, drawn)         # the scene to draw: every device it asks for laid out first
         if settle:
             log = chain.sh(ctx, ["zsh", settle, scene, ctx.supply, sound, out + ".part.mp4"], label=f"wf3-render-{ctx.run_id}", heavy=os.environ.get("SHELL_RENDER_REMOTE") != "1", timeout=7200)
             j = {}
