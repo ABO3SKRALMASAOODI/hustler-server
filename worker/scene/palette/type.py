@@ -104,9 +104,11 @@ def counter(l1, work, ask, sense=None):
     say = o.get("t") or o.get("lands")
     a, z, hit = K.span(l1, ask, need=hold, text=say if isinstance(say, str) else None)
     land = K.frame_of(l1, o.get("lands"), near=a) if o.get("lands") is not None and not isinstance(o.get("lands"), str) else None
+    run = int(o.get("run", 18))
+    if land is not None and (land < a - run or land > z + 3 * hold):
+        land = None                # a figure word far outside its own place (a word number read as a frame): the place's own hit
     if land is None:
         land = hit[0][1] if hit else a + max(min(int(0.6 * (z - a)), 28), 8)
-    run = int(o.get("run", 18))
     if land - a < 8:
         a = max(0, land - run)
     z = max(z, min(land + hold, dur))
@@ -996,7 +998,8 @@ def readalong(l1, work, ask, sense=None):
     o = K.opts(ask)
     W, H, fps, dur = K.size(l1)
     a = K.frame_of(l1, o.get("at")) if o.get("at") is not None else 0
-    z = K.frame_of(l1, o.get("until")) if o.get("until") is not None else dur
+    z = K.frame_of(l1, o.get("until")) if o.get("until") is not None else (
+        int(o["at"][1]) if isinstance(o.get("at"), (list, tuple)) and len(o["at"]) > 1 else dur)
     a, z = a or 0, z or dur
     z = K.bounded(o, z, a + 2)
     dim = float(o.get("dim", 0.34))
@@ -1048,11 +1051,11 @@ def readalong(l1, work, ask, sense=None):
 
 
 DEVICES = {
-    "counter": {"plan": counter, "layer": 3, "needs": ("voice",), "fallback": ("staircase", "verb"),
+    "counter": {"plan": counter, "layer": 3, "needs": ("voice",), "fallback": ("staircase", "verb"), "words": ("lands",),
                 "card": 'counter at(word where the count starts) lands(word that says the final figure) from to unit(short|words|none) fmt("${n}", "{n} MILES") dec sep label hold. '
                         'Digits step hard and slow into the spoken figure on one seat across every cut, then hit and hold with an underline',
                 "amplifies": "a figure, money, a count, a jump from one number to another; the payoff when it is a number"},
-    "staircase": {"plan": staircase, "layer": 3, "needs": (), "fallback": ("verb",),
+    "staircase": {"plan": staircase, "layer": 3, "needs": (), "fallback": ("verb",), "words": ("lines[].at",),
                   "card": 'staircase at lines[{t size(big|small) at}] stairs. A two-size stack: each line lands on its word, stepping across',
                   "amplifies": "a figure and what it measures, a before and after, a list of three"},
     "name": {"plan": name, "layer": 3, "needs": (), "fallback": ("verb",),

@@ -180,6 +180,35 @@ def test_the_measure_reads_flips_whites_and_cuts_from_pixels():
     assert side["sequence"] == ["white", "neg"] and side["fell_back"] == 1 and side["first_device_f"] == 0
 
 
+def test_the_measure_sees_a_camera_move_inside_a_shot_and_none_in_a_still_one(tmp_path):
+    """The record's moves are the judge's: a 2% or more rigid zoom or pan inside a shot, read off the exported pixels (20 Nov:
+    the record counted only the eased moves the pace engine planned, 0.4 a 10 s, while the slow pushes went unseen)."""
+    import shutil
+    import subprocess
+    from scene.palette import measure as M
+    ffm = os.environ.get("FFMPEG_BIN") or shutil.which("ffmpeg")
+    if not ffm:
+        pytest.skip("no ffmpeg")
+    import cv2
+    rng = np.random.RandomState(5)
+    W_, H_ = 108, 192
+    still = cv2.GaussianBlur((rng.rand(H_, W_, 3) * 90).astype(np.uint8), (5, 5), 0)              # dark: a hard cut to the next
+    big = cv2.GaussianBlur((rng.rand(H_ * 2, W_ * 2, 3) * 90 + 160).astype(np.uint8), (7, 7), 0)
+    frames_ = [still] * 30
+    for i in range(30):                      # a 12% push in over one second
+        k = 1.0 / (1.0 + 0.12 * i / 29)
+        cw, ch = int(W_ * 2 * k), int(H_ * 2 * k)
+        x0, y0 = (W_ * 2 - cw) // 2, (H_ * 2 - ch) // 2
+        frames_.append(cv2.resize(big[y0:y0 + ch, x0:x0 + cw], (W_, H_), interpolation=cv2.INTER_AREA))
+    out = str(tmp_path / "m.mp4")
+    pr = subprocess.run([ffm, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W_}x{H_}", "-r", "30", "-i", "-",
+                         "-pix_fmt", "yuv420p", "-crf", "12", out], input=b"".join(f.tobytes() for f in frames_), capture_output=True)
+    assert pr.returncode == 0, pr.stderr
+    cam = M.camera(out)
+    assert cam["moves_10s"] == pytest.approx(5.0, abs=0.1) and cam["moving_share"] == 0.5
+    assert 0.06 <= cam["zoom_s"] <= 0.2
+
+
 def test_a_models_field_shapes_are_read_not_refused(film):
     from scene.palette import clean
     got, notes = clean({"dev": "lamp", "seat": "center", "room": "warm", "width": "0.7", "lift": True, "ink": "gold", "n": "3"})
@@ -366,3 +395,24 @@ def test_a_sprite_wider_than_an_atlas_page_gets_a_page_of_its_own():
     assert b["page"] != s["page"] and (b["aw"], b["ah"]) == (5434, 922)
     assert pages[b["page"]].shape[1] >= 5434 and pages[b["page"]].shape[0] >= 922
     assert (pages[b["page"]][:922, :5434] == 255).all()
+
+
+def test_a_threshold_splits_each_picture_at_its_own_light(film, tmp_path):
+    """20 Nov rating: one level for a whole threshold section printed dark faces as unreadable black blobs. Each shot is
+    split at its own middle light: a dark picture and a bright one both print part ink, part paper."""
+    import cv2
+    l1, work = film
+    dark = (np.random.RandomState(1).rand(160, 90, 3) * 70).astype(np.uint8)
+    bright = (np.random.RandomState(2).rand(160, 90, 3) * 60 + 150).astype(np.uint8)
+    cv2.imwrite(str(tmp_path / "dk.png"), dark)
+    cv2.imwrite(str(tmp_path / "br.png"), bright)
+    l1 = dict(l1, assets=dict(l1["assets"], dk={"kind": "image", "path": "dk.png"}, br={"kind": "image", "path": "br.png"}),
+              items=[dict(i, pic="dk") if i["id"] == "s2" else dict(i, pic="br") if i["id"] == "s3" else i for i in l1["items"]])
+    out, log = palette.apply(l1, work, [{"dev": "finish", "id": "t", "surface": "threshold", "f": [40, 100]}])
+    fl = next(i for i in out["items"] if i["k"] == "flash" and i["mode"] == "threshold")
+    th = fl["th"]
+    assert isinstance(th, list) and len(th) == fl["f"][1] - fl["f"][0]
+    lo_, hi_ = th[5], th[-5]
+    assert lo_ < 0.2 and hi_ > 0.55                                            # each picture's own middle, not one level for both
+    dk_y = cv2.cvtColor(dark, cv2.COLOR_BGR2GRAY) / 255.0
+    assert 0.25 <= float((dk_y > lo_).mean()) <= 0.75                          # the dark one prints part paper: readable, not a blob

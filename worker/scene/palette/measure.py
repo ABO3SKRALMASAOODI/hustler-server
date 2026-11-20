@@ -10,7 +10,11 @@ Signal, on the exported pixels (decoded small, every frame):
     white_10s        white frames a 10 s; black_10s: black frames a 10 s
     contour_3s       cuts in each 3 s window: p10, median, p90 (strobe against hold)
     first_device_f   the first frame a laid device is on screen (from the log), and the first flip, white or black frame
-From the scene: layers (share of frames with three or more drawn layers), display shots, moves the pace engine made.
+    moves_10s        camera moves a 10 s, as the judge's teardown measures them: DIS optical flow on every frame at 192 px,
+                     a similarity fit a frame (zoom and pan), summed over each shot; a move is 2% or more of zoom or pan
+                     inside one shot with a rigid fit (half the flow or more on it). zoom_s: the median move's size a second.
+From the scene: layers (share of frames with three or more drawn layers), display shots, the eased moves, punches and
+whips the pace engine planned (eased_10s: planned, not seen; the slow pushes it gives every picture are not in it).
 From the log: asks, landed, fell back, and the device sequence's edit distance to the recent films in the ledger.
 """
 import argparse
@@ -76,6 +80,58 @@ def signal(arr, fps):
             "flips_f": flips[:40], "white_f": white[:40], "black_f": black[:40]}
 
 
+def camera(path, shots_at=None):
+    """Camera moves inside shots, by signal on the exported pixels (the judge's teardown): {"moves_10s", "moving_share",
+    "zoom_s"}. ``shots_at``: the shot edges in frames (else cut where a frame differs from the last by a hard cut)."""
+    import cv2
+    from .. import reader
+    info = reader.probe(path)
+    fps = float(info.get("fps") or 30.0)
+    W0, H0 = int(info.get("w") or 1080), int(info.get("h") or 1920)
+    k = 192.0 / max(W0, H0)
+    w, h = max(32, int(round(W0 * k / 2)) * 2), max(32, int(round(H0 * k / 2)) * 2)
+    p = subprocess.run([ff(), "-nostdin", "-v", "error", "-i", path, "-an", "-vf", f"scale={w}:{h}:flags=area,format=gray",
+                        "-f", "rawvideo", "-"], capture_output=True, check=True)
+    a = np.frombuffer(p.stdout, np.uint8)
+    g = a[:a.size // (w * h) * w * h].reshape(-1, h, w)
+    n = len(g)
+    if n < 3:
+        return {}
+    if shots_at is None:
+        sm = np.stack([cv2.resize(x, (72, 128) if h > w else (128, 72), interpolation=cv2.INTER_AREA) for x in g]).astype(np.float32)
+        d = np.abs(sm[1:] - sm[:-1]).reshape(n - 1, -1).mean(axis=1)
+        shots_at = [i + 1 for i in range(n - 1) if d[i] > 28]
+    edges = [0] + [int(c) for c in shots_at if 0 < c < n] + [n]
+    dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
+    ys, xs = np.mgrid[4:h - 4:6, 4:w - 4:6]
+    pts = np.stack([xs.ravel(), ys.ravel()], 1).astype(np.float32)
+    moved, sizes, counted = 0, [], 0
+    for s0, s1 in zip(edges, edges[1:]):
+        if s1 - s0 < 3:
+            continue
+        counted += 1
+        lz, px, py, rig = 0.0, 0.0, 0.0, []
+        for i in range(s0 + 1, s1):
+            v = dis.calc(g[i - 1], g[i], None)[pts[:, 1].astype(int), pts[:, 0].astype(int)]
+            if np.abs(v).mean() < 0.02:
+                rig.append(1.0)
+                continue
+            M, inl = cv2.estimateAffinePartial2D(pts, pts + v, method=cv2.RANSAC, ransacReprojThreshold=0.6)
+            if M is None:
+                continue
+            lz += float(np.log(max(float(np.hypot(M[0, 0], M[1, 0])), 1e-3)))
+            px += float(M[0, 2] + (M[0, 0] - 1) * w / 2 + M[0, 1] * h / 2) / w
+            py += float(M[1, 2] + M[1, 0] * w / 2 + (M[1, 1] - 1) * h / 2) / w
+            rig.append(float(inl.mean()) if inl is not None else 0.0)
+        z, pan = float(np.expm1(abs(lz))), float(np.hypot(px, py))
+        if (z >= 0.02 or pan >= 0.02) and rig and float(np.median(rig)) >= 0.5:
+            moved += 1
+            sizes.append(max(z, pan) / ((s1 - s0) / fps))
+    secs = n / fps
+    return {"moves_10s": round(moved / secs * 10, 2), "moving_share": round(moved / max(counted, 1), 3),
+            "zoom_s": round(float(np.median(sizes)), 3) if sizes else 0.0}
+
+
 def scene_side(l1):
     """Layers, display and moves as the scene declares them."""
     dur = int(l1.get("dur_f") or 1)
@@ -93,7 +149,7 @@ def scene_side(l1):
     secs = dur / float(l1.get("fps") or 30)
     moves = int(pace.get("eased") or 0) + int(pace.get("punches") or 0) + int(pace.get("whips") or 0)
     return {"three_layer_share": round(float((layers >= 3).mean()), 3), "display_share": round(float(disp.mean()), 3),
-            "moves_10s": round(moves / max(secs, 1e-6) * 10, 2)}
+            "eased_10s": round(moves / max(secs, 1e-6) * 10, 2)}
 
 
 def edit_distance(a, b):
@@ -132,6 +188,10 @@ def log_side(log, ledger=None, n=12):
 def measure(film, l1=None, log=None, ledger=None):
     arr, fps = frames(film)
     out = {"film": film, "signal": signal(arr, fps)}
+    try:
+        out["signal"].update(camera(film))
+    except Exception as e:      # noqa: BLE001 - a record only: the moves left unmeasured say why
+        out["signal"]["camera_fault"] = repr(e)[:200]
     if l1:
         out["scene"] = scene_side(l1)
     if log is not None:
@@ -156,7 +216,7 @@ def main(argv=None):
     with open(a.out, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=1)
     s = out.get("signal") or {}
-    print(json.dumps({k: s.get(k) for k in ("cuts_10s", "short_shots", "flips_10s", "white_10s", "black_10s", "contour_3s")}))
+    print(json.dumps({k: s.get(k) for k in ("cuts_10s", "short_shots", "flips_10s", "white_10s", "black_10s", "contour_3s", "moves_10s", "zoom_s")}))
     return 0
 
 

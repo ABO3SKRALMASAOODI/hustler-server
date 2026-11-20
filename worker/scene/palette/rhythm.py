@@ -15,9 +15,14 @@ import math
 from ..alien import sense
 from . import picks as K
 
-STROBE_F = (2, 8)          # a strobe section's shots, in frames (references: 1-4 frame strobes; MM 8.6% of shots 1-2 frames)
+# Shots of 1-2 frames are the punctuation devices' (white, black, negative frames, glimpses): 8.6% of the judge's shots.
+# A strobe or a burst cuts no shorter than the judge's p10 shot (0.13 s, 4 frames) and a burst's own strobe lasts about a
+# second, then lands and holds (20 Nov rating: bursts asked over 3.5 s strobed 34 three-frame shots and strobe sections
+# cut 2-frame framings, so 21% of one film's shots were 1-2 frames and it read over-strobed).
+STROBE_F = (4, 8)          # a strobe section's shots, in frames
 BRISK_F = (10, 24)         # a brisk section: a new picture every 0.33-0.8 s (MM 16.1 a 10 s at the median)
-BURST_F = (2, 5)           # a list burst: 2-5 frames a picture
+BURST_F = (3, 6)           # a list burst: 3-6 frames a picture
+BURST_RUN_S = 1.2          # the burst's strobe, at most; the picture it lands on holds the rest of its span
 TASTE_UP = 3.0             # the tightest any framing is drawn: three output pixels a source pixel (TASTE 4.2)
 
 
@@ -62,7 +67,9 @@ def _clip_shots(seq, a, lens, fps, look, mono, ask_id, tag):
     for i, ((pic, t0, crop, gain), n) in enumerate(zip(seq, lens)):
         it = dict(look, id=f"{ask_id}.{tag}{i}", k="shot", f=[pos, pos + n], pic=pic.aid)
         # a picture in a strobe still moves: a 3% push across its few frames, so the run never reads as stills
-        it["crop"] = [K.r5(K.scale_crop(crop, 1.0 / (1.0 + 0.03 * j / max(n - 1, 1)))) for j in range(n)]
+        # (a picture that holds, a burst's landing, pushes the way the references push a held picture: about 8% a second)
+        push = 0.03 if n <= 8 else min(0.04 + 0.06 * n / fps, 0.14)
+        it["crop"] = [K.r5(K.scale_crop(crop, 1.0 / (1.0 + push * j / max(n - 1, 1)))) for j in range(n)]
         if pic.video:
             it["src"] = [round(t0, 4), round(t0 + n / fps, 4)]
         if abs(gain - 1.0) > 0.01:
@@ -153,8 +160,9 @@ def burst(l1, work, ask, sense_=None, pool=None):
     a, z = K.span(l1, args, default_s=1.2, least=6)
     rng = K.rng_of(l1, args)
     land = min(int(args.get("land", 6)), max((z - a) // 3, 2))
+    land = max(land, z - a - int(round(BURST_RUN_S * fps)))       # the strobe runs about a second, the landing holds the rest
     fixed = args.get("frames")
-    lo, hi = (int(fixed), int(fixed)) if fixed else BURST_F
+    lo, hi = (max(int(fixed), BURST_F[0]), max(int(fixed), BURST_F[0])) if fixed else BURST_F
     lens = _lengths(z - a - land, lo, hi, rng) + [land]
     pics = K.pictures(l1, work, args, pool, sense_=sense_, need=len(lens), length_s=hi / fps + 0.05)
     if not pics:

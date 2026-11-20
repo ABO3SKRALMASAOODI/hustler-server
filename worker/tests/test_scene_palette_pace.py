@@ -123,12 +123,12 @@ def test_the_palette_imports_no_model_code():
 
 # ------------------------------------------------------------------ burst, contour
 
-def test_a_burst_gives_two_to_five_frame_shots_from_the_pool(film):
+def test_a_burst_gives_three_to_six_frame_shots_from_the_pool(film):
     l1, work = film
     out, patch = lay(l1, work, {"dev": "burst", "id": "b", "f": [30, 75]})
     bs = [s for s in shots(out) if s["id"].startswith("b.b")]
-    assert len(bs) >= 8
-    assert all(2 <= s["f"][1] - s["f"][0] <= 5 for s in bs[:-1]) and bs[-1]["f"][1] - bs[-1]["f"][0] >= 2
+    assert len(bs) >= 6
+    assert all(3 <= s["f"][1] - s["f"][0] <= 6 for s in bs[:-1]) and bs[-1]["f"][1] - bs[-1]["f"][0] >= 6
     assert bs[0]["f"][0] == 30 and bs[-1]["f"][1] == 75
     pool_ids = set(patch["assets"])
     assert len({s["pic"] for s in bs} & pool_ids) >= 4                     # the pool's pictures, added to the scene
@@ -506,3 +506,17 @@ def test_shrink_never_lifts_a_layouts_ground_away_from_its_cards(film):
     out, _ = lay(l1, work, {"dev": "split", "id": "sp", "f": [120, 180], "pics": ["p1", "p2"]})
     patch = palette.plan(out, work, {"dev": "shrink", "id": "sh", "at": 180, "frames": 14})
     assert patch.get("skip")
+
+
+def test_a_long_burst_strobes_about_a_second_then_lands_and_holds_moving(film):
+    """20 Nov rating: a burst asked over 3.5 s strobed 34 three-frame shots (21% of the film's shots were 1-2 frames,
+    the judge's 8.6%). The strobe runs about a second, never under three frames a shot, and the picture it lands on holds
+    the rest of the span, pushing in."""
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "burst", "id": "b", "f": [30, 135]})
+    bs = sorted((s for s in shots(out) if s["id"].startswith("b.b")), key=lambda s: s["f"][0])
+    strobe, landing = bs[:-1], bs[-1]
+    assert all(s["f"][1] - s["f"][0] >= 3 for s in bs)
+    assert strobe[-1]["f"][1] - 30 <= 37 and landing["f"] == [strobe[-1]["f"][1], 135]
+    w = [c[2] - c[0] for c in landing["crop"]]
+    assert w[0] / w[-1] >= 1.08                                                  # the held picture moves: a push of 8% or more
