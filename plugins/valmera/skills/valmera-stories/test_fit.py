@@ -930,3 +930,14 @@ def test_a_read_timeout_on_the_proxy_is_asked_again_at_most_once(monkeypatch):
     writer, sleeps, posts = _proxy(monkeypatch, [(ce(), {}), (httpx.ConnectTimeout("connect"), {}), (rt(), {}), (ce(), {}), (200, {})])
     assert writer.ask_openai("s", "c", what="picture check", model="gpt-6.1-sol")[0] == '{"ok": true}'
     assert len(posts) == 5 and sleeps == list(writer.PROXY_WAITS)
+
+
+def test_the_scene_worker_is_the_worker_that_laid_the_devices(monkeypatch):
+    """21 Nov: devices laid by VALMERA_WORKER's palette were drawn by skill-main's older engine ('unknown flash mode
+    paper'); the render follows VALMERA_WORKER unless VALMERA_SCENE_WORKER names another."""
+    import film
+    monkeypatch.delenv("VALMERA_SCENE_WORKER", raising=False)
+    monkeypatch.setenv("VALMERA_WORKER", "/tmp/w-palette")
+    assert film.scene_worker() == "/tmp/w-palette"
+    monkeypatch.setenv("VALMERA_SCENE_WORKER", "/tmp/w-scene")
+    assert film.scene_worker() == "/tmp/w-scene"

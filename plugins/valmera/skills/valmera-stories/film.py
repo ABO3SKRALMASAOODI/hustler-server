@@ -36,6 +36,10 @@ MAX_UP = 3.0                             # TASTE 4.2: total upscale never past 3
 def scene_worker():
     if os.environ.get("VALMERA_SCENE_WORKER"):
         return os.environ["VALMERA_SCENE_WORKER"]
+    # 21 Nov: the devices were laid by VALMERA_WORKER's palette but drawn by skill-main's older engine, which has no
+    # 'paper'/'vhs' surface modes, and the film stopped "ineligible". One worker lays and draws a film.
+    if os.environ.get("VALMERA_WORKER"):
+        return os.environ["VALMERA_WORKER"]
     d = os.path.dirname(os.path.abspath(__file__))
     for _ in range(6):
         d = os.path.dirname(d)
