@@ -7925,7 +7925,7 @@ def _adopt_landed_original(user_id, project_id, original):
 
 
 def _request_final(cur, user_id, project_id, version, render_group=None,
-                   reuse_existing=False):
+                   reuse_existing=False, audio_model_review=None):
     """One export gate shared by individual and explicit batch requests."""
     p = _project_for_user(cur, project_id, user_id)
     if not p:
@@ -8152,6 +8152,7 @@ def _request_final(cur, user_id, project_id, version, render_group=None,
     # ordering and worker lanes own actual fleet capacity.
     job_id = _enqueue(cur, project_id, user_id, "final",
                       {"edl_version": version, **({"render_group": render_group} if render_group else {}),
+                       **({"audio_model_review": False} if audio_model_review is False else {}),
                        **_flash_flag(edl_row["json"])})
     record_client_event(
         user_id, project_id, "export_job_started",

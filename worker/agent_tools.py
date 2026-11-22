@@ -1065,12 +1065,8 @@ def get_video_info(ctx):
         edl = ctx.latest_edl()
         ins = edl["json"].get("inserts") or []
         prog = _program_map(ctx, edl["json"])
-        guidance = ("This project has no main video. Uploaded audio, clips and images "
-                "can form a finished film here in Valmera. Keep narration on "
-                "the timeline with add_voiceover, place checked footage with "
-                "place_search_result, and add captions and designed motion. "
-                "Review render_preview(complete=true), then export_final and "
-                "download_url(kind=final); downloaded source assets are not a finished film. ")
+        guidance = ("For a documentary from an uploaded voice-over, call build_film. "
+                    "It places pictures along the narration and exports the MP4. ")
         if not getattr(ctx, "sight_out", False):
             guidance = ("No main video in this project — this is a blank canvas. Build "
                         "the program from uploaded images/clips, then place them "
@@ -27602,7 +27598,7 @@ def _department_listing(domains):
     for domain in domains:
         rows.append(f"{domain}:")
         for tool in sorted(TOOL_DOMAINS.get(domain) or ()):
-            if tool in TOOLS and not _tool_disabled(tool):
+            if tool in TOOLS and tool not in MCP_ONLY_TOOLS and not _tool_disabled(tool):
                 first = str(TOOLS[tool][1]).split(". ")[0].split("\n")[0]
                 rows.append(f"  {tool}: {first[:70]}")
     return ("These tools exist; none is loaded yet. Call load_tools(names=[...]) "
@@ -34904,6 +34900,9 @@ for _retired_tool in (
 # making the model negotiate scores of unrelated write schemas on every step.
 TOOL_DOMAIN_NAMES = set(AGENT_TOOL_DOMAINS)
 AGENT_SCHEMA_HIDDEN = {"expand_toolset"}  # legacy MCP alias for load_tools
+# These entry points belong to external apps. Keep them in the full MCP
+# catalog and department map, without advertising them to the Studio model.
+MCP_ONLY_TOOLS = {"build_film"}
 TOOL_CORE = {
     "load_tools",
     "wait_for_job",
@@ -35333,11 +35332,13 @@ def capability_directory():
     for domain in sorted(TOOL_DOMAINS):
         names = sorted(name for name in TOOL_DOMAINS[domain]
                        if name in TOOLS and name not in AGENT_SCHEMA_HIDDEN
+                       and name not in MCP_ONLY_TOOLS
                        and not _tool_disabled(name))
         assigned.update(names)
         rows.append(f"{domain}: " + ", ".join(names))
     core = sorted(name for name in TOOLS
                   if name not in assigned and name not in AGENT_SCHEMA_HIDDEN
+                  and name not in MCP_ONLY_TOOLS
                   and not _tool_disabled(name))
     rows.append("evidence, planning, verification and utility: "
                 + ", ".join(core))
@@ -35573,6 +35574,8 @@ def openai_tools(model=None, compact=False, names=None, engine=False):
     sees = model is not None and llm.agent_sees(model)
     for name, (_fn, desc, props) in TOOLS.items():
         if names is not None and name not in names:
+            continue
+        if model is not None and name in MCP_ONLY_TOOLS:
             continue
         if _tool_disabled(name, model):
             continue

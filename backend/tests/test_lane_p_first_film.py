@@ -205,8 +205,8 @@ def test_make_first_cut_on_a_narration_project_answers_its_path(monkeypatch):
     out = mcpmod._t_make_first_cut({"user_id": 2555}, {"project_id": 5845})
     text = out["content"][0]["text"]
     assert jobs == [] and out["isError"] is False
-    assert out["structuredContent"]["next_tool"] == "place_scenes"
-    assert "place_scenes(project_id=5845, narration_asset_key='music/5845/nar.mp3'" in text
+    assert out["structuredContent"]["next_tool"] == "build_film"
+    assert "build_film(project_id=5845, narration_asset_key='music/5845/nar.mp3'" in text
     assert "done: music/5845/nar.mp3 (Narration 47.mp3, 1509s)" in text
 
 

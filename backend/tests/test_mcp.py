@@ -669,7 +669,7 @@ def test_upload_finish_of_a_narration_names_the_next_calls(client, monkeypatch):
     }))
     assert "analysis (transcript and sound) is queued as job 52" in body
     assert "get_transcript(project_id=3, asset_key='music/3/nar.mp3')" in body
-    assert "place_scenes(project_id=3, narration_asset_key='music/3/nar.mp3'" in body
+    assert "build_film(project_id=3, narration_asset_key='music/3/nar.mp3'" in body
 
 
 def test_index_status_without_a_main_video_reports_the_uploads(monkeypatch):

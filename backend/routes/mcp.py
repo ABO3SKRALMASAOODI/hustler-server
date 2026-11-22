@@ -326,7 +326,7 @@ _OPEN_WORLD = {
     "generate_image", "generate_video", "generate_sfx",
     "record_website", "record_website_demo", "showcase_demo",
     # Wave 4 (4C): the B-roll director searches public libraries
-    "source_broll",
+    "source_broll", "build_film",
 }
 # Titles that read badly when derived mechanically from the snake_case name.
 _TITLE_OVERRIDES = {
@@ -426,7 +426,7 @@ def _v2_routed(tok):
 def _v2_editor_tools(catalog):
     v2 = _editor_tools({"tools": (catalog or {}).get("v2_tools") or []})
     gateway = [t for t in _editor_tools(catalog)
-               if t.get("name") == GATEWAY_TOOL]
+               if t.get("name") in (GATEWAY_TOOL, "build_film")]
     return v2 + gateway
 
 
@@ -816,7 +816,7 @@ SESSION_TOOLS = [
          "edl_version": {"type": "integer", "minimum": 1}},
          "required": ["project_id", "edl_version"]}},
     {"name": "make_first_cut",
-     "description": "Make Valmera's automatic first cut of an explicit project's analyzed main video: a finished vertical film (the strongest stretch, tightened, with a hook title, captions and the picture reframed for phones), made by the same chain the Studio runs after a first upload. Use it when the user wants a finished video and has not asked for anything more specific, or as the first draft you then refine with the editing tools. Needs index_status 'done'. Returns a job: call wait_for_job, then download_url(kind='preview') to watch it and export_final(edl_version) for the MP4. One first cut per project; calling it again returns the existing one. A project with no main video (a narration upload) answers with its narrated-film path: get_transcript, search, then place_scenes builds the picture along the narration in one call.",
+     "description": "Make Valmera's automatic first cut of an explicit project's analyzed main video: a finished vertical film (the strongest stretch, tightened, with a hook title, captions and the picture reframed for phones), made by the same chain the Studio runs after a first upload. Use it when the user wants a finished video and has not asked for anything more specific, or as the first draft you then refine with the editing tools. Needs index_status 'done'. Returns a job: call wait_for_job, then download_url(kind='preview') to watch it and export_final(edl_version) for the MP4. One first cut per project; calling it again returns the existing one. A project with no main video (a narration upload) answers with its narrated-film path: build_film builds and exports the documentary in one call.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer", "minimum": 1}},
          "required": ["project_id"]}},
@@ -1097,8 +1097,8 @@ with the same names, arguments and effects.
 
 3. THE CLIENT TALKS TO THE USER. ask_user suspends a turn of Valmera's
    in-house agent; over MCP, questions belong in the client's own
-   conversation with the user. Nothing renders automatically when a turn
-   ends.
+   conversation with the user. build_film explicitly builds and exports;
+   other low-level editing tools require a render/export request.
 
 4. UPLOADS AND INDEXING. upload_start returns the exact command for
    uploading a local file's bytes (for example with curl); use it to
@@ -1107,20 +1107,11 @@ with the same names, arguments and effects.
    index_status reports progress, and a long video takes minutes. A source
    under one minute is already one short: edit that project directly
    instead of using the multi-clip workflow.
-   A FINISHED FILM IN ONE CALL: once the video is analyzed,
-   make_first_cut(project_id) makes Valmera's automatic first cut, the
-   same finished vertical film the Studio makes after a first upload. Use it
-   when the user wants a finished video and has not asked for anything more
-   specific, or as the draft you refine. wait_for_job, watch it with
-   download_url(kind='preview'), then export_final for the MP4.
-   A NARRATED FILM FROM A VOICE-OVER: upload the narration with
-   kind='music'; get_transcript(project_id, asset_key=<its storage_key>)
-   waits for its analysis and returns the timed words. Find a picture for
-   each beat (search_stock, research_broll, find_footage + fetch_url), then
-   ONE place_scenes(project_id, narration_asset_key, scenes=[{id or
-   asset_key, start_s, end_s}, ...]) lays the whole picture along the
-   narration, with the narration under it, in Valmera's timeline. Then
-   render_preview(complete=true) and export_final for the finished MP4.
+   A NARRATED DOCUMENTARY IN ONE CALL: after uploading a voice-over as
+   kind='music', call build_film(project_id, narration_asset_key, goal).
+   It reads the timed transcript, finds and places pictures along the entire
+   narration, and exports the MP4. Follow wait_for_job on its job id.
+   For a filmed video, make_first_cut makes the Studio's vertical first draft.
 
 5. LONG VIDEO TO SHORTS. create_project(title, kind='shorts'), upload the
    long main video and poll index_status. Clip selection does not start
@@ -1535,21 +1526,118 @@ def _settle(job_id, user_id, seconds=None, slow=None):
     deadline = time.time() + budget
     share = {} if slow is None else {"slow": slow}
     row = _wait(job_id, user_id, budget, **share)
-    # A resumed run adopts the finished render and never parks again; the
-    # bound only guards against a release mismatch looping.
+    if _parked_render(row) and _parked_render(row).get("type") == "film_chapter":
+        row = _last_film_chapter(row, user_id, deadline)
+        if not row or row["state"] in ("queued", "running"):
+            return dict(row, id=job_id) if row else None
+        return _settle_film_export(dict(row, id=job_id), user_id, max(0, deadline - time.time()))
     for _ in range(3):
         parked = _parked_render(row)
         if parked is None:
-            return row
+            return _settle_film_export(row, user_id, max(0, deadline - time.time()))
+        if parked.get("type") == "film_chapter":
+            return dict(row, state="running")
         remaining = max(0.0, deadline - time.time())
         render = _wait(parked["job_id"], user_id, remaining, slow=True)
         if render and render.get("state") in ("queued", "running"):
-            return dict(row, state="running",
-                        progress=render.get("progress") or 0)
+            return dict(row, state="running", progress=render.get("progress") or 0)
         _resume_parked(job_id, user_id, parked["job_id"])
-        remaining = max(0.0, deadline - time.time())
-        row = _wait(job_id, user_id, remaining, **share)
+        row = _wait(job_id, user_id, max(0, deadline - time.time()), **share)
+    return dict(row, state="running") if _parked_render(row) else row
+
+
+def _last_film_chapter(row, user_id, deadline):
+    # A fresh lease per checkpoint. A long narration can contain many more
+    # chapters than a single job's physical retry allowance.
+    while (parked := _parked_render(row)) and parked.get("type") == "film_chapter":
+        row = _wait(parked["job_id"], user_id, max(0, deadline - time.time()), slow=True)
     return row
+
+
+def _settle_film_export(row, user_id, seconds):
+    """Finish the explicit build-and-export request through the ordinary export gate.
+
+    Repeating wait_for_job reuses the same immutable version and export job.
+    It never invents a successful export from a completed build or preview.
+    """
+    if not row or row.get('state') != 'done' or row.get('type') != 'mcp_tool':
+        return row
+    result = row.get('result') or {}
+    film = result.get('film') or {}
+    if not film.get('edl_version'):
+        return row
+    pid, version = row['project_id'], int(film['edl_version'])
+    answer = _t_export_final({"user_id": user_id}, {"project_id": pid, "edl_version": version},
+                             documentary=True)
+    if answer.get('isError'):
+        return dict(row, result=dict(result, is_error=True,
+            text='Film built, but export needs attention: ' + '\n'.join(c.get('text','') for c in answer.get('content',[])),
+            export=answer.get('structuredContent')))
+    export = (answer.get('structuredContent') or {}).get('export') or {}
+    if export.get('job_id'):
+        final = _wait(export['job_id'], user_id, seconds, slow=True)
+        if not final or final.get('state') in ('queued','running'):
+            return dict(row, state='running', progress=(final or {}).get('progress',0))
+        if final.get('state') == 'failed':
+            return dict(row, result=dict(result, is_error=True,
+                text=f"Film export failed in job {final['id']}: {final.get('error')}"))
+        answer = _t_download_url({'user_id':user_id}, {'project_id':pid,'edl_version':version,'kind':'final'})
+    content = answer.get('content') or []
+    return dict(row, result=dict(result,
+        text='\n'.join(c.get('text','') for c in content if c.get('type')=='text'),
+        is_error=bool(answer.get('isError')),
+        film_delivery=answer.get('structuredContent') or {}))
+
+
+def _advance_film_exports():
+    """Start authorized final renders even after the initiating MCP client disconnects."""
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT key, value FROM app_kv WHERE key >= %s AND key < %s",
+                    ("mcp_film_pending:", "mcp_film_pending;"))
+        pending = list(cur.fetchall())
+    for entry in pending:
+        job_id, user_id = json.loads(entry["value"])
+        row = _job_row(job_id, user_id)
+        if not row or row["state"] in ("queued", "running"):
+            continue
+        row = _last_film_chapter(row, user_id, time.time())
+        if not row or row["state"] in ("queued", "running"):
+            continue
+        parked = _parked_render(row)
+        if parked:
+            indexed = _job_row(parked["job_id"], user_id)
+            if indexed and indexed["state"] in ("queued", "running"):
+                continue
+            _resume_parked(row["id"], user_id, parked["job_id"])
+            continue
+        film = (row.get("result") or {}).get("film") or {}
+        if film.get("edl_version"):
+            with vdb() as conn:
+                cur = conn.cursor()
+                response = _request_final(cur, user_id, row["project_id"], film["edl_version"],
+                                          reuse_existing=True, audio_model_review=False)
+                if isinstance(response, tuple) and response[1] >= 400:
+                    data = response[0].get_json() or {}
+                    if data.get("code") in ("already_running", "edit_in_progress", "original_uploading"):
+                        continue
+        with vdb() as conn:
+            conn.cursor().execute("DELETE FROM app_kv WHERE key=%s", (entry["key"],))
+    return bool(pending)
+
+
+def start_film_exports(app):
+    def run():
+        while not SHUTTING_DOWN.is_set():
+            active = False
+            try:
+                with app.app_context():
+                    active = _advance_film_exports()
+            except Exception:
+                app.logger.exception("Documentary render dispatch will retry")
+            SHUTTING_DOWN.wait(5 if active else 30)
+
+    threading.Thread(target=run, daemon=True, name="mcp-film-exports").start()
 
 
 def _still_running(row, what):
@@ -1682,7 +1770,7 @@ def _editor_structured_content(result):
     if isinstance(preview, dict):
         out["preview"] = preview
     for key in ("changed_section_preview", "changed_section_previews",
-                "images", "images_remaining", "error", "download_receipt"):
+                "images", "images_remaining", "error", "download_receipt", "film", "film_delivery"):
         if key in result:
             out[key] = result[key]
     return out
@@ -1927,9 +2015,10 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
             result = {"text": identity + "\n" + immediate, "is_error": False}
             return _out(result["text"], result)
         wait_budget = min(INDEX_WAIT_S, SYNC_WAIT_S) - _index_waited_s
-        wait_for_index = (not ready and analysis.get("active")
+        film_wait = name == "build_film" and not ready and bool(analysis.get("active"))
+        wait_for_index = (not ready and not film_wait and analysis.get("active")
                           and wait_budget > 0 and not name.startswith("__"))
-        if not ready and not wait_for_index:
+        if not ready and not wait_for_index and not film_wait:
             waiting = bool(analysis.get("active"))
             pct = int(analysis.get("progress") or 0)
             guidance = (f"Analysis job {analysis['id']} is {pct}% done"
@@ -1977,7 +2066,7 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
                 conn, tok["user_id"], project, project_id, name, args,
                 started=_call_started())
             if fast is not None:
-                return _tool_answer(project, project_id, fast, raw, _out)
+                return _tool_answer(project, project_id, fast, raw, _out, tool=name)
         if not wait_for_index:
             mutation = name in set(catalog.get("write_tools") or []) or \
                 name in {"reset_edit"} or \
@@ -1999,6 +2088,9 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
                 job_payload["harness_request"] = harness_request
             job_id = _enqueue(cur, project_id, tok["user_id"], "mcp_tool",
                               job_payload)
+            if name == "build_film":
+                cur.execute("INSERT INTO app_kv (key, value, updated_at) VALUES (%s, %s, NOW())",
+                            (f"mcp_film_pending:{job_id}", json.dumps([job_id, tok["user_id"]])))
     if wait_for_index:
         waited = _await_index(project_id, wait_budget, reads)
         return _run_tool_job(tok, name, args, raw=raw, project_id=project_id,
@@ -2064,6 +2156,13 @@ def _draft_preview_next_step(project_id, tool, result):
             f"{project_id}, kind='final', edl_version={version}).")
 
 
+def _narration_next(project_id, key=None):
+    asset = f", narration_asset_key={key!r}" if key else ""
+    return (f"For a narrated documentary, call build_film(project_id={project_id}{asset}). "
+            "It places pictures along the complete narration and exports the film. "
+            "Follow wait_for_job on its job id for the finished MP4.")
+
+
 def _tool_answer(project, project_id, result, raw, _out, tool=None):
     """One finished tool call's reply, from its stored result. Queued calls
     and fast reads (mcp_fast_reads) both answer through here."""
@@ -2071,6 +2170,8 @@ def _tool_answer(project, project_id, result, raw, _out, tool=None):
     text = identity + "\n" + (result.get("text") or json.dumps(result))
     text += _preview_policy_line(result.get("preview"))
     text += _draft_preview_next_step(project_id, tool, result)
+    if tool in ("get_transcript", "search_stock"):
+        text += "\n\n" + _narration_next(project_id)
     if raw:
         result = dict(result)
         result.update(text=text, project_id=project_id,
@@ -2358,7 +2459,9 @@ def _t_create_project(tok, args):
                 "shorts_status and open each child for direct editing.")
     return (f"Created editor project {pid} (\"{title}\") and selected it for "
             "navigation. Pass that project_id to upload_start, or use it on "
-            "every editor call while building a canvas program.")
+            "every editor call. For a documentary from an uploaded voice-over, "
+            "call build_film(project_id=" + str(pid) + ", goal=<the user request>) "
+            "and follow wait_for_job until its final export is ready.")
 
 
 def _t_project_state(tok, args):
@@ -2601,14 +2704,7 @@ def _t_upload_finish_answer(payload, role, storage_key=None, project_id=None):
                 f"{pid}, asset_key='{key}') waits for it and answers with the "
                 "timed transcript; index_status shows its progress.")
         if payload["kind"] == "music":
-            text += (" For a narrated film: read the transcript, find a "
-                     "picture for each beat (search_stock, research_broll, "
-                     f"find_footage), then place_scenes(project_id={pid}, "
-                     f"narration_asset_key='{key}', scenes=[{{id, start_s, "
-                     "end_s}, ...]) lays the whole picture along the narration "
-                     "and the narration under it in one call; "
-                     "render_preview(complete=true), then export_final for "
-                     "the MP4.")
+            text += " " + _narration_next(pid, key)
         else:
             text += (" It can be placed now with insert_media, add_overlay or "
                      "place_scenes.")
@@ -2737,14 +2833,7 @@ def _uploads_analysis_status(cur, project_id):
                     "a running analysis and answers with the timed transcript; "
                     "wait_for_job(job_id) follows one." % project_id)
     if narration:
-        tail.append(
-            f"To make the narrated film: read get_transcript(project_id="
-            f"{project_id}, asset_key='{narration}'), find a picture for each "
-            "beat (search_stock, research_broll, find_footage), then "
-            f"place_scenes(project_id={project_id}, narration_asset_key="
-            f"'{narration}', scenes=[{{id, start_s, end_s}}, ...]) builds the "
-            "whole picture along it in one call; render_preview(complete=true) "
-            "and export_final finish it.")
+        tail.append(_narration_next(project_id, narration))
     return head + "\n".join(lines) + ("\n" + "\n".join(tail) if tail else "")
 
 
@@ -3085,6 +3174,8 @@ def _t_wait_for_job(tok, args):
         text += _draft_preview_next_step(
             row.get("project_id"), (row.get("payload") or {}).get("tool"),
             result)
+        if (row.get("payload") or {}).get("tool") in ("search_stock", "get_transcript"):
+            text += "\n\n" + _narration_next(row.get("project_id"))
         structured = _editor_structured_content(result)
         structured["job"] = job_status
         image_content = _image_blocks(result.get("images"))
@@ -3340,20 +3431,11 @@ def _t_make_first_cut(tok, args):
             return {"content": [{"type": "text", "text": (
                         f"PROJECT {project_id} has no main video, so the "
                         "automatic first cut (which cuts a filmed video) has "
-                        "nothing to cut. A narrated film is made here this way: "
-                        "get_transcript(asset_key=<the narration>) for the timed "
-                        "words; a picture for each beat with search_stock, "
-                        "research_broll or find_footage + fetch_url; then ONE "
-                        "place_scenes(project_id, narration_asset_key, scenes="
-                        "[{id or asset_key, start_s, end_s}, ...]) call builds "
-                        "the whole picture along the narration with the "
-                        "narration under it; render_preview(complete=true), "
-                        "then export_final. To cut a filmed video instead, "
-                        "upload it with kind='original'.\n\n" + status)}],
+                        "nothing to cut. " + _narration_next(project_id) + "\n\n" + status)}],
                     "isError": False,
                     "structuredContent": {"project_id": project_id,
                                           "status": "no_main_video",
-                                          "next_tool": "place_scenes"}}
+                                          "next_tool": "build_film"}}
         if not (original.get("sha256") and _index_row(cur, original["sha256"])):
             analysis = _index_job_state(cur, project_id, original.get("id"))
             if not analysis.get("active"):
@@ -3431,7 +3513,7 @@ def _t_make_first_cut(tok, args):
                                   "job_id": job_id, "kind": "first_cut"}}
 
 
-def _t_export_final(tok, args):
+def _t_export_final(tok, args, *, documentary=False):
     project_id, version = args.get("project_id"), args.get("edl_version")
     if type(project_id) is not int or project_id < 1 or type(version) is not int or version < 1:
         return _text("Supply positive integer project_id and reviewed edl_version.", True)
@@ -3488,7 +3570,8 @@ def _t_export_final(tok, args):
                             "unresolved_finding_ids": ids}},
                         "isError": True}
         response = _request_final(cur, int(tok["user_id"]),
-                                  project_id, version, reuse_existing=True)
+                                  project_id, version, reuse_existing=True,
+                                  **({"audio_model_review": False} if documentary else {}))
         response, status = response if isinstance(response, tuple) else (response, 200)
         data = response.get_json()
     receipt = {"project_id": project_id, "edl_version": version, **data}

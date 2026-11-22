@@ -845,8 +845,9 @@ def record_agent_turn_baseline(conn, job_id, total_claims, version, digest):
 
 
 def enqueue_agent_continuation(conn, project_id, user_id, root_job_id,
-                               sequence, payload, parent_job_id=None, parent_claim=None):
-    """Idempotently enqueue one physical slice of a logical agent request."""
+                               sequence, payload, parent_job_id=None, parent_claim=None,
+                               job_type="agent_turn"):
+    """Idempotently enqueue one physical slice of a logical editor request."""
     root_job_id = int(root_job_id)
     sequence = max(1, int(sequence))
     body = dict(payload or {})
@@ -872,19 +873,19 @@ def enqueue_agent_continuation(conn, project_id, user_id, root_job_id,
         cur.execute("SELECT pg_advisory_xact_lock(%s, %s)",
                     (root_job_id, sequence))
         cur.execute("""SELECT id FROM video_jobs
-                       WHERE project_id = %s AND type = 'agent_turn'
+                       WHERE project_id = %s AND type = %s
                          AND payload->>'root_agent_job_id' = %s
                          AND payload->>'continuation_sequence' = %s
                        ORDER BY id LIMIT 1""",
-                    (project_id, str(root_job_id), str(sequence)))
+                    (project_id, job_type, str(root_job_id), str(sequence)))
         existing = cur.fetchone()
         if existing:
             return existing["id"]
         cur.execute("""INSERT INTO video_jobs
                             (project_id, user_id, type, payload)
-                       VALUES (%s, %s, 'agent_turn', %s)
+                       VALUES (%s, %s, %s, %s)
                        RETURNING id""",
-                    (project_id, user_id, Json(body)))
+                    (project_id, user_id, job_type, Json(body)))
         return cur.fetchone()["id"]
 
 

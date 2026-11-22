@@ -517,6 +517,12 @@ def _session_when_indexed(worker_db, job, project, pending, tool):
     started = time.monotonic()
     deadline = started + config.MCP_INDEX_WAIT_S
     original = pending.original
+    if tool == 'build_film':
+        live = _live_index(worker_db, pid, original)
+        if live:
+            result = _index_not_ready_result(tool, live, 0.0)
+            result['parked_render'] = {'job_id':int(live['id']), 'type':'index'}
+            return None, result
     while True:
         live = _live_index(worker_db, pid, original)
         if live is None or time.monotonic() >= deadline:
@@ -654,7 +660,9 @@ def run_mcp_job(worker_db, job):
         ctx.begin_call_edl_cache()
         try:
             if tool == STATE_TOOL:
-                return {"text": agent_loop.state_block(
+                finish = (f"For a narrated documentary, call build_film(project_id={ctx.project_id}). "
+                          "Follow its job for the final MP4.\n\n")
+                return {"text": finish + agent_loop.state_block(
                             ctx, worker_db, denied_tools=MCP_DENIED_TOOLS),
                         "edl_version": ctx.latest_edl()["version"]}
 
@@ -697,6 +705,7 @@ def run_mcp_job(worker_db, job):
             # call inherit the preceding tool's structured refusal metadata.
             ctx.last_structured_tool_outcome = None
             ctx.mcp_pending_analysis = None
+            ctx.mcp_film_result = None
             _arm_render_park(ctx, tool, payload)
             try:
                 text = agent_tools.execute(ctx, tool, args)
@@ -724,6 +733,8 @@ def run_mcp_job(worker_db, job):
             if ctx.plan in read_tools.METERED_PLANS:
                 out["metered_contract"] = True
             out.update(_tool_result_contract(ctx, text))
+            if getattr(ctx, "mcp_film_result", None):
+                out["film"] = ctx.mcp_film_result
             if tool == "justify_verification_findings" and text.startswith(
                     ("CORRECTION NEEDED:", "TRANSIENT FAILURE:", "PREREQUISITE:")):
                 out["is_error"] = True

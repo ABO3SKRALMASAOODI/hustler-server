@@ -32,10 +32,14 @@ def subscription_endpoint(url):
     HTTP redirects remain disabled in the transport below.
     """
     target = urlsplit(url)
+    try:          # the Mac's proxy: 8788 since 19 Nov (the CRM's server holds 8787), CODEX_PROXY_PORT when set
+        port = int(os.environ.get("CODEX_PROXY_PORT") or 8788)
+    except ValueError:
+        port = 8788
     return (os.environ.get("CODEX_PROXY_LOCAL") == "1"
             and target.scheme == "http"
             and target.hostname in ("127.0.0.1", "localhost", "::1")
-            and target.port == 8787 and target.path == "/v1/responses"
+            and target.port == port and target.path == "/v1/responses"
             and not target.username and not target.password
             and not target.query and not target.fragment)
 

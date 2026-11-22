@@ -290,6 +290,9 @@ def create_app():
     try:
         from routes.mcp import install_shutdown_hook
         install_shutdown_hook()
+        if os.getenv("SKIP_DB_INIT") != "1":
+            from routes.mcp import start_film_exports
+            start_film_exports(app)
     except Exception as e:
         app.logger.error("could not install MCP shutdown hook: %s", e)
     # Founder-only read-only metrics for the signed Valmera iPhone widgets.
