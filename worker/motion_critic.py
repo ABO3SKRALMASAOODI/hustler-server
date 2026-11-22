@@ -426,28 +426,32 @@ def lens_rhythm(view, edl, index, plan, genre):
     return out, measure
 
 
-def _sound_measure(path, prog):
+def _sound_measure(audio, prog, background=None):
     """(quiet share, hits/s) of the render's first ``prog`` seconds; quiet
     share 1.0 when it has no audio. A hit is a 10 ms frame that rises
     HIT_RISE_DB over the quietest of the 100 ms before it, to at least
     HIT_LEVEL_DB, at most one per 150 ms."""
     import numpy as np
-    db, frame_s = audio_rms(path)
+    db, frame_s = audio
     if db is None or not prog:
         return 1.0, 0.0
     db = db[:max(1, int(prog / frame_s))]
-    quiet = float((db < QUIET_DB).mean())
+    if background is None:
+        background = np.ones(len(db), dtype=bool)
+    if not background.any():
+        return 1.0, 0.0
+    quiet = float((db[background] < QUIET_DB).mean())
     k = 10
     hits, last = 0, -10 ** 9
     for i in range(1, len(db)):
-        if db[i] < HIT_LEVEL_DB or i - last <= 15:
+        if not background[max(0, i-k):i+1].all() or db[i] < HIT_LEVEL_DB or i - last <= 15:
             continue
         if db[i] - float(np.min(db[max(0, i - k):i])) >= HIT_RISE_DB:
             hits, last = hits + 1, i
-    return quiet, hits / float(prog)
+    return quiet, hits / (background.sum() * frame_s)
 
 
-def lens_craft(view, path, rhythm=None):
+def lens_craft(view, path, rhythm=None, *, audio=None, words=(), edl=None, silence_by_design=False):
     """What the references never lack, measured on the render: a picture
     that moves or changes, a sound bed with hits, an opening that moves.
 
@@ -467,7 +471,10 @@ def lens_craft(view, path, rhythm=None):
     cuts_per_s = cuts / prog
     picture = min(1.0, max(moving / MOVING_REF, cuts_per_s / CUTS_REF))
     motion = 1.0 + 9.0 * picture
-    quiet, hits_per_s = _sound_measure(path, prog)
+    if audio is None:
+        audio = audio_rms(path)
+    db, frame_s = audio
+    quiet, hits_per_s = _sound_measure(audio, prog)
     bed = min(1.0, (1.0 - quiet) / 0.9)
     sound = 1.0 + 9.0 * bed * (0.6 + 0.4 * min(1.0, hits_per_s / HITS_REF))
     h = max(1, int(HOOK_S * view.fps))
@@ -476,13 +483,52 @@ def lens_craft(view, path, rhythm=None):
     hook_cut = first_cut is not None and float(first_cut) < HOOK_S
     hook = 10.0 if hook_cut else \
         1.0 + 9.0 * min(1.0, hook_moving / HOOK_MOVING)
-    dims = {"motion_design": round(motion, 1), "sound": round(sound, 1),
+    opening_words = [w for w in words if w["t0"] < HOOK_S and w["t1"] > 0]
+    spoken_opening = any((_level(db, frame_s, max(0, w["t0"]), min(HOOK_S, w["t1"]))
+                          or -120) >= HIT_LEVEL_DB for w in opening_words)
+    # An audible entrance can precede the ASR's first recognised word
+    # (thiel_2004). Measure a sustained foreground onset on the render.
+    opening = db[:int(HOOK_S / frame_s)] if db is not None else []
+    audio_entrance = (len(opening) >= 10 and
+                      np.count_nonzero(opening >= HIT_LEVEL_DB) * frame_s >= 0.12 and
+                      np.percentile(opening, 90) - np.percentile(opening, 10) >= 12)
+    if spoken_opening or audio_entrance:
+        hook = 10.0
+    # On a dialogue edit, count only the audible bed and hits outside the
+    # spoken words, unless the timeline identifies a separate sound layer.
+    layers = edl or {}
+    added = any(not item.get("mute") and float(item.get("gain_db") or 0) > -55
+                for lane in ("music", "sfx") for item in layers.get(lane) or [])
+    if words and db is not None:
+        gaps = np.ones(len(db[:max(1, int(prog / frame_s))]), dtype=bool)
+        for word in words:
+            gaps[max(0, int((word["t0"] - 0.12) / frame_s)):
+                 max(0, int((word["t1"] + 0.12) / frame_s))] = False
+        # Room tone between words alone is not evidence of designed sound.
+        outside = db[:len(gaps)][gaps]
+        quiet, hits_per_s = _sound_measure(audio, prog, gaps)
+        bed = min(1.0, (1.0 - quiet) / 0.9)
+        if added:
+            # During dialogue, the timeline identifies which non-speech sources play.
+            for item in layers.get("music") or []:
+                if not item.get("mute") and float(item.get("gain_db") or 0) > -55:
+                    start, end = float(item.get("start") or 0), float(item.get("end") or prog)
+                    bed = max(bed, min(1.0, max(0.0, min(prog, end) - start) / prog))
+            cues = [item for item in layers.get("sfx") or []
+                    if not item.get("mute") and float(item.get("gain_db") or 0) > -55]
+            hits_per_s = max(hits_per_s, len(cues) / prog)
+        sound = 1.0 + 9.0 * bed * (0.6 + 0.4 * min(1.0, hits_per_s / HITS_REF))
+        if not added and (len(outside) < 0.3 / frame_s or np.median(outside) < HIT_LEVEL_DB):
+            sound = min(sound, 2.0)
+    if silence_by_design:
+        sound = None
+    dims = {"motion_design": round(motion, 1), "sound": round(sound, 1) if sound is not None else None,
             "story_hook": round(hook, 1)}
     measure = {"moving_share": round(moving, 3),
                "cuts_per_s": round(cuts_per_s, 3),
                "quiet_share": round(quiet, 3),
                "hits_per_s": round(hits_per_s, 3),
-               "hook_moving_share": round(hook_moving, 3),
+               "hook_moving_share": round(hook_moving, 3), "spoken_opening": spoken_opening,
                "dims": dims}
     if motion < 8.0:
         out.append(_f(
@@ -490,14 +536,12 @@ def lens_craft(view, path, rhythm=None):
             f"the picture changes on {100 * moving:.0f}% of frames and cuts "
             f"{cuts_per_s:.2f}/s; every reference moves on at least "
             f"{100 * MOVING_REF:.0f}% or cuts {CUTS_REF}/s.",
-            fix="add motion that carries meaning: a camera move or "
-                "add_zoom_path on each held picture, set_overlay_motion / "
-                "set_text_motion entrances, new pictures from the footage or "
-                "source_broll / search_stock on each beat, and cuts on the "
-                "action instead of holding one card",
+            fix="Keep a held picture while the line carries it. Where attention drops, "
+                "cut to the detail the speaker names or reveal a relevant graphic.",
             measure={k: measure[k] for k in ("moving_share", "cuts_per_s")}))
-    if sound < 8.0:
-        what = ("no sound at all" if quiet >= 0.99 else
+    if sound is not None and sound < 8.0:
+        what = ("the speech has no audible designed layer" if words and not added and sound <= 2 else
+                "no sound at all" if quiet >= 0.99 else
                 f"silence under {100 * quiet:.0f}% of it" if bed < 1.0 else
                 f"a bed but only {hits_per_s:.2f} hits/s")
         out.append(_f(
@@ -673,7 +717,7 @@ JOIN_LOUD_DB = -32.0
 JOIN_WIN_S = 0.03
 
 
-def lens_words(edl, index, plan, program_s, path=None, cut_level=None):
+def lens_words(edl, index, plan, program_s, path=None, cut_level=None, audio=None):
     """Cuts that split a word (the ASR span straddles the cut AND the
     render's audio is loud on both sides of the join), an opening
     mid-sentence, the payoff hold.
@@ -691,7 +735,7 @@ def lens_words(edl, index, plan, program_s, path=None, cut_level=None):
     words = [w for w in (index or {}).get("words") or []
              if isinstance(w, dict) and not w.get("filler")]
     keep = (edl or {}).get("keep") or []
-    db, fs = audio_rms(path) if path else (None, None)
+    db, fs = audio if audio is not None else audio_rms(path) if path else (None, None)
     if words and keep:
         # one span or many: the joins (none for one span), the opening and
         # the ending are judged (a single-span short skipped the opening
@@ -2019,7 +2063,7 @@ def _brand_findings(ec, rb, render_qc):
 def critique(path, edl, index=None, *, request_text=None, report=None,
              previous=None, fmt=None, intensity="designed", final=None,
              want_wm=False, maps=None, deep=True, board_dir=None,
-             cut_level=None):
+             cut_level=None, silence_by_design=False):
     """Judge the render at ``path`` of ``edl``. Returns {version, score,
     genre, findings (ranked), measures, ideas, strengths, board, wall_s}.
     Never raises for a lens: a lens that fails is reported, the others
@@ -2075,12 +2119,14 @@ def critique(path, edl, index=None, *, request_text=None, report=None,
     if got:
         findings += got[0]
         measures["rhythm"] = got[1]
-    got = run("craft", lens_craft, view, path, measures.get("rhythm"))
+    audio = audio_rms(path)
+    got = run("craft", lens_craft, view, path, measures.get("rhythm"), audio=audio,
+              words=plan.get("words") or [], edl=edl, silence_by_design=silence_by_design)
     if got:
         findings += got[0]
         measures["craft"] = got[1]
     got = run("words", lens_words, edl, index, plan, program_s, path,
-              cut_level)
+              cut_level, audio)
     findings += got or []
     got = run("type", lens_type, report)
     if got:
@@ -2181,7 +2227,7 @@ def critique_text(res, limit=10):
     cr = m.get("craft") or {}
     if cr.get("dims"):
         bits.append("measured craft " + ", ".join(
-            f"{k} {v}/10" for k, v in cr["dims"].items())
+            f"{k} {v}/10" if v is not None else f"{k} intentionally silent" for k, v in cr["dims"].items())
             + f" (picture moves on {100 * float(cr.get('moving_share') or 0):.0f}% "
             f"of frames, silence {100 * float(cr.get('quiet_share') or 0):.0f}%, "
             f"{cr.get('hits_per_s')} sound hits/s)")

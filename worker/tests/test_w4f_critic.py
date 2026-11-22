@@ -206,7 +206,7 @@ def test_a_static_silent_card_template_cannot_score_ten(silent_cards):
     assert {"static_picture", "no_sound_design", "static_hook"} <= set(craft)
     # the answer names what to add, with the tools that add it
     assert "add_sfx" in craft["no_sound_design"]["fix"]
-    assert "add_zoom_path" in craft["static_picture"]["fix"]
+    assert "add_zoom_path" not in craft["static_picture"]["fix"]
     text = motion_critic.critique_text(res)
     assert "no_sound_design" in text and "sound 1.0/10" in text
 
@@ -315,3 +315,23 @@ def test_critique_short_is_a_read_only_verify_verb():
     assert "critique_short" not in tools_ext.core_names(agent_tools.TOOLS)
     desc = agent_tools.TOOLS["critique_short"][1]
     assert desc.startswith("READ") and len(desc) <= 900
+
+
+def test_spoken_opening_and_requested_silence(two_tone, monkeypatch):
+    from tools_ext import critic_tools
+    from score import asks
+    from types import SimpleNamespace
+    def read(ctx, name, schema, prompt, request, **kwargs):
+        assert request == "Keep just my voice"
+        return {"intentional": True}, {}
+    monkeypatch.setattr(asks, "_call", read)
+    ctx = SimpleNamespace()
+    words = [{"w": "Listen", "t0": 0.1, "t1": 2.5}, {"w": "now", "t0": 3, "t1": 4}]
+    index = {"words": words}
+    raw = motion_critic.critique(two_tone, _edl(4), index, deep=False)
+    assert raw["measures"]["craft"]["dims"]["story_hook"] == 10
+    assert raw["measures"]["craft"]["dims"]["sound"] <= 2
+    quiet = motion_critic.critique(two_tone, _edl(4), index, deep=False,
+                  silence_by_design=critic_tools._silence_by_design(ctx, "Keep just my voice"))
+    assert quiet["measures"]["craft"]["dims"]["sound"] is None
+    assert "no_sound_design" not in _codes(quiet)
