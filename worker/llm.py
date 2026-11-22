@@ -367,6 +367,7 @@ def record(purpose, request, response, usage=None):
                 response['cache_write_in'] = (
                     details.get('cache_write_tokens', 0)
                     if isinstance(details, dict) else 0)
+                response['cache_write_1h_in'] = getattr(usage, 'hour_write_tokens', 0)
                 response['uncached_in'] = max(0,
                     int(getattr(usage, 'prompt_tokens', 0) or 0)
                     - response['cached_in'] - int(response['cache_write_in'] or 0))

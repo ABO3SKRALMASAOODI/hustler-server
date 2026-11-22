@@ -101,7 +101,7 @@ class World:
         p = params or ()
         self.sql.append(q)
         self._rows = []
-        if q.startswith(("SAVEPOINT", "RELEASE", "ROLLBACK")):
+        if q.startswith(("SELECT pg_advisory_xact_lock", "SAVEPOINT", "RELEASE", "ROLLBACK")):
             return
         if q.startswith("SELECT value FROM app_kv"):
             v = self.kv.get(p[0])
@@ -170,7 +170,8 @@ class World:
 
 
 @pytest.fixture(autouse=True)
-def fresh():
+def fresh(monkeypatch):
+    monkeypatch.setattr(model_budget, "_now", lambda now=None: now or NOW)
     model_budget.reset_cache()
     yield
     model_budget.reset_cache()
@@ -197,14 +198,15 @@ def test_the_allowance_spreads_the_wallet_over_the_days_left():
 def test_opus_when_the_allowance_is_large():
     got = _decide(World(wallet=200.0))           # (200-15)/18 = $10.3 a day
     assert got["model"] == OPUS and got["upgraded"] and got["reason"] == "fits"
-    assert got["plan_model"] == HAIKU and got["charge_as"] == HAIKU
+    assert got["plan_model"] == HAIKU and got["markup"] == 1.5
     assert got["expected_usd"] == pytest.approx(1.2)
 
 
-def test_sonnet_when_only_sonnet_fits():
+def test_configured_sonnet_when_only_sonnet_fits():
     # (69.04-15)/18 = $3.00 a day, $2.0 already spent: Opus 1.2 does not fit,
     # Sonnet 0.6 does (and is inside the account's 40% share)
-    got = _decide(World(wallet=67.04, spent_today=2.0))
+    got = _decide(World(wallet=67.04, spent_today=2.0, budget={
+        "plan_ladder": {"grandfathered": [OPUS, SONNET]}}))
     assert got["model"] == SONNET and got["reason"] == "fits"
 
 
@@ -217,16 +219,8 @@ def test_haiku_when_nothing_fits_and_the_request_still_runs():
     assert got["model"] == HAIKU and got["allowance_usd"] == 0.0
 
 
-def test_one_account_gets_at_most_its_share_of_the_day():
-    w = World(wallet=200.0, account={CUSTOMER: 3.5})   # share 0.4 x $10.28
-    got = _decide(w)
-    # Opus (1.2) would pass $4.11; Sonnet (0.6) still fits
-    assert got["model"] == SONNET and got["account_premium_usd"] == 3.5
-    w = World(wallet=200.0, account={CUSTOMER: 4.0})
-    got = _decide(w)
-    assert got["model"] == HAIKU and got["reason"] == "account_share"
-    # another account is unaffected
-    assert _decide(w, user=CUSTOMER + 1)["model"] == OPUS
+def test_account_spend_does_not_demote_paid_requests():
+    assert _decide(World(wallet=200, account={CUSTOMER: 4}))["model"] == OPUS
 
 
 def test_the_credit_line_bounds_the_allowance_so_the_switch_never_trips():
@@ -242,10 +236,10 @@ def test_the_credit_line_bounds_the_allowance_so_the_switch_never_trips():
 def test_the_pick_is_pure_and_the_floor_is_the_plans_model():
     costs = {OPUS: 1.2, SONNET: 0.6, HAIKU: 0.04}
     ladder = [OPUS, SONNET, HAIKU]
-    assert model_budget.pick(ladder, HAIKU, 10, 0, 0, costs, 0.4) == (OPUS, "fits")
-    assert model_budget.pick(ladder, SONNET, 10, 0, 0, costs, 0.4)[0] == OPUS
-    assert model_budget.pick(ladder, OPUS, 10, 0, 0, costs, 0.4)[0] == OPUS
-    assert model_budget.pick(ladder, "gpt-6.1-sol", 10, 0, 0, costs, 0.4) == (
+    assert model_budget.pick(ladder, HAIKU, 10, 0, costs) == (OPUS, "fits")
+    assert model_budget.pick(ladder, SONNET, 10, 0, costs)[0] == OPUS
+    assert model_budget.pick(ladder, OPUS, 10, 0, costs)[0] == OPUS
+    assert model_budget.pick(ladder, "gpt-6.1-sol", 10, 0, costs) == (
         "gpt-6.1-sol", "plan_model_not_on_ladder")
 
 
@@ -391,8 +385,8 @@ def test_expected_cost_learns_from_real_requests():
     # only requests the governor ran on that model teach it
     assert "payload->'model_budget'->>'model' = l.model" in learn
     # an expensive history moves the ladder down
-    w = World(wallet=200.0, samples={OPUS: [6.0] * 20})
-    assert _decide(w)["model"] == SONNET
+    w = World(wallet=200.0, samples={OPUS: [15.0] * 20})
+    assert _decide(w)["model"] == HAIKU
 
 
 def test_blend_starts_at_the_default():
@@ -440,13 +434,13 @@ def _route(world, payload, job=None, trialing=False, govern=True):
 def test_an_upgraded_request_edits_on_opus_and_helpers_keep_haiku(
         lane_up, monkeypatch):
     monkeypatch.setattr(model_budget, "decide",
-                        lambda conn, *a: model_budget._decision(
+                        lambda conn, *a, **kw: model_budget._decision(
                             OPUS, HAIKU, "fits", None))
     world, payload = World(), {}
     route = _route(world, payload)
     assert route["lane"]["model"] == OPUS
     assert route["helper_lane"]["model"] == HAIKU
-    assert route["credit_aliases"] == {OPUS: HAIKU}
+    assert OPUS not in route["credit_aliases"]
     assert payload["model_budget"]["model"] == OPUS
     assert payload["model_budget"]["root"] == 501
     assert world.stamped and world.stamped[0][0] == 501
@@ -459,7 +453,7 @@ def test_a_continuation_keeps_its_model_while_its_next_slice_fits(
         lane_up, monkeypatch):
     calls = []
 
-    def decide(conn, *a):
+    def decide(conn, *a, **kwargs):
         calls.append(a)
         return model_budget._decision(OPUS, HAIKU, "fits", None)
 
@@ -494,14 +488,15 @@ def test_a_long_request_steps_down_the_ladder_at_its_slice_boundaries(lane_up):
     kept for every slice whatever it cost."""
     previous = model_budget._decision(OPUS, HAIKU, "fits", None,
                                       expected_usd=1.2)
-    previous["root"] = 501
+    previous.update(root=501, plan="plus_2026")
+    budget = {"plan_ladder": {"plus_2026": [OPUS, SONNET]}}
     # 2 slices so far, 3M tokens: about $1.65 a slice on Opus, $1.02 on
     # Sonnet. Today: (69.04-15)/18 = $3.00, $1.9 spent (most of it this
     # request's): Opus no longer fits, Sonnet does.
     mix = {"fresh": 100_000, "cached": 2_600_000, "written": 260_000,
            "out": 40_000}
     cont = {"model_budget": dict(previous), "root_agent_job_id": 501}
-    world = World(wallet=69.04 - 1.9, spent_today=1.9,
+    world = World(budget=budget, wallet=69.04 - 1.9, spent_today=1.9,
                   progress={"mix": mix, "slices": 2}, request_premium=1.9,
                   account={CUSTOMER: 0.0})
     route = _route(world, cont, job={"id": 503, "user_id": CUSTOMER})
@@ -514,7 +509,7 @@ def test_a_long_request_steps_down_the_ladder_at_its_slice_boundaries(lane_up):
     # more spent: Sonnet no longer fits either, the request finishes on the
     # plan's model (never stopped)
     cont = {"model_budget": dict(previous), "root_agent_job_id": 501}
-    world = World(wallet=69.04 - 2.5, spent_today=2.5,
+    world = World(budget=budget, wallet=69.04 - 2.5, spent_today=2.5,
                   progress={"mix": mix, "slices": 2}, request_premium=2.5)
     route = _route(world, cont, job={"id": 504, "user_id": CUSTOMER})
     assert route["lane"]["model"] == HAIKU and "helper_lane" not in route
@@ -522,8 +517,8 @@ def test_a_long_request_steps_down_the_ladder_at_its_slice_boundaries(lane_up):
     assert cont["model_budget"]["upgraded"] is False
     # a stepped-down request never climbs back
     sonnet = model_budget._decision(SONNET, HAIKU, "stepped_down", None)
-    sonnet["root"] = 501
-    got = model_budget.reconsider(World(wallet=500.0, progress={
+    sonnet.update(root=501, plan="plus_2026")
+    got = model_budget.reconsider(World(budget=budget, wallet=500.0, progress={
         "mix": {k: v / 100 for k, v in mix.items()}, "slices": 1}),
         CUSTOMER, HAIKU, sonnet, 501, now=NOW)
     assert got["model"] == SONNET and got["reason"] == "continuation"
@@ -537,15 +532,15 @@ def test_the_first_decision_is_priced_from_the_requests_size():
     big = {"fresh": 150_000, "cached": 4_000_000, "written": 400_000,
            "out": 60_000}
     # $10.3 a day: the flat $1.20 would give Opus; this project's own
-    # requests cost about $4.0 on Opus, more than 40% of the day
+    # requests cost about $4.0 on Opus, which still fits the day
     w = World(wallet=200.0, project=[big, big])
     got = model_budget.decide(w, CUSTOMER, HAIKU, True, project_id=77,
                               root=900, now=NOW)
     assert got["estimate_basis"] == "project"
     assert got["costs"][OPUS] == pytest.approx(model_budget.mix_cost(OPUS, big),
                                                abs=1e-3)
-    assert got["model"] == SONNET
-    assert got["expected_usd"] == pytest.approx(model_budget.mix_cost(SONNET, big),
+    assert got["model"] == OPUS
+    assert got["expected_usd"] == pytest.approx(model_budget.mix_cost(OPUS, big),
                                                 abs=1e-3)
     # no history on the project: the typical request, scaled by source length
     typical = {"mix": {"fresh": 14_000, "cached": 327_000, "written": 67_000,
@@ -578,10 +573,10 @@ def test_requests_that_start_together_count_each_other():
     assert got["model"] == OPUS
     flying.append({"id": 702, "user_id": CUSTOMER + 7, "expected": 1.0, "spent": 0.0})
     got = _decide(World(wallet=200.0, flying=flying))
-    assert got["model"] == SONNET and got["inflight_usd"] == pytest.approx(9.5)
-    # the account's own requests in flight count against its share
+    assert got["model"] == HAIKU and got["inflight_usd"] == pytest.approx(9.5)
+    # reservations count against the common daily wallet
     mine = [{"id": 710, "user_id": CUSTOMER, "expected": 3.5, "spent": 0.0}]
-    assert _decide(World(wallet=200.0, flying=mine))["model"] == SONNET
+    assert _decide(World(wallet=200.0, flying=mine))["model"] == OPUS
     # a request's own jobs are never in its way
     got = model_budget.decide(World(wallet=200.0, flying=[
         {"id": 900, "user_id": CUSTOMER, "expected": 9.0, "spent": 0.0}]),
@@ -811,7 +806,7 @@ def test_the_admin_summary_reads_the_same_numbers():
     assert model_budget.summary(World(budget={"on": False}), now=NOW) == {
         "on": False, "ladder": [OPUS, SONNET, HAIKU], "reserve_usd": 15.0,
         "refill_at": REFILL, "refill_usd": 200.0, "nonexpiring_usd": 4.26,
-        "cycle_days": 30.0, "account_share": 0.4, "charge_as": HAIKU}
+        "cycle_days": 30.0, "plan_ladder": model_budget.DEFAULTS["plan_ladder"], "markup": 1.5}
 
 
 def test_question_need_asks_the_plans_helper_model_not_the_upgrade(monkeypatch):
@@ -843,3 +838,17 @@ def test_question_need_asks_the_plans_helper_model_not_the_upgrade(monkeypatch):
     ctx = SimpleNamespace(agent_lanes=[{"client": haiku, "model": "m"}])
     agent_tools._question_needs_customer(ctx, "Which file?")
     assert seen[-1] == (haiku, "m")
+
+
+@pytest.mark.parametrize("plan", ["plus_2026", "pro_2026", "max_2026", "ai_pro"])
+def test_paid_opus_week_2026_11_21(plan):
+    picked = model_budget.decide(World(wallet=200), CUSTOMER, HAIKU, True, now=NOW, plan=plan)
+    assert picked["model"] == OPUS
+    assert "upgrade your plan" in model_prices.low_balance_notice(picked, 1)
+    assert model_prices.low_balance_notice(picked, 5000) is None
+    assert model_budget.decide(World(wallet=0), CUSTOMER, HAIKU, True, now=NOW, plan=plan)["model"] == HAIKU
+
+
+@pytest.mark.parametrize("plan", ["free", "mcp_connect"])
+def test_free_and_mcp_do_not_get_editing_upgrade(plan):
+    assert model_budget.plan_rungs(model_budget.parse_config(None), plan, HAIKU) == [HAIKU]

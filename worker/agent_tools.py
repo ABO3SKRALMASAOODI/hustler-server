@@ -558,7 +558,7 @@ class ToolContext:
                 out = (u["out"] - audio_out
                        + (u["reasoning"]
                           if p.get("reasoning_separate") else 0))
-                cost += ((u["in"] - audio_in - cached) * p["in"]
+                model_cost = ((u["in"] - audio_in - cached) * p["in"]
                          + cached * p["cached_in"]
                          + audio_in * p["audio_in"]
                          + out * p["out"]
@@ -568,7 +568,10 @@ class ToolContext:
                 # contracted model rate instead. Applying the surcharge here
                 # stopped paid turns with hundreds of credits still available.
                 if not aliases.get(model):
-                    cost += float(u.get("cost_adjustment_usd") or 0)
+                    model_cost += float(u.get("cost_adjustment_usd") or 0)
+                markup = (getattr(self, "upgrade_markups", None) or {}).get(
+                    model, model_prices.PROVIDER_COST_MARKUP)
+                cost += model_prices.credit_cost_basis(model_cost, markup)
         else:
             cached_in = min(max(self.tokens_cached_in, 0), self.tokens_in)
             cost = ((self.tokens_in - cached_in) * config.LLM_PRICE_IN_PER_M +

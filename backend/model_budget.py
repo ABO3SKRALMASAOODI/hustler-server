@@ -30,14 +30,8 @@ never runs dry before the refill. When the Claude credit switch's line
 (claude_credit) leaves less room, that counts instead.
 
 THE PICK. At the start of a PAYING customer's request, ``decide`` picks the
-highest model on the ladder (Opus, then Sonnet, then the plan's model) whose
-expected cost for THIS request (its project's own past requests or its source
-length, priced on that model's card) still fits:
-
-  * the customers' spend today, plus what upgraded requests in flight are
-    still expected to spend, plus this request, within the allowance;
-  * this account's premium spend today, plus its own requests in flight,
-    plus this request, within ``account_share`` of the allowance.
+highest model configured for the plan whose expected cost fits today's wallet
+allowance after spend and outstanding reservations.
 
 At every slice boundary ``reconsider`` decides again from what the request
 has really spent: when its next slice no longer fits, it continues on the
@@ -46,9 +40,7 @@ and is always allowed: the governor never refuses, holds or stops a request;
 it only chooses a model. Not paying, not a customer account (spend_ledger
 lanes), the wallet unknown, or any error: the plan's model.
 
-Credits: an upgraded request is charged as if it ran on ``charge_as`` (the
-plan's Haiku card), like the edit rung: customers' credits buy as many edits
-as before. llm_calls and the meters keep the real model and the real cost.
+Credits use the actual editing model and the configured upgrade markup.
 
 app_kv ``model_budget`` (JSON, read at most every 60 s). An absent row means
 DEFAULTS, which are ON (the owner decided); {"on": false} is the behaviour
@@ -88,11 +80,12 @@ DEFAULTS = {
     "refill_usd": 200.0,
     "nonexpiring_usd": 4.26,
     "cycle_days": 30.0,
-    "account_share": 0.4,
     # The flat cost of a request on each model, used only when there is no
     # token history to price (a fresh install); learned from real requests.
     "expected_usd": {HAIKU: 0.04, SONNET: 0.6, OPUS: 1.2},
-    "charge_as": HAIKU,
+    "plan_ladder": {"plus_2026": [OPUS], "pro_2026": [OPUS], "max_2026": [OPUS],
+                    "grandfathered": [OPUS]},
+    "markup": 1.5,
     # The Claude credit switch's line (claude_credit.line_usd) bounds the
     # allowance too, so an upgrade never switches the free trial off.
     "respect_credit_line": True,
@@ -128,8 +121,6 @@ REASONS = {
     "not_customer": "internal and replay work keep the plan's model",
     "plan_model_not_on_ladder": "the plan's model is not on the ladder",
     "daily_allowance": "nothing above the plan's model fits today's allowance",
-    "account_share": "this account's spend today and this request would "
-                     "pass one account's share of today's allowance",
     "wallet_unknown": "the Anthropic wallet estimate is unknown",
     "error": "the budget lookup failed",
 }
@@ -222,15 +213,18 @@ def parse_config(raw):
                                   DEFAULTS["nonexpiring_usd"])
     out["cycle_days"] = _num(data.get("cycle_days"), DEFAULTS["cycle_days"],
                              1.0, 366.0)
-    out["account_share"] = _num(data.get("account_share"),
-                                DEFAULTS["account_share"], 0.0, 1.0)
     expected = dict(DEFAULTS["expected_usd"])
     for name, usd in (data.get("expected_usd") or {}).items():
         model = _model(name)
         if model:
             expected[model] = _num(usd, expected.get(model, 0.0))
     out["expected_usd"] = expected
-    out["charge_as"] = _model(data.get("charge_as")) or DEFAULTS["charge_as"]
+    plans = data.get("plan_ladder")
+    if isinstance(plans, dict):
+        for plan, rungs in plans.items():
+            if isinstance(rungs, list):
+                out["plan_ladder"][plan] = list(dict.fromkeys(m for m in rungs if m in (OPUS, SONNET)))
+    out["markup"] = _num(data.get("markup"), DEFAULTS["markup"], lo=0.01)
     out["respect_credit_line"] = data.get("respect_credit_line", True) is not False
     out["learn_days"] = _num(data.get("learn_days"), DEFAULTS["learn_days"], 1.0, 90.0)
     out["learn_requests"] = int(_num(data.get("learn_requests"),
@@ -460,25 +454,6 @@ def _internal_ids():
     return sorted(int(x) for x in spend_ledger.INTERNAL_USER_IDS)
 
 
-def account_premium_today(conn, user_id, models, now=None):
-    """This account's spend today on the premium models (the real provider
-    cost its requests' calls recorded)."""
-    models = [m for m in models if m]
-    if not models or user_id is None:
-        return 0.0
-    start = datetime.combine(_now(now).date(), datetime.min.time(),
-                             tzinfo=timezone.utc)
-    with conn.cursor() as cur:
-        cur.execute("""SELECT COALESCE(SUM(COALESCE(
-                                  (l.response->>'provider_cost_usd')::float, 0)), 0)
-                              AS usd
-                         FROM llm_calls l JOIN video_jobs j ON j.id = l.job_id
-                        WHERE l.created_at >= %s AND l.model = ANY(%s)
-                          AND j.user_id = %s""",
-                    (start, list(models), int(user_id)))
-        return float(_v(cur.fetchone(), "usd", 0) or 0.0)
-
-
 def inflight(conn, cfg, user_id=None, root=None, job_id=None, now=None):
     """{"usd", "mine_usd", "jobs"}: what upgraded agent jobs queued or running
     (payload.model_budget.upgraded) are still expected to spend: each one's
@@ -523,7 +498,8 @@ def inflight(conn, cfg, user_id=None, root=None, job_id=None, now=None):
 _MIX_SQL = """SUM(COALESCE(l.prompt_tokens, 0)) AS prompt,
               SUM(COALESCE((l.response->>'cached_in')::float, 0)) AS cached,
               SUM(COALESCE((l.response->>'cache_write_in')::float, 0)) AS written,
-              SUM(COALESCE(l.completion_tokens, 0)) AS completion"""
+              SUM(COALESCE(l.completion_tokens, 0)) AS completion,
+              SUM(COALESCE((l.response->>'cache_write_1h_in')::float, 0)) AS written_hour"""
 
 
 def _mix(row, offset=0):
@@ -533,7 +509,8 @@ def _mix(row, offset=0):
     written = float(_v(row, "written", offset + 2) or 0.0)
     out = float(_v(row, "completion", offset + 3) or 0.0)
     return {"fresh": max(0.0, prompt - cached - written), "cached": cached,
-            "written": written, "out": out}
+            "written": written, "out": out,
+            "written_hour": min(written, float(_v(row, "written_hour", offset + 4) or 0))}
 
 
 def mix_cost(model, mix):
@@ -545,6 +522,7 @@ def mix_cost(model, mix):
             or model_prices.MODEL_PRICES[SONNET])
     return (mix["fresh"] * card["in"] + mix["cached"] * card["cached_in"]
             + mix["written"] * card.get("cache_write_in", card["in"])
+            + mix.get("written_hour", 0) * (2 * card["in"] - card["cache_write_in"])
             + mix["out"] * card["out"]) / 1e6
 
 
@@ -587,7 +565,7 @@ def typical_mix(conn, cfg, now=None):
     with conn.cursor() as cur:
         cur.execute(f"""SELECT AVG(r.prompt) AS prompt, AVG(r.cached) AS cached,
                                AVG(r.written) AS written,
-                               AVG(r.completion) AS completion,
+                               AVG(r.completion) AS completion, AVG(r.written_hour) AS written_hour,
                                AVG(a.dur) AS duration_s, COUNT(*) AS n
                           FROM (SELECT {_MIX_SQL}, MAX(j.project_id) AS pid
                                   FROM llm_calls l JOIN video_jobs j ON j.id = l.job_id
@@ -605,12 +583,12 @@ def typical_mix(conn, cfg, now=None):
                     (EDIT_PURPOSE, now - timedelta(days=float(cfg["learn_days"])),
                      _internal_ids()))
         row = cur.fetchone()
-    if not row or not int(_v(row, "n", 5) or 0):
+    if not row or not int(_v(row, "n", 6) or 0):
         return None
     mix = _mix(row)
     if sum(mix.values()) <= 0:
         return None
-    dur = _v(row, "duration_s", 4)
+    dur = _v(row, "duration_s", 5)
     return {"mix": mix, "duration_s": float(dur) if dur else None}
 
 
@@ -798,29 +776,27 @@ def _state(conn, cfg, now=None):
 
 # ------------------------------------------------------------------ the pick
 
-def pick(ladder, floor, allowance, spent_today, account_spent, expected, share):
-    """(model, reason): the highest ladder model above ``floor`` whose
-    expected cost fits both today's allowance and this account's share of
-    it; ``floor`` when none does. ``spent_today`` and ``account_spent``
-    already hold what is in flight. Pure."""
+def pick(ladder, floor, allowance, spent_today, expected):
+    """Choose the first model whose estimated cost fits the unreserved wallet."""
     if floor not in ladder:
         return floor, "plan_model_not_on_ladder"
-    reason = "daily_allowance"
     for model in ladder[:ladder.index(floor)]:
-        cost = float(expected.get(model, float("inf")))
-        if spent_today + cost > allowance:
-            continue
-        if account_spent + cost > share * allowance:
-            reason = "account_share"
-            continue
-        return model, "fits"
-    return floor, reason
+        if spent_today + expected.get(model, float("inf")) <= allowance:
+            return model, "fits"
+    return floor, "daily_allowance"
+
+
+def plan_rungs(cfg, plan, floor):
+    if plan in ("free", "mcp_connect"):
+        return [floor]
+    plans = cfg["plan_ladder"]
+    return [rung for rung in plans.get(plan, plans["grandfathered"]) if rung != floor] + [floor]
 
 
 def _decision(model, plan_model, reason, cfg=None, **numbers):
     out = {"model": model, "plan_model": plan_model, "reason": reason,
            "upgraded": model != plan_model,
-           "charge_as": (cfg or DEFAULTS)["charge_as"],
+           "markup": (cfg or DEFAULTS)["markup"] if model != plan_model else 2.0,
            "decided_at": _now().isoformat()}
     out.update({k: (round(v, 6) if isinstance(v, float) else v)
                 for k, v in numbers.items()})
@@ -828,7 +804,7 @@ def _decision(model, plan_model, reason, cfg=None, **numbers):
 
 
 def decide(conn, user_id, plan_model, paying, project_id=None, root=None,
-           now=None):
+           now=None, plan="grandfathered"):
     """The model for a new request. Never raises; any doubt is the plan's
     model. ``paying``: the account pays (subscribed, not on a trial).
     ``project_id`` sizes the request; ``root`` is its root agent job."""
@@ -849,23 +825,19 @@ def decide(conn, user_id, plan_model, paying, project_id=None, root=None,
                       "; paying requests keep the plan's model")
             return _decision(plan_model, plan_model, state["problem"], cfg,
                              wallet_usd=state["wallet_usd"])
-        premium = cfg["ladder"][:cfg["ladder"].index(floor)]
-        # Fresh, not cached: requests that start together count each other.
+        ladder = plan_rungs(cfg, plan, floor)
         spent = customers_spent_today(conn, now)
         flying = inflight(conn, cfg, user_id, root, root, now)
-        mine = account_premium_today(conn, user_id, premium, now)
         estimate = request_estimate(conn, cfg, project_id, root, now)
-        costs = _costs(cfg["ladder"], estimate, flat)
-        model, reason = pick(cfg["ladder"], floor, state["allowance_usd"],
-                             spent + flying["usd"],
-                             mine + flying["mine_usd"], costs,
-                             cfg["account_share"])
+        costs = _costs(ladder, estimate, flat)
+        model, reason = pick(ladder, floor, state["allowance_usd"],
+                             spent + flying["usd"], costs)
         return _decision(model if model != floor else plan_model, plan_model,
                          reason, cfg,
                          allowance_usd=float(state["allowance_usd"]),
                          spent_today_usd=float(spent),
                          inflight_usd=float(flying["usd"]),
-                         account_premium_usd=float(mine),
+                         plan=plan,
                          expected_usd=float(costs.get(model, 0.0)),
                          estimate_basis=(estimate or {}).get("basis", "flat"),
                          costs={m: round(float(c), 4) for m, c in costs.items()},
@@ -941,7 +913,7 @@ def reconsider(conn, user_id, plan_model, previous, root, project_id=None,
     request's decision (a new request: ``decide``). An upgraded request
     decides again at every slice boundary from its own spend: its next slice
     (what its slices so far used on average, priced on each rung) must still
-    fit today's allowance and the account's share, counting what is in
+    fit today's allowance, counting what is in
     flight; when it no longer does, the request continues on the next cheaper
     rung, down to the plan's model. Never moves up; never raises."""
     out = kept(previous, root, plan_model, continuation_state)
@@ -963,7 +935,7 @@ def reconsider(conn, user_id, plan_model, previous, root, project_id=None,
         if not cfg["on"]:
             return step(plan_model, "off")
         floor = _model(plan_model)
-        ladder = cfg["ladder"]
+        ladder = plan_rungs(cfg, out.get("plan", "grandfathered"), floor)
         if floor not in ladder or current not in ladder or \
                 ladder.index(current) >= ladder.index(floor):
             return step(plan_model, "plan_model_not_on_ladder")
@@ -981,17 +953,15 @@ def reconsider(conn, user_id, plan_model, previous, root, project_id=None,
         costs = _costs(ladder, per_slice,
                        expected_costs(conn, cfg, now) if not per_slice else {})
         flying = inflight(conn, cfg, user_id, root, root, now)
-        mine = account_premium_today(conn, user_id, premium, now)
         rungs = ladder[ladder.index(current):]
         model, reason = pick(rungs, floor, state["allowance_usd"],
                              state["spent_today_usd"] + flying["usd"],
-                             mine + flying["mine_usd"], costs,
-                             cfg["account_share"])
+                             costs)
         return step(model, "continuation" if model == current else "stepped_down",
                     allowance_usd=float(state["allowance_usd"]),
                     spent_today_usd=float(state["spent_today_usd"]),
                     inflight_usd=float(flying["usd"]),
-                    account_premium_usd=float(mine),
+                    markup=cfg["markup"] if model != floor else 2.0,
                     request_premium_usd=float(progress["premium_usd"]),
                     slices=int(progress["slices"]),
                     expected_usd=float(costs.get(model, 0.0)),
@@ -1016,7 +986,7 @@ def summary(conn, now=None):
            "refill_usd": cfg["refill_usd"],
            "nonexpiring_usd": cfg["nonexpiring_usd"],
            "cycle_days": cfg["cycle_days"],
-           "account_share": cfg["account_share"], "charge_as": cfg["charge_as"]}
+           "plan_ladder": cfg["plan_ladder"], "markup": cfg["markup"]}
     if not cfg["on"]:
         return out
     now = _now(now)
@@ -1036,8 +1006,7 @@ def summary(conn, now=None):
         out["inflight_usd"] = flying["usd"]
         out["typical_request_usd"] = {m: round(c, 4) for m, c in costs.items()}
         out["next_model"], out["reason"] = pick(
-            cfg["ladder"], floor, state["allowance_usd"],
-            state["spent_today_usd"] + flying["usd"], 0.0, costs,
-            cfg["account_share"])
+            plan_rungs(cfg, "grandfathered", floor), floor, state["allowance_usd"],
+            state["spent_today_usd"] + flying["usd"], costs)
     out["reason_text"] = REASONS.get(out["reason"], out["reason"])
     return out

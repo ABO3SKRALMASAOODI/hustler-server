@@ -213,6 +213,19 @@ PROVIDER_COST_MARKUP = 2.0
 USD_PER_CREDIT = CREDIT_USAGE_VALUE_USD / PROVIDER_COST_MARKUP
 
 
+def credit_cost_basis(provider_cost, markup):
+    """Convert a model's markup to the common 2x settlement basis."""
+    return provider_cost * markup / PROVIDER_COST_MARKUP
+
+
+def low_balance_notice(decision, balance):
+    expected = round(decision.get("expected_usd", 0) * decision["markup"] / CREDIT_USAGE_VALUE_USD)
+    if expected > float(balance or 0):
+        return (f"This edit is expected to use about {expected} credits of the "
+                f"{float(balance or 0):g} you have left. You can upgrade your plan for more credits.")
+    return None
+
+
 def context_multiplier(model, prompt_tokens):
     p = MODEL_PRICES.get(normalize(model)) or {}
     threshold = p.get("long_context_tokens")
@@ -248,7 +261,7 @@ def luna6_usage_cost(tokens_in, tokens_out, cached=0, cache_write=0,
 
 
 def claude_usage_cost(model, input_tokens, output_tokens, cache_read=0,
-                      cache_write=0):
+                      cache_write=0, hour_write=0):
     """Exact USD for one Anthropic Messages call, from its own usage block.
 
     Anthropic reports the three input categories separately and DISJOINTLY:
@@ -269,8 +282,9 @@ def claude_usage_cost(model, input_tokens, output_tokens, cache_read=0,
     if long_card and tin + read + write > long_card["threshold"]:
         card.update({k: long_card[k]
                      for k in ("in", "cached_in", "cache_write_in", "out")})
-    return (tin * card["in"] + read * card["cached_in"]
-            + write * card.get("cache_write_in", card["in"])
+    hour = min(write, max(0, int(hour_write or 0)))
+    return (tin * card["in"] + read * card["cached_in"] + hour * 2 * card["in"]
+            + (write - hour) * card.get("cache_write_in", card["in"])
             + out * card["out"]) / 1e6
 
 

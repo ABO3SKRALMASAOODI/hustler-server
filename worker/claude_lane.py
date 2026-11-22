@@ -450,7 +450,8 @@ _plan_off = False
 
 def tool_plan(stable, catalog, effort=None):
     """The turn's fixed list, the catalog behind it, and what was surfaced."""
-    return {"stable": list(stable or []), "catalog": list(catalog or []),
+    return {"stable": sorted(stable or [], key=lambda t: t["function"]["name"]),
+            "catalog": sorted(catalog or [], key=lambda t: t["function"]["name"]),
             "refs": {}, "effort": effort}
 
 
@@ -481,12 +482,15 @@ def surface_tools(plan, messages, tools):
 
 
 def _plan_tools(plan, model):
+    if model in plan.get("wire_tools", {}):
+        return list(plan["wire_tools"][model])
     stable = to_anthropic([], plan["stable"], model)[2]
     names = {tool["name"] for tool in stable}
     rest = to_anthropic([], [t for t in plan["catalog"]
                              if t["function"]["name"] not in names], model)[2]
-    return stable + [dict(tool, defer_loading=True)
-                     for tool in sorted(rest, key=lambda t: t["name"])]
+    ordered = stable + [dict(tool, defer_loading=True) for tool in rest]
+    plan.setdefault("wire_tools", {})[model] = ordered
+    return list(ordered)
 
 
 def _plan_refused(exc):
@@ -519,7 +523,7 @@ def _one_shot(msgs, tools):
     return (not tools or structured_brief) and all(m["role"] != "assistant" for m in msgs)
 
 
-def _mark_cache(system, msgs, tools, model="", cache_policy=None):
+def _mark_cache(system, msgs, tools, model="", cache_policy=None, long_prefix=False):
     """Up to four ephemeral breakpoints at the stability boundaries, and none
     where nothing would be read back."""
     # A model name cannot tell us whether the call is reusable. Opus also
@@ -538,20 +542,28 @@ def _mark_cache(system, msgs, tools, model="", cache_policy=None):
     # write beyond Anthropic's 20-position lookback. Keep an explicit read
     # anchor there in that case, using the otherwise redundant tools slot.
     anchor = _released_pixels_anchor(msgs) or _previous_cache_anchor(msgs)
-    if tools and anchor is None:
-        last = max((i for i, tool in enumerate(tools)
-                    if not tool.get("defer_loading")), default=None)
-        if last is not None:
-            tools[last] = dict(tools[last], cache_control={"type": "ephemeral"})
-    if system:
-        # The editor kernel + capability directory are identical for every
-        # project; one breakpoint after them is a cross-account read point,
-        # the last leading block caches this project's context.
-        stable = min(1, len(system) - 1)
-        system[stable] = dict(system[stable],
-                              cache_control={"type": "ephemeral"})
-        if len(system) - 1 != stable:
-            system[-1] = dict(system[-1], cache_control={"type": "ephemeral"})
+    if long_prefix:
+        # Paid Opus edits can wait on a render or a preview between tool calls.
+        stable = {"type": "ephemeral", "ttl": "1h"}
+        if tools:
+            tools[-1] = dict(tools[-1], cache_control=stable)
+        if system:
+            system[-1] = dict(system[-1], cache_control=stable)
+    else:
+        if tools and anchor is None:
+            last = max((i for i, tool in enumerate(tools)
+                        if not tool.get("defer_loading")), default=None)
+            if last is not None:
+                tools[last] = dict(tools[last], cache_control={"type": "ephemeral"})
+        if system:
+            # The editor kernel + capability directory are identical for every
+            # project; one breakpoint after them is a cross-account read point,
+            # the last leading block caches this project's context.
+            stable = min(1, len(system) - 1)
+            system[stable] = dict(system[stable],
+                                  cache_control={"type": "ephemeral"})
+            if len(system) - 1 != stable:
+                system[-1] = dict(system[-1], cache_control={"type": "ephemeral"})
     for msg in reversed(msgs):
         if msg["role"] == "system":
             continue             # a mid-conversation note cannot carry one
@@ -747,6 +759,10 @@ class _Usage:
         self.cache_read_input_tokens = int(get("cache_read_input_tokens"))
         self.cache_creation_input_tokens = int(
             get("cache_creation_input_tokens"))
+        breakdown = getattr(raw, "cache_creation", None)
+        self.hour_write_tokens = int((breakdown.get("ephemeral_1h_input_tokens")
+                                      if isinstance(breakdown, dict) else
+                                      getattr(breakdown, "ephemeral_1h_input_tokens", 0)) or 0)
         self.output_tokens = int(get("output_tokens"))
         self.prompt_tokens = (self.input_tokens + self.cache_read_input_tokens
                               + self.cache_creation_input_tokens)
@@ -754,11 +770,12 @@ class _Usage:
         self.total_tokens = self.prompt_tokens + self.completion_tokens
         self.prompt_tokens_details = {
             "cached_tokens": self.cache_read_input_tokens,
-            "cache_write_tokens": self.cache_creation_input_tokens}
+            "cache_write_tokens": self.cache_creation_input_tokens,
+            "cache_write_1h_tokens": self.hour_write_tokens}
         self.completion_tokens_details = {}
         self.provider_cost_usd = model_prices.claude_usage_cost(
             model, self.input_tokens, self.output_tokens,
-            self.cache_read_input_tokens, self.cache_creation_input_tokens)
+            self.cache_read_input_tokens, self.cache_creation_input_tokens, self.hour_write_tokens)
         self.service_tier = getattr(raw, "service_tier", None)
 
 
@@ -846,11 +863,17 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
     plan = tool_plan if plan_usable(tool_plan, model) else None
 
     def build(active):
+        long_prefix = bool(active and model.startswith("claude-opus-5-5"))
+        volatile = [m for m in messages if long_prefix and m.get("role") == "system"
+                    and m.get("content") == active.get("volatile_system")]
+        history = [m for m in messages if m not in volatile]
         system, msgs, tool_defs = to_anthropic(
-            messages, tools, model, active["refs"] if active else None)
+            history, None if active else tools, model, active["refs"] if active else None)
         if active:
             tool_defs = _plan_tools(active, model)
-        _mark_cache(system, msgs, tool_defs, model, cache_policy)
+        _mark_cache(system, msgs, tool_defs, model, cache_policy, long_prefix)
+        for note in volatile:
+            msgs.append({"role": "system", "content": note["content"]})
         body = {"model": model, "max_tokens": int(max_tokens or 8000),
                 "messages": msgs}
         if system:

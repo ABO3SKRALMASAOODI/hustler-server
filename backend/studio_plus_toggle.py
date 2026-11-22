@@ -233,6 +233,29 @@ def switch(conn, on, actor="admin", now=None):
     return value
 
 
+def _model_week(conn):
+    """Requests, settled credits and actual Claude spend, grouped by the editing model."""
+    with conn.cursor() as cur:
+        cur.execute("""WITH roots AS (
+            SELECT id, payload->'model_budget'->>'model' AS model,
+                   COALESCE((payload->'model_budget'->>'credits_charged')::numeric, 0) AS credits
+              FROM video_jobs
+             WHERE type = 'agent_turn' AND payload ? 'model_budget'
+               AND COALESCE((payload->>'root_agent_job_id')::int, id) = id
+               AND created_at >= NOW() - interval '7 days'
+        ), spend AS (
+            SELECT COALESCE((j.payload->>'root_agent_job_id')::int, j.id) AS root,
+                   SUM((l.response->>'provider_cost_usd')::numeric) AS usd
+              FROM llm_calls l JOIN video_jobs j ON j.id = l.job_id
+             WHERE l.created_at >= NOW() - interval '7 days' AND l.model LIKE 'claude-%'
+             GROUP BY 1
+        )
+        SELECT model, count(*) AS requests, sum(credits) AS credits_charged,
+               COALESCE(sum(usd), 0) AS anthropic_usd
+          FROM roots LEFT JOIN spend ON root = id GROUP BY model ORDER BY model""")
+        return [dict(row) for row in cur.fetchall()]
+
+
 def features(conn, now=None):
     """The "Claude features" card: both switches and the shared line."""
     import trial_toggle
@@ -246,6 +269,11 @@ def features(conn, now=None):
     # last, inside a savepoint: any doubt is an "unavailable" line.
     budget = claude_plans.safe(conn, model_budget.summary,
                                default={"error": "unavailable"})
+    by_model = claude_plans.safe(conn, _model_week, default=[])
+    budget["requests_by_model_7d"] = by_model
+    budget["week_line"] = "Last 7 days: " + (", ".join(
+        f"{row['model']} · {row['requests']} requests · {row['credits_charged']:g} credits · "
+        f"${row['anthropic_usd']:.2f} Anthropic" for row in by_model) or "no metered requests")
     return {"trial": trial, "studio_plus": studio,
             "opus_supervision": opus_supervision.status(conn),
             "model_budget": budget,

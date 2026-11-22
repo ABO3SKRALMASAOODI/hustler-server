@@ -4401,6 +4401,10 @@ def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0,
                        WHERE id = %s""",
                     (spend_daily, spend_bonus, spend_monthly,
                      spend_daily, spend_bonus, spend_monthly, user_id))
+        cur.execute("""UPDATE video_jobs
+                          SET payload = jsonb_set(payload, '{model_budget,credits_charged}', to_jsonb(%s::numeric))
+                        WHERE id = %s AND payload ? 'model_budget'""",
+                    (credits, job_id))
         return credits
 
 

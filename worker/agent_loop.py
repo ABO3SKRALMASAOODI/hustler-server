@@ -1432,6 +1432,7 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
             print(f"[filmstrip] skipped ({e})", flush=True)
     current_state = state_block(
         ctx, worker_db, include_blueprint=False)
+    ctx._cache_state_text = current_state
     msgs.append({"role": "system", "content": current_state})
     _component("current_project_edl_state", current_state)
     # The last few messages, not the last twenty (round 71f). Twenty was up
@@ -2229,9 +2230,15 @@ def run_agent_job(worker_db, job):
                 # stay on the plan's model: llm.helper_lane.
                 ctx.helper_client = helper_lane["client"]
                 ctx.helper_model = helper_lane["model"]
+            budget = paid_claude.get("model_budget") or {}
+            if budget.get("upgraded"):
+                ctx.upgrade_markups = {budget["model"]: budget["markup"]}
+                notice = model_prices.low_balance_notice(budget, balance)
+                if notice and not payload.get("continuation_state"):
+                    worker_db.run(_show_credit_estimate, session_id, job["id"], notice)
             if paid_claude.get("credit_aliases"):
                 ctx.credit_price_aliases = dict(paid_claude["credit_aliases"])
-            elif paid_claude.get("credit_model"):
+            elif paid_claude.get("credit_model") and not budget.get("upgraded"):
                 ctx.credit_price_aliases = {
                     paid_claude["lane"]["model"]: paid_claude["credit_model"]}
             metrics = getattr(ctx, "editing_metrics", None)
@@ -2317,6 +2324,12 @@ def run_agent_job(worker_db, job):
             if audio_out:
                 extra["audio_out"] = audio_out
             response = dict(response, **extra)
+        markup = (getattr(ctx, "upgrade_markups", None) or {}).get(model)
+        if markup is not None and usage:
+            provider_cost = llm.provider_cost_usd(usage, model)
+            if provider_cost is not None:
+                response = dict(response or {}, credit_cost_usd=model_prices.credit_cost_basis(
+                    provider_cost, markup), credit_markup=markup)
         worker_db.run(dbx.insert_llm_call, job["project_id"], job["id"],
                       purpose, model,
                       request, response,
@@ -2559,7 +2572,7 @@ def _claude_paid_lane(worker_db, job, subscribed, plan, payload,
         if govern:
             # An editing request (not a Shorts helper lane): the governor.
             _apply_model_budget(worker_db, job, route, model, subscribed,
-                                trialing, payload, flag)
+                                trialing, payload, plan)
         return route
     except Exception as exc:  # noqa: BLE001 - today's lanes on any doubt
         print(f"[agent] job {job.get('id')}: new-subscriber lane lookup "
@@ -2568,15 +2581,8 @@ def _claude_paid_lane(worker_db, job, subscribed, plan, payload,
 
 
 def _apply_model_budget(worker_db, job, route, plan_model, subscribed,
-                        trialing, payload, flag):
-    """The model budget governor (model_budget, owner 20 Nov 2026): a paying
-    customer's request edits on the best model today's Anthropic allowance
-    can pay for; the plan's model is the floor. Decided once per request,
-    kept by its continuations. Only the editing turn's model changes: the
-    plan's lane stays behind it (a provider failure falls back to it) and is
-    the lane every helper role, vision and critic uses. The upgraded model's
-    calls are charged at ``charge_as`` (the plan's Haiku card), like the edit
-    rung. Never raises; any doubt leaves the route as it was."""
+                        trialing, payload, plan):
+    """Reserve the wallet estimate and persist the model in one transaction."""
     try:
         import model_budget
         payload = payload if isinstance(payload, dict) else {}
@@ -2584,19 +2590,21 @@ def _apply_model_budget(worker_db, job, route, plan_model, subscribed,
         # A continuation decides again at its slice boundary from what the
         # request has really spent (model_budget.reconsider): it keeps its
         # model while the next slice fits, else continues a rung cheaper.
-        decision = None
-        if model_budget.kept(payload.get("model_budget"), root, plan_model,
-                             payload.get("continuation_state")) is not None:
-            decision = worker_db.run(
-                model_budget.reconsider, job.get("user_id"), plan_model,
-                payload.get("model_budget"), root, job.get("project_id"),
-                payload.get("continuation_state"))
-        if decision is None:
-            decision = worker_db.run(
-                model_budget.decide, job.get("user_id"), plan_model,
-                bool(subscribed) and not trialing, job.get("project_id"),
-                root)
-            decision = dict(decision or {}, root=root)
+        def reserve(conn):
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext('valmera.model_budget'))")
+            decision = model_budget.reconsider(
+                conn, job.get("user_id"), plan_model, payload.get("model_budget"),
+                root, job.get("project_id"), payload.get("continuation_state"))
+            if decision is None:
+                decision = model_budget.decide(conn, job.get("user_id"), plan_model,
+                                               bool(subscribed) and not trialing,
+                                               job.get("project_id"), root, plan=plan)
+            decision = dict(decision, root=root)
+            _stamp_model_budget(conn, job.get("id"), decision)
+            return decision
+
+        decision = worker_db.run(reserve)
         if not isinstance(decision, dict) or not decision.get("model"):
             return route
         model = str(decision["model"])
@@ -2606,15 +2614,6 @@ def _apply_model_budget(worker_db, job, route, plan_model, subscribed,
             helper = route["lane"]
             route["lane"] = claude_lane.lane(model, name="claude_paid")
             route["helper_lane"] = helper
-            aliases = dict(route.get("credit_aliases") or {})
-            # Credit parity (an owner's choice on studio_for_all_plans)
-            # still prices every Claude call at the plan's contracted card;
-            # otherwise the upgrade is charged as the plan's model would be.
-            aliases[model] = (route.get("credit_model")
-                              if flag.get("credit_parity")
-                              and route.get("credit_model")
-                              else decision.get("charge_as") or plan_model)
-            route["credit_aliases"] = aliases
         else:
             decision["model"] = plan_model
             decision["upgraded"] = False
@@ -2624,11 +2623,6 @@ def _apply_model_budget(worker_db, job, route, plan_model, subscribed,
         payload["model_budget"] = decision
         if job.get("payload") is not payload and isinstance(job, dict):
             job["payload"] = payload
-        try:
-            worker_db.run(_stamp_model_budget, job.get("id"), decision)
-        except Exception as exc:  # noqa: BLE001 - the stamp is a record
-            print(f"[agent] job {job.get('id')}: model budget stamp not "
-                  f"written ({str(exc)[:120]})", flush=True)
         print(f"[agent] job {job.get('id')}: model budget -> {model} "
               f"({decision.get('reason')}; allowance "
               f"{decision.get('allowance_usd')}, spent today "
@@ -2638,6 +2632,17 @@ def _apply_model_budget(worker_db, job, route, plan_model, subscribed,
               f"({type(exc).__name__}: {str(exc)[:160]}); plan model",
               flush=True)
     return route
+
+
+def _show_credit_estimate(conn, session_id, job_id, notice):
+    """Post the estimate before editing, once even if a worker restarts."""
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs SET payload = payload || '{"estimate_shown":true}'::jsonb
+                        WHERE id = %s AND NOT (payload ? 'estimate_shown') RETURNING id""",
+                    (job_id,))
+        if cur.fetchone():
+            dbx.add_message(conn, session_id, "assistant", notice,
+                            {"kind": "credit_estimate", "job_id": job_id})
 
 
 def _stamp_model_budget(conn, job_id, decision):
@@ -6378,7 +6383,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             tools, agent_tools.openai_tools(
                 model, compact=True, names=set(agent_tools.TOOLS),
                 engine=agent_tools.engine_on(ctx)),
-            config.CLAUDE_TRIAL_EFFORT)
+            "low" if model.startswith("claude-opus-5-5") else config.CLAUDE_TRIAL_EFFORT)
+        tool_plan["volatile_system"] = getattr(ctx, "_cache_state_text", None)
     total_steps = _cont.get("steps", 0)
     t_start = _cont.get("t_start") or time.monotonic()
     turn_started = (time.monotonic() if _cont.get("durable_slice")
@@ -6807,6 +6813,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         if claude_lane.is_claude_model(model):
             step_effort = (config.CLAUDE_TRIAL_PLAN_EFFORT if iteration == 0
                            else config.CLAUDE_TRIAL_EFFORT)
+            if model.startswith("claude-opus-5-5"):
+                step_effort = "high" if iteration == 0 and not total_steps else "low"
         elif edit_rung.is_rung_model(model):
             # The effort the Gauntlet scoreboard measured on every plan.
             step_effort = llm.editor_reasoning_effort(None, iteration)
