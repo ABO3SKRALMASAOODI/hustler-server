@@ -623,3 +623,13 @@ def test_a_request_shown_to_the_assistant_never_runs_in_the_studio(world):
     assert out["reason"] == "assistant_took_over" and world["enqueued"] == []
     world["cur"] = Cur(plan="pro_2026")                 # a Studio plan: runs
     assert held_request.resume(2647, "studio")["resumed"] is True
+
+
+def test_playhead_survives_the_subscription_handoff():
+    from routes import video
+    sent = video._studio_playhead({"playhead_s": 9.125})
+    assert sent == {"playhead_s": 9.125}
+    held = video._blocked_prompt("freeze here", playhead=sent)
+    assert video._studio_playhead(held) == sent
+    for value in (None, False, "9", -1, float("inf"), 10 ** 500):
+        assert video._studio_playhead({"playhead_s": value}) == {}

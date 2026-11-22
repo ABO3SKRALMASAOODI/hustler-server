@@ -13,6 +13,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import sys
@@ -1379,11 +1380,24 @@ def _message_out(row):
             else created}
 
 
-def _blocked_prompt(text, attachment_ids=None, client_msg_id=None):
+def _studio_playhead(data):
+    """Capture the timeline position visible at send, independently of the chat text."""
+    at = data.get("playhead_s")
+    if type(at) in (int, float):
+        try:
+            seconds = float(at)
+        except OverflowError:
+            return {}
+        if math.isfinite(seconds) and seconds >= 0:
+            return {"playhead_s": round(seconds, 3)}
+    return {}
+
+
+def _blocked_prompt(text, attachment_ids=None, client_msg_id=None, playhead=None):
     """The request a wall refused, kept so checkout can return the user to
     this project and send it for them (PLAN.md P1, 25 Oct 2026: 210 blocked
     first prompts in 14 days were discarded)."""
-    return {"text": str(text or "")[:4000],
+    return {**(playhead or {}), "text": str(text or "")[:4000],
             "attachments": [int(a) for a in (attachment_ids or [])][:4],
             "client_msg_id": (str(client_msg_id)[:64] if client_msg_id
                               else None),
@@ -4897,7 +4911,7 @@ def replay_blocked(user_id, project_id):
                                         "prompt_chars": len(blocked["text"])},
                                 origin="server")
             return jsonify({
-                "replay": "send", "text": blocked["text"],
+                "replay": "send", "text": blocked["text"], **_studio_playhead(blocked),
                 "attachments": blocked.get("attachments") or [],
                 "client_msg_id": f"replay-{last['id']}"})
         original = _active_original(cur, project_id)
@@ -5083,7 +5097,7 @@ def post_message(user_id, project_id, data=None):
                 body["subscription_message"] = _record_plans_message(
                     cur, p["chat_session_id"], "chat",
                     blocked_prompt=_blocked_prompt(text, attachment_ids,
-                                                   client_msg_id))
+                                                   client_msg_id, _studio_playhead(data)))
                 return jsonify(body), 402
         trial_lane = bool(trial and trial.get("allowed"))
 
@@ -5244,7 +5258,7 @@ def post_message(user_id, project_id, data=None):
                 if differs:
                     branch_base = picked
 
-        meta = {}
+        meta = _studio_playhead(data)
         if msg_version is not None:
             meta["edl_version"] = msg_version
         if stepped_back:
