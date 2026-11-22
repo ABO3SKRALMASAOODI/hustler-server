@@ -67,6 +67,12 @@ For each candidate and EACH line listed with it, decide in this order:
 
 1. "exact_thing": the picture is the very thing the narration is about at this point (a thing named in the words under the shot or in the line): that person; that work in any of its own versions (its test reel, storyboards, finished film, trailer, poster, making-of footage of it); that product; that company (its people, its logo, its offices, its own products); that place. False for a stand-in: a toy, sculpture, maquette, statue, ride or park figure, costume character, museum replica, another film's or product's characters, a lookalike, a namesake, a fan remake, a different person.
 
+A person's name or profession does not establish the role a line assigns them. For an attributed
+action, check the source for the actual relationship or event and inspect the frames for its
+participants or primary record. Another interview of the narrator, an unrelated show, a viral
+reaction or synthesized stock cannot document that incident. Leave exact_thing false when the
+only link is a similar-looking profession, emotion or setting.
+
 2. "story_time": the time and version the narration means AT THIS SHOT, found in this order and no further:
    (a) a time or version the words spoken under this shot name ("the finished film", "in 1993", "an early version", "today");
    (b) else a time or version the line's own words name or point back to (a line that says a thing was changed, rewritten, replaced or "from X to Y" names BOTH the before and the after: a picture of either carries it);
@@ -166,7 +172,7 @@ def say_hash(say):
 
 def key(path, line, say, take=None):
     t = "" if take is None else "|" + take_tag(take)
-    return f"{path}{t}|{int(line)}|{say_hash(say)}"
+    return f"role2|{path}{t}|{int(line)}|{say_hash(say)}"
 
 
 def take_tag(take):

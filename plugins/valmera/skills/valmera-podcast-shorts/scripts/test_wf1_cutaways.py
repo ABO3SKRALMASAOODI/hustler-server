@@ -168,12 +168,9 @@ def test_composed_frames_judge_composing_only_and_never_lose_a_picture_to_text(t
     assert kept == [] and report["placements"][0]["fault"] == "reframe"    # a 'no' without a class: framed again first
 
 
-def test_the_check_chooses_and_says_no_only_for_a_contradiction():
-    """Round 1, 19 Nov: 'readable attribution in every sampled frame; otherwise reject' and 'merely associated ...
-    must be rejected' emptied six of twelve films (a 'Steve Jobs holding a small staff meeting' source under 'even
-    other founder CEOs' was rejected nine times for having no lower third)."""
-    assert "ONLY for a contradiction" in pc.SYSTEM and "fit ranks the candidates" in pc.SYSTEM
-    assert "on-screen attribution is not required" in pc.SYSTEM and "attribution_text" in pc.SYSTEM
+def test_chooser_asks_for_evidence_of_the_participant_and_role():
+    assert "role implied by" in pc.SYSTEM and "primary records" in pc.SYSTEM
+    assert "synchronized original shot" in pc.SYSTEM and "attribution_text" in pc.SYSTEM
     assert "text_box" in pc.SYSTEM and "subject_x" in pc.SYSTEM
     for veto in ("otherwise reject", "must be rejected", "cannot be established from these frames and the context, reject"):
         assert veto not in pc.SYSTEM and veto not in pc.COMPOSED

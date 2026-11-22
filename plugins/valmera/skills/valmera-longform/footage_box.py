@@ -23,6 +23,9 @@ if os.environ.get('DATABASE_URL'):raise RuntimeError('private footage jobs must 
 # Keep the engine's provider/budget fences. Its charge sink for this standalone
 # job is a local cost ledger; no production connection is created or written.
 import llm,threading,pathlib,time
+import footage.look
+look_reader=pathlib.Path(sys.argv[1]).parent/'footage_look.py'
+exec(compile(look_reader.read_text(),str(look_reader),'exec'),vars(footage.look))
 if os.environ.get('CODEX_PROXY_LOCAL')=='1':
     import footage.ask
     patch=pathlib.Path(sys.argv[1]).parent/'footage_ask.py'
@@ -349,13 +352,14 @@ def fetch(payload, out, log=print, _port=None):
     out = Path(out)
     probing=bool(payload.get('_probe'))
     rec = out / ('probe.json' if probing else 'footage.json')
-    adapter=hashlib.sha256((PROBE if probing else REMOTE).encode()+
+    look_reader = (Path(__file__).resolve().parents[4] / 'worker/footage/look.py').read_bytes()
+    adapter=hashlib.sha256((PROBE if probing else REMOTE).encode()+look_reader+
                           (b'' if probing else Path(__file__).with_name('witness_evidence.py').read_bytes())).hexdigest()
     if rec.exists():
         cached=json.loads(rec.read_text())
-        stale_voice=payload.get('_voices') and not cached.get('voices') and cached.get('adapter_sha256')!=adapter
         incomplete=not probing and not payload.get('_voices') and not completed_research(cached)
-        if not stale_voice and not incomplete:return cached
+        stale_candidates = (cached.get('lines') or payload.get('_voices')) and cached.get('adapter_sha256') != adapter
+        if not stale_candidates and not incomplete:return cached
         prior=cached.get('adapter_sha256','unversioned')[:12]
         rec.rename(out/('footage-rejected-'+prior+'.json'))
         if (out/'fetch.log').exists():(out/'fetch.log').rename(out/('fetch-rejected-'+prior+'.log'))
@@ -380,7 +384,7 @@ def fetch(payload, out, log=print, _port=None):
             files['footage_hear.py']=(Path(__file__).resolve().parents[4]/'worker/footage/hear.py').read_bytes()
             for name,data in files.items():
                 t=tarfile.TarInfo(name);t.size=len(data);tf.addfile(t,io.BytesIO(data))
-        for name, data in [('input.json', json.dumps(payload).encode()), ('fetch.py', (PROBE if probing else REMOTE).encode()),('runner.py',RUNNER.encode())]:
+        for name, data in [('footage_look.py', look_reader), ('input.json', json.dumps(payload).encode()), ('fetch.py', (PROBE if probing else REMOTE).encode()),('runner.py',RUNNER.encode())]:
             t = tarfile.TarInfo(name); t.size = len(data); tf.addfile(t, io.BytesIO(data))
         if not probing:tf.add(Path(__file__).with_name('witness_evidence.py'),arcname='witness_evidence.py',recursive=False)
     ssh(f'mkdir -p {q(scratch)}', capture_output=True)

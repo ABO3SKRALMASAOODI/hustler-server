@@ -148,6 +148,18 @@ def test_the_directors_pictures_come_first_whichever_field_carries_them(film):
     assert near[0].path == l1["pool"][3]["path"]                                  # the pool found for these words first
 
 
+def test_documentary_device_uses_checked_picture_or_its_own_camera_at_the_words(film):
+    l1, work = film
+    l1["documentary_lead_f"] = 3
+    path = l1["pool"][1]["path"]
+    l1["documentary_cuts"] = [dict(path=path, f=[30, 60])]
+    chosen = K.pictures(l1, work, {"dev": "burst", "f": [30, 60], "pics": ["p2", "p1"]})
+    assert [p.path for p in chosen] == [os.path.abspath(os.path.join(work, path))]
+    fallback = K.pictures(l1, work, {"dev": "burst", "f": [60, 90], "pics": ["p1"]})
+    assert [p.aid for p in fallback] == ["main"]
+    assert fallback[0].rng == [57 / FPS, 87 / FPS]
+
+
 def test_flash_safety_counts_opposing_steps_and_tames_a_fixed_order():
     lum = [0.05, 0.6, 0.05, 0.6, 0.05, 0.6, 0.05, 0.6, 0.05, 0.6]
     lens = [3] * 10

@@ -1,9 +1,8 @@
 """Choose cutaway pictures for the words they sit under, on the actual frames, and repair what can be repaired.
 
 Every verdict is tied to the source picture's bytes, the clause it would sit under and its provenance. The check is a
-model that chooses (round 1, 19 Nov 2026: a check that rejected by default emptied six of twelve films): it ranks the
-candidates of a clause (fit), says where the subject stands so the phone slice can be centred on it (subject_x), and
-says no only for a contradiction a viewer would be misled by (a different person, company, place, era or event).
+model that chooses pictures for the timed clause, uses their source to resolve attribution, and centres the
+phone slice on the depicted subject. A missing match goes back to search or to the synchronous original.
 Identity comes from provenance (the source's title, channel and description, what the footage engine saw, a lower
 third anywhere in the full source frame), never from on-screen attribution alone. Other editors' text is cut away;
 text that cannot be cut away stays rather than costing the picture. The report survives delivery; no customer project
@@ -19,8 +18,7 @@ import subprocess
 import sys
 
 MODEL = "gpt-6-sol"
-CONTRACT = 12       # 20 Nov: the check chooses and repairs: the full source frame plus the phone slice, the whole clause,
-                    # identity from provenance, a 'no' only for a contradiction; composed review judges composing only
+CONTRACT = 13  # Exact spoken referent, attributed role and timed picture.
 PHONE = 9 / 16
 # One call carries as many placements as fit these bounds. On the codex-proxy a call's cost is its harness prefix
 # (about 13k input tokens); each phone frame adds about 0.6k tokens and no latency (calls.jsonl, 15-16 Nov: 1 image
@@ -44,17 +42,10 @@ def words_under(clock, a, b, fps=30):
 
 
 def sample_times(rec):
-    """Where a clip is looked at. A composed film: the frames the viewer sees (check_times, else the placement's
-    entry, middle and exit). A source clip: across the whole clip (its first, middle and last stretch), so the verdict
-    belongs to the picture and survives any slice of it the film later cuts: a re-proposal or a boundary repair moves
-    the slice, never the picture (19 Nov m07: a moved boundary changed the sampled frames and a picture approved three
-    times was judged again and lost)."""
+    """Inspect the entrance, middle and exit of the interval actually shown."""
     if rec.get("check_times"):
         return list(rec["check_times"])
     start, end = rec.get("src") or (0.0, float(rec.get("seconds") or 0.0))
-    seconds = float(rec.get("seconds") or 0.0)
-    if not rec.get("composed_fps") and seconds > 0:
-        return [round(seconds * q, 3) for q in (0.15, 0.5, 0.85)]
     return [start, (start + end) / 2, max(start, end - 1/30)]
 
 
@@ -374,26 +365,18 @@ SYSTEM = (
     "description, what the footage engine saw on it), never a filename. For a wide source the frames are the full "
     "source frame, lower thirds, wordmarks and signs included, and the last image is the phone-shaped slice the film "
     "shows full screen. "
-    "Identity: establish who and what is on screen from all of the evidence together: a lower third, caption, sign or "
-    "wordmark anywhere in the full frame, the source's title, channel and description, and what the speaker says. A "
-    "source titled for a person, company or event, showing a scene that fits it, establishes that person, company or "
-    "event; on-screen attribution is not required, and a name readable only outside the phone slice still counts. "
-    "Never identify or compare faces. "
-    "ok is false ONLY for a contradiction a viewer would be misled by: the frames, their labels or their provenance "
-    "show a different named person, company, place, product, era or event than the words name, or the picture would "
-    "state a false fact. Otherwise ok is true: the very subject, a faithful illustration of what the clause tells, a "
-    "genuine example of an unnamed category, period footage under a recollection, a company's premises, people or "
-    "products under the company. Never set ok false for missing attribution, for connective or filler words in the "
-    "clause, for a picture that illustrates rather than records the clause, for a crop (the film reframes it), for "
-    "text on the picture (reported below) or because a better picture may exist: rank instead. "
-    "An entry with association is a picture of what the words MEAN, chosen on purpose for an abstract claim, verdict "
-    "or feeling (association says what it shows): it never claims to record the event, the place or a person, so it "
-    "is never a contradiction for not showing the thing named; it is ok unless it shows something the words deny or "
-    "presents a stranger as a named person, and its fit is how strongly it carries the meaning (10 at once, 4 "
-    "loosely). "
-    "fit ranks the candidates of a clause, an integer 0-10: 10 the very person, thing or event the words name, doing "
-    "what they say; 7 the named subject itself; 4 a truthful illustration of the clause's topic; 1 only associated "
-    "with it. A contradiction is ok false whatever its fit. "
+    "For each placement read the words at the cut (on_screen_words) with their whole clause and context. "
+    "Ask which person, company, object, place or event these words refer to, including the role implied by "
+    "their action. Choose an external picture only when the visible frames and their source support that "
+    "identification. A source title can describe an entire compilation; it does not identify each person in it. "
+    "Use visible contextual evidence, primary records, signs and attributions; never compare faces. A lower "
+    "third naming a person cannot establish that they funded, rejected or employed the speaker. An unidentified "
+    "participant stays unidentified. Never use another interview of this speaker under this interview's voice "
+    "unless the line is specifically about the pictured occasion. Reaction memes, other shows and generated "
+    "stock cannot document real people or events. An authentic product, headquarters or record of a named "
+    "company may illustrate that company when it implies no unsupported action. If every candidate misses "
+    "the referent, return ok=false for each and describe what actual picture to search for; the editor can "
+    "use the synchronized original shot. Rank matching candidates by fit from 1 to 10. "
     "subject_x: where across the full source frame (0 left, 1 right) the subject the words need stands, so the phone "
     "slice can be centred on it; null when you cannot tell. "
     "Also inspect change BETWEEN the ordered frames: motion_ok is true only for visible action in "
@@ -514,7 +497,7 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         # The whole clause the picture sits under, never only the second of words under its slice (19 Nov m03: the
         # recipe pictures were rejected because 'the biggest thing is, like,' is filler).
         spoken = rec.get("clause") or words_under(clock, a, b)
-        entry = dict(id=i, f=[a, b], name=name, words=spoken, context=context_of(script, clock, rec, a, b),
+        entry = dict(id=i, f=[a, b], name=name, words=spoken, on_screen_words=words_under(clock, a, b), context=context_of(script, clock, rec, a, b),
                      source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"))
         entry['source_evidence'] = provenance(rec, kind)
         if rec.get("association"):
@@ -523,7 +506,7 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
             entry["display_words"] = rec["display_words"]
         if rec.get("caption_words"):
             entry["caption_words"] = rec["caption_words"]
-        # The verdict belongs to what the model is shown: the picture's frames, its clause and its provenance (the
+        # The verdict belongs to the shown frames, their timed words, clause and provenance (the
         # frame numbers excepted). The director's search brief is not shown and not part of it: a rewritten brief
         # never re-judges an approved picture (19 Nov m03, m05). A re-proposal that slices the same clip differently,
         # a picture proposed again in a later attempt and a resume all reuse it; a changed pixel or word is checked
@@ -591,11 +574,10 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         if not unanswered:
             break
     for entry, _, _ in unanswered:
-        # Twice without an answer (a provider fault, not a verdict): the picture keeps the place the supply's own check
-        # gave it (the footage engine's look passed its frames for this subject), recorded as unchecked and never
-        # cached, so the next pass asks again. A model's silence never empties a slot.
-        entry.update(ok=True, fit=3, subject_x=None, fault="none", model=MODEL, unchecked=True,
-                     reason="no model answer twice: kept on the supply's own check", motion_ok=False, motion_reason="",
+        # A composed frame already has a placement reading. A new candidate with
+        # no reading yields to another candidate or to the synchronous base picture.
+        entry.update(ok=review != "placement", fit=0, subject_x=None, fault="none", model=MODEL, unchecked=True,
+                     reason="No frame reading after retry", motion_ok=False, motion_reason="",
                      attribution_text="", name_super="", foreign_text=False, text_box=None, text_reason="")
     # Another editor's text: a source clip is cut down clear of it and checked again as the picture it now is. Text
     # no band can shed stays on the picture, recorded (text_kept); it never costs the picture its place.

@@ -47,7 +47,7 @@ def test_documentary_context_reaches_frame_checker_not_only_search_planner():
     assert has_brief([dict(lines[0],see=[dict(thing='Stanford',as_of='2005')])])
 
 
-def test_contextual_admission_does_not_require_archival_claim_fields(tmp_path,monkeypatch):
+def test_contextual_candidate_needs_a_visual_reading_for_its_line(tmp_path,monkeypatch):
     from footage import look
     import json
     monkeypatch.setattr(look,'sheet',lambda *a,**k:'sheet.jpg')
@@ -57,7 +57,7 @@ def test_contextual_admission_does_not_require_archival_claim_fields(tmp_path,mo
     lines=[dict(i=0,say='I studied at Stanford',visual='Campus setting, not the actual conversation.')]
     candidates=[dict(src=0,t=1.,jpg='frame.jpg')];sources=[dict(title='Campus tour',channel='Stanford')]
     accepted,_=look.check(subject,lines,candidates,sources,str(tmp_path))
-    assert accepted[0]['lines']==[0]
+    assert accepted[0]['lines']==[]
     exact=[dict(lines[0],see=[dict(thing='Stanford',as_of='2005')])]
     checked,_=look.check(subject,exact,candidates,sources,str(tmp_path))
     assert checked[0]['lines']==[]  # an archival claim still needs all three explicit checks
@@ -73,12 +73,10 @@ def test_research_clauses_join_only_identical_director_subjects():
 def test_static_video_files_do_not_satisfy_moving_coverage():
     coverage = {'windows':[{'t0':0.,'t1':10.}]}
     rows = [[i*30,(i+1)*30,'clip','subject',dict(path=f'static-{i}.mp4',window=0,placed_motion_p90=0.)] for i in range(8)]
-    with pytest.raises(RuntimeError,match='moving=0.000'):
-        C.require_coverage(rows,coverage,10)
+    assert C.require_coverage(rows,coverage,10)['moving_seconds'] == 0
     for row in rows: row[4]['placed_motion_p90']=2.
     # Moving a card or cursor can cross the flow threshold without depicting action.
-    with pytest.raises(RuntimeError,match='moving=0.000'):
-        C.require_coverage(rows,coverage,10)
+    assert C.require_coverage(rows,coverage,10)['moving_seconds'] == 0
     for row in rows: row[4]['verified_motion']=True
     assert C.require_coverage(rows,coverage,10)['moving_seconds']==8
 

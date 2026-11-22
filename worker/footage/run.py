@@ -693,7 +693,7 @@ def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict
                 continue
             if ln["i"] in c["lines"]:
                 score = c["grade"] + 1.0
-            elif strict:
+            elif strict or ln.get("see") or ln.get("visual"):
                 continue
             elif c["subject"] in names and not c["lines"]:
                 score = c["grade"] - 0.5

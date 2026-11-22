@@ -10,6 +10,11 @@ PLAN_SYSTEM = """You are the footage researcher for a short documentary film (a 
 
 You get the film's lines (numbered) and the named things the writer listed. Write the searches that find real footage of each thing.
 
+Search for evidence of the actual line, including the role it attributes to the people shown.
+For an unnamed participant look for first-party records of the named company and event, never
+other people doing similar work. If there is no traceable event, return no external subject for
+that line. Other interviews of the narrator belong only to lines about the filmed occasion.
+
 For each subject (keep the writer's names; add a subject only when a line needs a real thing the list lacks, such as the place the line happens in):
 - "name": the subject.
 - "kind": person, place, thing, company or event.

@@ -227,8 +227,8 @@ def test_a_wide_clip_is_judged_on_its_full_frame_and_the_slice_the_film_shows(tm
     assert abs(sizes[3][0] / sizes[3][1] - 9 / 16) < 0.01
     labels = pc.frame_labels([0, 30, "clip", "Susan Li", rec], 4)
     assert labels[0].startswith("full source frame") and labels[3].startswith("the phone-shaped slice")
-    # the frames span the whole clip, not the slice the proposal happened to cut
-    assert pc.sample_times(rec) == [0.3, 1.0, 1.7]
+    # These are the frames actually placed in the programme.
+    assert pc.sample_times(rec) == [0.6, 1.0, 1.4 - 1/30]
 
 
 def _clock():
@@ -249,7 +249,7 @@ def _approving(calls, **extra):
     return call
 
 
-def test_the_verdict_belongs_to_the_picture_and_its_clause_not_its_slice_or_the_brief(tmp_path, monkeypatch):
+def test_moving_to_different_words_and_source_frames_reads_the_new_placement(tmp_path, monkeypatch):
     """19 Nov: a re-brief and a moved boundary re-judged approved pictures (m03: the watermelon shots approved in
     review 0 were gone after the re-brief; m07: a lab clip approved three times was lost when its slice moved)."""
     import placement_check as pc
@@ -266,15 +266,16 @@ def test_the_verdict_belongs_to_the_picture_and_its_clause_not_its_slice_or_the_
     pc.check([[0, 30, "clip", "Founder CEOs", rec]], script, _clock(), str(tmp_path), "ff", call=_approving(calls))
     moved = dict(rec, src=[1.0, 2.0], illustration="A complete, uncropped lower third is required")
     kept, report = pc.check([[45, 75, "clip", "Founder CEOs", moved]], script, _clock(), str(tmp_path), "ff", call=_approving(calls))
-    assert len(calls) == 1 and report["accepted"] == 1 and kept[0][4]["fit"] == 8
+    assert len(calls) == 2 and report["accepted"] == 1 and kept[0][4]["fit"] == 8
+    assert calls[0]["rows"][0]["on_screen_words"] != calls[1]["rows"][0]["on_screen_words"]
     sent = calls[0]["rows"][0]
     assert sent["words"] == clause and "illustration_intent" not in sent
     assert sent["source_evidence"]["title"].startswith("Steve Jobs") and sent["source_evidence"]["description"]
     assert sent["source_evidence"]["shows"].startswith("a man")
-    assert seen[0] == seen[1] == [0.36, 1.2, 2.04]
+    assert seen == [[0.2, 0.7, 1.2 - 1/30], [1.0, 1.5, 2.0 - 1/30]]
 
 
-def test_a_silent_model_is_asked_again_and_never_empties_the_slot(tmp_path, monkeypatch):
+def test_unread_external_picture_yields_to_synchronous_source_after_retry(tmp_path, monkeypatch):
     import json
     import placement_check as pc
     monkeypatch.setattr(pc, "evidence", lambda row, ff: [b"pixels"])
@@ -286,7 +287,7 @@ def test_a_silent_model_is_asked_again_and_never_empties_the_slot(tmp_path, monk
     rec = dict(path="/clips/a.mp4", seconds=1.5, src=[0, 1], clause="Nvidia builds", source=dict(url="u", title="Nvidia"))
     kept, report = pc.check([[0, 30, "clip", "Nvidia", rec]], dict(segments=[dict(say="Nvidia builds")]), _clock(), str(tmp_path),
                             "ff", call=call)
-    assert len(calls) == 2 and len(kept) == 1 and report["unchecked"] == 1
+    assert len(calls) == 2 and not kept and report["unchecked"] == 1
     assert json.load(open(tmp_path / "placement_checks.json")) == {}          # silence is never kept as a verdict
     later = []
     pc.check([[0, 30, "clip", "Nvidia", rec]], dict(segments=[dict(say="Nvidia builds")]), _clock(), str(tmp_path), "ff",

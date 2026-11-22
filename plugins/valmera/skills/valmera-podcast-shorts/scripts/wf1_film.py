@@ -445,9 +445,10 @@ def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, str
         for x in new:
             mid = (x[0] + x[1]) // 2
             inside = next((i for i, (a, b) in enumerate(span) if a <= mid < b), None)
-            near = inside if inside is not None else min(key_f, key=lambda i: abs(key_f[i] - mid)) if key_f else None
-            x[4] = dict(x[4], window=inside, gap_fill=True,
-                        illustration=windows[near]["must_show"] if near is not None else x[4].get("illustration"))
+            window = windows[inside] if inside is not None else {}
+            x[4] = dict(x[4], window=inside, gap_fill=True, clause=window.get("say"),
+                        clause_t=[window["t0"], window["t1"]] if window else None,
+                        illustration=window.get("must_show"))
         accepted, rep = checker(new)
         for row in accepted:
             if row[4]["path"] in composed_stills:
@@ -912,7 +913,7 @@ def build(script, sup, style_id, direction=None):
         # proposes (adversarial review, 20 Nov: findings keyed on the cleared path never matched and the short was lost).
         origin = (rec.get("text_cleared") or {}).get("from_path") or rec["path"]
         P.pictures.append(dict(f=[f0, f1], visible_f=[f0, rec.get("audit_until", f1)], kind=kind, name=name, path=rec["path"], origin=origin,
-                               shows=rec.get("shows"), mode=mode,
+                               shows=rec.get("shows"), mode=mode, source_slice=rec.get("src"),
                                window=rec.get("window"), clause=rec.get("clause"), clause_t=rec.get("clause_t"), fit=rec.get("fit"),
                                reframed=bool(rec.get("reframe")), attribution=rec.get("attribution"), name_super=rec.get("name_super"),
                                w=rec.get("w"), h=rec.get("h"), upscaled_from=rec.get("upscaled_from"), rung=rec.get("rung"),

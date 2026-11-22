@@ -453,9 +453,12 @@ def recover_wall(ctx, script, pack, rec=None, waits=None, sleep=None):
         pack.setdefault('gone_sources', []).extend(gone)
     save_pack(ctx, pack)
     if pack['platform_walled']:
-        raise RuntimeError(f"{wf1_film.WALL}: {len(wall['refused'])} of {wall['sources']} footage sources still refused after "
-                           f"trying each again on every route; this short keeps its work and continues when the wall lifts")
-    ctx.log(f"the wall lifted for this short: {added} clips cut from the sources it had refused")
+        pack['coverage_exhausted'] = 'Source routes exhausted; use available verified pictures and the original camera'
+        pack['platform_walled'] = False
+        save_pack(ctx, pack)
+        ctx.log(pack['coverage_exhausted'])
+    else:
+        ctx.log(f"the wall lifted for this short: {added} clips cut from the sources it had refused")
     path = os.path.join(ctx.supply, 'pack.json')
     stored = json.load(open(path))
     rec = dict(rec or stored.get('record') or {})
@@ -1041,7 +1044,7 @@ def score(ctx, script):
     if ((pack.get('coverage') or {}).get('contract') != wf1_coverage.CONTRACT
             or pack.get('alignment_contract')!=wf1_alignment.CONTRACT
             or pack.get('platform_walled')                       # a walled pack fetches its refused sources again
-            or not any(row.get('clips') for row in pack.get('footage',[]))):
+            or (not pack.get('coverage_exhausted') and not any(row.get('clips') for row in pack.get('footage',[])))):
         supply(ctx,script)
         pack = wf3.load_pack(ctx)
     pack["work"] = ctx.supply
@@ -1101,12 +1104,14 @@ def score(ctx, script):
         l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
     # every picture the supply holds rides the scene as the palette's pool: the devices the director asks for (a burst,
     # a grid, a collage, panels) draw from all of it, never only the pictures the windows placed; set before the
-    # devices are heard, so the sound hears the same landings the render draws
-    # (a clip no shot or card of the film shows has another editor's seated text cut away first, by signal: the builder
-    # registers every supply clip as an asset, so "placed" is what the items show)
-    l1["pool"] = wf1_coverage.device_pool(pack, beats.get("placement_check"), work=ctx.supply, ffmpeg=pack.get("ffmpeg") or "ffmpeg",
-                                          placed={(l1.get("assets") or {}).get(it.get("pic"), {}).get("path") for it in l1["items"]
-                                                  if it.get("k") in ("shot", "card") and it.get("pic")} - {None})
+    # Devices use the same timed external pictures as the base cut. Keep the
+    # original camera available for a device that spans two different clauses.
+    shown = beats.get('pictures') or []
+    l1["pool"] = wf1_coverage.device_pool(pack, beats.get("placement_check"), work=ctx.supply,
+                                          ffmpeg=pack.get("ffmpeg") or "ffmpeg",
+                                          matched={p.get('origin') or p['path'] for p in shown})
+    l1['documentary_cuts'] = [dict(f=p['f'], path=p['path'], source_slice=p.get('source_slice')) for p in shown]
+    l1['documentary_lead_f'] = wf1_film.LEAD_F
     if l1.get("devices") or l1.get("alien"):
         # the sound design hears the Director's devices: laid now on the scene the render draws (one base picture on
         # every frame first), their landings planned again with the take's own turn and words, before the taste check

@@ -42,10 +42,11 @@ SHEETS_PER_CALL = max(1, int(os.environ.get("FOOTAGE_SHEETS_PER_CALL", "4")))
 
 LOOK_BRIEF = """
 
-The film's lines carry the writer's brief: for each line, the things it names ("see"), each with the version or time it means ("as of") and the moment the line tells. For every line a cell carries (each number in its "lines"), also return one entry in "line_checks": {"line": line number, "version_ok": bool, "time_ok": bool, "exact_thing": bool}, meaning:
+The film's lines carry a picture brief ("see" or documentary depiction requirements). Use the spoken words to resolve the referent and its role. A request for a campus setting can be met by the actual campus without documenting a private conversation. For every line a cell carries (each number in its "lines"), also return one entry in "line_checks": {"line": line number, "version_ok": bool, "time_ok": bool, "exact_thing": bool}, meaning:
 - "exact_thing": the frame shows the very thing the line is about (that person, that film, that product, that place, or the work itself), not a lookalike, a sequel or another film, a namesake, a toy, sculpture, ride or museum version, a fan remake.
 - "time_ok": false only when the frame plainly shows another time than the line means (a later building, a later film's characters, a person decades away from the moment the line tells); true when a viewer cannot tell.
 - "version_ok": false only when the line's words set one version against another and the frame plainly is the other one (a test reel under words about the finished film, the finished film under words about an early version, a later model); when the words only name the work, any version of it carries them.
+For every attribution, establish the depicted role as well as the subject. A title about a company or a lower third naming an investor does not establish that the pictured individual made the deal, rejection or claim in the narration. An unnamed historical participant is not interchangeable with another person or panel. Look for the subject's own event, product, premises or primary record. A different interview, reaction clip, reality show or generated stock is not evidence of the incident. Use another search or leave this line with its original shot when no candidate depicts it.
 A line belongs in "lines" only when all three are true."""
 
 
@@ -190,7 +191,7 @@ def sheet(cells, path, cell=(CELL_W, CELL_H)):
 
 def check(subject, lines, cands, sources, work, budget_s=120.0):
     """cands: [{src, t, jpg, said}] -> (the same with ok, clean, grade, lines, shows, x; usd).
-    Lines carrying the writer's brief (see: thing, as_of, moment; only the stories skill sends it): the listing names each
+    Lines carrying a writer's brief (see or visual): the listing names each
     line's brief, the model also answers per line it gives a cell (version_ok, time_ok, exact_thing, LOOK_BRIEF), a
     cell keeps only the lines where all three are true, and a sheet holds BRIEF_PER_SHEET cells at BRIEF_CELL_W x
     BRIEF_CELL_H. Without a brief, exactly as before."""
@@ -200,7 +201,7 @@ def check(subject, lines, cands, sources, work, budget_s=120.0):
     contextual = any(ln.get('visual') for ln in lines)
     ls = _listing(lines)
     per = BRIEF_PER_SHEET if brief or contextual else PER_SHEET
-    system = LOOK_SYSTEM + LOOK_BRIEF if brief else LOOK_SYSTEM
+    system = LOOK_SYSTEM + LOOK_BRIEF if brief or contextual else LOOK_SYSTEM
     if os.environ.get("FOOTAGE_LOOK_ITSELF") == "1":
         system += LOOK_ITSELF
     sheets = [cands[i:i + per] for i in range(0, len(cands), per)]
@@ -244,7 +245,7 @@ def check(subject, lines, cands, sources, work, budget_s=120.0):
                 trim = [0.0, 0.0]
             got_lines = [int(n) for n in v.get("lines") or [] if isinstance(n, int)]
             extra = {}
-            if brief:
+            if brief or contextual:
                 checks = {}
                 for lc in v.get("line_checks") or []:
                     if isinstance(lc, dict) and isinstance(lc.get("line"), int):

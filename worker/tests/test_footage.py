@@ -586,10 +586,13 @@ def test_the_look_keeps_only_lines_whose_three_brief_checks_pass(monkeypatch, tm
     out, _ = look.check(sub, brief, cands, srcs, str(tmp_path))
     assert out[0]["lines"] == [0] and out[0]["lines_offered"] == [0, 1, 2]          # line 1 fails version, line 2 was not checked
     assert "line_checks" in seen["systems"][0] and "as of: 1995 release" in seen["texts"][0] and "moment: the window fall" in seen["texts"][0]
+    podcast = [dict(i=0, say="the investors who passed", visual="Scale AI investors"), dict(i=1, say="another clause")]
+    out, _ = look.check(sub, podcast, cands, srcs, str(tmp_path))
+    assert out[0]["lines"] == [0] and "line_checks" in seen["systems"][-1]
     plain = [dict(i=0, say="a"), dict(i=1, say="b"), dict(i=2, say="c")]
     out, _ = look.check(sub, plain, cands, srcs, str(tmp_path))
-    assert out[0]["lines"] == [0, 1, 2] and "lines_offered" not in out[0] and seen["systems"][1] == look.LOOK_SYSTEM
-    assert "[see:" not in seen["texts"][1]
+    assert out[0]["lines"] == [0, 1, 2] and "lines_offered" not in out[0] and seen["systems"][-1] == look.LOOK_SYSTEM
+    assert "[see:" not in seen["texts"][-1]
 
 
 def test_a_subjects_sheets_go_to_the_model_four_a_call_and_every_cell_keeps_its_own_verdict(monkeypatch, tmp_path):
