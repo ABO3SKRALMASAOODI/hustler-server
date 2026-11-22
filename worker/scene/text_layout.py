@@ -1,9 +1,29 @@
 """Seat the final composed words after palette expansion, on their rendered ink."""
 
 from collections import defaultdict
+import math
+
+import numpy as np
 
 from .palette.kit import item_box
 from .plan import A
+from .runtime import plane_hom
+
+
+def proof_bounds(card, frame, width, height):
+    """The projected evidence page, or its cited line when the camera fills the phone."""
+    at = card["f"][0]
+    x, y, scale, rot, rx, ry = (A(card.get(k, v), frame, at)
+                                 for k, v in (("x", .5), ("y", .5), ("s", 1), ("rot", 0), ("rx", 0), ("ry", 0)))
+    transform = plane_hom(x*width, y*height, scale, math.radians(rot), rx, ry, width, height, card.get("persp", 1.2))
+    def project(box):
+        l, t, r, b = box
+        corners = np.array([[(u-.5)*card["w"]*width, (v-.5)*card["h"]*height, 1]
+                            for u, v in ((l,t), (r,t), (l,b), (r,b))]) @ transform.T
+        xy = corners[:, :2] / np.maximum(corners[:, 2:], 1e-6) / [width, height]
+        return (*xy.min(axis=0), *xy.max(axis=0))
+    page = project([0, 0, 1, 1])
+    return project(card["proof_line"]) if page[3] - page[1] > .74 else page
 
 
 def resolve(scene):
@@ -13,11 +33,13 @@ def resolve(scene):
     overflow = set()
     active = defaultdict(list)
     for layer in scene["items"]:
-        if layer.get("source_ink"):
+        if layer.get("source_ink") or layer.get("proof_line"):
             lo, hi = layer["f"]
             for f in range(lo, hi):
                 if A(layer.get("op", 1), f, lo) > .01:
-                    occupied[f].extend(layer["source_ink"])
+                    occupied[f].extend(layer.get("source_ink", []))
+                    if layer.get("proof_line"):
+                        occupied[f].append(proof_bounds(layer, f, width, height))
     words, groups = [], {}
     for layer in scene["items"]:
         glyph = layer["k"] == "join" and layer.get("mode") == "glyph"

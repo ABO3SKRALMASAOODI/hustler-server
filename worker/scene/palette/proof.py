@@ -81,7 +81,10 @@ def proof_object(l1, work, ask, sense):
     s = run(0.8, 0.9, S)
     x = run(0.5, 0.5, xe)
     y = run(0.58, 0.52, ye)
-    drop, keep = make_room(l1, a, b, "pd_pf")
+    # Animate the source card the workflow already placed rather than laying a
+    # second copy beneath it, where the original would cover the camera push.
+    talk = l1.get("workflow_text_layout")
+    drop, keep = make_room(l1, a, b, "pd_pf", source_card=pic if talk else None)
     desk = arg(ask, "desk", "plate")
     if desk == "blur":
         base = {"id": uid(l1, "pd_pfd"), "k": "shot", "f": [a, b], "pic": pic, "blur": 38.0,
@@ -93,6 +96,8 @@ def proof_object(l1, work, ask, sense):
             "h": round(h, 5), "s": s, "rx": rx, "ry": ry, "rot": rot, "radius": 0.004, "z": -10,
             "dof": {"blur": num(ask, "dof", 3.0), "focus": [(bx0 + bx1) / 2, (by0 + by1) / 2]},
             "shadow": {"dx": 0.012, "dy": 0.03, "blur": 0.035, "a": 0.6}}
+    if talk and line:
+        card["proof_line"] = [bx0, by0, bx1, by1]
     if asset.get("kind") == "video":
         # A selected moving source can carry the document or screen. Hold its
         # actual frame under both the push and its blurred desk.

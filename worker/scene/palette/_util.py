@@ -188,16 +188,20 @@ def cut(it, lo, hi):
     return o
 
 
-def make_room(l1, a, b, stem):
+def make_room(l1, a, b, stem, source_card=None):
     """Base shots cut so that [a, b) is free for a new base picture: (items to drop, items to add). Each shot that
     overlapped keeps what lies outside the window, under its own id where it can."""
     drop, add = [], []
-    for s in over(l1, a, b):
+    covered = over(l1, a, b)
+    if source_card is not None:
+        covered += [c for c in l1["items"] if c["k"] == "card" and c.get("pic") == source_card
+                    and c["f"][0] < b and a < c["f"][1]]
+    for s in covered:
         drop.append(s["id"])
         if s["f"][0] < a:
             add.append(dict(cut(s, s["f"][0], a), id=s["id"]))
         if s["f"][1] > b:
-            add.append(dict(cut(s, b, s["f"][1]), id=s["id"] if s["f"][0] >= a else uid(l1, stem + "r")))
+            add.append(dict(cut(s, b, s["f"][1]), id=s["id"] if s["f"][0] >= a else uid(l1, stem + "r" + (s["id"] if source_card else ""))))
     return drop, add
 
 

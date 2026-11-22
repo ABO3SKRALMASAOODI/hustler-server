@@ -161,3 +161,25 @@ def test_wang_payoff_hands_the_spoken_word_to_its_live_cutout():
     assert (start, end) == (1523, 1556)
     assert len(changed) == 1 and changed[0]["f"] == [1516, start]
     assert changed[0]["id"] == cap["id"] and len(changed[0]["op"]) == 7
+
+
+def test_wang_llama_page_animates_once_and_its_caption_clears_the_source():
+    from scene.palette import merge
+    from scene.palette.proof import proof_object
+    from scene.text_layout import proof_bounds
+    voice = {"v": {"font": "ArchivoBlack-Regular.ttf", "px": 58}}
+    cap = word("w0084", "Llama", "v", .42, .60, [313, 325], "cap")
+    card = dict(k="card", id="cd0012", pic="v07", f=[293, 328], x=.5, y=.399, w=.92, h=.291)
+    base = dict(k="shot", id="original", pic="v07", f=[0, 360], src=[0, 12])
+    scene = dict(frame=[1080, 1920], dur_f=360, fps=30, workflow_text_layout=True,
+                 assets={"v07": {"kind": "video", "w": 1920, "h": 1080}}, voices=voice, items=[base, card, cap])
+    ask = dict(dev="proof_object", f=[309, 350], pool=["v07"], box=[.25,.6,.51,.66], desk="blur")
+    scene = merge(scene, proof_object(scene, "", ask, None))
+    resolve(scene)
+    for f in range(313, 325):
+        pages = [i for i in scene["items"] if i["k"] == "card" and i["f"][0] <= f < i["f"][1]]
+        assert len(pages) == 1
+        source = proof_bounds(pages[0], f, 1080, 1920)
+        ink = item_box(cap, voice, 1080, 1920, f)
+        assert ink[1] >= source[3] or ink[3] <= source[1]
+    assert next(i for i in scene["items"] if i["id"] == "cd0012")["f"] == [293, 309]
