@@ -586,7 +586,7 @@ def decide(ticket, happened_at, severity):
 
 
 def open_or_attach(cur, cause_key, title, severity, review_id=None,
-                   session_key=None, summary=None, cause_class=None):
+                   session_key=None, summary=None, cause_class=None, fallback_class=None):
     """One ticket per cause. A new cause opens a ticket; a known open one
     gains the session (and the worse severity); a closed one that shows up
     again in a session that STARTED after it was closed reopens with
@@ -662,7 +662,7 @@ def open_or_attach(cur, cause_key, title, severity, review_id=None,
                    WHERE id = %s""",
            (review["settled_at"], review["started_at"], t["id"]))
     diagnosis = cause_class or cause_prefix(cause_key)
-    inherited = (review.get("signals") or {}).get("cause_class")
+    inherited = fallback_class or (review.get("signals") or {}).get("cause_class")
     if diagnosis or inherited:
         classify_ticket(cur, t["id"], diagnosis or inherited, missing_only=not diagnosis)
     cur.execute("SELECT * FROM tickets WHERE id = %s", (t["id"],))
