@@ -93,3 +93,15 @@ def test_twenty_spoken_words_and_a_separate_title_keep_their_times():
                                   "value": words + [title]}], 8, {})
     assert [(t["start"], t["end"]) for t in out["texts"]] == [
         (t["start"], t["end"]) for t in words + [title]]
+
+
+def test_repaired_word_run_keeps_its_authored_position_size_and_final_hold():
+    from score import asks
+
+    words = [dict(word, x=0.5, y=0.48, template="lower_third", font_size=0.09,
+                  text_align="center") for word in _line(ids=False, step=0.2)]
+    edl = edit_batch.apply_batch(default_edl(32.6), [
+        {"action": "set", "layer": "texts", "value": words}], 32.6, {})
+    for title, word in zip(asks.facts(edl)["titles"], words, strict=True):
+        for field in ("text", "template", "start", "end", "x", "y", "font_size", "text_align"):
+            assert title[field] == word[field]

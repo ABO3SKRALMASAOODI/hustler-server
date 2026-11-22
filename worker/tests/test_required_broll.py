@@ -231,3 +231,16 @@ def test_rendered_picture_check_keeps_customer_scope_not_only_model_examples(mon
        'source_words':[{'w':'gaming','t0':1.,'t1':1.5}]}
     result=required_broll.check(ctx,{'required_pictures':[p]},{'keep':[[0,3]]},{'edl_version':1})
     assert result['picture1']['state']=='done'
+
+
+def test_followup_picture_scope_receives_the_selection_conversation(monkeypatch):
+    history = [{'role': 'user', 'content': 'Change the soundtrack.'},
+               {'role': 'assistant', 'content': 'Which track would you like?'}]
+
+    def observe(ctx, name, schema, system, content, **kw):
+        assert name == 'identify_picture_subjects'
+        assert json.loads(content) == {'request': 'Northern Lights', 'conversation': history}
+        return {'pictures': [], 'spoken_categories': []}, {}
+
+    monkeypatch.setattr(asks, '_call', observe)
+    assert required_broll.record(NS(request_contract_history=history), {'asks': []}, 'Northern Lights') == []
