@@ -1,0 +1,8 @@
+{
+  "double_signature": {"take":"cuban","cuts":[[19.56,6.0]],"beats":[3.99,4.83],"ends":[4.81,5.77],"music":"pb-586985","song_at":14,"fx":"paper_3","title":"Two signatures","quote":"Oh, I can make it work. I can make it work."},
+  "room_between": {"take":"cuban","cuts":[[27.61,6.5]],"beats":[2.90,4.81],"music":"pb-253216","song_at":28,"fx":"whoosh_soft_1","title":"The room between replies","quote":"Don't send it to me. I'm awful at it."},
+  "human_orbit": {"take":"sam","cuts":[[1750.36,9.625]],"beats":[1.00,5.56,7.00,9.16],"music":"mk-543","song_at":22,"fx":"mx_whoosh_1464","title":"The span of a galaxy","quote":"The sun rotated around the earth ... this whole solar system ... this whole galaxy ... multiverse."},
+  "moat_cast": {"take":"sam","cuts":[[2477.79,7.75]],"beats":[1.73,3.93,4.65],"music":"pb-630767","song_at":34,"fx":"whoosh_soft_2","fx_peak":-22,"title":"Casting the moat","quote":"There haven't been that many software moats in history. There's other kind of moats. There's like network effects, like Facebook or something."},
+  "phrase_register": {"take":"sam","cuts":[[2851.20,7.875]],"beats":[1.24,3.28,4.72],"music":"pb-624652","song_at":17,"fx":"shutter_2","title":"Three strikes in register","quote":"No leader ... no credit squabbles ... perfect alignment."},
+  "short_century": {"take":"sam","cuts":[[461.30,1.375],[468.00,2.125],[484.32,4.875]],"beats":[0.18,2.54,3.86,7.30],"years":[2005,2105,2012],"music":"pb-146980","song_at":19,"fx":"paper_8","title":"Seven leaves of a century","quote":"In 2005 ... it was probably going to take another century at least ... and then in 2012 there was the famous AlexNet result."}
+}
