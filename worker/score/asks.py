@@ -1029,7 +1029,8 @@ def facts(edl, preview=None, changes="", shots=None, source_s=None, index=None):
         "frame": edl.get("frame") or {"ratio": "source"},
         "captions": ("off" if not cap else {"mode": cap.get("mode") if isinstance(cap, dict) else "items",
                                             "style": (cap.get("style") if isinstance(cap, dict) else None)}),
-        "titles": [{k: t.get(k) for k in ("id", "text", "start", "end", "template", "font", "color", "size_scale")}
+        "titles": [{k: t.get(k) for k in ("id", "text", "start", "end", "template", "font", "color", "size_scale",
+                                              "x", "y", "font_size", "max_width", "text_align")}
                    for t in (edl.get("texts") or [])[:24] if isinstance(t, dict)],
         "music": [{k: m.get(k) for k in ("start", "end", "gain_db", "mute", "provenance")}
                   for m in edl.get("music") or [] if isinstance(m, dict)],
