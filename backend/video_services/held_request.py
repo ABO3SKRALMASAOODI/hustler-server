@@ -346,6 +346,7 @@ def resume(user_id, origin, project_id=None, window_h=WINDOW_H):
         # A typed request: the ordinary send path, deduped with the Studio's
         # own replay by the same client_msg_id.
         out = v.send_as_user(user_id, pid, {
+            **v._studio_playhead(blocked),
             "text": str(blocked.get("text") or "")[:4000],
             "attachments": blocked.get("attachments") or [],
             "client_msg_id": f"replay-{held['id']}"})
