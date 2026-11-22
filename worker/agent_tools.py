@@ -24666,7 +24666,7 @@ def _proof_pages(ranges):
     return pages
 
 
-def _broll_coverage_line(edl):
+def _broll_coverage_line(edl, index=None):
     """How much of the program the cutaways cover, once any b-roll is in and
     a long stretch is still bare (ticket #51: "b-roll throughout" got 2 clips
     at the one named place, 1-7 s of 15.4 s, and the agent never saw the
@@ -24677,12 +24677,29 @@ def _broll_coverage_line(edl):
     total, covered, (a, b) = cov
     if total <= 0 or covered / total >= 0.6 or b - a < 5.0:
         return ""
-    return (f" B-ROLL COVERAGE: cutaways cover {covered:g}s of the {total:g}s "
-            f"program ({covered / total:.0%}); {a:g}-{b:g}s has none. If the "
-            "user asked for b-roll throughout (or across the whole video), "
-            "that stretch is still unmet: read what is said there (get_words) "
-            "and source footage for its topics, not only for the names the "
-            "user listed, before you reply.")
+    line = (f" B-ROLL COVERAGE: cutaways cover {covered:g}s of the {total:g}s "
+            f"program ({covered / total:.0%}); {a:g}-{b:g}s has none.")
+    if not index or not index.get("words"):
+        return line
+    # The coverage window is in program time. A source-clock lookup here
+    # would quote discarded dialogue after a trim or a speed change.
+    tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed") or [])
+    words = tl.kept_words(index["words"], rescue=True,
+                          voice=timeline_mod.Voice.from_index(index))
+    excerpts = []
+    for word in words:
+        if a <= word["t0"] < b:
+            if (not excerpts or len(excerpts[-1]) >= 12 or
+                    word["t0"] - excerpts[-1][-1]["t1"] > 1.2):
+                excerpts.append([])
+            excerpts[-1].append(word)
+    if excerpts:
+        selected = sorted({0, len(excerpts) // 2, len(excerpts) - 1})
+        quotes = [f'{excerpts[i][0]["t0"]:g}s “'
+                  + " ".join(w["w"] for w in excerpts[i]) + "”"
+                  for i in selected]
+        line += " Main-footage speech there (program time): " + " / ".join(quotes)
+    return line
 
 
 def _motion_warning_line(result):
@@ -25584,7 +25601,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                            "place edges audio-safely; get_words) and "
                            "re-render.")
             note += _motion_warning_line(result)
-            note += _broll_coverage_line(row.get("json"))
+            note += _broll_coverage_line(row.get("json"), ctx.index)
             # Caption audit on what actually survived the cut: captions are
             # usually enabled BEFORE later cuts, so the add-time warning
             # can't see speech that a later keep_segments removed. A real
