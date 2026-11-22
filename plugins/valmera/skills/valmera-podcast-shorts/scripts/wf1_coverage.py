@@ -180,6 +180,20 @@ def same_picture(left,right):
     return False
 
 
+def source_excerpt(picture):
+    """Identity shared by a downloaded excerpt, its resized copy and its placed picture."""
+    source = picture.get('source_evidence') or picture.get('source') or picture.get('page')
+    url = source.get('url') if isinstance(source, dict) else source
+    return dict(path=picture.get('origin') or (picture.get('text_cleared') or {}).get('from_path')
+                or picture.get('path'), source={'url': url}, time_range=picture.get('time_range'),
+                document=picture.get('document'))
+
+
+def same_excerpt(picture, finding):
+    old = finding.get('excerpt') or {'path': finding.get('origin') or finding.get('path')}
+    return bool(old.get('path')) and (old['path'] == picture.get('path') or same_picture(source_excerpt(picture), old))
+
+
 def repair_boundaries(coverage, rejected, llm):
     """Repair boundaries and source-wide contradictions without discarding valid contexts."""
     prompt = '''Review rejected picture placements against the full timed speech and existing documentary windows.

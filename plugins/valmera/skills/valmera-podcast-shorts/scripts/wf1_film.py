@@ -398,7 +398,7 @@ def original_camera_options(ins, coverage, take, checker):
 
 
 def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, stress, checker, rejected=(), composed_stills=(), rounds=3,
-               originals=None, cut_dir=None, ffmpeg=None):
+               originals=None, cut_dir=None, ffmpeg=None, composed_findings=()):
     """The final build's gap fill (19 Nov: m03 held the speaker 34 s once its windows' pictures were turned down, m10
     22 s, and fill_gaps had no caller). Any stretch of the take over FILL_GAP_S between f_first and f_last (the hook's
     first second and the payoff are his face) takes the approved pictures the film found and has not shown (fill_gaps:
@@ -406,7 +406,7 @@ def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, str
     checked on its own words by the same placement check as every picture; one turned down gives its place to the next
     spare. When the found pictures run out, fresh intervals of the kept originals (beside each interval the look
     verified, never one already shown: wf1_coverage.fresh_interval) are the spares. Returns (ins, report)."""
-    from wf1_coverage import shared_candidates, same_picture, fresh_interval
+    from wf1_coverage import shared_candidates, same_picture, same_excerpt, fresh_interval
     windows = coverage.get("windows") or []
     span = [(round(w["t0"] * FPS) + LEAD_F, round(w["t1"] * FPS) + LEAD_F) for w in windows]
     key_f = {i: (a + b) // 2 for i, (a, b) in enumerate(span)}
@@ -467,6 +467,19 @@ def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, str
             x[4] = dict(x[4], window=inside, gap_fill=True, clause=window.get("say"),
                         clause_t=[window["t0"], window["t1"]] if window else None,
                         illustration=window.get("must_show"))
+        def available(row):
+            a, b, _, _, candidate = row
+            for finding in composed_findings:
+                window = finding.get('window')
+                if window is not None and not (window < len(span) and a < span[window][1] and b > span[window][0]):
+                    continue
+                if finding.get('fault') == 'speaker' or same_excerpt(candidate, finding):
+                    return False
+            return True
+
+        new = [row for row in new if available(row)]
+        if not new:
+            break
         accepted, rep = checker(new)
         for row in accepted:
             if row[4]["path"] in composed_stills:
@@ -754,13 +767,22 @@ def build(script, sup, style_id, direction=None):
     # next-ranked candidate and leaves the picture to every other window.
     # Findings are keyed on the candidate's own path (origin); a copy derived from it (text cleared) inherits the
     # candidate's reframe, so clip_meta frames it again.
+    from wf1_coverage import same_excerpt
     reframe = {(r.get("origin") or r.get("path")) if isinstance(r, dict) else r for r in d.get("reframe") or []}
+    for finding in d.get('reframe') or []:
+        if isinstance(finding, dict) and finding.get('excerpt'):
+            for group in list(footage.values()) + list(pics.values()):
+                reframe.update(rec['path'] for rec in group if same_excerpt(rec, finding))
     if reframe:
         footage = {i: [dict(c, reframe=True) if c["path"] in reframe else c for c in lst] for i, lst in footage.items()}
         pics = {k: [dict(r, reframe=True) if r["path"] in reframe else r for r in lst] for k, lst in pics.items()}
     # (window, path): that window's slot goes to its next candidate; (window, None): the window rests on the speaker.
     rejected_pairs = {(r.get("window"), r.get("origin") or r.get("path")) for r in d.get("reject") or []
                       if isinstance(r, dict) and (r.get("origin") or r.get("path") or (r.get("fault") == "speaker" and r.get("window") is not None))}
+    for finding in d.get('reject') or []:
+        if isinstance(finding, dict) and finding.get('excerpt') and finding.get('fault') == 'contradiction':
+            for group in list(footage.values()) + list(pics.values()):
+                rejected_pairs.update((finding.get('window'), rec['path']) for rec in group if same_excerpt(rec, finding))
     take = sup["take"]
     keys, meta = {}, {}
     # the take's own shots (a show cut between cameras): each is framed on its own speaker. One file, one asset a shot
@@ -854,7 +876,8 @@ def build(script, sup, style_id, direction=None):
     # takes the approved pictures the film has to spare, each checked on its own words
     ins,fill_report=fill_holes(ins,coverage,footage,pics,script,seg_f,LEAD_F+FPS,f_last,stress,checker,
                                placement_report.get('rejected_paths') or [],composed_stills,
-                               originals=originals_of(sup['work']),cut_dir=os.path.join(sup['work'],'fresh-intervals'),ffmpeg=sup['ffmpeg'])
+                               originals=originals_of(sup['work']),cut_dir=os.path.join(sup['work'],'fresh-intervals'),ffmpeg=sup['ffmpeg'],
+                               composed_findings=[r for r in d.get('reject') or [] if isinstance(r, dict)])
     placement_report['gap_fill']={k:v for k,v in fill_report.items() if k!='spend'}
     placement_report['spend']=list(placement_report.get('spend') or [])+fill_report['spend']
     for row in ins:                                      # a clip the check cut clear of another editor's text is a new file

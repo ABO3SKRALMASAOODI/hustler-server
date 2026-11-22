@@ -1077,7 +1077,8 @@ def score(ctx, script):
               segments=[dict(say=ln["text"], pictures=[n for n in ln.get("subjects") or []]) for ln in pack["lines"]])
     for attempt in range(RECOVERY_PASSES + 3 + LADDER_RUNGS):
         knobs["coverage_final"] = coverage_final(pack)
-        knobs["offer_original_camera"] = bool(pack.get("coverage_recoveries") or research_spent(pack))
+        knobs["offer_original_camera"] = bool(pack.get("coverage_recoveries") or research_spent(pack)
+                                              or any(r.get("fault") == "speaker" for r in found))
         try:
             l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
             break
@@ -1350,20 +1351,32 @@ def current_rejections(supply):
     if not os.path.exists(marker) or json.load(open(marker)) != CONTRACT:
         return []
     rows = json.load(open(path)) if os.path.exists(path) else []
-    return [r if isinstance(r, dict) else dict(window=None, path=r, fault="contradiction") for r in rows]
+    rows = [r if isinstance(r, dict) else dict(window=None, path=r, fault="contradiction") for r in rows]
+    missing = {r['path'] for r in rows if r.get('path') and not r.get('excerpt')}
+    pack_path = os.path.join(supply, 'pack.json')
+    if missing and os.path.isfile(pack_path):
+        from wf1_coverage import source_excerpt
+        pack = json.load(open(pack_path)).get('pack') or {}
+        clips = [c for line in pack.get('footage') or [] for c in line.get('clips') or []]
+        pictures = [p for group in (pack.get('pictures') or {}).values() for p in group]
+        known = {p['path']: source_excerpt(p) for p in clips + pictures if p.get('path') in missing}
+        for r in rows:
+            if r.get('path') in known:
+                r['excerpt'] = known[r['path']]
+    return rows
 
 
 def unrepaired(picture, found):
     """True when a planned picture still carries a composed finding its plan has not repaired: a contradiction in its
     own window, a reframe it was not yet framed for, or a window given to the speaker. Findings are keyed on the
     candidate (origin), never on a copy derived from it."""
-    own = {picture.get("origin"), picture.get("path")} - {None}
+    from wf1_coverage import same_excerpt
     for r in found:
         if r.get("fault") == "speaker":
             if r.get("window") is not None and r.get("window") == picture.get("window"):
                 return True
             continue
-        if (r.get("origin") or r.get("path")) not in own or r.get("window") not in (None, picture.get("window")):
+        if r.get("window") not in (None, picture.get("window")) or not same_excerpt(picture, r):
             continue
         if r.get("fault") != "reframe" or not picture.get("reframed"):
             return True
@@ -1402,25 +1415,32 @@ def _rebuild_rejected(ctx, script, sc, report):
     on the film and the film is delivered (never lost to its repair: adversarial review, 20 Nov)."""
     pics = sc["beats"].get("pictures") or []
     previous = current_rejections(ctx.supply)
-    before = {(r.get("window"), r.get("origin") or r.get("path"), r.get("fault")) for r in previous}
+    from wf1_coverage import same_excerpt, source_excerpt
     added = []
-
-    def has(key):
-        return key in before or any((a["window"], a["path"], a["fault"]) == key for a in added)
     for r in report["placements"]:
         if r.get("ok"):
             continue
         p = pics[r["id"]]
-        window, origin = p.get("window"), p.get("origin") or p["path"]
-        if r.get("fault", "reframe") == "reframe" and not has((window, origin, "reframe")):
-            step = (window, origin, "reframe")
-        elif not has((window, origin, "contradiction")):
-            step = (window, origin, "contradiction")
-        elif window is not None and not has((window, None, "speaker")):
-            step = (window, None, "speaker")
+        window = p.get("window")
+        excerpt = source_excerpt(p)
+        local = [old for old in previous if old.get('window') == window]
+        matched = {old['fault'] for old in local if same_excerpt(p, old)}
+        failed_sources = {(old.get('excerpt') or {}).get('source', {}).get('url')
+                          for old in local if old.get('fault') == 'contradiction'} - {None}
+        source = excerpt['source']['url']
+        # Another failed crop from a source already replaced in this spoken window is a tested
+        # alternative. Changing the download path or cutting a new interval mustn't start over.
+        if 'contradiction' in matched or (source and source in failed_sources):
+            fault = 'speaker' if window is not None else 'contradiction'
+        elif r.get('fault', 'reframe') == 'reframe' and 'reframe' not in matched:
+            fault = 'reframe'
         else:
+            fault = 'contradiction'
+        history = local + [old for old in added if old['window'] == window]
+        if any(old['fault'] == fault and (fault == 'speaker' or same_excerpt(p, old)) for old in history):
             continue
-        added.append(dict(window=step[0], path=step[1], fault=step[2], placed=p["path"], reason=str(r.get("reason") or "")[:240]))
+        added.append(dict(window=window, path=None if fault == 'speaker' else excerpt['path'],
+                          excerpt=excerpt, fault=fault, placed=p['path'], reason=str(r.get('reason') or '')[:240]))
     if not added:
         ctx.log("composed picture check: every finding has had each repair; the film is delivered with them on record")
         return False

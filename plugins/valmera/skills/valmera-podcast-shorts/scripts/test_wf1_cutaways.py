@@ -362,3 +362,42 @@ def test_after_alternate_search_original_camera_carries_private_claim():
     measured = wf1_coverage.require_coverage([], coverage, 5., original=original)
     assert not measured["missing_windows"] and measured["new_pictures"] == 0
     assert measured["source_camera"][0]["words"] == "They passed on us"
+
+
+def test_another_crop_from_a_failed_source_returns_its_window_to_synchronous_camera(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import wf1_short as wf
+    import wf1_coverage as coverage
+
+    ctx = SimpleNamespace(supply=str(tmp_path), run_dir=str(tmp_path), log=lambda _: None)
+    source = dict(url='source://original')
+    first = dict(path='old-download', source=source, time_range=[82, 84])
+    alias = dict(path='new-download', source=source, time_range=[82.2, 84.2])
+    other = dict(path='other-excerpt', source=source, time_range=[127, 129], window=5)
+    (tmp_path/'render_rejected_contract.json').write_text(json.dumps(pc.CONTRACT))
+    (tmp_path/'render_rejected.json').write_text(json.dumps([dict(window=5, path=first['path'], fault='contradiction')]))
+    (tmp_path/'pack.json').write_text(json.dumps(dict(pack=dict(footage=[dict(clips=[first])]))))
+    previous = wf.current_rejections(str(tmp_path))
+    assert coverage.same_excerpt(alias, previous[0])
+    assert not coverage.same_excerpt(other, previous[0])
+    assert wf.unrepaired(dict(alias, window=5), previous)
+    assert not wf.unrepaired(dict(alias, window=3), previous)
+    monkeypatch.setattr(wf, '_repair_window_boundaries', lambda *args: None)
+    monkeypatch.setattr(wf, 'score', lambda *args: dict(beats=dict(pictures=[]), spend=[]))
+    sc = dict(beats=dict(pictures=[other]), spend=[])
+    report = dict(placements=[dict(id=0, ok=False, fault='reframe')])
+    assert wf._rebuild_rejected(ctx, {}, sc, report)
+    assert wf.current_rejections(str(tmp_path))[-1]['fault'] == 'speaker'
+
+
+def test_gap_fill_respects_camera_window_even_when_candidate_midpoint_lies_outside_it(monkeypatch):
+    picture = dict(path='stock', subject='Meta')
+    monkeypatch.setattr(film, 'fill_gaps', lambda *args, **kwargs: [[20, 90, 'clip', 'Meta', picture]])
+    checked = []
+    def checker(rows):
+        checked.extend(rows)
+        return rows, dict(placements=[])
+    coverage = dict(windows=[dict(t0=0, t1=1, name='Meta', say='Meta', subjects=[])])
+    kept, _ = film.fill_holes([], coverage, {0: [picture]}, {}, {}, [], 0, 300, [], checker,
+                             composed_findings=[dict(window=0, fault='speaker', path=None)])
+    assert kept == [] and checked == []
