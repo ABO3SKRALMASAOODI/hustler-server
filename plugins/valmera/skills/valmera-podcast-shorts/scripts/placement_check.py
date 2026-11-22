@@ -529,6 +529,15 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
     system = SYSTEM
     menu = foley_menu() if review == "placement" else {}
     system += foley_ask(menu)
+    if review == "source_camera":
+        system += (" These candidates are the ORIGINAL synchronous interview camera at the exact time of each "
+                   "clause. Alternate archival queries have already been tried. Choose this source camera "
+                   "(ok=true) when the frames show this conversation carrying the speaker's recollection, "
+                   "private interaction, idea or explanation truthfully. The original interview is primary "
+                   "evidence of the account being given; it need not depict the events remembered. For a "
+                   "named artifact with a better identifiable primary view, or footage visibly on a different "
+                   "scene, choose further research. Give the concrete reason in the existing reason field. "
+                   "No new text, attribution, trim or foley is requested for the original camera.")
     if review == "transition":
         system += (" This is a separate adversarial transition audit." + COMPOSED)
     elif review == "composed":
@@ -576,7 +585,7 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
     for entry, _, _ in unanswered:
         # A composed frame already has a placement reading. A new candidate with
         # no reading yields to another candidate or to the synchronous base picture.
-        entry.update(ok=review != "placement", fit=0, subject_x=None, fault="none", model=MODEL, unchecked=True,
+        entry.update(ok=review not in ("placement", "source_camera"), fit=0, subject_x=None, fault="none", model=MODEL, unchecked=True,
                      reason="No frame reading after retry", motion_ok=False, motion_reason="",
                      attribution_text="", name_super="", foreign_text=False, text_box=None, text_reason="")
     # Another editor's text: a source clip is cut down clear of it and checked again as the picture it now is. Text

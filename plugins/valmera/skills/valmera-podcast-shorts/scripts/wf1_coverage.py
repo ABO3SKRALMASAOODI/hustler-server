@@ -463,6 +463,10 @@ def repair_requirements(coverage, wanted, evidence, llm):
     system='''Direct documentary acquisition requirements using primary research and any previous failures.
 Return JSON {"windows":[{"i":integer,"name":resolved subject name,"referent_evidence":str,"must_show":str,"video_searches":[str]}]}.
 Composed-frame rejections are evidence that an earlier depiction brief may have been too broad.
+A different interview in which a founder tells a similar story is not footage of the event being
+told. Search the actual named artifact, contemporaneous primary document or recorded occasion. When an
+external picture would imply an unsupported role or record of a private conversation, identify the
+missing evidence. The original synchronous interview can carry this testimony after acquisition.
 An illustration intent cannot override the actual words: depict the activity or relationship being
 discussed, not merely an unrelated example of the broad category used as its search label.
 Revise an unsuitable acquisition brief instead of requesting more shots of the same unsuitable activity.
@@ -519,7 +523,7 @@ Do not change any spoken words, window boundaries, or numerical quality targets.
     return use
 
 
-def require_coverage(ins, coverage, duration, fps=30, final=False):
+def require_coverage(ins, coverage, duration, fps=30, final=False, original=()):
     """The documentary targets, measured on the approved placements only (a rejected asset never counts).
 
     Under target, the report goes back to research as a CoverageError while recovery passes remain. On the final
@@ -531,7 +535,8 @@ def require_coverage(ins, coverage, duration, fps=30, final=False):
     def moving_picture(row):
         return row[2]=='clip' and row[4].get('verified_motion') is True and row[4].get('placed_motion_p90',0)>=1.
     moving = sum(r[1]-r[0] for r in ins if moving_picture(r))/fps
-    missing = [i for i in range(len(coverage['windows'])) if not any(r[4].get('window')==i for r in ins)]
+    on_camera = {row['window'] for row in original}
+    missing = [i for i in range(len(coverage['windows'])) if i not in on_camera and not any(r[4].get('window')==i for r in ins)]
     named = sum(w['t1']-w['t0'] for w in coverage['windows'])
     unique=[]
     for row in ins:
@@ -540,7 +545,7 @@ def require_coverage(ins, coverage, duration, fps=30, final=False):
     weak = [i for i,w in enumerate(coverage['windows'])
             if sum(r[1]-r[0] for r in ins if r[4].get('window')==i)/fps < .8*(w['t1']-w['t0'])
             or sum(r[1]-r[0] for r in ins if r[4].get('window')==i and moving_picture(r))/fps < .6*(w['t1']-w['t0'])]
-    report = dict(real_seconds=real,moving_seconds=moving,required_real_seconds=.45*duration,required_moving_seconds=.6*max(real,.45*duration),named_seconds=named,new_per_10s=rate,new_pictures=len(unique),repeated_pictures=len(ins)-len(unique),weak_windows=weak,missing_windows=missing)
+    report = dict(real_seconds=real,moving_seconds=moving,required_real_seconds=.45*duration,required_moving_seconds=.6*max(real,.45*duration),named_seconds=named,new_per_10s=rate,new_pictures=len(unique),repeated_pictures=len(ins)-len(unique),weak_windows=[i for i in weak if i not in on_camera],missing_windows=missing,source_camera=list(original))
     short = bool(real/max(duration,.01)<.45 or moving/max(real,.01)<.60 or rate<6 or missing)
     report['short'] = short
     if missing and not final:

@@ -379,6 +379,24 @@ def fill_gaps(ins, footage, pics, script, seg_f, f_first, f_last, stress, gap_s=
 FILL_GAP_S = 3.0          # no stretch of the take over about this long without a picture, when the film has one to spare
 
 
+def original_camera_options(ins, coverage, take, checker):
+    """Offer the synchronous original for windows still uncovered after alternate archive searches."""
+    covered = {r[4].get("window") for r in ins}
+    rows = []
+    for i, window in enumerate(coverage["windows"]):
+        if i in covered:
+            continue
+        a, b = window["t0"], window["t1"]
+        rec = dict(path=take["path"], seconds=take["dur"], src=[a, b], clause=window["say"],
+                   clause_t=[a, b], window=i, source=dict(title="Original synchronous interview"))
+        rows.append([round(a * FPS) + LEAD_F, round(b * FPS) + LEAD_F, "clip", window["name"], rec])
+    if not rows:
+        return []
+    _, result = checker(rows)
+    return [dict(window=row[4]["window"], f=row[:2], words=row[4]["clause"], reason=choice["reason"])
+            for row, choice in zip(rows, result["placements"]) if choice.get("ok") and not choice.get("unchecked")]
+
+
 def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, stress, checker, rejected=(), composed_stills=(), rounds=3,
                originals=None, cut_dir=None, ffmpeg=None):
     """The final build's gap fill (19 Nov: m03 held the speaker 34 s once its windows' pictures were turned down, m10
@@ -846,7 +864,12 @@ def build(script, sup, style_id, direction=None):
             # the object the check saw in this picture (placement_check foley): its landing sounds as that object
             # (worker/score/sound_screen.py)
             P.assets[keys[row[4]["path"]]]["foley"] = str(row[4]["foley"])
-    coverage_report = require_coverage(ins, coverage, f_end/FPS, final=bool(d.get('coverage_final')))
+    original = []
+    if d.get('offer_original_camera'):
+        original = original_camera_options(ins, coverage, take, lambda rows: check(
+            rows, script, clock, sup['work'], sup['ffmpeg'], review='source_camera'))
+    coverage_report = require_coverage(ins, coverage, f_end/FPS, final=bool(d.get('coverage_final')),
+                                       original=original)
     past = {int(i) for i in d.get("past_segs") or [] if isinstance(i, int)}
     cut_pts, drive_ids, look_pics, mono_spans, bright = [], set(), [], [], []
     if take.get("still"):

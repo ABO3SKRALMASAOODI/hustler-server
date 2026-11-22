@@ -1077,6 +1077,7 @@ def score(ctx, script):
               segments=[dict(say=ln["text"], pictures=[n for n in ln.get("subjects") or []]) for ln in pack["lines"]])
     for attempt in range(RECOVERY_PASSES + 3 + LADDER_RUNGS):
         knobs["coverage_final"] = coverage_final(pack)
+        knobs["offer_original_camera"] = bool(pack.get("coverage_recoveries") or research_spent(pack))
         try:
             l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
             break

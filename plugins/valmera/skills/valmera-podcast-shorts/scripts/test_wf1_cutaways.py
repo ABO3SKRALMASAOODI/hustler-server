@@ -349,3 +349,16 @@ def test_a_person_named_by_the_source_is_named_on_screen(tmp_path, monkeypatch):
     assert clips[0]["f"][0] <= lab[0] and lab[1] <= clips[0]["f"][1] + 1 and lab[1] - lab[0] >= 14
     taste = film.F.taste_check(l1, beats)
     assert not [p for p in taste["problems"] if "SUSAN" in p or "FOX" in p], taste["problems"]
+
+
+def test_after_alternate_search_original_camera_carries_private_claim():
+    import wf1_film
+    import wf1_coverage
+    coverage = {"windows": [dict(t0=1., t1=3., name="investors", say="They passed on us")]}
+    def choose(rows):
+        assert rows[0][4]["src"] == [1., 3.] and rows[0][4]["path"] == "original.mp4"
+        return rows, {"placements": [dict(ok=True, reason="Original interview testimony")]}
+    original = wf1_film.original_camera_options([], coverage, {"path":"original.mp4","dur":5.}, choose)
+    measured = wf1_coverage.require_coverage([], coverage, 5., original=original)
+    assert not measured["missing_windows"] and measured["new_pictures"] == 0
+    assert measured["source_camera"][0]["words"] == "They passed on us"
