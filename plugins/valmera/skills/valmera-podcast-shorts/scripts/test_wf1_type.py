@@ -57,11 +57,13 @@ def test_measure_reads_the_ink_seat_on_encoded_frames(tmp_path):
     if not ff:
         pytest.skip("ffmpeg required")
     path = str(tmp_path / "bright.mp4")
-    subprocess.run([ff, "-v", "error", "-f", "lavfi", "-i", "color=white:s=270x480:r=30:d=0.5",
+    subprocess.run([ff, "-v", "error", "-f", "lavfi", "-i", "color=white:s=270x480:r=30:d=5",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", path], check=True)
     doc = dict(frame=[270,480], items=[dict(id="word", k="word", role="cap", f=[2,12], t="year",
                                                v="cap", x=.2, y=.6, ink="#FFFFFF")])
     ruler = SimpleNamespace(width=lambda *_: 50)
     assert measure_contrast(path, doc, ff, ruler)["word_ids"] == ["word"]
-    doc["items"][0]["ink"] = "#101010"
-    assert measure_contrast(path, doc, ff, ruler)["ok"]
+    word = doc["items"][0]
+    doc["items"] = [dict(word, id=f"word{i}", f=[i, i+1], ink="#101010") for i in range(135)]
+    result = measure_contrast(path, doc, ff, ruler)
+    assert result["captions_sampled"] == 135 and result["ok"]

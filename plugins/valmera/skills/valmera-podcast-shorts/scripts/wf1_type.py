@@ -150,8 +150,12 @@ def measure_contrast(movie, doc, ffmpeg, ruler):
     bad = []
     frames = sorted(samples)
     if frames:
-        select = "+".join(f"eq(n,{f})" for f in frames)
-        cmd = [ffmpeg, "-v", "error", "-i", movie, "-an", "-vf", f"select='{select}',scale=270:480",
+        # FFmpeg's evaluator limits expression depth. Group the positions so
+        # dense dialogue still needs just one decode.
+        terms = [f"eq(n,{frame})" for frame in frames]
+        while len(terms) > 1:
+            terms = ["(" + "+".join(terms[i:i+8]) + ")" for i in range(0, len(terms), 8)]
+        cmd = [ffmpeg, "-v", "error", "-i", movie, "-an", "-vf", f"select='{terms[0]}',scale=270:480",
                "-vsync", "0", "-pix_fmt", "gray", "-f", "rawvideo", "-"]
         pixels = subprocess.run(cmd, capture_output=True, check=True).stdout
         images = np.frombuffer(pixels, dtype=np.uint8).reshape(len(frames), 480, 270)
