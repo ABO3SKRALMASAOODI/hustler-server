@@ -3902,6 +3902,8 @@ class _FakeDB:
     def run(self, fn, *a, **kw):
         name = getattr(fn, "__name__", str(fn))
         self.calls.append(name)
+        if name == "render_account":
+            return False, "free"
         if name == "get_edl_version":
             return {"json": {"keep": [[0, 10]], "captions": None}, "version": 2}
         if name == "latest_asset":
