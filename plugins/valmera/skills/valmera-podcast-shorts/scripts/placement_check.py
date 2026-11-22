@@ -19,7 +19,7 @@ import subprocess
 import sys
 
 MODEL = "gpt-6-sol"
-CONTRACT = 12       # 20 Nov: the check chooses and repairs: the full source frame plus the phone slice, the whole clause,
+CONTRACT = 13       # 20 Nov: the check chooses and repairs: the full source frame plus the phone slice, the whole clause,
                     # identity from provenance, a 'no' only for a contradiction; composed review judges composing only
 PHONE = 9 / 16
 # One call carries as many placements as fit these bounds. On the codex-proxy a call's cost is its harness prefix
@@ -407,10 +407,11 @@ SYSTEM = (
     "This is separate from fidelity: a faithful still may have ok=true and motion_ok=false. "
     "Text on the picture: a lower third, name super, caption, chart, headline or graphic that names or describes "
     "this clause's subject or facts is attribution: give it as attribution_text (at most eight words); it is the "
-    "picture's evidence, never foreign. name_super: when the picture shows a person the clause is about and the "
-    "evidence names them (a lower third anywhere in the full frame, or the source's title, channel or description), "
-    "that person's name as a viewer's name super would give it, at most five words, their role after a comma when "
-    "the evidence gives one; empty when no named person is shown. Never name anyone from a face. foreign_text is true only for other text another editor or channel laid over "
+    "picture's evidence, never foreign. name_super: the spoken name alone, only when the full frames and the "
+    "phone slice show this person throughout. Use visible identifying evidence such as the original name super "
+    "attached to this person or a documented single-person portrait. A show's channel, an interview title "
+    "or a guessed face does not identify a listener. Leave it empty if the camera changes person or the name "
+    "is uncertain. foreign_text is true only for other text another editor or channel laid over "
     "the picture that does not belong to this clause: subtitles of other speech, promo slogans, a channel's own title "
     "card, a quote card, a date stamp. Text of the filmed scene (a sign, a livery, a product's own label, a printed "
     "page or a screen being filmed, a primary document that is the subject), a small corner logo, this film's own "
@@ -620,8 +621,8 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         rec['verified_motion'] = row[2] == 'clip' and decision.get('motion_ok') is True
         if decision.get("attribution_text"):
             rec["attribution"] = decision["attribution_text"]
-        if decision.get("name_super") and review == "placement":
-            rec["name_super"] = decision["name_super"]      # drawn under the picture (wf1_film labels): identity reaches the viewer
+        if review == "placement":
+            rec["name_super"] = decision.get("name_super", "") if decision["ok"] else ""      # drawn under the picture (wf1_film labels): identity reaches the viewer
         if decision.get("fit") is not None and review == "placement":
             rec["fit"] = decision["fit"]
         if decision.get("foley") and review == "placement" and decision.get("ok") is True:

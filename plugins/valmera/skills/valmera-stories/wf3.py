@@ -2393,33 +2393,52 @@ def render(ctx, script, sc):
     settle = os.environ.get("SHELL_RENDER_CMD")       # a renderer in place of the Mac engine: the box image's, where a film is settled
     if not os.path.exists(out):
         scene = chain.lay_devices(ctx, drawn)         # the scene to draw: every device it asks for laid out first
-        if settle:
-            log = chain.sh(ctx, ["zsh", settle, scene, ctx.supply, sound, out + ".part.mp4"], label=f"wf3-render-{ctx.run_id}", heavy=os.environ.get("SHELL_RENDER_REMOTE") != "1", timeout=7200)
-            j = {}
-            bl = os.path.join(ctx.supply, "box", "film.mp4.log.json")
-            if os.path.exists(bl):
+        if ctx.workflow == "wf1":
+            from wf1_type import finish_layout
+            scene = finish_layout(scene)
+
+        def draw(scene):
+            if settle:
+                log = chain.sh(ctx, ["zsh", settle, scene, ctx.supply, sound, out + ".part.mp4"], label=f"wf3-render-{ctx.run_id}", heavy=os.environ.get("SHELL_RENDER_REMOTE") != "1", timeout=7200)
+                j = {}
+                bl = os.path.join(ctx.supply, "box", "film.mp4.log.json")
+                if os.path.exists(bl):
+                    try:
+                        j = json.load(open(bl))
+                    except ValueError:
+                        j = {}
                 try:
-                    j = json.load(open(bl))
+                    j["settled_on"] = json.loads(log[log.rindex("{"):log.rindex("}") + 1])
+                except ValueError:
+                    j["settled_on"] = dict(cmd=os.path.basename(settle))
+            else:
+                log = chain.sh(ctx, ["env", f"PYTHONPATH={env_path()}", f"VALMERA_SCENE_CACHE={cache}", chain.PY, "-m", "scene.run", "render", "--l1", scene,
+                                     "--work", ctx.supply, "--out", out + ".part.mp4", "--tier", "master", "--strict", "--cache", cache, "--audio", sound],
+                               label=f"wf3-render-{ctx.run_id}", heavy=True, timeout=7200)
+                try:
+                    j = json.loads(log[log.index("{"):log.rindex("}") + 1])
                 except ValueError:
                     j = {}
-            try:
-                j["settled_on"] = json.loads(log[log.rindex("{"):log.rindex("}") + 1])
-            except ValueError:
-                j["settled_on"] = dict(cmd=os.path.basename(settle))
-        else:
-            log = chain.sh(ctx, ["env", f"PYTHONPATH={env_path()}", f"VALMERA_SCENE_CACHE={cache}", chain.PY, "-m", "scene.run", "render", "--l1", scene,
-                                 "--work", ctx.supply, "--out", out + ".part.mp4", "--tier", "master", "--strict", "--cache", cache, "--audio", sound],
-                           label=f"wf3-render-{ctx.run_id}", heavy=True, timeout=7200)
-            try:
-                j = json.loads(log[log.index("{"):log.rindex("}") + 1])
-            except ValueError:
-                j = {}
+            return j
+
+        j = draw(scene)
+        if ctx.workflow == "wf1":
+            from wf1_type import measure_contrast, repair_contrast
+            actual = json.load(open(scene))
+            measure = measure_contrast(out + ".part.mp4", actual, pack["ffmpeg"], F.Ruler(actual["voices"]))
+            if measure["unreadable"]:
+                scene = repair_contrast(actual, scene, measure["word_ids"], F.Ruler(actual["voices"]))
+                j = draw(scene)
+                j["caption_repair"] = dict(words=measure["word_ids"])
+                measure = measure_contrast(out + ".part.mp4", actual, pack["ffmpeg"], F.Ruler(actual["voices"]))
+            j["caption_contrast"] = measure
+            j["laid_scene"] = scene
         os.replace(out + ".part.mp4", out)
         chain.measure_devices(ctx, out, scene)          # what the film did, by signal, beside the bar (a record only)
         json.dump(dict(j, mix=mix), open(out + ".log.json", "w"))
     j = json.load(open(out + ".log.json")) if os.path.exists(out + ".log.json") else {}
     return dict(engine="scene", film=out, engine_check=dict(frames=j.get("frames"), seconds=j.get("seconds"), audio=j.get("mix"),
-                                                              degraded=j.get("degraded"), warnings=j.get("warnings"), settled_on=j.get("settled_on")))
+                                                              degraded=j.get("degraded"), warnings=j.get("warnings"), laid_scene=j.get("laid_scene"), caption_repair=j.get("caption_repair"), caption_contrast=j.get("caption_contrast"), settled_on=j.get("settled_on")))
 
 
 def mark_samples(prog, final, n=6):
@@ -2597,7 +2616,9 @@ def check_once(ctx, rd, sc):
                         render=rd.get("engine_check"), measured=sc["beats"].get("measured"), style=sc["beats"].get("style"))
     rec = json.load(open(os.path.join(ctx.supply, "pack.json")))["record"]
     c["stories"]["narration"] = dict(seconds=rec.get("narration_s"), voice=rec.get("voice"), gate=rec.get("gate"))
-    c["stories"]["caption_contrast"] = caption_contrast(rd["film"], json.load(open(sc["l1"])), pack["ffmpeg"])
+    laid = (rd.get("engine_check") or {}).get("laid_scene") or sc["l1"]
+    measured = (rd.get("engine_check") or {}).get("caption_contrast")
+    c["stories"]["caption_contrast"] = measured or caption_contrast(rd["film"], json.load(open(laid)), pack["ffmpeg"])
     c["ok"] = bool(c["ok"] and sc["taste"]["ok"] and c["stories"]["caption_contrast"]["ok"])
     c["stories"]["voices"] = voices_record(ctx, pack)
     if ctx.workflow == "wf3":

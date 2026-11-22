@@ -323,10 +323,8 @@ def test_a_finding_that_survives_every_repair_gives_its_window_to_the_speaker_th
 
 
 @pytest.mark.skipif(not FF, reason="no ffmpeg")
-def test_a_person_named_by_the_source_is_named_on_screen(tmp_path, monkeypatch):
-    """Verdict better_fix #2 (19 Nov m01): the 'SUSAN LI' lower third is outside the phone slice, so the person must be
-    named on screen. The check returns the name its evidence gives (name_super); the film draws it in the label type
-    while her picture is up, once."""
+def test_source_attribution_alone_does_not_print_an_unspoken_name(tmp_path, monkeypatch):
+    """The frame reader sees Susan Li, while the transcript here speaks about Meta."""
     import placement_check
     clip = _meta_clip(tmp_path, "li")
     script, sup = _meta_short(tmp_path, [clip])
@@ -345,10 +343,7 @@ def test_a_person_named_by_the_source_is_named_on_screen(tmp_path, monkeypatch):
     assert calls and "name_super" in calls[0]
     clips = [p for p in beats["pictures"] if p["kind"] == "clip"]
     assert clips and clips[0]["attribution"] == "SUSAN LI lower third"
-    assert [x["text"] for x in beats["labels"]] == ["Susan Li, Fox Business"]
-    named = [it for it in l1["items"] if it["k"] == "word" and it.get("role") == "stat"]
-    assert " ".join(it["t"] for it in named) == "SUSAN LI, FOX BUSINESS"
-    lab = beats["labels"][0]["f"]
-    assert clips[0]["f"][0] <= lab[0] and lab[1] <= clips[0]["f"][1] + 1 and lab[1] - lab[0] >= 14
+    assert not beats["labels"]
+    assert not [it for it in l1["items"] if it.get("name_picture")]
     taste = film.F.taste_check(l1, beats)
     assert not [p for p in taste["problems"] if "SUSAN" in p or "FOX" in p], taste["problems"]

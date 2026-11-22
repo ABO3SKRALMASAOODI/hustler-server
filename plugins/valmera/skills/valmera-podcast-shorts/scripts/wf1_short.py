@@ -1218,7 +1218,7 @@ def render(ctx, script, sc):
     found=current_rejections(ctx.supply)
     rejected_plan=any(unrepaired(p,found) for p in sc.get('beats',{}).get('pictures',[]))
     stale_captions=('caption_lines' in sc.get('beats',{})
-                    and sc['beats'].get('caption_contract')!=1)
+                    and sc['beats'].get('caption_contract')!=2)
     if rejected_plan or stale_captions:
         if history and rejected_plan:
             _repair_window_boundaries(ctx,[r for r in history[-1]['placements'] if not r['ok'] and r.get('fault')!='reframe'])

@@ -96,35 +96,44 @@ def fmt_value(v, o, final=False):
 def counter(l1, work, ask, sense=None):
     """Digits that step hard and slow into the spoken figure, on one seat across every cut, then hold and hit."""
     o, W, H, fps, dur, S, pal = _base(l1, work, ask, sense)
-    try:
-        v0, v1 = float(o["from"]), float(o["to"])
-    except (KeyError, TypeError, ValueError):
-        return {"skip": "counter needs from and to"}
-    hold = int(o.get("hold", 30))
-    say = o.get("t") or o.get("lands")
-    a, z, hit = K.span(l1, ask, need=hold, text=say if isinstance(say, str) else None)
-    land = K.frame_of(l1, o.get("lands"), near=a) if o.get("lands") is not None and not isinstance(o.get("lands"), str) else None
-    run = int(o.get("run", 18))
-    if land is not None and (land < a - run or land > z + 3 * hold):
-        land = None                # a figure word far outside its own place (a word number read as a frame): the place's own hit
-    if land is None:
-        land = hit[0][1] if hit else a + max(min(int(0.6 * (z - a)), 28), 8)
-    if land - a < 8:
-        a = max(0, land - run)
-    z = max(z, min(land + hold, dur))
-    z = min(K.bounded(o, z, land + 8), dur)                # the row's window ends it; the figure still lands and holds a beat
-    if z <= land:
-        land = max(a + 2, z - 4)
-    span_f = land - a
-    k = int(min(max(span_f // 2.2, 4), 28))
-    steps = [a + s for s in K.hard_steps(span_f, k)] + [land]
-    steps = sorted(set(steps))
-    geo = v0 > 0 and v1 > 0 and max(v0, v1) / min(v0, v1) >= 8
-    vals = []
-    for j in range(len(steps)):
-        p = j / max(len(steps) - 1, 1)
-        vals.append(v0 * (v1 / v0) ** p if geo else v0 + (v1 - v0) * p)
-    texts = [cased(fmt_value(v, o, final=(j == len(vals) - 1)), o) for j, v in enumerate(vals)]
+    # Documentary figures step through the words of the spoken measurement.
+    # Their motion lands on the final word without inventing intermediate values.
+    timed = o.get("spoken_steps")
+    if timed:
+        steps = [int(row[0]) for row in timed]
+        texts = [cased(" ".join(row[1] for row in timed[:i+1]), o) for i in range(len(timed))]
+        a, land = steps[0], steps[-1]
+        z = min(dur, max(land + 1, int(o["bound"])))
+    else:
+        try:
+            v0, v1 = float(o["from"]), float(o["to"])
+        except (KeyError, TypeError, ValueError):
+            return {"skip": "counter needs from and to"}
+        hold = int(o.get("hold", 30))
+        say = o.get("t") or o.get("lands")
+        a, z, hit = K.span(l1, ask, need=hold, text=say if isinstance(say, str) else None)
+        land = K.frame_of(l1, o.get("lands"), near=a) if o.get("lands") is not None and not isinstance(o.get("lands"), str) else None
+        run = int(o.get("run", 18))
+        if land is not None and (land < a - run or land > z + 3 * hold):
+            land = None                # a figure word far outside its own place (a word number read as a frame): the place's own hit
+        if land is None:
+            land = hit[0][1] if hit else a + max(min(int(0.6 * (z - a)), 28), 8)
+        if land - a < 8:
+            a = max(0, land - run)
+        z = max(z, min(land + hold, dur))
+        z = min(K.bounded(o, z, land + 8), dur)                # the row's window ends it; the figure still lands and holds a beat
+        if z <= land:
+            land = max(a + 2, z - 4)
+        span_f = land - a
+        k = int(min(max(span_f // 2.2, 4), 28))
+        steps = [a + s for s in K.hard_steps(span_f, k)] + [land]
+        steps = sorted(set(steps))
+        geo = v0 > 0 and v1 > 0 and max(v0, v1) / min(v0, v1) >= 8
+        vals = []
+        for j in range(len(steps)):
+            p = j / max(len(steps) - 1, 1)
+            vals.append(v0 * (v1 / v0) ** p if geo else v0 + (v1 - v0) * p)
+        texts = [cased(fmt_value(v, o, final=(j == len(vals) - 1)), o) for j, v in enumerate(vals)]
     font = pal["font"]      # palette_of resolves the ask's font word
     v = K.voice(font, 100, track=int(o.get("track", -1)), shadow=0.5)
     wide = max(texts, key=lambda t: K.ink_box(v, t)[1][2] - K.ink_box(v, t)[1][0])

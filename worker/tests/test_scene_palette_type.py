@@ -673,3 +673,13 @@ def test_a_font_role_or_a_missing_font_draws_in_the_films_own_face(tmp_path):
             assert used, (dev, font, log)
             for f in used:
                 find_font(f)                                                               # every face is installed
+
+
+def test_counter_draws_only_the_spoken_measurement_in_documentary_mode(tmp_path):
+    l1 = film(tmp_path)
+    ask = dict(dev="counter", id="literal", f=[30,63], bound=63,
+               spoken_steps=[[30,"about"],[36,"a"],[42,"year"]])
+    out, log = laid(l1, tmp_path, [ask])
+    assert log[0]["landed"] == "counter"
+    words = sorted((i["f"], i["t"]) for i in mine(out,"literal") if i["k"] == "word")
+    assert words == [([30,36],"about"),([36,42],"about a"),([42,63],"about a year")]

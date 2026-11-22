@@ -1030,6 +1030,8 @@ def build(script, sup, style_id, direction=None):
             P.card([f0,f1],key,[cx-width/2,cy-height/2,cx+width/2,cy+height/2],**kw)
             note(f0,f1,kind,name,rec,"print")
 
+    from wf1_type import phrase, type_ask
+    said = [[w["w"], Clock.f(w["t0"]) - 1, Clock.f(w["t1"]), int(w.get("seg", 0))] for w in clock.words]
     pos, labelled, labels, flashes = 0, set(), [], []
     runs = _runs(ins)
     layouts_used = []
@@ -1048,21 +1050,12 @@ def build(script, sup, style_id, direction=None):
                 window(f0, f1, kind, name, rec, keys[rec["path"]])
             cut_pts.append(f0)
             P.events.append(f0)
-            who = rec.get("name_super")
-            if who and who not in labelled:
-                # The person the picture shows, named as its source names them (a lower third the phone slice cuts
-                # away, the source's title or channel: placement_check name_super), in the label type, once.
+            who = rec.get("name_super") or ""
+            spoken = phrase([w for w in said if w[1] < f1 and w[2] > f0], who)
+            if spoken and who not in labelled:
                 labelled.add(who)
-                b_lab, j = f1, k + 1
-                while j < len(ins) and ins[j][0] == b_lab and ins[j][4].get("name_super") == who:
-                    b_lab, j = ins[j][1], j + 1
-                labels.append((f0 + 2, min(b_lab, f0 + int(2.4 * FPS)), str(who)))
-            elif not who and d.get("labels", False) and name not in labelled:            # a named thing is labelled once, small, while its own pictures are up
-                labelled.add(name)
-                b_lab, j = f1, k + 1
-                while j < len(ins) and ins[j][0] == b_lab and ins[j][3] == name:
-                    b_lab, j = ins[j][1], j + 1
-                labels.append((f0 + 2, min(b_lab, f0 + int(2.4 * FPS)), str(name)))
+                labels.append((max(f0, spoken[0][1]), min(f1, spoken[-1][2]),
+                               " ".join(w[0] for w in spoken), keys[rec["path"]]))
         if st["flash"] == "runs" and not dr and (not flashes or r0 - flashes[-1] >= 4 * FPS):      # the projector catches: into a run of archive
             flashes.append(r0)
         pos = r1
@@ -1106,7 +1099,7 @@ def build(script, sup, style_id, direction=None):
         ys = [r4(y + float(q)) for q in bake.bounce(kk, rest=0.0)] + [r4(y)] * (n - kk)
         bl = [round(float(q), 3) for q in bake.bounce_blur(kk)] + [0.0] * (n - kk)
         P.word([a + delay, b], text, vk, 0.5, ys[delay:] if delay else ys, ink, [min(1.0, (q + 1) / 2) for q in range(n - delay)],
-               align="c", z=8, blur=bl[delay:] if delay else bl, role="big", stroke=dict(w=3.0, c=stroke), on=a if on is None else on)
+               align="c", z=8, blur=bl[delay:] if delay else bl, role="big", stroke=dict(w=3.0, c=stroke), on=a if on is None else on, display_ink_on=a)
 
     def ground_at(f, y0, y1):
         """The tone (0..1) of the picture up at frame f, under the band y0-y1 of the frame."""
@@ -1136,10 +1129,11 @@ def build(script, sup, style_id, direction=None):
             continue
         if not (0 <= seg < nseg) or not text or any(text.lower() in t.lower() or t.lower() in text.lower() for _, _, t in shown):
             continue
-        hit = F.said_at(clock, seg, text)
-        if hit is None:
+        spoken = phrase([w for w in said if w[3] == seg], text)
+        if not spoken:
             continue
-        a = max(Clock.f(hit[0]) - 1, 1)
+        text = " ".join(w[0] for w in spoken)
+        a = max(spoken[0][1], 1)
         if a < 2*FPS or any(abs(a - x) < 2.0 * FPS for x, _, _ in shown) or a >= f_voice_end - 12:
             continue
         b = int(min(a + 1.15 * FPS, f_end, Clock.f(clock.segs[seg][1]) + 10))
@@ -1151,6 +1145,10 @@ def build(script, sup, style_id, direction=None):
         if b - a < 14:
             continue
         role = row.get("role") or "hook"
+        if role == "name":
+            # A spoken name is already captioned. Its title is laid with the
+            # visually identified picture, so the listener never inherits it.
+            continue
         perf = row.get("perform") if isinstance(row.get("perform"), dict) else None
         if perf and perf.get("dev"):
             # the model chose the device that makes this row's type perform (palette_menu): the palette draws it on the
@@ -1158,11 +1156,12 @@ def build(script, sup, style_id, direction=None):
             import palette_menu
             limit = min([Clock.f(clock.segs[seg][1]) + 10] + next_subject)
             ask = palette_menu.ask_for(row, seg, text, a, b, len(devices), limit=limit)
+            ask = type_ask(ask, said)
             devices.append(ask)
-            if perf["dev"] in palette_menu.REPLACES:
+            if ask["dev"] in palette_menu.REPLACES:
                 # a device that draws the words itself takes the row's place and the caption words it draws; a word of
                 # the row it does not draw stays in the caption, which then keeps its seat (the device seats itself off it)
-                mask = palette_menu.drawn(ask, text)
+                mask = palette_menu.drawn(dict(ask, args=ask), text)
                 span = F.said_span(clock, seg, text)
                 if all(mask):
                     omit += span
@@ -1187,7 +1186,7 @@ def build(script, sup, style_id, direction=None):
         if role == "contrast":                           # the contrast on a bar: dark ink on the accent
             wd = P.R.width(f"dsp{a}_{big}", rows[big][0]) / W
             P.block([a, b], [0.5 - wd / 2 - 0.02, ys[big] - P.R.cap(f"dsp{a}_{big}") / H - 0.014, 0.5 + wd / 2 + 0.02, ys[big] + 0.016],
-                    pal["accent"], z=7, op=0.96, radius=0.006, bar_on=a)     # part of the block: seat_display moves and shrinks it with its lines
+                    pal["accent"], z=7, op=0.96, radius=0.006, bar_on=a, display_on=a)     # part of the block: seat_display moves and shrinks it with its lines
         for k, (line, px) in enumerate(rows):
             vk = f"dsp{a}_{k}"
             line_ink, line_edge = (DARK_INK, pal["accent"]) if role == "contrast" and k == big else (ink, edge)
@@ -1196,7 +1195,7 @@ def build(script, sup, style_id, direction=None):
         P.events.append(a)
         shown.append((a, b, text))
     shown.sort()
-    for a, b, text in labels:
+    for a, b, text, picture in labels:
         if b - a < 14:
             continue
         t = text.upper()
@@ -1210,9 +1209,9 @@ def build(script, sup, style_id, direction=None):
             continue
         y = 0.752
         y_last = y + 0.036 * (len(rows) - 1)
-        P.block([a, b], [0.5 - wd / 2 - 0.022, y - 0.030, 0.5 + wd / 2 + 0.022, y_last + 0.013], pal["plate"], z=6, op=0.78, radius=0.008)
+        P.block([a, b], [0.5 - wd / 2 - 0.022, y - 0.030, 0.5 + wd / 2 + 0.022, y_last + 0.013], pal["plate"], z=6, op=0.78, radius=0.008, name_picture=picture)
         for n, r_ in enumerate(rows):
-            P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat")
+            P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat", name_picture=picture)
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), hold=[(a - 1, b) for a, b, t in shown if (a, b, t) not in free], z=5,
                             omit=omit)
     P.items = inside(P.items, f_end)
@@ -1245,7 +1244,7 @@ def build(script, sup, style_id, direction=None):
             except Exception as e:  # noqa: BLE001 - a section the driver cannot cut keeps the film's own band
                 bands.append(dict(energy=en, take=is_take, fault=repr(e)[:200]))
     # the film's word clock, for the palette's devices: each word on the frame a display word lands on it, and its sentence
-    l1["said"] = [[w["w"], Clock.f(w["t0"]) - 1, Clock.f(w["t1"]), int(w.get("seg", 0))] for w in clock.words]
+    l1["said"] = said
     # the Director's story beats for the sound's hero hits (worker/score/sound_screen.py): a beat it held (energy hold)
     # lands a short dry hit, not a trailer impact (lane sfx-moments, 20 Nov: an impact on a suicide line read wrong)
     l1["sound_beats"] = [dict(f=int(word_frame(b["w"])), role=b.get("role"), energy=b.get("energy"))
@@ -1290,7 +1289,7 @@ def build(script, sup, style_id, direction=None):
         by_id = {pid: keys.get(path) or path for pid, path in (dr.get("pictures") or {}).items()}
         asks, notes = DR.palette_asks(dr, word_frame, seg_span, by_id.get, f_end)
         if asks:
-            l1["devices"] = list(l1.get("devices") or []) + asks        # after the rows whose type performs (perform)
+            l1["devices"] = list(l1.get("devices") or []) + [type_ask(ask, said) for ask in asks]
     why = notes
     changes = sorted({it["f"][0] for it in l1["items"] if it["k"] == "shot"})
     for s_ in l1.get("sound") or []:
@@ -1303,9 +1302,9 @@ def build(script, sup, style_id, direction=None):
                  events=sorted(set(P.events) | set(cut_pts) | set(changes) | {it["f"][0] for it in l1["items"] if it["k"] == "card"}
                                | {e["f"] for e in dev_events if 0 <= e["f"] < f_end}),
                  device_events=dev_events,
-                 pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=1, display=[dict(f=[a, b], text=t) for a, b, t in shown],
+                 pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=2, display=[dict(f=[a, b], text=t) for a, b, t in shown],
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
-                 labels=[dict(f=[a, b], text=t) for a, b, t in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
+                 labels=[dict(f=[a, b], text=t) for a, b, t, _ in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=(sorted(set(layouts_used)) if dr and len(set(layouts_used)) > 1 else (layouts_used[0] if dr and layouts_used else st["layout"])), placement_check=placement_report, coverage=coverage_report,
                  title_layout=title_layout, caption_restarts=restarts, face_metadata=meta,
                  finishes=dict(black_and_white=len([p for p in P.pictures if p.get("finish")]), flashes=len(flashes), dark_ink_spans=len(bright),
