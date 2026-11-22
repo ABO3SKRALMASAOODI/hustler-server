@@ -681,6 +681,12 @@ def apply(l1, work, asks=None, pool=None):
             got = {k: v for k, v in trimmed.items() if k.startswith(str(r["id"]))}
             if got:
                 r["behind_trimmed"] = got
+    if l1.get("story_cues"):
+        cur["story_landings"] = [
+            {"f": m["f"], "kind": "display" if m.get("kind") == "type" else "device", "landing": True}
+            for row in log if row.get("done")
+            for m in row.get("marks", []) if isinstance(m.get("f"), int)
+        ]
     cur["device_events"] = sorted(events, key=lambda e: (int(e.get("f", 0)), str(e.get("id"))))
     cur["device_log"] = log
     return cur, log

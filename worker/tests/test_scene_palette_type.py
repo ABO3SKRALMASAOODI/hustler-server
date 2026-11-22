@@ -204,6 +204,15 @@ def _product_row(l1, f0=40, f1=90):
     return l1
 
 
+def test_wang_highlight_waits_three_frames_for_its_caption(tmp_path):
+    scene = _product_row(film(tmp_path))
+    line = next(it for it in scene["items"] if it.get("k") == "word" and it.get("id") == "row")
+    frame = line["f"][0]
+    ask = {"dev": "highlight", "id": "late", "f": frame - 3, "t": "here", "style": "under"}
+    _, log = laid(scene, tmp_path, [ask])
+    assert log[0]["landed"] == "highlight" and not log[0]["fallback"]
+
+
 @pytest.mark.parametrize("style", ["marker", "box", "under"])
 def test_highlight_covers_the_whole_phrase_as_drawn_and_darkens_only_the_phrase(tmp_path, style):
     """m06b frame 262: the marker covered 'her' of 'here' and the whole row went dark over a dark suit."""

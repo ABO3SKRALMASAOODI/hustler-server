@@ -530,6 +530,10 @@ def highlight(l1, work, ask, sense=None):
     f_hit = hit[0][1] if hit else a
     got = target(l1, t, f_hit, f_hit + 2)
     if got is None:
+        # Captions can type on a few frames after the spoken word. Seat the
+        # marker on the same word's actual entrance.
+        got = target(l1, t, f_hit, f_hit + max(3, round(0.22 * fps)))
+    if got is None:
         return {"skip": f"'{t}' is not on screen there"}
     it, v, lo, hi = got
     f_hit = max(f_hit, it["f"][0])

@@ -12,8 +12,8 @@ LAYER = "rhythm"
 
 def _doc(l1, ask, a, sense):
     assets = l1.get("assets") or {}
-    for p in arg(ask, "pics") or []:
-        if (assets.get(p) or {}).get("kind") == "image":
+    for p in list(arg(ask, "pics") or []) + list(arg(ask, "pool") or []):
+        if isinstance(p, str) and (assets.get(p) or {}).get("kind") in ("image", "video"):
             return p
     sh = base_at(l1, a)
     if sh and (assets.get(sh.get("pic")) or {}).get("kind") == "image":
@@ -93,6 +93,12 @@ def proof_object(l1, work, ask, sense):
             "h": round(h, 5), "s": s, "rx": rx, "ry": ry, "rot": rot, "radius": 0.004, "z": -10,
             "dof": {"blur": num(ask, "dof", 3.0), "focus": [(bx0 + bx1) / 2, (by0 + by1) / 2]},
             "shadow": {"dx": 0.012, "dy": 0.03, "blur": 0.035, "a": 0.6}}
+    if asset.get("kind") == "video":
+        # A selected moving source can carry the document or screen. Hold its
+        # actual frame under both the push and its blurred desk.
+        card["src"] = [0.0, 0.0]
+        if base.get("pic") == pic:
+            base["src"] = [0.0, 0.0]
     items = keep + [base, card]
     evs = [{"f": a, "kind": "paper", "strength": 0.4}]
     if line and arg(ask, "mark", True) and n - p2 >= 6:

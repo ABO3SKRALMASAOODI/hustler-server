@@ -2365,7 +2365,7 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
            "seed": film_seed(l1.get("sid"), l1.get("seed"), D, [e.get("src") for e in (l1.get("spine") or [])][:64],
                              sorted(str((a or {}).get("path")) for a in (l1.get("assets") or {}).values())[:64])}
     if "story_cues" in l1:
-        return story_accents(l1["story_cues"], events, voice, fps)
+        return story_accents(l1["story_cues"], events + list(l1.get("story_landings") or []), voice, fps)
     sounds, report = plan_sounds(events, ctx)
     if screen:                               # the ceilings: no 2-8 kHz spike, never louder than LEVEL_TOP over the voice
         sounds = SCR.restrain(sounds, voice, AR, shift, library(), report, fps=fps, sample=_full_band, srate=SR)

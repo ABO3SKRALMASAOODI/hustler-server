@@ -363,14 +363,36 @@ def shrink(l1, work, ask, sense_=None, pool=None):
     n = min(int(args.get("frames", 14)), c - K.run_start(l1, c) - 2)
     if p is None or q is None or n < 6 or c - p["f"][0] < n + 2 or K.is_take(q.get("pic")) and not q.get("src"):
         return {"skip": "the outgoing shot is too short to shrink away"}
-    if p.get("pic") == "plate" or any(it.get("k") == "card" and it.get("pic") not in (None, "plate") and it["f"][0] < c and it["f"][1] > c - n
-                                      for it in l1.get("items") or []):
-        return {"skip": "the outgoing picture is a layout (a ground under cards): it leaves by its own cut"}
     f0 = c - n
-    card, _ = _full_card(p, l1, work, f0, c, f"{args.get('id', 'shrink')}.out")
     k = K.decel(n, 0.15)
-    tx, ty = args.get("to") or (0.72, 0.30)
-    card["s"] = [round(1.0 - 0.7 * k[j], 5) for j in range(n)]
+    destination = args.get("to")
+    tx, ty = destination if isinstance(destination, (list, tuple)) and len(destination) == 2 else (0.72, 0.30)
+    size = min(1.0, max(0.03, destination)) if isinstance(destination, (int, float)) else 0.30
+    cards = [it for it in l1.get("items", []) if it["k"] == "card" and it.get("pic") not in (None, "plate")
+             and it["f"][0] < c and it["f"][1] > f0]
+    if cards:
+        # The outgoing picture may already be a card. Animate the visible
+        # card in place, with every existing tilt, crop and source clock intact.
+        from ..plan import A
+        items = []
+        for it in cards:
+            lo, hi = it["f"]
+            out = dict(it)
+            for key, default, target in (("s", 1., size), ("x", .5, tx), ("y", .5, ty)):
+                values = []
+                for frame in range(lo, hi):
+                    start = A(it.get(key, default), frame, lo)
+                    t = k[frame - f0] if f0 <= frame < c else 0.
+                    end = start * target if key == "s" else target
+                    values.append(round(start + (end - start) * t, 5))
+                out[key] = values
+            items.append(out)
+        return {"items": items, "events": [{"f": f0, "what": "shrink exit", "kind": "move", "strength": .4}],
+                "log": {"join": c, "frames": n, "cards": len(cards)}}
+    if p.get("pic") == "plate":
+        return {"skip": "the outgoing shot has no picture to shrink"}
+    card, _ = _full_card(p, l1, work, f0, c, f"{args.get('id', 'shrink')}.out")
+    card["s"] = [round(1.0 - (1.0 - size) * k[j], 5) for j in range(n)]
     card["x"] = [round(0.5 + (tx - 0.5) * k[j], 5) for j in range(n)]
     card["y"] = [round(0.5 + (ty - 0.5) * k[j], 5) for j in range(n)]
     card["rot"] = [round(-3.5 * k[j], 4) for j in range(n)]
