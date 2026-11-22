@@ -54,3 +54,13 @@ def test_observed_frame_can_override_a_matching_library_title(monkeypatch):
     result = stock._rank_matches([("library", rows)], "human heart anatomy", 1)
     assert result[0]["id"] == "organ"
     assert result[0]["description"] == "Anatomical heart model"
+
+
+def test_director_selects_only_discovered_library_ids(monkeypatch):
+    import json
+    picture = {"id": "archive:1", "asset_key": "films/3/photo.jpg", "shows": "The heart ventricles"}
+    monkeypatch.setattr(llm, "ask_text", lambda *a, **kw: {"text": json.dumps([
+        {"i": 0, "ids": ["invented", "archive:1"], "searches": [], "quote": ""}])})
+    rows = [{"say": "These are the chambers."}]
+    mcp_film.picture_plan(rows, "documentary", [picture])
+    assert rows[0]["leads"] == [picture]

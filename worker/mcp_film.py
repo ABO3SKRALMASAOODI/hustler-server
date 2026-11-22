@@ -48,22 +48,82 @@ def beats(index, start, end):
     return rows
 
 
-def picture_plan(rows, goal):
+def archive_subjects(index, goal):
+    """Research recurring subjects once for the whole film, before directing the chapters."""
+    import llm
+    from broll_source import _subjects_of
+    reply = llm.ask_text(
+        "Select up to ten recurring, specific documentary subjects from this narration. "
+        "Use the actual names of people, places, companies, mechanisms or objects. "
+        "Provide short catalogue search phrases. For a person ask for a sourced portrait "
+        "or public appearance. For a mechanism ask for an identifiable specimen, model or "
+        "diagram. Describe what pixels establish the subject rather than how to stage a scene. "
+        "Return a JSON array of {name,is,must_show,searches:[query,alternate]}.",
+        json.dumps({"goal": goal, "transcript": [s["text"] for s in index.get("sentences", [])]},
+                   ensure_ascii=False), max_tokens=1600, purpose="narration_archives",
+        reasoning_effort="low")
+    rows = llm.extract_json_array((reply or {}).get("text") or "") or []
+    return [sub for r in rows[:10] for sub in _subjects_of({"subjects": [r]})]
+
+
+def archive_record(item, got, key):
+    return {"id": item["id"], "title": item.get("title"), "shows": item.get("shows"),
+            "asset_key": key, "kind": got["kind"], "duration_s": got.get("duration_s")}
+
+
+def film_archives(ctx, idx, goal, work):
+    from broll_source import BrollError, carried, fetch_local, find_named
+
+    def collect(pair):
+        number, subject = pair
+        directory = os.path.join(work, str(number))
+        os.makedirs(directory)
+        try:
+            hits, _ = find_named(subject, count=4, workdir=directory)
+        except (BrollError, OSError, RuntimeError, ValueError):
+            return []
+        pictures = []
+        for hit in hits:
+            try:
+                got = fetch_local(hit, directory, 1920, 1080)
+            except (BrollError, OSError, RuntimeError, ValueError):
+                continue
+            key = publish(ctx, hit, got)
+            pictures.append(archive_record(hit, got, key))
+            if len(pictures) == 2:
+                break
+        return pictures
+
+    subjects = archive_subjects(idx, goal)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        return [pic for group in pool.map(carried(collect), enumerate(subjects)) for pic in group]
+
+
+def picture_plan(rows, goal, leads=()):
     import llm
     from broll_source import _subjects_of
     from score import boards
     response = llm.ask_text(
-        "Direct a documentary from these already timed beats. Choose the exact person, "
-        "object, anatomical structure, company or setting the words describe. Prefer "
-        "an archive image or a moving illustration for observable subjects. Give two "
-        "different archive search phrases and a precise visible requirement. For an "
-        "abstract beat select a short contiguous quotation from that beat for a designed "
-        "card. For a number, comparison, sequence or term, also supply design: "
-        "{kind:number|versus|timeline|term,title,parts:[{label,value}]}. Copy every display "
-        "phrase exactly from this beat. Return a JSON array of {i,name,is,must_show,searches,quote,design}. "
-        "i is the zero-based index in beats. "
-        "Use empty name for a designed beat. Never infer an identity from resemblance.",
-        json.dumps({"goal": goal, "beats": [r["say"] for r in rows]}, ensure_ascii=False),
+        "Choose obtainable documentary illustrations for each timed beat of an existing narration. "
+        "Each name is ONE actual subject in the line, suitable as a short catalogue search, never "
+        "a shot direction. must_show is a visible identity or category, not a demand for a camera "
+        "move, a cast member, the staging of an imaginary scene, an exact broadcast, the moment "
+        "of a quote, or subsequent scenes. Only demand an exact event when that footage is truly "
+        "needed. A sourced portrait depicts a named participant; an anatomical image or diagram "
+        "shows a named structure without claiming to depict the narrator. Select a contextual "
+        "archive subject when the literal scene is private or unavailable. Preserve the line's "
+        "meaning and attribution. Do not cast a stock actor as a named person. Prefer concrete "
+        "illustrations to words on screen. Start with the supplied library. When a checked "
+        "image shows what this beat names, choose its exact ID first. Vary views across "
+        "beats; a sourced participant portrait identifies its subject without depicting a private event. "
+        "Reserve new archive searches for subjects the library cannot illustrate. Also give a short contiguous quote, and optionally a number, "
+        "comparison or term card with display phrases copied exactly from this beat. Return "
+        "a JSON array of {i,name,is,must_show,searches:[two archive queries],ids:[lead IDs],"
+        "quote,design:{kind,title,parts:[{value,label}]}}. i is the zero-based beat index. "
+        "Use empty name for a designed beat.",
+        json.dumps({"goal": goal, "beats": [r["say"] for r in rows], "leads": [
+            {"id": h["id"], "checked": bool(h.get("asset_key")), "shows": h.get("shows") or h.get("description") or h.get("title")}
+            for h in leads]}, ensure_ascii=False),
         max_tokens=2200, purpose="narration_picture_plan", reasoning_effort="low")
     items = llm.extract_json_array((response or {}).get("text") or "") or []
     items = {r["i"]: r for r in items if isinstance(r, dict) and type(r.get("i")) is int}
@@ -77,6 +137,8 @@ def picture_plan(rows, goal):
             labels = [design["title"]] + [p[k] for p in design["parts"] for k in ("label", "value")]
             if any(label.casefold() not in row["say"].casefold() for label in labels if label):
                 design = None
+        ids = item.get("ids") if isinstance(item.get("ids"), list) else []
+        row["leads"] = [h for h in leads if h["id"] in ids]
         row["design"] = design
         row["subject"] = subjects[0] if subjects else None
 
@@ -88,27 +150,31 @@ def picture(ctx, beat, work):
     subject = beat.get("subject")
     if subject:
         # Include the moving-stock sources in the archive engine's frame check.
-        library = []
+        library = list(beat.get("leads") or [])
         for provider, key in ((stock._pexels_search, stock.PEXELS_KEY),
                               (stock._pixabay_search, stock.PIXABAY_KEY)):
             if key:
                 try:
-                    library.extend(provider(subject["name"], "video", "landscape", 3))
+                    library.extend(provider(subject["name"], "video", "landscape", 4))
                 except Exception:
                     continue
-        try:
-            candidates, _ = find_named(subject, kind="video", count=4, also=library, workdir=work,
-                                       deadline=time.monotonic() + 32)
-        except (BrollError, OSError, RuntimeError, ValueError):
-            candidates = []
-        for candidate in candidates:
+        for brief in (subject, dict(subject, searches=[subject["name"]],
+                                    must_show=f"An identifiable documentary picture of {subject['name']}. "
+                                              "A clearly sourced portrait, object photograph or accurate "
+                                              "labeled illustration can establish this subject in context.")):
             try:
-                got = fetch_local(candidate, work, 1920, 1080)
-                if got["kind"] == "video" and got["duration_s"] < beat["end"] - beat["start"]:
-                    continue
-                return candidate, got
+                candidates, _ = find_named(brief, kind="video", count=5, also=library, workdir=work,
+                                           deadline=time.monotonic() + 65)
             except (BrollError, OSError, RuntimeError, ValueError):
-                continue
+                candidates = []
+            for candidate in candidates:
+                try:
+                    got = fetch_local(candidate, work, 1920, 1080)
+                    if got["kind"] == "video" and got["duration_s"] < beat["end"] - beat["start"]:
+                        continue
+                    return candidate, got
+                except (BrollError, OSError, RuntimeError, ValueError):
+                    continue
     # A source quote remains a truthful picture when the archive or model is unavailable.
     quote = beat.get("quote") or " ".join(beat["say"].split()[:7])
     spec = beat.get("design") or boards.design_spec({"kind": "term", "parts": [{"label": quote}]})
@@ -116,7 +182,7 @@ def picture(ctx, beat, work):
     return candidate, fetch_local(candidate, work, 1920, 1080)
 
 
-def publish(ctx, beat, item, media):
+def publish(ctx, item, media):
     import db
     import read_tools
     import storage
@@ -133,9 +199,7 @@ def publish(ctx, beat, item, media):
                    key, bytes_=media["bytes"], duration_s=media.get("duration_s"),
                    width=media["width"], height=media["height"], sha256=digest,
                    meta=dict(facts, mcp_film=True, filename=item.get("title") or item["id"]))
-    return {"asset_key": key, "kind": kind, "at_output_s": beat["start"],
-            "duration_s": beat["end"] - beat["start"], "mute": True,
-            "fit": "pad_blur"}
+    return key
 
 
 def build(ctx, narration_asset_key=None, goal="Make a documentary from the entire narration."):
@@ -167,6 +231,11 @@ def build(ctx, narration_asset_key=None, goal="Make a documentary from the entir
     ctx.model_usage = state.get("model_usage") or ctx.model_usage
     idx = index["json"]
     intervals = chapters(idx)
+    if "archives" not in state:
+        with tempfile.TemporaryDirectory(prefix="narration_archive_", dir=ctx.workdir) as work:
+            state["archives"] = film_archives(ctx, idx, goal, work)
+        state["model_usage"] = ctx.model_usage
+        ctx.db.run(db.kv_put, checkpoint, json.dumps(state))
     for n in range(len(state["chapters"]), len(intervals)):
         start, end = intervals[n]
         rows = beats(idx, start, end)
@@ -176,22 +245,39 @@ def build(ctx, narration_asset_key=None, goal="Make a documentary from the entir
             if prior:
                 prior["duration_s"] += end - start
         else:
-            picture_plan(rows, goal)
+            from agent_tools import _search_hit_cache_key
+            library = ctx.db.run(db.kv_get, _search_hit_cache_key(ctx, "stock")) or "{}"
+            known = {h["id"]: h for h in list(json.loads(library).values())[-24:] + state["archives"]}
+            picture_plan(rows, goal, list(known.values()))
         inserts = []
         with tempfile.TemporaryDirectory(prefix="narration_pictures_", dir=ctx.workdir) as work:
             from broll_source import carried
 
             def acquire(indexed):
                 i, beat = indexed
+                for lead in beat["leads"]:
+                    if lead.get("asset_key") and (lead["kind"] == "photo"
+                            or (lead.get("duration_s") or 0) >= beat["end"] - beat["start"]):
+                        return lead, None
                 folder = os.path.join(work, str(i))
                 os.makedirs(folder)
                 return picture(ctx, beat, folder)
 
             with ThreadPoolExecutor(max_workers=3) as pool:
                 for i, (item, media) in enumerate(pool.map(carried(acquire), enumerate(rows))):
-                    insert = publish(ctx, rows[i], item, media)
-                    insert["id"] = f"chapter{n+1}picture{i+1}"
-                    inserts.append(insert)
+                    if media:
+                        key = publish(ctx, item, media)
+                        record = archive_record(item, media, key)
+                        if item.get("shows") and len(state["archives"]) < 64:
+                            state["archives"].append(record)
+                    else:
+                        record = item
+                    beat = rows[i]
+                    inserts.append({"id": f"chapter{n+1}picture{i+1}",
+                                    "asset_key": record["asset_key"],
+                                    "kind": "video" if record["kind"] == "video" else "image",
+                                    "at_output_s": beat["start"], "duration_s": beat["end"] - beat["start"],
+                                    "mute": True, "fit": "pad_blur"})
         state["chapters"].append(inserts)
         state["model_usage"] = ctx.model_usage
         ctx.db.run(db.kv_put, checkpoint, json.dumps(state))
