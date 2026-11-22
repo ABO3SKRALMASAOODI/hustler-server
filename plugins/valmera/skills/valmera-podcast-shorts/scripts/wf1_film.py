@@ -478,24 +478,24 @@ def fill_size(rec, work, ffmpeg):
     return dict(rec, path=dst, w=w2, h=h2, upscaled_from=dict(path=path, w=int(rec["w"]), h=int(rec["h"]), up=round(up, 3)))
 
 
-def clips_source_lettering(rec):
+def clipped_source_ink(rec):
     """Would the phone crop slice through measured lettering on an attributed source?"""
     if not rec.get("attribution") or rec.get("faces") or not rec.get("still"):
-        return False
+        return []
     import cv2
     from footage import overlay
     image = cv2.imread(rec["still"])
     if image is None:
-        return False
+        return []
     height, width = image.shape[:2]
     span = (W / H) / (width / height)
     if span >= 1:
-        return False
+        return []
     centre = .5 if rec.get("x") is None else float(rec["x"])
     left = max(0., min(1. - span, centre - span / 2))
     preview = cv2.resize(image, (overlay.WIDTH, round(height * overlay.WIDTH / width)))
     _, boxes = overlay.lines(preview)
-    return any(x0 + .008 < edge < x1 - .008 for x0, _, x1, _ in boxes for edge in (left, left + span))
+    return boxes if any(x0 + .008 < edge < x1 - .008 for x0, _, x1, _ in boxes for edge in (left, left + span)) else []
 
 
 def clip_meta(rec):
@@ -961,7 +961,7 @@ def build(script, sup, style_id, direction=None):
             kw["look"] = "mono_silver"
         P.shot([f0, f1], key, F.cover_crop(pw_, ph_, W / H, (0.5, 0.45), (0.5, 0.40)), **kw)
 
-    def window(f0, f1, kind, name, rec, key):
+    def window(f0, f1, kind, name, rec, key, source_ink=()):
         n = f1 - f0
         mono = is_mono(f0)
         bed_of(f0, f1, key, kind, rec, mono)
@@ -974,6 +974,9 @@ def build(script, sup, style_id, direction=None):
         asp = (x1 - x0) * W / ((y1 - y0) * H)
         kw = dict(z=1, s=1.0, crop=[0.0, 0.0, 1.0, 1.0], radius=0.010, op=[min(1.0, 0.5 + 0.25 * q) for q in range(n)],
                   shadow=dict(a=0.55, blur=0.03, dx=0, dy=0.012))
+        if source_ink:
+            kw["source_ink"] = [[x0 + x * width, y0 + y * height, x0 + right * width, y0 + bottom * height]
+                                for x, y, right, bottom in source_ink]
         if kind == "clip":
             kw["src"] = list(rec["src"])
         if mono:
@@ -982,8 +985,9 @@ def build(script, sup, style_id, direction=None):
         note(f0, f1, kind, name, rec, "window")
 
     def bleed(f0, f1, kind, name, rec, key):
-        if rec.get('provider')=='primary-document' or (kind == "clip" and clips_source_lettering(rec)):
-            return window(f0,f1,kind,name,rec,key)             # the approved document crop is already the editorial rectangle
+        source_ink = clipped_source_ink(rec) if kind == "clip" else []
+        if rec.get("provider") == "primary-document" or source_ink:
+            return window(f0, f1, kind, name, rec, key, source_ink)             # the approved document crop is already the editorial rectangle
         bal = None if is_mono(f0) else clip_balance(take.get("still"), rec.get("still") if kind == "clip" else rec.get("path"))
         gk = dict(grade=bal) if bal else {}               # matched to the take it cuts against, part of the way (round1 colour)
         if kind == "clip":                                   # moving footage fills the phone, whatever its size (fill_size)
