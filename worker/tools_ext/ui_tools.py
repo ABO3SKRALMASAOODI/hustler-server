@@ -241,11 +241,11 @@ def remove_ui_scene(ctx, ids):
         return _rejected("ids is a list of UI scene ids")
     have = {str(m.get("id")) for m in edl.get("motion") or []
             if isinstance(m, dict) and m.get("template") == "ui_scene"}
-    missing = [i for i in ids if str(i) not in have]
-    if missing:
-        return _rejected("no UI scene with id " + ", ".join(map(str, missing))
-                         + (f" (UI scenes: {', '.join(sorted(have))})"
-                            if have else " (this edit has none)"))
+    from tools_ext._write import removal_targets
+    current = have
+    ids, note = removal_targets(ids, current, "UI scene")
+    if not ids:
+        return note
     ops = []
     for f in edl.get("fx") or []:
         if isinstance(f, dict) and f.get("type") == "ui_media" and \
@@ -253,7 +253,7 @@ def remove_ui_scene(ctx, ids):
             ops.append(_write.remove_fx(f["id"]))
     ops += [{"action": "remove", "layer": "motion", "id": str(i)}
             for i in ids]
-    return _write.commit(ctx, ops, f"removed UI scene(s) {', '.join(ids)}")
+    return _write.commit(ctx, ops, f"removed UI scene(s) {', '.join(ids)}") + (" " + note if note else "")
 
 
 _OBJ = {"type": "object", "properties": {

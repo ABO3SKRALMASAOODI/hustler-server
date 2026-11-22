@@ -986,17 +986,14 @@ def remove_punctuation(ctx, ids):
     if isinstance(ids, str):
         ids = [ids]
     ids = [str(i) for i in ids or []]
-    missing = [i for i in ids if i not in mine]
-    if missing:
-        have = ", ".join(sorted(mine)) or "none"
-        return _r(f"{', '.join(missing)} is not punctuation in this edit "
-                  f"(accents, strobes, junctions: {have}).")
+    from tools_ext._write import removal_targets
+    current = mine
+    ids, note = removal_targets(ids, current, "punctuation")
     if not ids:
-        return ("NO CHANGE: nothing to remove. Do NOT tell the user you "
-                "changed anything.")
+        return note
     import tools_ext._write as w
     return w.commit(ctx, [w.remove_fx(i) for i in ids],
-                    f"remove_punctuation: {', '.join(ids)}")
+                    f"remove_punctuation: {', '.join(ids)}") + (" " + note if note else "")
 
 
 # ── re-solve on a keep change (hooks.on_keep_change) ────────────────────

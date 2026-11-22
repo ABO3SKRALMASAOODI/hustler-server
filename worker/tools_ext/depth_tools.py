@@ -565,13 +565,13 @@ def remove_depth_time(ctx, ids):
     ids = list(dict.fromkeys(str(i) for i in ids or []))
     if not ids:
         return _rejected("name the ids to remove")
-    have = {str(i.get("id")): i.get("type") for i in edl.get("fx") or []
-            if isinstance(i, dict)}
-    bad = [i for i in ids if have.get(i) not in ("depth", "time")]
-    if bad:
-        return _rejected(f"not a depth or time item here: {', '.join(bad)}")
+    from tools_ext._write import removal_targets
+    current = [i["id"] for i in edl.get("fx") or [] if i.get("type") in ("depth", "time")]
+    ids, note = removal_targets(ids, current, "depth/time effect")
+    if not ids:
+        return note
     return _commit(ctx, [_write.remove_fx(i) for i in ids],
-                   f"removed {', '.join(ids)}")
+                   f"removed {', '.join(ids)}") + (" " + note if note else "")
 
 
 # ── registration ────────────────────────────────────────────────────────
