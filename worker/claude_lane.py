@@ -523,7 +523,7 @@ def _one_shot(msgs, tools):
     return (not tools or structured_brief) and all(m["role"] != "assistant" for m in msgs)
 
 
-def _mark_cache(system, msgs, tools, model="", cache_policy=None, long_prefix=False):
+def _mark_cache(system, msgs, tools, model="", cache_policy=None, prefix_ttl=None):
     """Up to four ephemeral breakpoints at the stability boundaries, and none
     where nothing would be read back."""
     # A model name cannot tell us whether the call is reusable. Opus also
@@ -542,11 +542,12 @@ def _mark_cache(system, msgs, tools, model="", cache_policy=None, long_prefix=Fa
     # write beyond Anthropic's 20-position lookback. Keep an explicit read
     # anchor there in that case, using the otherwise redundant tools slot.
     anchor = _released_pixels_anchor(msgs) or _previous_cache_anchor(msgs)
-    if long_prefix:
+    if prefix_ttl:
         # Paid Opus edits can wait on a render or a preview between tool calls.
-        stable = {"type": "ephemeral", "ttl": "1h"}
-        if tools:
-            tools[-1] = dict(tools[-1], cache_control=stable)
+        stable = {"type": "ephemeral", "ttl": prefix_ttl}
+        last = next((i for i in reversed(range(len(tools))) if not tools[i].get("defer_loading")), None)
+        if last is not None:
+            tools[last] = dict(tools[last], cache_control=stable)
         if system:
             system[-1] = dict(system[-1], cache_control=stable)
     else:
@@ -871,7 +872,8 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
             history, None if active else tools, model, active["refs"] if active else None)
         if active:
             tool_defs = _plan_tools(active, model)
-        _mark_cache(system, msgs, tool_defs, model, cache_policy, long_prefix)
+        _mark_cache(system, msgs, tool_defs, model, cache_policy,
+                    active.get("prefix_ttl", "1h") if long_prefix else None)
         for note in volatile:
             msgs.append({"role": "system", "content": note["content"]})
         body = {"model": model, "max_tokens": int(max_tokens or 8000),

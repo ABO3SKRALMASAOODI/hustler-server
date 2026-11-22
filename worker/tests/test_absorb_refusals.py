@@ -587,7 +587,7 @@ def test_opus_sends_identical_stable_prefix_and_short_conversation_cache(monkeyp
         [seen[1][k] for k in ("tools","system")])
     for body in seen:
         for key in ("tools", "system"):
-            assert body[key][-1]["cache_control"]["ttl"] == "1h"
+            assert [block["cache_control"]["ttl"] for block in body[key] if "cache_control" in block] == ["1h"]
         assert not any(b.get("cache_control", {}).get("ttl") for m in body["messages"]
                        if isinstance(m["content"], list) for b in m["content"])
     assert "Current cut v1" in str(seen[1]["messages"][-1])
@@ -1078,3 +1078,12 @@ def test_a_grade_given_in_percent_is_read_as_percent(zoom_ctx):
     assert zoom_ctx.edl["effects"]["grade_custom"]["contrast"] == 0.96
 
 
+
+
+@pytest.mark.parametrize(("measured", "ttl"), [(True, "1h"), (False, "5m"), (None, "1h")])
+def test_cache_ttl_tracks_project_waits(measured, ttl):
+    from unittest.mock import MagicMock
+    import agent_loop
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value.fetchone.return_value = {"long_wait": measured}
+    assert agent_loop._editing_cache_ttl(conn, 9) == ttl

@@ -6215,6 +6215,21 @@ def _follow_up_turn(ctx):
         return False
 
 
+def _editing_cache_ttl(conn, project_id):
+    """Choose once, before the write, from recent gaps on this project's editing jobs."""
+    with conn.cursor() as cur:
+        cur.execute("""WITH recent AS (
+            SELECT job_id, created_at FROM llm_calls
+             WHERE project_id = %s AND purpose = 'agent' ORDER BY created_at DESC LIMIT 64
+        ), gaps AS (
+            SELECT created_at - lag(created_at) OVER (PARTITION BY job_id ORDER BY created_at) AS gap
+              FROM recent
+        ) SELECT max(gap) >= interval '5 minutes' AS long_wait FROM gaps""", (project_id,))
+        row = cur.fetchone() or {}
+    # A new project has no measured waits yet. Protect the first render.
+    return "5m" if row.get("long_wait") is False else "1h"
+
+
 def _tool_schema_refresh_needed(ctx):
     """Whether the next dispatch needs a newly routed tool catalog."""
     return bool(getattr(ctx, "edit_plan", None) or ctx.versions_written
@@ -6379,11 +6394,18 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     if claude_lane.is_claude_model(model):
         ctx._tools_by_name = True
         tools = agent_tools.names_only_load(tools)
-        tool_plan = claude_lane.tool_plan(
-            tools, agent_tools.openai_tools(
-                model, compact=True, names=set(agent_tools.TOOLS),
-                engine=agent_tools.engine_on(ctx)),
-            "low" if model.startswith("claude-opus-5-5") else config.CLAUDE_TRIAL_EFFORT)
+        tool_plan = _cont.get("claude_tool_plan")
+        if not tool_plan:
+            tool_plan = claude_lane.tool_plan(
+                tools, agent_tools.openai_tools(
+                    model, compact=True, names=set(agent_tools.TOOLS),
+                    engine=agent_tools.engine_on(ctx)),
+                "low" if model.startswith("claude-opus-5-5") else config.CLAUDE_TRIAL_EFFORT)
+            if model.startswith("claude-opus-5-5"):
+                tool_plan["prefix_ttl"] = worker_db.run(_editing_cache_ttl, ctx.project_id)
+        else:
+            # Resumed slices rebuild messages. References belonged to the previous history.
+            tool_plan["refs"] = {}
         tool_plan["volatile_system"] = getattr(ctx, "_cache_state_text", None)
     total_steps = _cont.get("steps", 0)
     t_start = _cont.get("t_start") or time.monotonic()
@@ -6472,6 +6494,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "honesty": honesty,
             "preview_repair_pushed": preview_repair_pushed,
             "quality_repair_versions": sorted(quality_repair_versions),
+            "claude_tool_plan": ({k: tool_plan[k] for k in ("stable", "catalog", "effort", "prefix_ttl")
+                                 if k in tool_plan} if tool_plan else None),
             "music_turn_choice": getattr(ctx, '_music_turn_choice', None),
             **_tighten_checkpoint(ctx),
             "plan_write_pushed": plan_write_pushed,
