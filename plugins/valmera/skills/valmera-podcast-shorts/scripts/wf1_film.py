@@ -964,7 +964,11 @@ def build(script, sup, style_id, direction=None):
     def window(f0, f1, kind, name, rec, key, source_ink=()):
         n = f1 - f0
         mono = is_mono(f0)
-        bed_of(f0, f1, key, kind, rec, mono)
+        evidence = bool(source_ink) or rec.get("provider") == "primary-document"
+        if evidence:
+            take_shot(f0, f1)
+        else:
+            bed_of(f0, f1, key, kind, rec, mono)
         x0, y0, x1, y1 = WINDOW_BOX
         aspect = float(rec.get("w") or W) / float(rec.get("h") or H)
         height = min(y1-y0, (x1-x0)*W/H/aspect)
@@ -974,9 +978,9 @@ def build(script, sup, style_id, direction=None):
         asp = (x1 - x0) * W / ((y1 - y0) * H)
         kw = dict(z=1, s=1.0, crop=[0.0, 0.0, 1.0, 1.0], radius=0.010, op=[min(1.0, 0.5 + 0.25 * q) for q in range(n)],
                   shadow=dict(a=0.55, blur=0.03, dx=0, dy=0.012))
-        if source_ink:
-            kw["source_ink"] = [[x0 + x * width, y0 + y * height, x0 + right * width, y0 + bottom * height]
-                                for x, y, right, bottom in source_ink]
+        if evidence:
+            # The source's labels and fine print belong together on the evidence card.
+            kw["source_ink"] = [[x0, y0, x1, y1]]
         if kind == "clip":
             kw["src"] = list(rec["src"])
         if mono:
