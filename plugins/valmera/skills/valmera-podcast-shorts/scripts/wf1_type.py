@@ -156,7 +156,7 @@ def measure_contrast(movie, doc, ffmpeg, ruler):
         while len(terms) > 1:
             terms = ["(" + "+".join(terms[i:i+8]) + ")" for i in range(0, len(terms), 8)]
         cmd = [ffmpeg, "-v", "error", "-i", movie, "-an", "-vf", f"select='{terms[0]}',scale=270:480",
-               "-vsync", "0", "-pix_fmt", "gray", "-f", "rawvideo", "-"]
+               "-fps_mode", "passthrough", "-pix_fmt", "gray", "-f", "rawvideo", "-"]
         pixels = subprocess.run(cmd, capture_output=True, check=True).stdout
         images = np.frombuffer(pixels, dtype=np.uint8).reshape(len(frames), 480, 270)
         for frame, image in zip(frames, images):
