@@ -32,6 +32,7 @@ object to R2 and nothing else.
 """
 import hashlib
 import re
+import time
 from datetime import datetime, timezone
 
 import psycopg2
@@ -204,19 +205,12 @@ def _presign_many(keys):
     return {k: _admin_presign(k) for k in keys}
 
 
-@admin_ops_bp.route("/admin/video/ops/journeys", methods=["GET"])
-@admin_required
-def ops_journeys():
-    """The Journeys view (owner, 31 Oct 2026): what each user wanted, what
-    the product did, whether we made it, and what they did next. Computed in
-    the background through the shared report cache (it builds every
-    session's context); the video and picture links are signed here, on
-    every request, so a cached copy never holds an expired link."""
+JOURNEYS_ENDPOINT = "/admin/video/ops/journeys"
+JOURNEYS_WARM_INTERVAL_S = 60
+
+
+def _journey_snapshot(window, fresh=False):
     from admin_metrics import cache as admin_cache
-    window = request.args.get("window") or "7d"
-    if window not in journeys.WINDOWS:
-        return jsonify({"error": "window must be one of "
-                                 + ", ".join(journeys.WINDOWS)}), 400
 
     def compute():
         conn = _connect()
@@ -224,14 +218,54 @@ def ops_journeys():
             return journeys.report(conn.cursor(), window=window)
         finally:
             conn.close()
-    got = admin_cache.shared_report("/admin/video/ops/journeys",
-                                    {"window": window}, compute,
-                                    fresh=request.args.get("fresh") == "1",
+    got = admin_cache.shared_report(JOURNEYS_ENDPOINT,
+                                    {"window": window, "version": 2}, compute,
+                                    fresh=fresh,
                                     logger=current_app.logger)
     if got.get("pending"):
-        return jsonify(got)
-    urls = _presign_many(journeys.storage_keys(got))
-    return jsonify(journeys.attach_urls(got, urls))
+        return got
+    return journeys.attach_urls(got, _presign_many(journeys.storage_keys(got)))
+
+
+def start_journey_warmer(app):
+    """Each web worker keeps two ready responses. shared_report's DB lock
+    elects one builder per window across workers and overlapping deploys."""
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    snapshots = app.extensions["journey_snapshots"] = {}
+
+    def warm():
+        with app.app_context():
+            for window in journeys.WINDOWS:
+                try:
+                    snapshot = _journey_snapshot(window)
+                    if not snapshot.get("pending") and not snapshot.get("refreshing"):
+                        snapshots[window] = (time.monotonic(), snapshot)
+                except Exception:
+                    app.logger.exception("could not warm %s journeys", window)
+
+    scheduler = BackgroundScheduler(daemon=True, timezone="UTC")
+    scheduler.add_job(warm, "interval", seconds=JOURNEYS_WARM_INTERVAL_S,
+                      next_run_time=datetime.now(timezone.utc), coalesce=True)
+    scheduler.start()
+
+
+@admin_ops_bp.route(JOURNEYS_ENDPOINT, methods=["GET"])
+@admin_required
+def ops_journeys():
+    window = request.args.get("window") or "7d"
+    if window not in journeys.WINDOWS:
+        return jsonify({"error": "window must be one of "
+                                 + ", ".join(journeys.WINDOWS)}), 400
+    fresh = request.args.get("fresh") == "1"
+    warm = current_app.extensions.get("journey_snapshots", {}).get(window)
+    if warm and not fresh:
+        prepared, snapshot = warm
+        elapsed = int(time.monotonic() - prepared)
+        # Missed ticks fall back to the shared cache well before URLs expire.
+        if elapsed < 2 * JOURNEYS_WARM_INTERVAL_S:
+            return jsonify(dict(snapshot, cache_age_s=snapshot["cache_age_s"] + elapsed))
+    return jsonify(_journey_snapshot(window, fresh))
 
 
 @admin_ops_bp.route("/admin/video/ops/tickets", methods=["GET"])

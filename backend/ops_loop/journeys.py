@@ -25,8 +25,11 @@ on every request (a cached report must never hold an expiring link).
 """
 import re
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 
 from admin_metrics import defs
+from credits import FREE_GRANT_CREDITS, PLAN_MONTHLY_LIMITS, trial_allowance
+from model_prices import usd_to_credits
 from ops_loop import EXCLUDED_USER_IDS, sessions as S, views
 
 WINDOWS = {"24h": timedelta(hours=24), "7d": timedelta(days=7)}
@@ -311,8 +314,10 @@ def _story_events(cur, uids, since):
 def _people(cur, uids):
     if not uids:
         return {}, set()
-    cur.execute("""SELECT id, email, device_type, device_browser
-                     FROM users WHERE id = ANY(%s)""", (list(uids),))
+    cur.execute("""SELECT u.id, u.email, u.device_type, u.device_browser,
+                          u.credits_monthly_limit, t.cap_usd AS trial_grant_usd
+                     FROM users u LEFT JOIN trial_budgets t ON t.user_id = u.id
+                    WHERE u.id = ANY(%s)""", (list(uids),))
     out = {r["id"]: dict(r) for r in cur.fetchall()}
     cur.execute("""SELECT DISTINCT user_id FROM projects
                     WHERE user_id = ANY(%s)
@@ -738,6 +743,34 @@ def customer_patterns(stories, window):
     return out
 
 
+def plan_use(jobs, user, stored_limit, trial_grant_usd=None):
+    plan = user.get("plan")
+    if not plan:
+        return None
+    limit = stored_limit
+    if not limit or limit <= 0:
+        if user.get("trial_status") == "trialing" or user.get("billing_status") == "trialing":
+            limit = trial_allowance(plan)
+        elif user.get("subscribed") or user.get("paying"):
+            limit = PLAN_MONTHLY_LIMITS.get(plan, 0)
+        else:
+            limit = usd_to_credits(trial_grant_usd) or FREE_GRANT_CREDITS
+    if not limit:
+        return None
+    total = Decimal(0)
+    for job in jobs:
+        try:
+            amount = Decimal(str(job.get("credits_charged") or 0))
+        except InvalidOperation:
+            continue
+        if amount.is_finite() and amount > 0:
+            total += amount
+    if total:
+        return {"credits": float(total), "plan_credits": float(limit),
+                "share": float(total / Decimal(str(limit)))}
+    return None
+
+
 def story(s, ctx, review, person, trial, extra):
     rv = _review_card(review)
     src = _pick_source(ctx, rv and rv.get("source_asset_id"))
@@ -775,6 +808,10 @@ def story(s, ctx, review, person, trial, extra):
                 "signed_up_at": _iso(joined),
                 "new_user": user.get("new_user"),
                 "device": device_label(person)},
+        # The compact context omits MCP tool jobs. Count all jobs in this window.
+        "plan_use": plan_use(s.rows["jobs"], user,
+                             (person or {}).get("credits_monthly_limit"),
+                             (person or {}).get("trial_grant_usd")),
         "uploaded": src,
         "asked": asks, "asked_earlier": earlier,
         "automatic_first_cut": first_cut,

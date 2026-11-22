@@ -248,7 +248,7 @@ def test_the_journeys_route_is_admin_only_and_signs_each_request(
               headers=_admin(app))
     assert r.status_code == 200
     assert seen == {"endpoint": "/admin/video/ops/journeys",
-                    "params": {"window": "24h"}, "fresh": True}
+                    "params": {"window": "24h", "version": 2}, "fresh": True}
     body = r.get_json()
     assert body["stories"][0]["uploaded"] == {"url":
                                               "https://s/proxies/1/a.mp4"}
@@ -320,3 +320,37 @@ def test_a_customers_habit_is_one_line_on_each_of_their_cards():
     assert pat[7] == ("This customer: 5 sessions in 7 days: 4 their AI app never "
                       "asked for a video; 1 delivered a video.")
     assert 8 not in pat                                   # fewer than 3 sessions
+
+def test_plan_use_counts_the_session_and_preserves_fractional_charges():
+    jobs = [{"credits_charged": n} for n in ("0.25", 119.75, None, "invalid", "NaN")]
+    paid = {"plan": "ai", "paying": True}
+    assert journeys.plan_use(jobs, paid, None) == {
+        "credits": 120, "plan_credits": 1000, "share": 0.12}
+    assert journeys.plan_use(jobs, paid, 2000)["share"] == 0.06
+    assert journeys.plan_use(jobs, dict(paid, trial_status="trialing"), 0)["share"] == 1.2
+    assert journeys.plan_use(jobs, {"plan": "free"}, 250)["share"] == 0.48
+    from model_prices import USD_PER_CREDIT
+    trial = journeys.plan_use(jobs, {"plan": "free"}, 0, 250 * USD_PER_CREDIT)
+    assert trial["plan_credits"] == 250 and trial["share"] == 0.48
+    assert journeys.plan_use(jobs, {"plan": "free"}, 0) is None
+    assert journeys.plan_use(jobs, {}, None) is None
+    assert journeys.plan_use([{"credits_charged": 0}], paid, 1000) is None
+
+
+def test_warmed_route_serves_complete_snapshot_and_honors_refresh(client, monkeypatch):
+    import time
+    app, c, mod = client
+    snapshot = {"stories": [{"key": "one"}], "cache_age_s": 10}
+    app.extensions["journey_snapshots"] = {"7d": (time.monotonic() - 5, snapshot)}
+    calls = []
+    def fetch(window, fresh):
+        calls.append((window, fresh))
+        return {"pending": True}
+    monkeypatch.setattr(mod, "_journey_snapshot", fetch)
+    body = c.get(mod.JOURNEYS_ENDPOINT, headers=_admin(app)).get_json()
+    assert body["stories"] == snapshot["stories"] and body["cache_age_s"] >= 15
+    assert not calls
+    c.get(mod.JOURNEYS_ENDPOINT + "?fresh=1", headers=_admin(app))
+    app.extensions["journey_snapshots"]["7d"] = (time.monotonic() - 150, snapshot)
+    c.get(mod.JOURNEYS_ENDPOINT, headers=_admin(app))
+    assert calls == [("7d", True), ("7d", False)]
