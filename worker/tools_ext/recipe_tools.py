@@ -55,11 +55,8 @@ def _used_here(edl):
 
 
 def _flash_ok(ctx):
-    try:
-        import flash_safety
-        return bool(flash_safety.opted_in(getattr(ctx, "user_message", "")))
-    except Exception:  # noqa: BLE001
-        return False
+    from score.asks import requested_devices
+    return "flash" in requested_devices(ctx)
 
 
 def _ops(items):

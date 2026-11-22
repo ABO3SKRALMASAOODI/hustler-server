@@ -3836,7 +3836,7 @@ def validate_edl(data, duration=None, *, render_fragment=False):
         tx.text = tx.text.strip()[:200]
         tx.start, tx.end = _r(tx.start), _r(tx.end)
         _check_span(f"texts[{i}]", tx.start, tx.end, prog_dur,
-                    min_len=TEXT_MIN_SPAN_S)
+                    min_len=0.01)  # A spoken word can occupy less than a reading hold.
         for fname in ("x", "y"):
             fv = getattr(tx, fname)
             if fv is not None:

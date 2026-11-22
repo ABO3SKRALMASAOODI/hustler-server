@@ -301,11 +301,6 @@ def slot_text(ws, max_words=4):
     return " ".join(core).strip(" ,;:")
 
 
-def _opted_in(ctx):
-    import flash_safety
-    return flash_safety.opted_in(getattr(ctx, "user_message", "") or "")
-
-
 def plan(ctx, edl, start, end, *, music_id=None, shots=None, modes=None,
          lead_f=1, on="auto", style="broll", seed=0, every=1, prefix=None,
          clock="auto", pool=None):
@@ -356,19 +351,7 @@ def plan(ctx, edl, start, end, *, music_id=None, shots=None, modes=None,
     # (best shots first), so a re-plan or a song swap is deterministic
     pool = unpack_pool(pack_pool(sorted(pool, key=lambda sh: -float(
         sh.get("score", 0.5)))))
-    opted = _opted_in(ctx)
     notes = []
-    if not opted and any(x["mode"] == "strobe" for x in sl):
-        for x in sl:
-            if x["mode"] == "strobe":
-                x["mode"] = "pulse"
-        notes.append("strobe sections cut as pulses: the user did not ask "
-                     "for strobing (flash safety)")
-        sl = montage.slots(rmap, s, e, fps=fps, lead_f=int(lead_f),
-                           modes={k: ("pulse" if v == "strobe" else v)
-                                  for k, v in dict(montage.SECTION_MODE,
-                                                   **(modes or {})).items()},
-                           on=on, every=max(1, int(every or 1)))
     rl = montage.roles(sl, style, rmap.get("sections"))
     words = _program_words(ctx, edl) if style != "broll" else []
     prefix = prefix or _prefix(edl)
@@ -593,23 +576,27 @@ def _swap_resolver(edl, intents, new_music_id):
         pool = unpack_pool(p.get("pool"))
         sl = montage.slots(prog, p.get("t0", 0.0), p.get("t1", 1e9),
                            fps=fps, lead_f=p.get("lead_f", 1),
-                           modes={k: ("pulse" if v == "strobe" else v)
-                                  for k, v in dict(montage.SECTION_MODE,
-                                                   **(p.get("modes") or {})
-                                                   ).items()},
+                           modes=p.get("modes"),
                            on=p.get("on", "kick"), every=p.get("every", 1))
-        asg = montage.assign(sl, pool, seed=p.get("seed", 0))
+        assignments = {id(slot): (shot, t) for slot, shot, t in montage.assign(
+            [x for x in sl if x["mode"] != "strobe"], pool, seed=p.get("seed", 0))}
         owned = set(iid for _l, iid in montage.owned(edl, prefix))
         for layer in ("overlays", "motion", "fx"):
             edl[layer] = [i for i in edl.get(layer) or []
                           if i.get("id") not in owned]
-        for k, (x, sh, src_t) in enumerate(asg, 1):
+        for k, x in enumerate(sl, 1):
+            if x["mode"] == "strobe":
+                edl.setdefault("fx", []).append(montage.strobe_item(x, f"{prefix}_{k}", fps, pool))
+                continue
+            if id(x) not in assignments:
+                continue
+            sh, src_t = assignments[id(x)]
             layer, val = montage.broll_value(x, sh, src_t, f"{prefix}_{k}")
             edl.setdefault(layer, []).append(val)
         edl.setdefault("fx", []).append(
             montage.intent(prefix, new_music_id, {k: v for k, v in p.items()
                                                   if k != "prefix"}))
-        notes.append(f"montage {prefix} re-cut on the new track: {len(asg)} "
+        notes.append(f"montage {prefix} re-cut on the new track: {len(sl)} "
                      "cuts, 1 frame before each hit")
     return edl, notes
 
