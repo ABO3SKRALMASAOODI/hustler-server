@@ -248,6 +248,19 @@ def test_a_shake_dies_inside_six_frames(film):
 
 # ------------------------------------------------------------------ ramp, freeze
 
+def test_a_ramp_uses_the_next_clip_when_the_first_overlap_is_a_sliver(film):
+    l1, work = film
+    if "v1" not in l1["assets"]:
+        pytest.skip("fixture requires ffmpeg")
+    clip = next(it for it in l1["items"] if it.get("pic") == "v1")
+    a, b = clip["f"]
+    l1["items"].remove(clip)
+    l1["items"].extend([dict(clip, f=[a,a+4], src=[0,4/30]),
+                        dict(clip, id="second", f=[a+4,b], src=[4/30,(b-a)/30])])
+    _, patch = lay(l1, work, {"dev":"ramp", "id":"rp", "f":[a,b], "low":.3})
+    assert patch["log"]["pieces"] > 1
+
+
 def test_the_speed_ramp_maps_monotonically_on_a_smooth_curve(film):
     l1, work = film
     if l1["assets"]["v1"].get("kind") != "video" if "v1" in l1["assets"] else True:

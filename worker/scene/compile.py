@@ -348,6 +348,9 @@ def compile(doc, work, budget_s=None, tier="mac", segment=True, strict=False, ti
         _bake_item(it, warn)
         if it["k"] in ("shot", "card", "join") and it.get("pic") not in (None, "plate") and it["pic"] not in d["assets"]:
             warn.append(f"asset missing for {it['id']}: {it['pic']}")
+    if l1.get("workflow_text_layout"):
+        from .text_layout import resolve
+        resolve(d)
     _need(d)
     pages, masks = _type(d, warn, tick)
     steps = []

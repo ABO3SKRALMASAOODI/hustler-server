@@ -819,10 +819,10 @@ def ramp(l1, work, ask, sense_=None, pool=None):
     W, H, fps = K.geometry(l1)
     args = K.args_of(ask)
     a, z = K.span(l1, args, default_s=1.2, least=6)
-    sh = next((s for s in K.shots(l1) if s["f"][0] < z and s["f"][1] > a and s.get("src") and not K.is_take(s.get("pic"))
-               and (l1.get("assets") or {}).get(s.get("pic"), {}).get("kind") == "video"), None)
+    sh = next((s for s in K.shots(l1) if min(z, s["f"][1]) - max(a, s["f"][0]) >= 6 and s.get("src")
+               and not K.is_take(s.get("pic")) and (l1.get("assets") or {}).get(s.get("pic"), {}).get("kind") == "video"), None)
     if sh is None:
-        return {"skip": "no clip under the moment to ramp"}
+        return {"skip": "no six-frame clip under the moment to ramp"}
     lo, hi = sh["f"]
     a, z = max(a, lo), min(z, hi)
     if z - a < 6:

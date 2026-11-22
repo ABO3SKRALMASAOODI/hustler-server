@@ -2238,6 +2238,50 @@ def _asked(asks):
     return False
 
 
+# Auditioned neutral masters from the workflow reference set. Each file is a single
+# gesture. The director reads the actual moment and selects its shape.
+STORY_SOUNDS = {"air": "mx_whoosh_1462", "rise": "mx_riser_1492", "sub": "mx_impact_2299",
+                "impact": "mx_hit_2148", "tick": "mx_click_2582"}
+
+
+def story_accents(cues, events, voice, fps):
+    from scipy.signal import resample_poly
+    from . import sound_signal
+    placed, sounds = [], []
+    for cue in cues:
+        sid = STORY_SOUNDS.get(cue.get("sound"))
+        if len(sounds) == 2 or sid not in library() or cue.get("role") not in ("hook", "figure", "turn", "payoff", "contrast"):
+            continue
+        partners = [e for e in events if abs(e["f"] - cue["f"]) <= max(2, round(.12 * fps))
+                    and (e["kind"] in ("display", "counter") if cue["sound"] == "tick"
+                         else e["kind"] in ("picture", "cut", "card", "display", "counter") or e.get("landing"))]
+        if not partners:
+            continue
+        partner = min(partners, key=lambda e: abs(e["f"] - cue["f"]))
+        f = partner["f"]
+        if any(abs(f - s["event_f"]) < 2 * fps for s in sounds):
+            continue
+        t = round(f * AR / fps)
+        region = np.asarray(voice[max(0, t-AR):t+AR]) if voice is not None else np.array([])
+        if not region.size:
+            continue
+        levels = sound_signal.k_level(sound_signal.power(resample_poly(region, SR // AR, 1)))
+        ref = float(np.percentile(levels[levels > -60], 70)) if np.any(levels > -60) else VOICE_LUFS
+        # Median 50 ms event peak in the reference reels is 10.7 dB below speech.
+        recording = _full_band(sid)
+        if not len(recording):
+            continue
+        power = 10 ** (sound_signal.k_level(sound_signal.power(recording)) / 10)
+        window = min(len(power), max(1, round(.05 * SR / sound_signal.HOP)))
+        peak = 10 * math.log10(np.convolve(power, np.ones(window)/window, mode="valid").max())
+        db = round(min(0., ref - 10.7 - peak), 1)
+        sounds.append(_item("accent" + str(len(sounds)), sid, f, fps, db, partner, cue["role"], "single"))
+        placed.append(dict(t=round(f / fps, 3), part=cue["role"], kind=partner["kind"], why=cue["why"],
+                           layers=[[sid, db, 1]], voice_db=round(ref, 1), peak_db=round(peak+db, 1)))
+    return sounds, dict(placed=placed, body=[], ticks=[], gestures=len(sounds), sounds=len(sounds),
+                        allow=2, allow_ticks=0, dropped=[], placement="director")
+
+
 def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=None, turn_s=None, bed=None, own_tiers=False, level_source=None):
     """The designed sound for a compiled film: (sounds, report). The Director's own sounds stay and count first.
     supply: the governor's {np10, bed} (taste.supply) when the compiler has it; else read from the L1 and the upload.
@@ -2320,6 +2364,8 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
            "tick_10s": (supply or {}).get("tick_10s"), "screen": screen, "beats": l1.get("sound_beats") if screen else None,
            "seed": film_seed(l1.get("sid"), l1.get("seed"), D, [e.get("src") for e in (l1.get("spine") or [])][:64],
                              sorted(str((a or {}).get("path")) for a in (l1.get("assets") or {}).values())[:64])}
+    if "story_cues" in l1:
+        return story_accents(l1["story_cues"], events, voice, fps)
     sounds, report = plan_sounds(events, ctx)
     if screen:                               # the ceilings: no 2-8 kHz spike, never louder than LEVEL_TOP over the voice
         sounds = SCR.restrain(sounds, voice, AR, shift, library(), report, fps=fps, sample=_full_band, srate=SR)

@@ -976,9 +976,12 @@ class Runtime:
         ss = spr["ss"]
         lod = max(math.log2(max(ss / max(s_now, 1e-3), 1.0)), 0.0)
         bsig = b_now * ss / max(s_now, 1e-3) if b_now > 0.25 else 0.0
-        if blend:
+        adaptive = bool(it.get("contrast_shadow"))
+        self.U(p, uAdaptive=int(adaptive))
+        if blend or adaptive:
             self.snapshot()
             self.bg.use(1)
+        if blend:
             self.ctx.disable(self.mgl.BLEND)
         fill = self.plan.fill_of.get(it["id"])
         st = (it.get("fill") or {}).get("plate") if isinstance(it.get("fill"), dict) else None

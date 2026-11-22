@@ -665,7 +665,7 @@ def apply(l1, work, asks=None, pool=None):
                 seats.append(box)
             elif dev not in WORD_DEVICES:           # the type family's own words: a later word device seats itself off them
                 seats += type_boxes(patch, nxt)
-            echoes = drop_echoes(nxt, texts, box[4], box[5], made)
+            echoes = set() if cur.get("workflow_text_layout") else drop_echoes(nxt, texts, box[4], box[5], made)
             if echoes:
                 nxt = dict(nxt, items=[i for i in nxt["items"] if i["id"] not in echoes])
         cur = nxt
