@@ -738,14 +738,13 @@ def remove_subject_effect(ctx, ids):
     if not ids:
         return "REJECTED: name the ids to remove (get_edl lists them)."
     edl = ctx.latest_edl()["json"]
-    have = {str(i.get("id")): i.get("type") for i in edl.get("fx") or []
-            if isinstance(i, dict)}
-    bad = [i for i in ids if have.get(i) not in ("subject", "background")]
-    if bad:
-        return ("REJECTED: not subject effects or backgrounds in this edit: "
-                + ", ".join(bad) + ". get_edl lists the fx ids.")
+    from tools_ext._write import removal_targets
+    current = [i["id"] for i in edl.get("fx") or [] if i.get("type") in ("subject", "background")]
+    ids, note = removal_targets(ids, current, "subject effect")
+    if not ids:
+        return note
     return _write.commit(ctx, [_write.remove_fx(i) for i in ids],
-                         "removed " + ", ".join(ids))
+                         "removed " + ", ".join(ids)) + (" " + note if note else "")
 
 
 # ------------------------------------------------------------------ specs

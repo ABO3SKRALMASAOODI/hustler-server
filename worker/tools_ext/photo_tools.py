@@ -224,16 +224,14 @@ def remove_filmstrip(ctx, ids="all"):
         wanted = mine
     else:
         wanted = [str(i) for i in ([ids] if isinstance(ids, str) else ids)]
-    missing = [i for i in wanted if i not in mine]
-    if missing:
-        return _r(f"{', '.join(missing)} is not a filmstrip here "
-                  f"(filmstrips: {', '.join(mine) or 'none'}).")
+    from tools_ext._write import removal_targets
+    current = mine
+    wanted, note = removal_targets(wanted, current, "filmstrip")
     if not wanted:
-        return ("NO CHANGE: this edit has no filmstrip. Do NOT tell the user "
-                "you changed anything.")
+        return note
     import tools_ext._write as w
     return w.commit(ctx, [w.remove_fx(i) for i in wanted],
-                    f"remove_filmstrip: {', '.join(wanted)}")
+                    f"remove_filmstrip: {', '.join(wanted)}") + (" " + note if note else "")
 
 
 def _frame_aspect(edl, pm):

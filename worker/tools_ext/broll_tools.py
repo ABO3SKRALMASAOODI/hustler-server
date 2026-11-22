@@ -863,14 +863,14 @@ def remove_broll(ctx, ids):
         return _rejected("ids is a list of cutaway ids")
     have = {str(i.get("id")) for i in edl.get("fx") or []
             if isinstance(i, dict) and i.get("type") == "broll"}
-    missing = [i for i in ids if str(i) not in have]
-    if missing:
-        return _rejected("no cutaway with id " + ", ".join(map(str, missing))
-                         + (f" (cutaways: {', '.join(sorted(have))})"
-                            if have else " (this edit has none)"))
+    from tools_ext._write import removal_targets
+    current = have
+    ids, note = removal_targets(ids, current, "cutaway")
+    if not ids:
+        return note
     from tools_ext import _write
     ops = [{"action": "remove", "layer": "fx", "id": str(i)} for i in ids]
-    return _write.commit(ctx, ops, f"removed cutaway(s) {', '.join(ids)}")
+    return _write.commit(ctx, ops, f"removed cutaway(s) {', '.join(ids)}") + (" " + note if note else "")
 
 
 _MOMENT = {"type": "object", "properties": {
