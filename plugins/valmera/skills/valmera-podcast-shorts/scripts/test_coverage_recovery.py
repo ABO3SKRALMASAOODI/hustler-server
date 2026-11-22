@@ -110,7 +110,7 @@ def test_the_plan_starts_from_the_scripts_briefs_and_gives_each_window_a_ladder(
     out=coverage.plan(words,'Two-day plan',str(tmp_path),llm,named=named)
     system,content=asked[0]
     assert content['named']==[dict(name=n['name'],must_show=n['must_show'],**{'is':n['is']}) for n in named]
-    assert 'current interview take' in system and "speaker's OWN past" in system and 'NEVER contain the original speaker' not in system
+    assert "original synchronous interview" in system and "event" in system
     ladder=out['windows'][0]['depictions']
     assert [r['name'] for r in ladder]==['Scale AI','AI data labelling','a'] and ladder[0]['video_searches']==['Scale AI office tour']
     assert out['windows'][0]['rung']==0 and out['windows'][1]['depictions']==[] and out['named']==content['named']
@@ -206,8 +206,8 @@ def test_a_source_still_behind_the_wall_is_refused_not_gone_through_the_real_lad
     assert len(refused[0]['error'])<=260 and 'Sign in to confirm' in refused[0]['error']
 
 
-def test_a_wall_that_holds_on_the_real_ladder_stops_the_short_instead_of_lifting(tmp_path,monkeypatch,worker_path):
-    import wf1_short as wf,wf1_film
+def test_exhausted_source_routes_leave_the_synchronous_camera_available(tmp_path,monkeypatch,worker_path):
+    import wf1_short as wf
     _walled_ladder(monkeypatch)
     rows=[dict(url=f'https://www.youtube.com/watch?v=video{n:05d}',title=f'Launch {n}',channel='Bloomberg Tech',where='youtube',
                duration=120,subjects=['Lab'],error='default: Sign in to confirm you are not a bot') for n in range(3)]
@@ -217,10 +217,9 @@ def test_a_wall_that_holds_on_the_real_ladder_stops_the_short_instead_of_lifting
     monkeypatch.setattr(primary.time,'sleep',lambda s:None)
     monkeypatch.setattr(wf.chain,'footage',lambda *a,**k:pytest.fail('nothing opened: nothing to cut'))
     ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
-    with pytest.raises(RuntimeError,match=wf1_film.WALL):
-        wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,))
+    wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,))
     stored=json.load(open(tmp_path/'pack.json'))['pack']
-    assert stored['platform_walled'] is True and stored['wall']['sources']==3 and len(stored['wall']['refused'])==3
+    assert stored['coverage_exhausted'] and not stored['platform_walled'] and stored['wall']['sources']==3 and len(stored['wall']['refused'])==3
 
 
 def test_an_operator_transport_that_fails_falls_through_to_every_local_route(tmp_path,monkeypatch,worker_path):
@@ -513,7 +512,7 @@ def test_when_found_pictures_run_out_the_gap_fill_cuts_fresh_intervals_of_kept_o
     (tmp_path/'sources'/'manifest.json').write_text(json.dumps([dict(url=url,path=str(original))]))
     shown=dict(path=str(tmp_path/'clip.mp4'),seconds=1.6,subject='Servers',source=dict(url=url),time_range=[12.0,13.6],w=320,h=180)
     FPS=wf1_film.FPS
-    cov=dict(windows=[dict(name='Servers',must_show='Meta data-centre servers',t0=1.0,t1=3.0)])
+    cov=dict(windows=[dict(name='Servers',must_show='Meta data-centre servers',t0=1.0,t1=15.0)])
     ins=[[wf1_film.LEAD_F+FPS,wf1_film.LEAD_F+3*FPS,'clip','Servers',dict(shown,window=0,src=[.1,1.5])]]
     first,last=wf1_film.LEAD_F+FPS,ins[0][1]+12*FPS
     checked=[]
@@ -528,3 +527,10 @@ def test_when_found_pictures_run_out_the_gap_fill_cuts_fresh_intervals_of_kept_o
     assert all(min(b,d)-max(a,c)<=0 for i,(a,b) in enumerate(ranges) for (c,d) in ranges[i+1:])   # no interval shown twice
     edges=[first]+[f for x in out for f in (x[0],x[1])]+[last]
     assert max(b-a for a,b in zip(edges[0::2],edges[1::2]))<=wf1_film.FILL_GAP_S*FPS
+
+
+def test_same_subject_in_different_roles_keeps_its_own_words():
+    rows = [dict(first=i, last=i, t0=i, t1=i+1, say=words, name="Investors", must_show=need)
+            for i, (words, need) in enumerate([("raised money", "Scale's completed round"),
+                                                ("passed on us", "documented rejection of Scale")])]
+    assert coverage.join_windows(rows) == rows

@@ -41,6 +41,8 @@ resolved_referents, when present, are the people, companies and events the scrip
 the whole moment, each with the event-level picture it needs: start from them, find their primary
 sources and filmed records (including the speaker's own filmed past when he tells of it: a livestream,
 a keynote, an event he took part in), and say so when evidence contradicts one.
+Use other appearances only when the spoken line names that very occasion. An interview about a
+founder's recollection is research, never an alternative shot to dub with this interview's voice.
 Resolve an unnamed company, project or research system only when primary evidence links it to the
 speaker's actual story. Original interviews, the named organization's publication, original papers,
 institutional records and contemporaneous product announcements are appropriate evidence.

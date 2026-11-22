@@ -303,7 +303,7 @@ def test_a_long_stretch_of_bare_take_in_the_final_build_takes_checked_spare_pict
     turned down gives its place to the next spare."""
     FPS = wf1_film.FPS
     clip = lambda n, url=None, tr=None: dict(path=f"/c/{n}.mp4", seconds=2.0, subject="Servers", **({"source": dict(url=url), "time_range": tr} if url else {}))  # noqa: E731
-    coverage = dict(windows=[dict(name="Servers", must_show="Meta's data-centre servers", t0=1.0, t1=3.0),
+    coverage = dict(windows=[dict(name="Servers", must_show="Meta's data-centre servers", t0=1.0, t1=11.0),
                              dict(name="Servers", must_show="Meta's data-centre servers", t0=30.0, t1=32.0)])
     shown = clip("shown", "https://y/v", [139.82, 141.42])
     ins = [[wf1_film.LEAD_F + FPS, wf1_film.LEAD_F + 3 * FPS, "clip", "Servers", dict(shown, window=0, src=[0.3, 1.7])]]
@@ -323,8 +323,19 @@ def test_a_long_stretch_of_bare_take_in_the_final_build_takes_checked_spare_pict
     edges = [first] + [f for x in out for f in (x[0], x[1])] + [last]
     assert max(b - a for a, b in zip(edges[0::2], edges[1::2])) <= wf1_film.FILL_GAP_S * FPS          # no bare stretch over 3 s
     added = [x for x in out if x[4].get("gap_fill")]
-    assert all(x[4]["illustration"] == "Meta's data-centre servers" and x[4]["window"] is None for x in added)
+    assert all(x[4]["illustration"] == "Meta's data-centre servers" and x[4]["window"] == 0 for x in added)
     assert rep["rejected"] == 1 and rep["accepted"] == len(added) == 3 and len(rep["spend"]) == 2
+
+
+def test_fundraising_gap_with_only_other_investors_stays_on_the_take():
+    # A spare source can illustrate its own show. A nearby fundraising clause
+    # cannot borrow that show's panel simply because the interview holds there.
+    windows = [dict(name="Bundil", say="the Bundil pitch", must_show="Bundil on Shark Tank", t0=1, t1=3)]
+    spare = dict(path="shark-tank.mp4", seconds=2, subject="Bundil")
+    shots, report = wf1_film.fill_holes([], dict(windows=windows), {0: [spare]}, {},
+                                        dict(segments=[]), [], 3*30+3, 20*30, [],
+                                        lambda rows: pytest.fail("unrelated excerpt proposed"))
+    assert shots == [] and report["proposed"] == 0
 
 
 def test_footage_routes_reach_the_footage_engine_from_the_operator_config(tmp_path, monkeypatch):

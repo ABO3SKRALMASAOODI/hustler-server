@@ -19,8 +19,7 @@ import subprocess
 import sys
 
 MODEL = "gpt-6-sol"
-CONTRACT = 12       # 20 Nov: the check chooses and repairs: the full source frame plus the phone slice, the whole clause,
-                    # identity from provenance, a 'no' only for a contradiction; composed review judges composing only
+CONTRACT = 14       # The excerpt and its source must support the role attributed in this clause.
 PHONE = 9 / 16
 # One call carries as many placements as fit these bounds. On the codex-proxy a call's cost is its harness prefix
 # (about 13k input tokens); each phone frame adds about 0.6k tokens and no latency (calls.jsonl, 15-16 Nov: 1 image
@@ -374,26 +373,18 @@ SYSTEM = (
     "description, what the footage engine saw on it), never a filename. For a wide source the frames are the full "
     "source frame, lower thirds, wordmarks and signs included, and the last image is the phone-shaped slice the film "
     "shows full screen. "
-    "Identity: establish who and what is on screen from all of the evidence together: a lower third, caption, sign or "
-    "wordmark anywhere in the full frame, the source's title, channel and description, and what the speaker says. A "
-    "source titled for a person, company or event, showing a scene that fits it, establishes that person, company or "
-    "event; on-screen attribution is not required, and a name readable only outside the phone slice still counts. "
-    "Never identify or compare faces. "
-    "ok is false ONLY for a contradiction a viewer would be misled by: the frames, their labels or their provenance "
-    "show a different named person, company, place, product, era or event than the words name, or the picture would "
-    "state a false fact. Otherwise ok is true: the very subject, a faithful illustration of what the clause tells, a "
-    "genuine example of an unnamed category, period footage under a recollection, a company's premises, people or "
-    "products under the company. Never set ok false for missing attribution, for connective or filler words in the "
-    "clause, for a picture that illustrates rather than records the clause, for a crop (the film reframes it), for "
-    "text on the picture (reported below) or because a better picture may exist: rank instead. "
-    "An entry with association is a picture of what the words MEAN, chosen on purpose for an abstract claim, verdict "
-    "or feeling (association says what it shows): it never claims to record the event, the place or a person, so it "
-    "is never a contradiction for not showing the thing named; it is ok unless it shows something the words deny or "
-    "presents a stranger as a named person, and its fit is how strongly it carries the meaning (10 at once, 4 "
-    "loosely). "
-    "fit ranks the candidates of a clause, an integer 0-10: 10 the very person, thing or event the words name, doing "
-    "what they say; 7 the named subject itself; 4 a truthful illustration of the clause's topic; 1 only associated "
-    "with it. A contradiction is ok false whatever its fit. "
+    "For each placement read the whole spoken clause and its context. "
+    "Ask which person, company, object, place or event these words refer to, including the role implied by "
+    "their action. Choose an external picture only when the visible frames and their source support that "
+    "identification. A source title can describe an entire compilation; it does not identify each person in it. "
+    "Use visible contextual evidence, primary records, signs and attributions; never compare faces. A lower "
+    "third naming a person cannot establish that they funded, rejected or employed the speaker. An unidentified "
+    "participant stays unidentified. Never use another interview of this speaker under this interview's voice "
+    "unless the line is specifically about the pictured occasion. Reaction memes, other shows and generated "
+    "stock cannot document real people or events. An authentic product, headquarters or record of a named "
+    "company may illustrate that company when it implies no unsupported action. If every candidate misses "
+    "the referent, return ok=false for each and describe what actual picture to search for; the editor can "
+    "use the synchronized original shot. Rank matching candidates by fit from 1 to 10. "
     "subject_x: where across the full source frame (0 left, 1 right) the subject the words need stands, so the phone "
     "slice can be centred on it; null when you cannot tell. "
     "Also inspect change BETWEEN the ordered frames: motion_ok is true only for visible action in "
@@ -408,7 +399,7 @@ SYSTEM = (
     "Text on the picture: a lower third, name super, caption, chart, headline or graphic that names or describes "
     "this clause's subject or facts is attribution: give it as attribution_text (at most eight words); it is the "
     "picture's evidence, never foreign. name_super: when the picture shows a person the clause is about and the "
-    "evidence names them (a lower third anywhere in the full frame, or the source's title, channel or description), "
+    "evidence names them (an identifying lower third, or a source description that specifically identifies the person in this shot), "
     "that person's name as a viewer's name super would give it, at most five words, their role after a comma when "
     "the evidence gives one; empty when no named person is shown. Never name anyone from a face. foreign_text is true only for other text another editor or channel laid over "
     "the picture that does not belong to this clause: subtitles of other speech, promo slogans, a channel's own title "
@@ -508,6 +499,7 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
     except (OSError, ValueError):
         cache = {}
     pending, rows, spend = [], [], []
+    reading = {}
     for i, row in enumerate(ins):
         a, b, kind, name, rec = row
         b = max(b, int(rec.get("audit_until", b)))
@@ -540,7 +532,8 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
             ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         if key in cache:
             entry.update(cache[key])
-        else:
+        elif key not in reading:
+            reading[key] = entry
             pending.append((entry, row, images))
         rows.append(entry)
     system = SYSTEM
@@ -591,12 +584,14 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         if not unanswered:
             break
     for entry, _, _ in unanswered:
-        # Twice without an answer (a provider fault, not a verdict): the picture keeps the place the supply's own check
-        # gave it (the footage engine's look passed its frames for this subject), recorded as unchecked and never
-        # cached, so the next pass asks again. A model's silence never empties a slot.
-        entry.update(ok=True, fit=3, subject_x=None, fault="none", model=MODEL, unchecked=True,
-                     reason="no model answer twice: kept on the supply's own check", motion_ok=False, motion_reason="",
+        # Keep the existing composed placement on a provider outage. New candidates yield to the take.
+        entry.update(ok=review != "placement", fit=0, subject_x=None, fault="none", model=MODEL, unchecked=True,
+                     reason="reading unavailable; original camera carries an unmatched placement", motion_ok=False, motion_reason="",
                      attribution_text="", name_super="", foreign_text=False, text_box=None, text_reason="")
+    for entry in rows:
+        original = reading.get(entry["key"])
+        if original is not None and original is not entry:
+            entry.update({k: original[k] for k in (*KEPT, "unchecked") if k in original})
     # Another editor's text: a source clip is cut down clear of it and checked again as the picture it now is. Text
     # no band can shed stays on the picture, recorded (text_kept); it never costs the picture its place.
     cleared, again = [], list(ins)
@@ -618,10 +613,9 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
     for row, decision in zip(ins, rows):
         rec = row[4]
         rec['verified_motion'] = row[2] == 'clip' and decision.get('motion_ok') is True
-        if decision.get("attribution_text"):
-            rec["attribution"] = decision["attribution_text"]
-        if decision.get("name_super") and review == "placement":
-            rec["name_super"] = decision["name_super"]      # drawn under the picture (wf1_film labels): identity reaches the viewer
+        if review == "placement":
+            rec["attribution"] = decision.get("attribution_text") or ""
+            rec["name_super"] = decision.get("name_super") or ""      # drawn under the picture (wf1_film labels): identity reaches the viewer
         if decision.get("fit") is not None and review == "placement":
             rec["fit"] = decision["fit"]
         if decision.get("foley") and review == "placement" and decision.get("ok") is True:

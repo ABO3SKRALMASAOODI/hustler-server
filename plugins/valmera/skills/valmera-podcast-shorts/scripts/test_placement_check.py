@@ -274,7 +274,7 @@ def test_the_verdict_belongs_to_the_picture_and_its_clause_not_its_slice_or_the_
     assert seen[0] == seen[1] == [0.36, 1.2, 2.04]
 
 
-def test_a_silent_model_is_asked_again_and_never_empties_the_slot(tmp_path, monkeypatch):
+def test_an_unread_candidate_returns_the_slot_to_the_interview(tmp_path, monkeypatch):
     import json
     import placement_check as pc
     monkeypatch.setattr(pc, "evidence", lambda row, ff: [b"pixels"])
@@ -286,7 +286,7 @@ def test_a_silent_model_is_asked_again_and_never_empties_the_slot(tmp_path, monk
     rec = dict(path="/clips/a.mp4", seconds=1.5, src=[0, 1], clause="Nvidia builds", source=dict(url="u", title="Nvidia"))
     kept, report = pc.check([[0, 30, "clip", "Nvidia", rec]], dict(segments=[dict(say="Nvidia builds")]), _clock(), str(tmp_path),
                             "ff", call=call)
-    assert len(calls) == 2 and len(kept) == 1 and report["unchecked"] == 1
+    assert len(calls) == 2 and not kept and report["unchecked"] == 1
     assert json.load(open(tmp_path / "placement_checks.json")) == {}          # silence is never kept as a verdict
     later = []
     pc.check([[0, 30, "clip", "Nvidia", rec]], dict(segments=[dict(say="Nvidia builds")]), _clock(), str(tmp_path), "ff",
@@ -428,3 +428,17 @@ def test_a_pictures_object_reaches_its_asset():
     P.image("p00", dict(path="/x/letter.jpg", w=800, h=600, foley="paper"))
     P.video("v01", dict(path="/x/clip.mp4", w=1920, h=1080, fps=30, seconds=3.0))
     assert P.assets["p00"]["foley"] == "paper" and "foley" not in P.assets["v01"]
+
+
+def test_duplicate_excerpt_in_one_batch_shares_one_source_reading(tmp_path, monkeypatch):
+    import placement_check as pc
+    monkeypatch.setattr(pc, "evidence", lambda *args: [b"same excerpt"])
+    calls = []
+    clip = dict(path="/clips/portrait.mp4", seconds=1.5, clause="Alexandr Wang speaks",
+                clause_t=[0, 1], source=dict(url="publisher/launch", title="Launch recording"))
+    rows = [[0, 30, "clip", "Alexandr Wang", dict(clip)] for _ in range(2)]
+    kept, report = pc.check(rows, dict(segments=[dict(say=clip["clause"])]), _clock(), str(tmp_path),
+                            "ff", call=_approving(calls, name_super="Alexandr Wang"))
+    assert [len(c["rows"]) for c in calls] == [1]
+    assert [r[4]["name_super"] for r in kept] == ["Alexandr Wang"] * 2
+    assert len(report["placements"]) == 2

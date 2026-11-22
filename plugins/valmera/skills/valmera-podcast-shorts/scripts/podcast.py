@@ -807,14 +807,16 @@ def _sources_md(pod_line, rows):
         for p in (ch.get("podcast") or {}).get("sources") or []:          # every picture in the film, in the order it is shown
             at = f"shown at {p['f'][0] / 30:.1f}-{p['f'][1] / 30:.1f} s" if p.get("f") else ""
             tr = tuple(p.get("time_range") or ())
+            evidence = p.get("source_evidence") or {}
+            subject = p.get("name_super") or p.get("attribution") or evidence.get("title") or p.get("name")
             if p.get("kind") == "clip":
                 c = by_clip.get((p.get("source"), tr)) or by_page.get(p.get("source")) or {}
                 seen.add((p.get("source"), tr))
                 span = f"{tr[0]:.1f}-{tr[1]:.1f} s of the source" if len(tr) == 2 else ""
-                out.append(f"- Footage ({p.get('name')}): {c.get('title')} | {c.get('credit')} | {p.get('source')} | {span} | {at} | not licensed")
+                out.append(f"- Footage ({subject}): {evidence.get('title') or c.get('title')} | {evidence.get('channel') or c.get('credit')} | {p.get('source')} | {span} | {at} | not licensed")
             else:
                 c = by_page.get(p.get("source")) or {}
-                out.append(f"- Photograph ({p.get('name')}): {c.get('title') or c.get('name')} | {c.get('credit')} | {c.get('licence')} | {p.get('source')} | {at}")
+                out.append(f"- Photograph ({subject}): {c.get('title') or c.get('name')} | {c.get('credit')} | {c.get('licence')} | {p.get('source')} | {at}")
         spare = [c for k, c in by_clip.items() if k not in seen]
         if spare:
             out.append(f"- Found and not used: {len(spare)} more clips from " + ", ".join(sorted({str(c.get('page')) for c in spare})))

@@ -43,12 +43,12 @@ os.environ.setdefault("VALMERA_WORKER", brand.worker_dir())
 os.environ.setdefault("VALMERA_SCENE_WORKER", os.environ["VALMERA_WORKER"])
 os.environ.setdefault("WRITER_PROVIDER", "openai")
 
-from director import CONTRACT as DIRECTION_CONTRACT  # noqa: E402
 import chain  # noqa: E402
 import film as F  # noqa: E402
 import pictures as PX  # noqa: E402
 import shell  # noqa: E402
 import wf1_film  # noqa: E402
+DIRECTION_CONTRACT = wf1_film._director().CONTRACT
 import wf3  # noqa: E402
 
 FOOTAGE_PIXELS = "native"  # clips keep their source pixels for full-bleed framing (16 Nov); a fitted 1080x608 shelf is not reused
@@ -169,7 +169,7 @@ def supply(ctx, script):
             # A wall left this short waiting: the exact sources YouTube refused are fetched again (nothing is searched
             # or asked anew) and cut; a walled pack is never final.
             return recover_wall(ctx, script, prior['pack'], prior['record'], waits=WALL_RESUME_S)
-        if current and any(row.get('clips') for row in prior['pack'].get('footage',[])):
+        if current:
             return prior['record']
         os.replace(pk,os.path.join(sup_dir,'previous-pack.json'))
     rec0 = chain.pack(ctx, script)                              # source.mp4 (the window), hearing.json, index.json
@@ -208,7 +208,8 @@ def supply(ctx, script):
                                  off_camera=off_camera(cuts, words))
     coverage['context']=who
     import wf1_context
-    primary_direction=wf1_context.direct(coverage,os.path.join(sup_dir,'referent-research'),_llm())
+    primary_direction = (wf1_context.direct(coverage, os.path.join(sup_dir, 'referent-research'), _llm())
+                         if coverage['windows'] else dict(references={}, spend=[]))
     windows = coverage['windows']
     # Inventory records what was said; windows specify what can truthfully be photographed.
     # Passing the inventory back as search subjects resurrects unnamed people and isolated dates.
@@ -234,7 +235,7 @@ def supply(ctx, script):
     foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]), 2) for s in windows],
                          W=fw, H=fh, preserve_source=True, native_pixels=True, look_itself=True, shot_s=1.15, line_max=20, per=5,
                          strict_lines=True, motion_first=True, scout_motion=True, alloc="round", reassign_lost=True,
-                         verify=False, whole_first=True, keep_sources=True, hear_s=0, out_name=footage_name)
+                         verify=False, whole_first=True, keep_sources=True, hear_s=0, out_name=footage_name) if windows else None
     if foot:
         n_yt, n_bad = refused(foot)
         ctx.log(f"footage sources: {n_yt} on YouTube, {n_bad} refused or archive-only; {foot['counts'].get('clips')} clips on "
@@ -302,12 +303,7 @@ def supply(ctx, script):
     return rec
 
 
-# The wall (19 Nov: from 17:43 YouTube refused 5 of 5, 16 of 16, 12 of 13, 14 of 16 of this Mac's footage sources) is a
-# temporary outage of one input, recovered like the model route's: the exact refused sources are fetched again after
-# these waits (seconds) in the short's own process (the footage engine has just tried every rung for them); still
-# refused, the short stops with wf1_film.WALL, keeps all its work, and podcast.py waits longer and continues it, when
-# they are tried again at once (WALL_RESUME_S: the run's wait was the backoff). A walled short is never built from no
-# footage.
+# Retry exact refused URLs before completing the short on the interview and available evidence.
 WALL_BACKOFF_S = (120, 300)
 WALL_RESUME_S = (0,)
 
@@ -421,10 +417,7 @@ def reopened_footage(ctx, script, pack, opened):
 
 
 def recover_wall(ctx, script, pack, rec=None, waits=None, sleep=None):
-    """Recover a short from YouTube's wall: fetch the exact sources it refused again (wf1_primary_sources.reopen: the
-    operator's transport, every player client on every configured proxy route, the Wayback copy), after each of WALL_BACKOFF_S
-    when the wall is first met (at once on a resume, WALL_RESUME_S), and cut what opens. When the wall still holds most of them the short stops with wf1_film.WALL:
-    its work is kept and podcast.py continues it when the wall lifts. Returns the supply record."""
+    """Retry the refused originals, retain their history, and continue on the take after exhaustion."""
     import wf1_primary_sources
     wall = wall_state(ctx, pack)
     keep = os.path.join(ctx.supply, 'sources')
@@ -454,9 +447,12 @@ def recover_wall(ctx, script, pack, rec=None, waits=None, sleep=None):
         pack.setdefault('gone_sources', []).extend(gone)
     save_pack(ctx, pack)
     if pack['platform_walled']:
-        raise RuntimeError(f"{wf1_film.WALL}: {len(wall['refused'])} of {wall['sources']} footage sources still refused after "
-                           f"trying each again on every route; this short keeps its work and continues when the wall lifts")
-    ctx.log(f"the wall lifted for this short: {added} clips cut from the sources it had refused")
+        pack['coverage_exhausted'] = 'Source routes exhausted; use available verified pictures and the original camera'
+        pack['platform_walled'] = False
+        save_pack(ctx, pack)
+        ctx.log(pack['coverage_exhausted'])
+    else:
+        ctx.log(f"the wall lifted for this short: {added} clips cut from the sources it had refused")
     path = os.path.join(ctx.supply, 'pack.json')
     stored = json.load(open(path))
     rec = dict(rec or stored.get('record') or {})
@@ -821,7 +817,7 @@ def refill(ctx, script, pack, shortage):
         if changed:
             ctx.log('director extended related story context; recheck existing pictures on the actual words')
             return
-    missing_documents=(not motion_ready and pack.get('coverage_repairs',0)>=1
+    missing_documents=(not motion_ready
                        and shortage.get('missing_windows')
                        and not pack.get('missing_document_attempted'))
     if motion_ready or missing_documents:
@@ -1048,8 +1044,7 @@ def score(ctx, script):
     pack = wf3.load_pack(ctx)
     if ((pack.get('coverage') or {}).get('contract') != wf1_coverage.CONTRACT
             or pack.get('alignment_contract')!=wf1_alignment.CONTRACT
-            or pack.get('platform_walled')                       # a walled pack fetches its refused sources again
-            or not any(row.get('clips') for row in pack.get('footage',[]))):
+            or pack.get('platform_walled')):
         supply(ctx,script)
         pack = wf3.load_pack(ctx)
     pack["work"] = ctx.supply
@@ -1079,7 +1074,7 @@ def score(ctx, script):
     sc = dict(title=script.get("title"), hook_line=script.get("hook_line"), close_line=script.get("close_line"),
               segments=[dict(say=ln["text"], pictures=[n for n in ln.get("subjects") or []]) for ln in pack["lines"]])
     for attempt in range(RECOVERY_PASSES + 3 + LADDER_RUNGS):
-        knobs["coverage_final"] = coverage_final(pack)
+        knobs["coverage_final"] = coverage_final(pack) or bool(pack.get("coverage_recoveries"))
         try:
             l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
             break
@@ -1105,14 +1100,14 @@ def score(ctx, script):
     else:
         knobs["coverage_final"] = True
         l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
-    # every picture the supply holds rides the scene as the palette's pool: the devices the director asks for (a burst,
-    # a grid, a collage, panels) draw from all of it, never only the pictures the windows placed; set before the
-    # devices are heard, so the sound hears the same landings the render draws
-    # (a clip no shot or card of the film shows has another editor's seated text cut away first, by signal: the builder
-    # registers every supply clip as an asset, so "placed" is what the items show)
-    l1["pool"] = wf1_coverage.device_pool(pack, beats.get("placement_check"), work=ctx.supply, ffmpeg=pack.get("ffmpeg") or "ffmpeg",
-                                          placed={(l1.get("assets") or {}).get(it.get("pic"), {}).get("path") for it in l1["items"]
-                                                  if it.get("k") in ("shot", "card") and it.get("pic")} - {None})
+    shown = beats.get("pictures") or []
+    l1["pool"] = wf1_coverage.device_pool(pack, beats.get("placement_check"), work=ctx.supply,
+                                          ffmpeg=pack.get("ffmpeg") or "ffmpeg",
+                                          matched={p.get("origin") or p["path"] for p in shown})
+    l1["documentary_cuts"] = [{k: p.get(k) for k in
+                               ("f", "pic", "path", "source_slice", "time_range", "source_evidence", "name_super")}
+                              for p in shown]
+    l1["documentary_lead_f"] = wf1_film.LEAD_F
     if l1.get("devices") or l1.get("alien"):
         # the sound design hears the Director's devices: laid now on the scene the render draws (one base picture on
         # every frame first), their landings planned again with the take's own turn and words, before the taste check
@@ -1492,7 +1487,9 @@ def check(ctx, rd, sc):
         sources=[dict(f=p.get("f"), visible_f=p.get("visible_f"), kind=p.get("kind"), name=p.get("name"), source=p.get("source"), time_range=p.get("time_range"),
                       mode=p.get("mode"), window=p.get("window"), w=p.get("w"), h=p.get("h"), rung=p.get("rung"), how=p.get("how"),
                       source_size=p.get("source_size"), upscaled_from=p.get("upscaled_from"), reframed=p.get("reframed"),
-                      origin=p.get("origin"), name_super=p.get("name_super")) for p in pics])
+                      origin=p.get("origin"), name_super=p.get("name_super"), attribution=p.get("attribution"),
+                      pic=p.get("pic"), source_slice=p.get("source_slice"), source_evidence=p.get("source_evidence"))
+                 for p in pics], labels=b.get("labels") or [])
     # Measured on the delivered programme's pixels: how often the picture changes and the longest hold (a record that
     # shows where a film runs on the speaker alone; never a gate).
     film = rd.get("film")

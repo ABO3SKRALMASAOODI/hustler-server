@@ -64,21 +64,18 @@ def test_a_contradicted_first_candidate_gives_its_window_the_next_one(tmp_path):
     assert not any(r[4]["path"].endswith("c0.jpg") for r in ins)
 
 
-def test_an_association_window_reaches_the_check_as_a_picture_of_the_meaning(tmp_path):
-    f = _files(tmp_path, ["cheetah.jpg"])
-    windows = [dict(first=0, last=5, name="cheetah at full speed", t0=0.0, t1=2.0, say="there is no plan B", must_show="a cheetah running",
-                    association=True)]
-    ins = cov.proposals(dict(windows=windows), {}, {"cheetah at full speed": [dict(path=f["cheetah.jpg"], w=800, h=600)]})
-    assert ins and ins[0][4]["association"] == "a cheetah running"
-    assert "association" in pc.SYSTEM and "never a contradiction for not showing the thing named" in pc.SYSTEM
-    plain = cov.proposals(dict(windows=[dict(windows[0], association=False)]), {}, {"cheetah at full speed": [dict(path=f["cheetah.jpg"], w=800, h=600)]})
-    assert "association" not in plain[0][4]
-
-
-def test_the_coverage_director_may_plan_a_picture_of_what_the_words_mean():
-    import inspect
-    src = inspect.getsource(cov.plan)
-    assert '"association": true' in src and "never in place of a named subject's own picture" in src
+def test_a_private_claim_can_have_a_finished_picture_plan_without_external_windows(tmp_path):
+    import json
+    from types import SimpleNamespace
+    calls = []
+    def plan_once(system, content, **kwargs):
+        calls.append(content)
+        return json.dumps(dict(entities=[dict(name="Investors", word_ids=[1])], windows=[], moves=[])), {}
+    words = [dict(w=w, start=i, end=i+1) for i, w in enumerate("those investors passed".split())]
+    result = cov.plan(words, "Fundraising", str(tmp_path),
+                      SimpleNamespace(ask=plan_once, json_block=json.loads))
+    assert result["windows"] == [] and len(calls) == 1
+    assert cov.require_coverage([], result, 3)["real_seconds"] == 0
 
 
 FF = os.environ.get("FFMPEG_BIN") or "/Users/masaoodi/Documents/Valmera/.valmera/week-1106/gauntlet/tools/ff/ffmpeg"

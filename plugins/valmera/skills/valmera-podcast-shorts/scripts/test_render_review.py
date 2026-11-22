@@ -446,7 +446,7 @@ def test_the_wall_refetches_the_exact_refused_sources_and_cuts_what_opens(tmp_pa
     assert wf.reopened_footage(ctx,dict(title='Lab',style={'id':'window'}),pack,[dict(r) for r in rows[:3]])==0
 
 
-def test_a_wall_that_holds_stops_the_short_with_its_work_kept_after_the_backoff(tmp_path,monkeypatch):
+def test_a_wall_after_backoff_returns_available_pictures_and_original_camera(tmp_path,monkeypatch):
     import wf1_film,wf1_primary_sources
     rows=[_refused_row(n) for n in range(4)]
     pack=_walled_supply(tmp_path,rows)
@@ -459,12 +459,11 @@ def test_a_wall_that_holds_stops_the_short_with_its_work_kept_after_the_backoff(
     monkeypatch.setattr(wf1_primary_sources.time,'sleep',lambda s:None)
     monkeypatch.setattr(wf.chain,'footage',lambda *a,**k:pytest.fail('nothing opened: nothing to cut'))
     ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
-    with pytest.raises(RuntimeError) as stop:
-        wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,120,300),sleep=slept.append)
-    assert wf1_film.WALL in str(stop.value)                                   # podcast.py waits and continues it
+    wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,120,300),sleep=slept.append)
+    assert pack['coverage_exhausted']
     assert slept==[120,300] and len(tries)==12                                # every refused source, at each try
     stored=json.load(open(tmp_path/'pack.json'))['pack']
-    assert stored['platform_walled'] is True and len(stored['wall']['refused'])==4 and stored['wall']['refused'][0]['tries']==3
+    assert stored['platform_walled'] is False and len(stored['wall']['refused'])==4 and stored['wall']['refused'][0]['tries']==3
 
 
 def test_a_wall_is_never_declared_lifted_on_sources_sorted_gone_while_nothing_was_cut(tmp_path,monkeypatch):
@@ -478,10 +477,10 @@ def test_a_wall_is_never_declared_lifted_on_sources_sorted_gone_while_nothing_wa
     monkeypatch.setattr(wf1_primary_sources.time,'sleep',lambda s:None)
     monkeypatch.setattr(wf.chain,'footage',lambda *a,**k:pytest.fail('nothing opened: nothing to cut'))
     ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
-    with pytest.raises(RuntimeError,match=wf1_film.WALL):
-        wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,120),sleep=lambda s:None)
+    wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,120),sleep=lambda s:None)
+    assert pack['coverage_exhausted']
     stored=json.load(open(tmp_path/'pack.json'))['pack']
-    assert stored['platform_walled'] is True and stored['wall']['sources']==4 and len(stored['wall']['refused'])==4
+    assert stored['platform_walled'] is False and stored['wall']['sources']==4 and len(stored['wall']['refused'])==4
     assert stored['wall']['refused'][0]['tries']==2 and not stored.get('gone_sources')      # tried again at each wait
     # the same sort on a short that has footage: the gone sources are not waited for and the short goes on
     pack=_walled_supply(tmp_path,[_refused_row(n) for n in range(4)])
@@ -493,6 +492,7 @@ def test_a_wall_is_never_declared_lifted_on_sources_sorted_gone_while_nothing_wa
 def test_a_walled_pack_is_never_returned_as_final_by_supply(tmp_path,monkeypatch):
     import wf1_coverage,wf1_alignment
     pack=_walled_supply(tmp_path,[_refused_row(0),_refused_row(1)],sources=2)
+    pack["coverage"]["contract"] = wf1_coverage.CONTRACT
     pack.update(alignment_contract=wf1_alignment.CONTRACT)
     (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack,record=dict(footage=None))))
     seen=[]

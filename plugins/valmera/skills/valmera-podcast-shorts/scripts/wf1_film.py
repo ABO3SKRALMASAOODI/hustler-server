@@ -359,87 +359,63 @@ FILL_GAP_S = 3.0          # no stretch of the take over about this long without 
 
 def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, stress, checker, rejected=(), composed_stills=(), rounds=3,
                originals=None, cut_dir=None, ffmpeg=None):
-    """The final build's gap fill (19 Nov: m03 held the speaker 34 s once its windows' pictures were turned down, m10
-    22 s, and fill_gaps had no caller). Any stretch of the take over FILL_GAP_S between f_first and f_last (the hook's
-    first second and the payoff are his face) takes the approved pictures the film found and has not shown (fill_gaps:
-    clips first, those of the nearest window first, about one every 2.6 s on the voice's stress). Each filler is
-    checked on its own words by the same placement check as every picture; one turned down gives its place to the next
-    spare. When the found pictures run out, fresh intervals of the kept originals (beside each interval the look
-    verified, never one already shown: wf1_coverage.fresh_interval) are the spares. Returns (ins, report)."""
+    """Fill long holds inside a planned clause using its own spare clips or source stills."""
     from wf1_coverage import shared_candidates, same_picture, fresh_interval
-    windows = coverage.get("windows") or []
-    span = [(round(w["t0"] * FPS) + LEAD_F, round(w["t1"] * FPS) + LEAD_F) for w in windows]
-    key_f = {i: (a + b) // 2 for i, (a, b) in enumerate(span)}
-    skip = set(rejected)
     pool = shared_candidates(coverage, footage)
     report = dict(proposed=0, accepted=0, rejected=0, fresh=0, spend=[], placements=[])
-    hold, rest = int(1.2 * FPS), int(0.8 * FPS)
     taken = {}
     for clips in list(pool.values()) + [[x[4] for x in ins]]:
-        for c in clips:
-            url = (c.get("source") or {}).get("url")
-            if url and c.get("time_range") and len(c["time_range"]) == 2:
-                taken.setdefault(url, []).append(tuple(c["time_range"]))
-    fresh = {}
-    for _ in range(rounds):
-        placed = [x[4] for x in ins]
-        spare_footage = {i: [c for c in lst + fresh.get(i, []) if c["path"] not in skip and not any(same_picture(c, p) for p in placed)]
-                         for i, lst in pool.items()}
-        edges = [f_first] + [f for x in sorted(ins) for f in (x[0], x[1])] + [f_last]
-        stride = hold + rest + hold // 2                     # fill_gaps' pace: a picture, then the take, about every 2.6 s
-        slots = sum((b - a - 2 * rest - hold) // stride + 1 for a, b in zip(edges[0::2], edges[1::2])
-                    if b - a > FILL_GAP_S * FPS and b - a - rest >= hold + rest)
-        short = slots - sum(map(len, spare_footage.values())) - sum(len(v) for v in pics.values())
-        if short > 0 and originals and cut_dir and ffmpeg:
-            # the same verified sources, intervals not yet shown: round-robin over the kept originals
-            sources = {}
-            for i, lst in pool.items():
-                for c in lst:
-                    url = (c.get("source") or {}).get("url")
-                    if url in originals and c.get("time_range") and c["path"] not in skip:
-                        sources.setdefault(url, (i, c))
-            progress = True
-            while short > 0 and progress:
-                progress = False
-                for i, c in list(sources.values()):
-                    got = fresh_interval([("clip", c.get("subject"), c)], taken, originals, cut_dir, 1.2 + 2 / FPS, ffmpeg, skip=skip)
-                    if got:
-                        rec = dict(got[0][2], subject=c.get("subject"))
-                        fresh.setdefault(i, []).append(rec)
-                        spare_footage.setdefault(i, []).append(rec)
-                        report["fresh"] += 1
-                        short -= 1
-                        progress = True
-                        if short <= 0:
-                            break
-        spare_pics = {n: [r for r in lst if r["path"] not in skip and not any(same_picture(r, p) for p in placed)]
-                      for n, lst in pics.items()}
-        have = {(x[0], x[1], x[4]["path"]) for x in ins}
-        out = fill_gaps([list(x) for x in ins], spare_footage, spare_pics, script, seg_f, f_first, f_last, stress,
-                        gap_s=FILL_GAP_S, hold_s=1.2, rest_s=0.8, key_f=key_f)
-        new = [x for x in out if (x[0], x[1], x[4]["path"]) not in have]
-        if not new:
-            break
-        for x in new:
-            mid = (x[0] + x[1]) // 2
-            inside = next((i for i, (a, b) in enumerate(span) if a <= mid < b), None)
-            near = inside if inside is not None else min(key_f, key=lambda i: abs(key_f[i] - mid)) if key_f else None
-            x[4] = dict(x[4], window=inside, gap_fill=True,
-                        illustration=windows[near]["must_show"] if near is not None else x[4].get("illustration"))
-        accepted, rep = checker(new)
-        for row in accepted:
-            if row[4]["path"] in composed_stills:
-                row[4]["verified_motion"] = False
-        report["proposed"] += len(new)
-        report["accepted"] += len(accepted)
-        report["rejected"] += len(new) - len(accepted)
-        report["spend"] += rep.get("spend") or []
-        report["placements"] += rep.get("placements") or []
-        ok = {id(r) for r in accepted}
-        skip.update(x[4]["path"] for x in new if id(x) not in ok)
-        ins = sorted(list(ins) + list(accepted), key=lambda x: x[0])
-        if len(accepted) == len(new):
-            break
+        for clip in clips:
+            url = (clip.get("source") or {}).get("url")
+            if url and clip.get("time_range"):
+                taken.setdefault(url, []).append(tuple(clip["time_range"]))
+    for i, window in enumerate(coverage["windows"]):
+        a = max(f_first, round(window["t0"] * FPS) + LEAD_F)
+        b = min(f_last, round(window["t1"] * FPS) + LEAD_F)
+        if b - a <= FILL_GAP_S * FPS:
+            continue
+        skip = set(rejected)
+        names = [window["name"], *(window.get("subjects") or [])]
+        for _ in range(rounds):
+            local = [r for r in ins if r[0] < b and a < r[1]]
+            edges = [a] + [f for row in local for f in row[:2]] + [b]
+            stride = round(2.6 * FPS)
+            slots = sum(1 + (end - start - round(2.8 * FPS)) // stride
+                        for start, end in zip(edges[::2], edges[1::2]) if end - start > FILL_GAP_S * FPS)
+            if not slots:
+                break
+            def unused(rec):
+                return rec["path"] not in skip and not any(same_picture(rec, r[4]) for r in ins)
+            clips = [c for c in pool[i] if unused(c)]
+            photos = {name: [r for r in pics.get(name, []) if unused(r)] for name in names}
+            available = [("clip", c.get("subject"), c) for c in pool[i] if c["path"] not in skip]
+            for _ in range(slots - len(clips) - sum(map(len, photos.values()))):
+                fresh = fresh_interval(available, taken, originals, cut_dir, 1.2 + 2 / FPS, ffmpeg, skip=skip)
+                if not fresh:
+                    break
+                clips.append(fresh[0][2])
+                report["fresh"] += 1
+            filled = fill_gaps(local, {i: clips}, photos, script, seg_f, a, b, stress,
+                               gap_s=FILL_GAP_S, hold_s=1.2, rest_s=0.8, key_f={i: (a+b)//2})
+            new = [r for r in filled if r not in local]
+            if not new:
+                break
+            for r in new:
+                r[4] = dict(r[4], window=i, gap_fill=True, illustration=window["must_show"],
+                            clause=window.get("say"), clause_t=[window["t0"], window["t1"]])
+            accepted, result = checker(new)
+            for row in accepted:
+                if row[4]["path"] in composed_stills:
+                    row[4]["verified_motion"] = False
+            report["proposed"] += len(new)
+            report["accepted"] += len(accepted)
+            report["rejected"] += len(new) - len(accepted)
+            report["spend"].extend(result.get("spend") or [])
+            report["placements"].extend(result.get("placements") or [])
+            ins = sorted([*ins, *accepted], key=lambda r: r[0])
+            skip.update(r[4]["path"] for r in new)
+            if len(new) == len(accepted):
+                break
     return ins, report
 
 
@@ -824,7 +800,7 @@ def build(script, sup, style_id, direction=None):
         meta[key] = dict(pw=int(take["w"]), ph=int(take["h"]), faces=fm, max_up=up,
                          face_h=PUNCH_FACE_H if pc["punch"] else medium_face_h(fm, int(take["h"]), up))
         pc["key"] = key
-    from placement_check import propose, check
+    from placement_check import CONTRACT as placement_contract, check
     from wf1_coverage import checked_proposals, require_coverage, originals_of
     checker=lambda rows:check(rows,script,clock,sup['work'],sup['ffmpeg'])
     # A replay can carry the delivered edit's time ranges and source-backed
@@ -832,18 +808,20 @@ def build(script, sup, style_id, direction=None):
     # A new film makes its picture decisions below as usual.
     archive = sup.get("archived_placement_plan")
     if archive is not None:
-        ins = archive["rows"]
-        placement_report = dict(archive["report"], replayed_from=archive["run_id"], spend=[])
+        if archive["report"].get("contract") == placement_contract:
+            ins, placement_report = archive["rows"], dict(archive["report"], spend=[])
+        else:
+            ins, placement_report = checker(archive["rows"])
+        placement_report["replayed_from"] = archive["run_id"]
     else:
         ins,placement_report=checked_proposals(coverage,footage,pics,f_end/FPS,checker,composed_stills,
             rejected=rejected_pairs,originals=originals_of(sup['work']),cut_dir=os.path.join(sup['work'],'fresh-intervals'),ffmpeg=sup['ffmpeg'])
-        # what is still bare after the windows (a window whose pictures were all turned down, speech no window covered)
-        # takes the approved pictures the film has to spare, each checked on its own words
-        ins,fill_report=fill_holes(ins,coverage,footage,pics,script,seg_f,LEAD_F+FPS,f_last,stress,checker,
-                                   placement_report.get('rejected_paths') or [],composed_stills,
-                                   originals=originals_of(sup['work']),cut_dir=os.path.join(sup['work'],'fresh-intervals'),ffmpeg=sup['ffmpeg'])
-        placement_report['gap_fill']={k:v for k,v in fill_report.items() if k!='spend'}
-        placement_report['spend']=list(placement_report.get('spend') or [])+fill_report['spend']
+        ins, fill = fill_holes(ins, coverage, footage, pics, script, seg_f, LEAD_F+FPS, f_last, stress, checker,
+                               placement_report.get("rejected_paths") or [], composed_stills,
+                               originals=originals_of(sup["work"]), cut_dir=os.path.join(sup["work"], "fresh-intervals"),
+                               ffmpeg=sup["ffmpeg"])
+        placement_report["gap_fill"] = {k: v for k, v in fill.items() if k != "spend"}
+        placement_report["spend"].extend(fill["spend"])
     for row in ins:                                      # a clip the check cut clear of another editor's text is a new file
         if row[4]["path"] not in keys:
             keys[row[4]["path"]] = (P.video if row[2] == "clip" else P.image)(f"{'v' if row[2] == 'clip' else 'p'}{len(keys):02d}", row[4])
@@ -920,7 +898,7 @@ def build(script, sup, style_id, direction=None):
         # proposes (adversarial review, 20 Nov: findings keyed on the cleared path never matched and the short was lost).
         origin = (rec.get("text_cleared") or {}).get("from_path") or rec["path"]
         P.pictures.append(dict(f=[f0, f1], visible_f=[f0, rec.get("audit_until", f1)], kind=kind, name=name, path=rec["path"], origin=origin,
-                               shows=rec.get("shows"), mode=mode,
+                               shows=rec.get("shows"), mode=mode, pic=keys[rec["path"]], source_slice=rec.get("src"),
                                window=rec.get("window"), clause=rec.get("clause"), clause_t=rec.get("clause_t"), fit=rec.get("fit"),
                                reframed=bool(rec.get("reframe")), attribution=rec.get("attribution"), name_super=rec.get("name_super"),
                                w=rec.get("w"), h=rec.get("h"), upscaled_from=rec.get("upscaled_from"), rung=rec.get("rung"),
@@ -1064,21 +1042,11 @@ def build(script, sup, style_id, direction=None):
                 window(f0, f1, kind, name, rec, keys[rec["path"]])
             cut_pts.append(f0)
             P.events.append(f0)
-            who = rec.get("name_super")
-            if who and ("person", name) not in labelled:
-                # The person the picture shows, named as its source names them (a lower third the phone slice cuts
-                # away, the source's title or channel: placement_check name_super), in the label type, once.
-                labelled.add(("person", name))
-                b_lab, j = f1, k + 1
-                while j < len(ins) and ins[j][0] == b_lab and ins[j][3] == name and ins[j][4].get("name_super"):
-                    b_lab, j = ins[j][1], j + 1
-                labels.append((f0 + 2, min(b_lab, f0 + int(2.4 * FPS)), str(who)))
-            elif not who and d.get("labels", False) and name not in labelled:            # a named thing is labelled once, small, while its own pictures are up
-                labelled.add(name)
-                b_lab, j = f1, k + 1
-                while j < len(ins) and ins[j][0] == b_lab and ins[j][3] == name:
-                    b_lab, j = ins[j][1], j + 1
-                labels.append((f0 + 2, min(b_lab, f0 + int(2.4 * FPS)), str(name)))
+            label = rec.get("name_super") or (rec.get("attribution") if d.get("labels") else None)
+            source_url = (rec.get("source") or {}).get("url") or rec.get("page")
+            if source_url and label and label not in labelled and f1 - f0 >= 16:
+                labelled.add(label)
+                labels.append((f0 + 2, min(f1, f0 + int(2.4 * FPS)), label, keys[rec["path"]]))
         if st["flash"] == "runs" and not dr and (not flashes or r0 - flashes[-1] >= 4 * FPS):      # the projector catches: into a run of archive
             flashes.append(r0)
         pos = r1
@@ -1167,6 +1135,9 @@ def build(script, sup, style_id, direction=None):
         if b - a < 14:
             continue
         role = row.get("role") or "hook"
+        if role == "name" and not row.get("perform"):
+            # Captions retain the spoken name. The identifying super belongs to its picture.
+            continue
         perf = row.get("perform") if isinstance(row.get("perform"), dict) else None
         if perf and perf.get("dev"):
             # the model chose the device that makes this row's type perform (palette_menu): the palette draws it on the
@@ -1224,7 +1195,7 @@ def build(script, sup, style_id, direction=None):
         P.events.append(a)
         shown.append((a, b, text))
     shown.sort()
-    for a, b, text in labels:
+    for a, b, text, pic in labels:
         if b - a < 14:
             continue
         t = text.upper()
@@ -1238,7 +1209,7 @@ def build(script, sup, style_id, direction=None):
             continue
         y = 0.752
         for n, r_ in enumerate(rows):
-            P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat")
+            P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat", name_picture=pic)
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), hold=[(a - 1, b) for a, b, t in shown if (a, b, t) not in free], z=5,
                             omit=omit)
     P.items = inside(P.items, f_end)
@@ -1331,7 +1302,7 @@ def build(script, sup, style_id, direction=None):
                  device_events=dev_events,
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=1, display=[dict(f=[a, b], text=t) for a, b, t in shown],
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
-                 labels=[dict(f=[a, b], text=t) for a, b, t in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
+                 labels=[dict(f=[a, b], text=t, pic=pic) for a, b, t, pic in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=(sorted(set(layouts_used)) if dr and len(set(layouts_used)) > 1 else (layouts_used[0] if dr and layouts_used else st["layout"])), placement_check=placement_report, coverage=coverage_report,
                  title_layout=title_layout, caption_restarts=restarts, face_metadata=meta,
                  finishes=dict(black_and_white=len([p for p in P.pictures if p.get("finish")]), flashes=len(flashes), dark_ink_spans=len(bright),
