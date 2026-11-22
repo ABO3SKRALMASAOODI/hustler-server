@@ -373,7 +373,19 @@ def pictures(l1, work, ask, pool=None, take=False, least=0, sense_=None, need=0,
     assets = l1.get("assets") or {}
     out, seen = [], set()
 
+    a, z = span(l1, ask)
+    matched = None
+    if 'documentary_cuts' in l1:
+        matched = {_key(work, row['path']): row for row in l1['documentary_cuts']
+                   if row['f'][0] <= a and z <= row['f'][1]}
+
     def add(pic):
+        if pic and matched is not None:
+            row = matched.get(_key(work, pic.meta.get('from_path') or pic.path)) or matched.get(_key(work, pic.path))
+            if not row:
+                return False
+            if pic.video and row.get('source_slice'):
+                pic.rng = row['source_slice']
         if pic and (take or not is_take(pic.aid)) and os.path.abspath(pic.path) not in seen:
             seen.add(os.path.abspath(pic.path))
             out.append(pic)
@@ -404,7 +416,6 @@ def pictures(l1, work, ask, pool=None, take=False, least=0, sense_=None, need=0,
             return pic_of_pool(l1, work, {"path": ref})
         return None
     W, H, fps = geometry(l1)
-    a, z = span(l1, ask)
     mid = (a + z) / 2 / fps
 
     def far(r):
@@ -467,12 +478,27 @@ def pictures(l1, work, ask, pool=None, take=False, least=0, sense_=None, need=0,
         add(of_asset(aid))
     for r in sorted((r for r in recs if r.get("text_kept")), key=far):
         add(pic_of_pool(l1, work, r))
+    if not out and matched is not None:
+        # The device can draw the original camera at these very words when
+        # there is no external picture verified for its entire duration.
+        shot = shot_at(l1, a)
+        on_take = shot and is_take(shot.get("pic"))
+        original = pic_of_asset(l1, work, shot["pic"] if on_take else "main")
+        if original:
+            lead = l1.get("documentary_lead_f", 0)
+            hi = min(original.dur, max(1, z - lead) / fps)
+            original.rng = [min(max(0., hi - 1 / fps), max(0., (a - lead) / fps)), hi]
+            if on_take and shot.get("crop"):
+                original.meta = dict(original.meta, interview_crop=crops(l1, work, shot)[a - shot["f"][0]])
+            out.append(original)
     return out
 
 
 def cover_on(pic, W, H):
     """The cover crop of a picture centred on its subject: the supply's measured subject place (``x``, the picture
     check's subject_x), else its biggest face, else the middle."""
+    if pic.meta.get("interview_crop"):
+        return list(pic.meta["interview_crop"])
     x = pic.meta.get("x") if isinstance(pic.meta.get("x"), (int, float)) else None
     y = 0.42
     if pic.faces:

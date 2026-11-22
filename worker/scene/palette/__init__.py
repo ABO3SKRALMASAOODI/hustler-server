@@ -698,6 +698,16 @@ def apply(l1, work, asks=None, pool=None):
         log.append(dict(row, done=True, landed=dev, fallback=bool(tried), tried=tried, log=patch.get("log"),
                         marks=patch.get("marks") or [], seat=patch.get("seat"), **({"replaced": sorted(echoes)} if echoes else {})))
     cur, trimmed = behind_on_take(cur)
+    if "documentary_cuts" in cur:
+        from .kit import cut, picture_spans
+        items = []
+        for item in cur["items"]:
+            if item.get("name_picture"):
+                for a, b in picture_spans(cur, item["name_picture"], *item["f"]):
+                    items.append(item if [a, b] == item["f"] else cut(item, a, b, f"{item['id']}~{a}"))
+            else:
+                items.append(item)
+        cur = dict(cur, items=items)
     if trimmed:
         for r in log:
             got = {k: v for k, v in trimmed.items() if k.startswith(str(r["id"]))}

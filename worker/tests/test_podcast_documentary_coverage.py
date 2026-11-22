@@ -47,12 +47,12 @@ def test_documentary_context_reaches_frame_checker_not_only_search_planner():
     assert has_brief([dict(lines[0],see=[dict(thing='Stanford',as_of='2005')])])
 
 
-def test_contextual_admission_does_not_require_archival_claim_fields(tmp_path,monkeypatch):
+def test_contextual_campus_illustration_follows_its_depiction_brief(tmp_path,monkeypatch):
     from footage import look
     import json
     monkeypatch.setattr(look,'sheet',lambda *a,**k:'sheet.jpg')
     monkeypatch.setattr(look.ask,'image_block',lambda *a:{})
-    monkeypatch.setattr(look.ask,'ask',lambda *a,**k:(json.dumps(dict(cells=[dict(n=1,ok=True,clean=True,grade=4,lines=[0],shows='Stanford campus')])),0.))
+    monkeypatch.setattr(look.ask,'ask',lambda *a,**k:(json.dumps(dict(cells=[dict(n=1,ok=True,clean=True,grade=4,lines=[0],shows='Stanford campus',line_checks=[dict(line=0,version_ok=True,time_ok=True,exact_thing=True)])])),0.))
     subject=dict(name='Stanford',must_show='Actual campus exterior')
     lines=[dict(i=0,say='I studied at Stanford',visual='Campus setting, not the actual conversation.')]
     candidates=[dict(src=0,t=1.,jpg='frame.jpg')];sources=[dict(title='Campus tour',channel='Stanford')]
@@ -60,7 +60,7 @@ def test_contextual_admission_does_not_require_archival_claim_fields(tmp_path,mo
     assert accepted[0]['lines']==[0]
     exact=[dict(lines[0],see=[dict(thing='Stanford',as_of='2005')])]
     checked,_=look.check(subject,exact,candidates,sources,str(tmp_path))
-    assert checked[0]['lines']==[]  # an archival claim still needs all three explicit checks
+    assert checked[0]['lines']==[0]
 
 
 def test_research_clauses_join_only_identical_director_subjects():
@@ -468,3 +468,27 @@ def test_exhausted_local_stills_do_not_loop_or_gain_motion_credit():
     rows,_=C.checked_proposals(coverage,{0:[dict(path='still.mp4',seconds=2,motion_p90=100)]},{},2,check)
     assert len(calls)==1
     with pytest.raises(C.CoverageError):C.require_coverage(rows,coverage,2)
+
+
+def test_wang_fundraising_uses_the_documented_round_and_leaves_private_rejections_on_camera(tmp_path, monkeypatch):
+    import json
+    from footage import look, run
+
+    lines = [dict(i=0, say="so many investors passed on us", dur=2., visual="Scale's fundraising meetings"),
+             dict(i=1, say="we raised a round", dur=2., visual="Scale's completed funding round")]
+    sources = [dict(title=t, channel=c, shots=[[0., 3.]]) for t, c in [
+        ("Bundil pitch", "Shark Tank Global"), ("Mitchell Green on the AI bubble", "CNBC"),
+        ("Scale announces Series F", "Scale AI")]]
+    candidates = [dict(src=i, source=str(i), t=1., jpg="cell.jpg") for i in range(3)]
+    cells = [dict(n=i+1, ok=True, clean=True, grade=5, lines=[line],
+                  line_checks=[dict(line=line, exact_thing=i == 2, time_ok=True, version_ok=True)])
+             for i, line in enumerate([0, 0, 1])]
+    monkeypatch.setattr(look, "sheet", lambda *args, **kwargs: "sheet.jpg")
+    monkeypatch.setattr(look.ask, "image_block", lambda p: {})
+    monkeypatch.setattr(look.ask, "ask", lambda *args, **kwargs: (json.dumps(dict(cells=cells)), 0.))
+    reads, _ = look.check(dict(name="fundraising", must_show="evidence of this round"), lines,
+                          candidates, sources, str(tmp_path))
+    placed = run.assign(lines, [dict(r, subject="fundraising") for r in reads],
+                        {str(i): s for i, s in enumerate(sources)},
+                        {ln["i"]: dict(subjects=["fundraising"]) for ln in lines}, {}, strict=True)
+    assert [[p["source"] for p in row["picks"]] for row in placed] == [[], ["2"]]

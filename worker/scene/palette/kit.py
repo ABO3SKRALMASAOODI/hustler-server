@@ -666,6 +666,25 @@ def cut(it, a, b, new_id=None):
     return out
 
 
+def picture_spans(l1, pic, a, b):
+    """Intervals where the identified asset is the visible picture after device cuts."""
+    layers = [v for v in l1["items"] if v["k"] in ("shot", "card") and v.get("pic")
+              and v["f"][0] < b and v["f"][1] > a]
+    edges = sorted({a, b, *(f for v in layers for f in v["f"] if a < f < b)})
+    spans = []
+    for start, end in zip(edges, edges[1:]):
+        live = [v for v in layers if v["f"][0] <= start < v["f"][1]]
+        # A source document can be a card over the interview. A montage with
+        # more than one foreground subject cannot identify a single portrait.
+        front = [v for v in live if v["k"] == "card"] or live
+        if front and all(v["pic"] == pic for v in front):
+            if spans and spans[-1][1] == start:
+                spans[-1][1] = end
+            else:
+                spans.append([start, end])
+    return spans
+
+
 def clear_captions(l1, a, z):
     """(items, drop): the caption words and their shade pools cut out of [a, z), for a page of type that takes the
     whole frame and says the words itself. A word or pool reaching past the page keeps its parts outside it."""

@@ -10,6 +10,11 @@ PLAN_SYSTEM = """You are the footage researcher for a short documentary film (a 
 
 You get the film's lines (numbered) and the named things the writer listed. Write the searches that find real footage of each thing.
 
+Search for evidence of the actual line, including the role it attributes to the people shown.
+For an unnamed participant look for first-party records of the named company and event, never
+other people doing similar work. If there is no traceable event, return no external subject for
+that line. Other interviews of the narrator belong only to lines about the filmed occasion.
+
 For each subject (keep the writer's names; add a subject only when a line needs a real thing the list lacks, such as the place the line happens in):
 - "name": the subject.
 - "kind": person, place, thing, company or event.
@@ -25,6 +30,11 @@ Answer with one JSON object only: {"subjects":[...],"lines":[...]}"""
 RANK_SYSTEM = """You choose which videos a footage researcher should open. For each subject you get YouTube and archive.org results (number, title, channel, length in seconds, views).
 
 The actual subject identity is binding. Suggested example papers, films or angles in must_show are an editorial wish list, not an exclusive source whitelist. Do not reject another authentic original demonstration of the same category and era merely because it was not among those examples. Specific named people, systems and events still need that exact identity. Numerical edit quotas and earlier acquisition failures are not visual facts.
+
+Read the spoken clauses alongside the visual brief. Rank sources by their connection to
+the particular event or artifact in those clauses. A channel interviewing an investor identifies
+its guest. A first-party deal announcement can document a completed round. Return the sources that
+support the specific claim or directly illustrate it; a subject can have an empty result.
 
 Keep the sources most likely to hold real, clean video of that very subject: the person interviewed or filmed himself, a news report of the day, event or launch footage, archive newsreel, the company's own film, a documentary with real footage. A long interview or documentary is good: the editor takes 1-3 seconds of it.
 
@@ -73,6 +83,13 @@ def plan(lines, named, about="", budget_s=90.0):
     for ln in obj.get("lines") or []:
         if isinstance(ln, dict) and isinstance(ln.get("i"), int):
             lns.append(dict(i=ln["i"], show=str(ln.get("show") or ""), subjects=[x for x in ln.get("subjects") or [] if x in names]))
+    assigned = {row["i"]: row["subjects"] for row in lns}
+    for subject in subs:
+        claims = [dict(words=line["say"], depiction=line["visual"]) for line in lines
+                  if line.get("visual") and (subject["name"] in assigned.get(line["i"], [])
+                                             or subject["name"] in (line.get("pictures") or []))]
+        if claims:
+            subject["claims"] = claims
     return dict(subjects=subs, lines=lns), usd
 
 
@@ -83,7 +100,9 @@ def rank(subjects, hits, per=3, budget_s=60.0):
         rows = [f"  {hi}. {h['title']} | {h.get('channel') or '?'} | {int(h['duration']) if h.get('duration') else '?'} s | "
                 f"{h.get('views') or '?'} views | {h['where']}" for hi, h in enumerate(hits.get(si) or [])]
         if rows:
-            blocks.append(f"Subject {si}: {s['name']} (must show: {s['must_show']})\n" + "\n".join(rows))
+            clauses = "".join(f"\n  Spoken: {claim['words']} | Depiction: {claim['depiction']}"
+                              for claim in s.get("claims", []))
+            blocks.append(f"Subject {si}: {s['name']} (must show: {s['must_show']}){clauses}\n" + "\n".join(rows))
     if not blocks:
         return [], 0.0
     decisions,usd=[],0.

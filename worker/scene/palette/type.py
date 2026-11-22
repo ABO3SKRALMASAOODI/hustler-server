@@ -254,13 +254,36 @@ def name(l1, work, ask, sense=None):
     """A name lands in two sizes: a small line (who they are) types on, the name slams on the word that says it."""
     o, W, H, fps, dur, S, pal = _base(l1, work, ask, sense)
     nm = " ".join(str(o.get("name") or o.get("t") or "").split())
-    if not nm:
-        return {"skip": "name needs a name"}
-    nm = cased(nm, o, "upper")
-    title = cased(" ".join(str(o.get("title") or "").split()), o, "upper")
+    title = o.get("title") or ""
     a, z, hit = K.span(l1, ask, need=int(o.get("hold", 48)), text=nm)
     land = hit[0][1] if hit else a
-    a = max(0, min(a, land - 4))
+    evidence = None
+    if "documentary_cuts" in l1:
+        # Use the selected excerpt's reading for both lines of this super.
+        # The Director supplies typography and timing; its guessed name is never a credit.
+        for row in l1["documentary_cuts"]:
+            if row.get("name_super") and (row.get("source_evidence") or {}).get("url") and row["f"][0] <= a < row["f"][1]:
+                spans = K.picture_spans(l1, row["pic"], a, min(z, row["f"][1]))
+                if spans and spans[0][0] == a and spans[0][1] - a >= 2:
+                    evidence = row
+                    a, z = spans[0]
+                    break
+        land = a
+        if evidence:
+            nm, _, title = evidence["name_super"].partition(",")
+        else:
+            words = [w for w in K.said(l1) if w[1] < z and w[2] > a][:4]
+            if not words:
+                from .rhythm import settle
+                return settle(l1, work, ask, sense)
+            nm = "“" + " ".join(w[0] for w in words) + "”"
+            title = ""
+    else:
+        a = max(0, min(a, land - 4))
+    if not nm:
+        return {"skip": "name needs a name"}
+    nm = cased(nm.strip(), o, "upper")
+    title = cased(" ".join(str(title).split()), o, "upper")
     rng = K.rng_of(l1, ask)
     layout = o.get("layout") or rng.choice(["stack", "left", "split"])
     ws = nm.split()
@@ -304,7 +327,7 @@ def name(l1, work, ask, sense=None):
         else:
             px, py = K.place(vv[kind], t, x0 + bw / 2, y, W, H)
         if kind == "title":
-            n = max(min(len(t), 10), 1)                          # the small line types on, a letter or two a frame
+            n = max(min(len(t), 10, z - a), 1)                          # the small line types on, a letter or two a frame
             t0 = max(a, land - n - 2)
             for q in range(n):
                 k = max(1, round(len(t) * (q + 1) / n))
@@ -319,12 +342,19 @@ def name(l1, work, ask, sense=None):
             items.append(it)
         y += gap
     if layout == "left":
-        n = z - (land - 2)
+        bar_start = max(a, land - 2)
+        n = z - bar_start
         grow = K.ease_out(n, 0.0, 1.0, frames=6)
-        items.append(K.rect(f"{ask['id']}.bar", (land - 2, z), [[round(x0, 5), round(top, 5), round(x0 + 0.009, 5), round(top + bh * g, 5)] for g in grow],
+        items.append(K.rect(f"{ask['id']}.bar", (bar_start, z), [[round(x0, 5), round(top, 5), round(x0 + 0.009, 5), round(top + bh * g, 5)] for g in grow],
                             acc, a=1.0))
+    receipt = {}
+    if evidence:
+        receipt = dict(pic=evidence["pic"], source=evidence["source_evidence"],
+                       time_range=evidence.get("time_range"), source_slice=evidence.get("source_slice"))
+        for item in items:
+            item["name_picture"] = evidence["pic"]
     return {"items": items, "voices": voices, "marks": _marks(land, "name lands", 0.9),
-            "seat": {"x": x0, "y": base, "w": bw, "h": bh, "f": [a, z]}, "log": {"layout": layout, "rows": [r[0] for r in rows], "lands": land}}
+            "seat": {"x": x0, "y": base, "w": bw, "h": bh, "f": [a, z]}, "log": {"layout": layout, "rows": [r[0] for r in rows], "lands": land, **receipt}}
 
 
 # --------------------------------------------------------------------------- the word ladder: whisper and shout

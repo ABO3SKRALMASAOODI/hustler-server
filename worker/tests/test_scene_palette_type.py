@@ -682,3 +682,21 @@ def test_a_font_role_or_a_missing_font_draws_in_the_films_own_face(tmp_path):
             assert used, (dev, font, log)
             for f in used:
                 find_font(f)                                                               # every face is installed
+
+
+def test_wang_title_follows_the_identified_picture_and_interview_uses_spoken_words(tmp_path):
+    l1 = film(tmp_path, n_shots=3, dur=300)
+    l1["said"] = [["Scale", 239, 259, 0]]
+    source = dict(url="https://www.youtube.com/watch?v=eRYP2arKkk0", channel="Scale")
+    l1["documentary_cuts"] = [dict(f=[185, 200], pic="p1", path="p1.png",
+                                   name_super="Alexandr Wang", source_evidence=source)]
+    asks = [dict(dev="name", id=key, at=[start, end],
+                 args=dict(name="Alexandr Wang", title="Scale", layout="stack"))
+            for key, start, end in [("archive", 185, 210), ("host", 239, 260)]]
+    out, log = laid(l1, tmp_path, asks)
+    host = [it["t"] for it in mine(out, "host") if it["k"] == "word"]
+    assert host and all("WANG" not in t for t in host)
+    assert any("SCALE" in t for t in host)
+    identified = [it for it in mine(out, "archive") if it.get("t") == "ALEXANDR WANG"]
+    assert identified and all(185 <= it["f"][0] < it["f"][1] <= 200 for it in identified)
+    assert next(r for r in log if r["id"] == "archive")["log"]["source"] == source

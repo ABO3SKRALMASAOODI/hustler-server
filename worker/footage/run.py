@@ -693,7 +693,7 @@ def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict
                 continue
             if ln["i"] in c["lines"]:
                 score = c["grade"] + 1.0
-            elif strict:
+            elif strict or ln.get("see") or ln.get("visual"):
                 continue
             elif c["subject"] in names and not c["lines"]:
                 score = c["grade"] - 0.5
@@ -721,7 +721,7 @@ def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict
         return True
     if alloc == "round":
         def eligible(ln):
-            return sum(1 for c in good if ln["i"] in c["lines"] or (not strict and c["subject"] in meta[ln["i"]][2]))
+            return sum(1 for c in good if ln["i"] in c["lines"] or (not (strict or ln.get("see") or ln.get("visual")) and c["subject"] in meta[ln["i"]][2]))
         order = sorted(lines, key=lambda ln: (eligible(ln) / max(meta[ln["i"]][0], 1), ln["i"]))
         open_ = {ln["i"] for ln in lines}
         while open_:
