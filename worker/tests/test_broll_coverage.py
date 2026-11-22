@@ -46,3 +46,10 @@ def test_preview_quotes_the_speech_in_the_uncovered_program_range():
     assert "8s" in note and "pulmão" in note
     assert "17s" in note and "diafragma" in note
     assert "deleted" not in note and "covered" not in note
+
+
+def test_preview_still_reports_coverage_with_an_unusable_word_index():
+    edl = dict(TALK, overlays=[{"asset_key": "a", "kind": "video",
+                                "start": 0, "duration_s": 3, "scale": 1}])
+    assert agent_tools._broll_coverage_line(edl, {"words": [{"w": "hello"}]}) == (
+        agent_tools._broll_coverage_line(edl))

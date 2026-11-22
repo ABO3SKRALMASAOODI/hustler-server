@@ -24683,9 +24683,14 @@ def _broll_coverage_line(edl, index=None):
         return line
     # The coverage window is in program time. A source-clock lookup here
     # would quote discarded dialogue after a trim or a speed change.
-    tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed") or [])
-    words = tl.kept_words(index["words"], rescue=True,
-                          voice=timeline_mod.Voice.from_index(index))
+    try:
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed") or [])
+        words = tl.kept_words(index["words"], rescue=True,
+                              voice=timeline_mod.Voice.from_index(index))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        # Older or incomplete indexes can lack word timings. The measured
+        # cutaway coverage and the completed render are still available.
+        return line
     excerpts = []
     for word in words:
         if a <= word["t0"] < b:
