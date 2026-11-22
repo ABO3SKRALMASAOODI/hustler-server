@@ -35,3 +35,16 @@ def test_requested_devices_come_from_model_and_fulfilled_items_survive():
     assert asks._unasked_only(rows, [{"items": ["fx:st1"]},
                                       {"items": ["fx:st1", "fx:st2"]},
                                       {"items": []}]) == [{"items": ["fx:st2"]}, {"items": []}]
+
+
+def test_partial_removal_applies_survivors_once(monkeypatch):
+    from tools_ext import broll_tools, _write
+    ctx = SimpleNamespace(latest_edl=lambda: {"version": 4, "json": {
+        "fx": [{"type": "broll", "id": "cut2"}, {"type": "other", "id": "other"}]}})
+    writes = []
+    monkeypatch.setattr(_write, "commit", lambda ctx, ops, summary: writes.append(ops) or summary)
+    assert "already absent" in broll_tools.remove_broll(ctx, ["cut1"])
+    assert writes == []
+    result = broll_tools.remove_broll(ctx, ["cut1", "cut2"])
+    assert writes == [[{"action": "remove", "layer": "fx", "id": "cut2"}]]
+    assert "cut1 already absent" in result and "removed cutaway(s) cut2" in result

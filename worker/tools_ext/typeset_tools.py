@@ -668,13 +668,13 @@ def remove_typeset(ctx, ids):
     edl = _latest(ctx)
     if isinstance(ids, str):
         ids = [p for p in re.split(r"[\s,]+", ids) if p]
-    have = {m.get("id"): m for m in edl.get("motion") or []}
-    bad = [i for i in ids or [] if (have.get(i) or {}).get("template")
-           != "typeset"]
-    if not ids or bad:
-        return (f"REJECTED: not typeset items: {', '.join(bad) or '(none)'}.")
+    from tools_ext._write import removal_targets
+    current = [m["id"] for m in edl.get("motion") or [] if m.get("template") == "typeset"]
+    ids, note = removal_targets(ids, current, "typeset")
+    if not ids:
+        return note
     ops = [{"action": "remove", "layer": "motion", "id": i} for i in ids]
-    return _write.commit(ctx, ops, f"removed typeset {', '.join(ids)}")
+    return _write.commit(ctx, ops, f"removed typeset {', '.join(ids)}") + (" " + note if note else "")
 
 
 def import_font(ctx, asset_key, licence, family=None, attest=False):
