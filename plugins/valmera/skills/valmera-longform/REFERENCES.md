@@ -19,6 +19,8 @@ reads this file; it is the bar, not a template. Numbers: `week-1106/atlas/ATLAS.
 
 Alternate breakthrough documentaries with journeys of widely known builders. Aim above these references with original scripts, titles and footage. Show the specific source on the sentence that invokes it. Preserve the post's author and date, the paper's byline, or the speaker and provenance of a quotation. Use the local Easton performance path and direct each passage for pace, warmth and emphasis. Music follows the change in the story. The close should leave the viewer feeling what the evidence means. The owner's test is goosebumps.
 
+The two openings deliver 145 and 150 words per minute. On an original 36-word evidence passage, the local Easton read moved from 190 to 161 words per minute with every word intact. Its measured pitch span was 8.7 semitones against 12.2 and 15.9 in the reference mixes. Give a reversal a stressed word and breathing room. The local read still has a narrower emphasis range.
+
 ## What they share
 
 - **A promise by 30 s and a question held to the end.** Long form holds with lines and open loops, not pace.

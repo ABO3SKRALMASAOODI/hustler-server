@@ -323,3 +323,13 @@ def test_a_counters_figure_word_lands_on_its_frame():
 def test_the_strobe_floor_leaves_one_and_two_frame_shots_to_punctuation():
     lo, hi = DR.energy_band("strobe")["hold"]
     assert lo * 30 >= 3.9 and hi <= 0.6
+
+
+def test_only_the_directors_explicit_accent_reaches_the_word_clock():
+    sentences, words = DR.numbered(SENTENCES, rows())
+    result, _ = DR.repair(dict(beats=[
+        dict(w=0, role="hook"),
+        dict(w=3, role="turn", sound="air", sound_reason="the reveal replaces the rehearsal"),
+    ]), sentences, words)
+    assert DR.sound_cues(result, lambda w: 11*w) == [
+        dict(f=33, role="turn", sound="air", why="the reveal replaces the rehearsal")]

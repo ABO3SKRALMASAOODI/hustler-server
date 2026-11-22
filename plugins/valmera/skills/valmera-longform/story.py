@@ -281,6 +281,12 @@ def narration_script(script):
         for k in ("beat", "melody", "emphasis", "direction", "pace", "energy"):
             if s.get(k):
                 seg[k] = s[k]
+        # Madigan's two reference reads average 157–159 words per elapsed minute.
+        # Articulated pace excludes pauses. Let the writer's brisk turns move
+        # faster, and give reflective evidence passages a warmer, longer vowel.
+        pace = seg.get("pace", script.get("pace", "steady"))
+        seg["wpm"] = {"slow": 158, "steady": 175, "brisk": 190}.get(pace,175)
+        seg["phonon_duration_delta"] = {"slow": .85, "steady": .60, "brisk": .25}.get(pace,.60)
         segs.append(seg)
     segs[-1]["pause_after"] = 0.0
     return dict(title=script.get("title"), voice=script.get("voice") or "sage", band=FORM["band"], pace=script.get("pace") or "steady",

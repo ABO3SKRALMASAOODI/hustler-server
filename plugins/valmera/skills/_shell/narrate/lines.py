@@ -133,6 +133,8 @@ def make_job(script, eng, ref_audio, ref_text, band="03", takes=TAKES):
     lines = []
     for i, s in enumerate(script["segments"]):
         ln = {"id": f"s{i:02d}", "text": s["text"], "takes": takes}
+        if eng == "phonon" and "phonon_duration_delta" in s:
+            ln["duration_delta"] = float(s["phonon_duration_delta"])
         if c.get("instruct"):
             ln["instruct"] = f"Same speaker, telling a true story to a friend. {persona} This line: {line_direction(s, script)}"
         if c.get("tags"):
@@ -215,6 +217,10 @@ def generate_phonon(job, out, log, seed0=7):
             if f.exists():
                 continue
             dd = retake_dd(k, int(job.get("takes") or TAKES))
+            # The first take stays at natural speed. The alternative takes use
+            # the native read direction, before intelligibility/stress scoring.
+            if k:
+                dd = max(dd, float(ln.get("duration_delta", 0)))
             tts.set_conditions({"duration_delta": dd} if dd else {})
             x = tts.synth(ln["text"], voice=job["voice"], seed=seed0 + 101 * k + 7 * i)
             sf.write(f, np.asarray(x, np.float32), tts.sample_rate, subtype="FLOAT")
