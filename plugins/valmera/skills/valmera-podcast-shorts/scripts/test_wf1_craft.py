@@ -135,6 +135,15 @@ class _LLM:
         return json.loads(text)
 
 
+def test_a_directed_beat_and_palette_ask_reach_the_film_together():
+    plan = {"contract": wf.DIRECTION_CONTRACT, "beats": [{"w": 55, "role": "turn", "sound": "impact"}],
+            "asks": [{"dev": "counter", "at": 85}], "sections": []}
+    for contract in (plan["contract"], plan["contract"] - 1):
+        forwarded = wf.film_direction(dict(plan, contract=contract))["director"]
+        assert forwarded["beats"] == plan["beats"]
+        assert forwarded["asks"] == plan["asks"]
+
+
 def test_the_direction_names_roles_the_turn_and_the_payoff_apart(tmp_path, monkeypatch):
     llm = _LLM(dict(display=[dict(seg=1, text="insecure overachievers", role="hook", key="overachievers"),
                              dict(seg=3, text="49%", role="figure", key="49%"), dict(seg=4, text="x", role="filler")] +

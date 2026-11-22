@@ -807,15 +807,23 @@ def build(script, sup, style_id, direction=None):
     from placement_check import propose, check
     from wf1_coverage import checked_proposals, require_coverage, originals_of
     checker=lambda rows:check(rows,script,clock,sup['work'],sup['ffmpeg'])
-    ins,placement_report=checked_proposals(coverage,footage,pics,f_end/FPS,checker,composed_stills,
-        rejected=rejected_pairs,originals=originals_of(sup['work']),cut_dir=os.path.join(sup['work'],'fresh-intervals'),ffmpeg=sup['ffmpeg'])
-    # what is still bare after the windows (a window whose pictures were all turned down, speech no window covered)
-    # takes the approved pictures the film has to spare, each checked on its own words
-    ins,fill_report=fill_holes(ins,coverage,footage,pics,script,seg_f,LEAD_F+FPS,f_last,stress,checker,
-                               placement_report.get('rejected_paths') or [],composed_stills,
-                               originals=originals_of(sup['work']),cut_dir=os.path.join(sup['work'],'fresh-intervals'),ffmpeg=sup['ffmpeg'])
-    placement_report['gap_fill']={k:v for k,v in fill_report.items() if k!='spend'}
-    placement_report['spend']=list(placement_report.get('spend') or [])+fill_report['spend']
+    # A replay can carry the delivered edit's time ranges and source-backed
+    # picture decisions. Compose those cuts again through the current engine.
+    # A new film makes its picture decisions below as usual.
+    archive = sup.get("archived_placement_plan")
+    if archive is not None:
+        ins = archive["rows"]
+        placement_report = dict(archive["report"], replayed_from=archive["run_id"], spend=[])
+    else:
+        ins,placement_report=checked_proposals(coverage,footage,pics,f_end/FPS,checker,composed_stills,
+            rejected=rejected_pairs,originals=originals_of(sup['work']),cut_dir=os.path.join(sup['work'],'fresh-intervals'),ffmpeg=sup['ffmpeg'])
+        # what is still bare after the windows (a window whose pictures were all turned down, speech no window covered)
+        # takes the approved pictures the film has to spare, each checked on its own words
+        ins,fill_report=fill_holes(ins,coverage,footage,pics,script,seg_f,LEAD_F+FPS,f_last,stress,checker,
+                                   placement_report.get('rejected_paths') or [],composed_stills,
+                                   originals=originals_of(sup['work']),cut_dir=os.path.join(sup['work'],'fresh-intervals'),ffmpeg=sup['ffmpeg'])
+        placement_report['gap_fill']={k:v for k,v in fill_report.items() if k!='spend'}
+        placement_report['spend']=list(placement_report.get('spend') or [])+fill_report['spend']
     for row in ins:                                      # a clip the check cut clear of another editor's text is a new file
         if row[4]["path"] not in keys:
             keys[row[4]["path"]] = (P.video if row[2] == "clip" else P.image)(f"{'v' if row[2] == 'clip' else 'p'}{len(keys):02d}", row[4])
@@ -823,7 +831,7 @@ def build(script, sup, style_id, direction=None):
             # the object the check saw in this picture (placement_check foley): its landing sounds as that object
             # (worker/score/sound_screen.py)
             P.assets[keys[row[4]["path"]]]["foley"] = str(row[4]["foley"])
-    coverage_report = require_coverage(ins, coverage, f_end/FPS, final=bool(d.get('coverage_final')))
+    coverage_report = require_coverage(ins, coverage, f_end/FPS, final=archive is not None or bool(d.get('coverage_final')))
     past = {int(i) for i in d.get("past_segs") or [] if isinstance(i, int)}
     cut_pts, drive_ids, look_pics, mono_spans, bright = [], set(), [], [], []
     if take.get("still"):
