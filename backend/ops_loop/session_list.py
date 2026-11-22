@@ -214,7 +214,8 @@ def _reviews(cur, roots, since):
         return {}, {}
     cur.execute("""
             SELECT r.id, r.session_key, r.project_id, r.started_at,
-                   r.verdict, r.score, r.signals->>'cause_class' AS cause_class,
+                   r.verdict, r.score, r.signals->'score_exact' AS score_exact,
+                   r.signals->>'cause_class' AS cause_class,
                    r.signals->>'why_short' AS why_short
               FROM session_reviews r
              WHERE r.project_id = ANY(%(roots)s)
@@ -246,11 +247,15 @@ def compute(cur, now, days):
     roots = S.candidate_roots(cur, since)
     data = _load(cur, roots, since - S.PAD)
     by_key, by_project = _reviews(cur, roots, since)
-    edls_by_root = {}
-    for e in data["edls"]:
-        p = data["projects"].get(e["project_id"])
-        if p:
-            edls_by_root.setdefault(p["root"], []).append(e)
+    families = {}
+    for pid, project in data["projects"].items():
+        family = families.setdefault(project["root"], {"projects": {}, "messages": [], "jobs": [], "edls": []})
+        family["projects"][pid] = project
+    for field in ("messages", "jobs", "edls"):
+        for item in data[field]:
+            project = data["projects"].get(item["project_id"])
+            if project:
+                families[project["root"]][field].append(item)
     rows = []
     for root in roots:
         proj = data["projects"].get(root)
@@ -259,13 +264,11 @@ def compute(cur, now, days):
         user = data["users"].get(proj["user_id"]) or {}
         if not user.get("real_customer"):
             continue
-        fam = {pid for pid, p in data["projects"].items()
-               if p["root"] == root}
-        for start, end, msgs, jobs in S.windows(data, root):
+        family = families[root]
+        for start, end, msgs, jobs in S.windows(family, root):
             if end < since:
                 continue
-            versions = _edit_versions(fam, start, end, jobs,
-                                      edls_by_root.get(root, []))
+            versions = _edit_versions(family["projects"], start, end, jobs, family["edls"])
             k = kind_of(proj["kind"], msgs, jobs, versions)
             key = S.session_key(root, start)
             rv = _review_for(key, root, start, end, by_key, by_project)
@@ -295,7 +298,8 @@ def compute(cur, now, days):
                 "first_ask": (S._redact(" ".join(first_ask.split()))[:ASK_CHARS]
                               if first_ask else None),
                 "review": ({"id": rv["id"], "verdict": rv["verdict"],
-                            "score": rv["score"], "cause_class": rv.get("cause_class"),
+                            "score": rv["score"] if rv.get("score_exact") is None else rv["score_exact"],
+                            "cause_class": rv.get("cause_class"),
                             "why_short": rv.get("why_short")} if rv else None),
             })
     rows.sort(key=lambda r: (r["started_at"], r["key"]), reverse=True)

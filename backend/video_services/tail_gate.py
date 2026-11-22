@@ -28,10 +28,6 @@ Pure: worker/timeline.py is passed in (routes.video loads it as
 
 TAIL_S = 1.5          # the programme seconds before the card that are read
 LIVE_MIN_S = 0.6      # live picture that must follow a hold before the card
-SLOW_BELOW = 0.99     # a speed factor under this is a slowed tail
-# add_time_effect kinds that repeat or slow frames (echo and reverse move).
-HOLDING_TIME_KINDS = frozenset({"posterize", "stutter", "remap",
-                                "interpolate", "ramp"})
 # render_qc._stall_cause codes for a HELD run. 'hold', 'still' and 'slow'
 # are the edit's own; 'footage' is the source not moving (or a false
 # positive on a quiet shot); 'join' is the renderer's and is reported, not
@@ -49,8 +45,8 @@ def _f(x, default=0.0):
 
 
 def edl_holds(edl, timeline):
-    """[{"what", "id", "t0", "t1", "fix"}] — what the EDL itself holds or
-    slows where the programme hands over to the end card: anything that
+    """[{"what", "id", "t0", "t1", "fix"}] — what the EDL explicitly holds
+    where the programme hands over to the end card: anything that
     reaches past (programme end - LIVE_MIN_S), i.e. leaves less than
     LIVE_MIN_S of live picture before the card. [] when the tail is live."""
     edl = edl if isinstance(edl, dict) else {}
@@ -111,31 +107,8 @@ def edl_holds(edl, timeline):
         what = ("the frozen-frame overlay (add_freeze_frame)"
                 if "/freeze-" in key else "the full-frame still overlay")
         add(what, ov.get("id"), a, b, f"remove_overlay(id='{ov.get('id')}')")
-    # A slowed tail: set_speed / set_speed_ramp spans under 1x.
-    for i, pcs in enumerate(tl.pieces):
-        t = float(tl.offsets[i])
-        for ps, pe, f in pcs:
-            n = (pe - ps) / f
-            if f < SLOW_BELOW and t + n > live_from + 1e-3 and t < end:
-                span = next((s for s in speed
-                             if _f(s.get("start")) <= ps + 1e-3
-                             and _f(s.get("end")) >= pe - 1e-3), {})
-                sid = span.get("id")
-                add(f"the {f:g}x slowed tail (set_speed)", sid, t, t + n,
-                    f"remove_speed(id='{sid}')" if sid else
-                    "remove the slow speed span over the ending")
-            t += n
-    # A time effect that repeats or slows frames over the ending.
-    for fx in edl.get("fx") or []:
-        if not isinstance(fx, dict) or fx.get("type") != "time":
-            continue
-        if str(fx.get("kind") or "") not in HOLDING_TIME_KINDS:
-            continue
-        a, b = _f(fx.get("start")), _f(fx.get("end"))
-        if b <= live_from + 1e-3 or a >= end:
-            continue
-        add(f"the {fx.get('kind')} time effect (add_time_effect)",
-            fx.get("id"), a, b, f"remove_depth_time(ids=['{fx.get('id')}'])")
+    # Retiming changes when moving source frames appear. An actual stall in
+    # that footage is measured on rendered frames by rendered_holds().
     return out
 
 

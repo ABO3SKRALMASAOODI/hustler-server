@@ -188,3 +188,25 @@ def test_a_session_that_delivered_nothing_says_so():
 
 def S_iso(seconds):
     return (T + timedelta(seconds=seconds)).isoformat()
+
+
+def test_compute_reads_global_events_once_and_shows_the_exact_review(monkeypatch):
+    class Once(list):
+        def __iter__(self):
+            assert not getattr(self, "seen", False), "scanned every event again for a different project"
+            self.seen = True
+            return super().__iter__()
+
+    projects = {pid: {"id": pid, "user_id": 1, "root": 1 if pid == 3 else pid,
+                      "kind": "edit", "title": "Copy"} for pid in (1, 2, 3)}
+    data = {"projects": projects, "users": {1: {"real_customer": True}},
+            "messages": Once([msg("user", project_id=3), msg("user", project_id=2)]),
+            "jobs": Once([job("agent_turn", project_id=3)]), "edls": [], "live": set()}
+    key = L.S.session_key(1, T)
+    review = {"id": 5, "score": 1, "score_exact": 1.5, "verdict": "delivered_poor", "cause_class": "tool"}
+    monkeypatch.setattr(L.S, "candidate_roots", lambda *_: [1, 2])
+    monkeypatch.setattr(L, "_load", lambda *_: data)
+    monkeypatch.setattr(L, "_reviews", lambda *_: ({key: review}, {}))
+    by_root = {r["project_id"]: r for r in L.compute(None, T + timedelta(hours=1), 7)["sessions"]}
+    assert len(by_root) == 2 and by_root[1]["review"]["score"] == 1.5
+    assert by_root[1]["review"]["cause_class"] == "tool" and by_root[2]["review"] is None

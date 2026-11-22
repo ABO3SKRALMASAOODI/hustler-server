@@ -82,13 +82,11 @@ def test_a_still_that_leaves_live_footage_before_the_card_passes():
     assert holds[0]["what"] == "the still image insert"
 
 
-def test_a_slowed_tail_and_a_frame_repeating_time_effect_are_holds():
+def test_retimed_moving_footage_needs_rendered_frames_to_establish_a_stall():
     edl = _live(P07)
     edl["speed"] = [{"id": "sp1", "start": 988.5, "end": 989.99,
                      "factor": 0.55}]
-    holds = tail_gate.edl_holds(edl, TL)
-    assert [h["id"] for h in holds] == ["sp1"]
-    assert holds[0]["fix"] == "remove_speed(id='sp1')"
+    assert tail_gate.edl_holds(edl, TL) == []
     # 1x and faster tails are live
     edl["speed"][0]["factor"] = 1.25
     assert tail_gate.edl_holds(edl, TL) == []
@@ -98,9 +96,7 @@ def test_a_slowed_tail_and_a_frame_repeating_time_effect_are_holds():
                   "start": end - 1.0, "end": end},
                  {"id": "tm_echo", "type": "time", "kind": "echo",
                   "start": end - 1.0, "end": end}]
-    holds = tail_gate.edl_holds(edl, TL)
-    assert [h["id"] for h in holds] == ["tm_post"]
-    assert holds[0]["fix"] == "remove_depth_time(ids=['tm_post'])"
+    assert tail_gate.edl_holds(edl, TL) == []
 
 
 def test_a_visual_only_freeze_overlay_is_a_hold_and_a_pip_is_not():
@@ -224,3 +220,22 @@ def test_export_final_passes_a_live_tail(monkeypatch):
             {"user_id": 60}, {"project_id": 3824, "edl_version": 34})
     assert result["isError"] is False
     assert result["structuredContent"]["export"]["job_id"] == 777
+
+
+def test_p5724_interpolated_moving_tail_can_export(monkeypatch):
+    from flask import Flask, jsonify
+    edl = {"keep": [[0, 13.9]],
+           "speed": [{"id": "ramp11_rp4", "start": 13.2, "end": 13.9, "factor": 0.958}],
+           "fx": [{"id": "ramp11_interp1", "type": "time", "kind": "interpolate",
+                   "start": 9.5, "end": 13.9}]}
+    cur = _Cur(edl, qc={"stall": []})
+    with Flask(__name__).app_context():
+        @contextlib.contextmanager
+        def connect():
+            yield type("C", (), {"cursor": lambda self: cur, "rollback": lambda self: None})()
+        monkeypatch.setattr(mcpmod, "vdb", connect)
+        monkeypatch.setattr(mcpmod, "_project_for_user", lambda *_: {"id": 5724})
+        monkeypatch.setattr(mcpmod, "_open_verification_findings", lambda *_: [])
+        monkeypatch.setattr(mcpmod, "_request_final", lambda *a, **k: jsonify(job_id=777))
+        receipt = mcpmod._t_export_final({"user_id": 1}, {"project_id": 5724, "edl_version": 14})
+    assert not receipt["isError"] and receipt["structuredContent"]["export"]["job_id"] == 777
