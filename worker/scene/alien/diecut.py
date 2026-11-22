@@ -67,6 +67,26 @@ def lift_curve(n, up=7, down=5):
     return [float(v) for v in e]
 
 
+def caption_handoff(items, text, a, z, fps):
+    """Pass the same lettering from its spoken caption into the cutout on this beat."""
+    def spelling(s):
+        return "".join(c for c in s.casefold() if c.isalnum())
+
+    caps = sorted((i for i in items if i.get("role") == "cap" and i.get("k") == "word"
+                   and spelling(i["t"]) == spelling(text) and i["f"][0] < z and a < i["f"][1]),
+                  key=lambda i: i["f"][0])
+    cursor, clipped = a, []
+    for cap in caps:
+        start, end = cap["f"]
+        if start - cursor >= 8:
+            return cursor, start, clipped
+        handoff = min(end, max(cursor, start + max(1, round(fps * .23))))
+        if handoff < end:
+            clipped.append(sense.slice_shot(cap, start, handoff))
+        cursor = max(cursor, handoff)
+    return (cursor, z, clipped) if z - cursor >= 8 else (a, z, [])
+
+
 def plan(l1, work, ask):
     fps = float(l1.get("fps") or 30)
     W, H = [int(v) for v in (l1.get("frame") or [1080, 1920])]
@@ -77,6 +97,10 @@ def plan(l1, work, ask):
     if z - a < 8:                                             # a lift needs eight frames: the word is held that long
         z = min(a + 8, int(l1["dur_f"]))
         a = max(0, z - 8)
+    captions = []
+    workflow = l1.get("workflow_text_layout")
+    if workflow:
+        a, z, captions = caption_handoff(l1["items"], text, a, z, fps)
     voice = {"font": ask.get("font") or "InterDisplay-Black.ttf", "track": 0, "shadow": {"a": 0.5, "blur": 0.016}}
     voice["px"] = round(glyphs.fit_px(voice, text, float(ask.get("width") or 0.84) * W, cap_px=0.2 * H), 2)
     _, b = glyphs.box(voice, text, voice["px"])
@@ -146,12 +170,14 @@ def plan(l1, work, ask):
         gr = dict({"lift": 0.0, "gamma": 1.0, "gain": 1.0, "sat": 1.0, "contrast": 1.0, "temp": 0.0, "tint": 0.0},
                   **(sh.get("grade") or (l1.get("film") or {}).get("grade") or {}))
         gr["gain"] = round(gr["gain"] * (1.0 + 0.20 * v), 4)   # lifted into the light
+        if workflow:
+            it["glyph_light"] = round(min(v, 1.0), 4)
         it["grade"] = gr
         items.append(it)
         f = g
     for layer in items:
         layer["text_group"] = ask["id"]
-    return {"items": items, "voices": {vname: voice, vname + ".rim": {k: v for k, v in voice.items() if k != "shadow"}},
+    return {"items": items + captions, "voices": {vname: voice, vname + ".rim": {k: v for k, v in voice.items() if k != "shadow"}},
             "marks": [{"f": a, "what": "diecut lift"}, {"f": z - 1, "what": "diecut seat"}],
             "seat": {"x": sx, "y": sy, "w": bw, "h": bh, "f": [a, z]},
             "log": {"px": voice["px"], "seat": [round(sx, 4), round(sy, 4)], "junctions": len(items) - 2, "borrowed_frames": borrowed}}

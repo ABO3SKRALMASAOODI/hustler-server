@@ -151,3 +151,13 @@ def test_cues_need_both_a_story_decision_and_a_picture_landing(monkeypatch):
         abs((p["voice_db"] - p["peak_db"]) - 10.7) < 0.2 for p in report["placed"]
     )
     assert report["sounds"] == 2
+
+
+def test_wang_payoff_hands_the_spoken_word_to_its_live_cutout():
+    from scene.alien.diecut import caption_handoff
+    cap = word("w0190", "compounds", "v", .23, .615, [1516, 1555], "cap")
+    cap["op"] = [1.] * 39
+    start, end, changed = caption_handoff([cap], "Compounds.", 1513, 1556, 30)
+    assert (start, end) == (1523, 1556)
+    assert len(changed) == 1 and changed[0]["f"] == [1516, start]
+    assert changed[0]["id"] == cap["id"] and len(changed[0]["op"]) == 7

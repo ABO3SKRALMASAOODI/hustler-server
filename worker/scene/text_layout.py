@@ -146,7 +146,9 @@ def resolve(scene):
                     overflow.add(f)
                 offset = 0.0
             dy[f] = offset
-            occupied[f].append((x0, y0 + offset, x1, y1 + offset))
+            # Leave a line of breathing room around display lettering at phone size.
+            margin = 0.027 if "layers" in it else 0.0
+            occupied[f].append((x0, y0 + offset - margin, x1, y1 + offset + margin))
         if any(dy.values()):
             ys = [A(it.get("y", 0), f, lo) + dy.get(f, 0.0) for f in range(lo, hi)]
             it["y"] = ys[0] if min(ys) == max(ys) else ys

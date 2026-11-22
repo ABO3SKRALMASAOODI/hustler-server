@@ -884,7 +884,7 @@ class Runtime:
             gx, gy = X + m["cx"] * s0, Y + m["cy"] * s0           # its centroid: the point it grows from
             rx, ry = gx + (m["x0"] - m["cx"]) * s, gy + (m["y0"] - m["cy"]) * s
             sw, sh_ = self.plan.masks.shape[1], self.plan.masks.shape[0]
-            J = (float(it.get("noise", 0.0)) * k, 0.0, 0.0, 0.0)
+            J = (float(it.get("noise", 0.0)) * k, float(it.get("glyph_light", 0.0)), k, 0.0)
             self.U(p, uMR=(rx, ry, m["w"] * s, m["h"] * s), uMUV=(m["ax"] / sw, 0.0, m["w"] / sw, m["h"] / sh_),
                    uMSpread=m["spread"] * s)
         self.snapshot()
