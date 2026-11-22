@@ -376,15 +376,13 @@ def remove_region_effect(ctx, ids):
     """Remove region effects by id."""
     edl = _latest(ctx)
     want = _ids(ids)
-    have = {i.get("id"): i for i in edl.get("fx") or []}
-    bad = [i for i in want if (have.get(i) or {}).get("type") != "region"]
-    if not want or bad:
-        existing = ", ".join(i for i, it in have.items()
-                             if it.get("type") == "region") or "none"
-        return (f"REJECTED: not region effects: {', '.join(bad) or '(none)'}"
-                f". Region effects here: {existing}.")
+    from tools_ext._write import removal_targets
+    current = [i["id"] for i in edl.get("fx") or [] if i.get("type") == "region"]
+    want, note = removal_targets(want, current, "region effect")
+    if not want:
+        return note
     return _write.commit(ctx, [_write.remove_fx(i) for i in want],
-                         f"removed region effect(s) {', '.join(want)}")
+                         f"removed region effect(s) {', '.join(want)}") + (" " + note if note else "")
 
 
 # ── catalog ──────────────────────────────────────────────────────────────

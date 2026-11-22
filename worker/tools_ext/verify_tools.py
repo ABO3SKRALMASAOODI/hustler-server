@@ -236,36 +236,9 @@ def matte_state(ctx, edl):
 # "no zooms", "don't zoom", "remove the whoosh", "without sound effects" name
 # the thing to refuse it: a mention preceded by a negation or a removal verb
 # in the same clause is not an ask.
-_ZOOM_ASK = r"(zoom|punch[- ]?in|push[- ]?in)\w*"
-_SFX_ASK = r"(sound[- ]?effects?|sfx|whoosh\w*|swoosh\w*)"
-_REFUSAL = (r"\b(no|not|never|don'?t|do not|without|stop|remove|delete|drop|"
-            r"cut|kill|lose|less|fewer|zero|nothing|avoid|skip|minus)\b")
-
-
-def _asks_for(text, pattern):
-    import re
-    for m in re.finditer(r"\b" + pattern, text, re.I):
-        clause = re.split(r"[.!?;,]|\b(?:but|and then|then)\b",
-                          text[:m.start()], flags=re.I)[-1]
-        if not re.search(_REFUSAL, clause, re.I):
-            return True
-    return False
-
-
 def _asked(ctx, asked):
-    out = {str(a).lower() for a in (asked or ()) if str(a).lower() in _ASKED}
-    text = str(getattr(ctx, "user_message", "") or "")
-    try:
-        import flash_safety
-        if flash_safety.opted_in(text):
-            out.add("flash")
-    except Exception:  # noqa: BLE001
-        pass
-    if _asks_for(text, _ZOOM_ASK):
-        out.add("zoom")
-    if _asks_for(text, _SFX_ASK):
-        out.add("sfx")
-    return out
+    from score.asks import requested_devices
+    return requested_devices(ctx) | set(asked or ()).intersection(_ASKED)
 
 
 # ── the verbs ────────────────────────────────────────────────────────────

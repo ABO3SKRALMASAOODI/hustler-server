@@ -21,6 +21,19 @@ def upsert_fx(item):
             "value": dict(item)}
 
 
+def removal_targets(ids, current, kind):
+    """Return existing targets and the receipt for targets already absent."""
+    current = {str(i) for i in current}
+    requested = list(dict.fromkeys(str(i) for i in ids or []))
+    found = [i for i in requested if i in current]
+    absent = [i for i in requested if i not in current]
+    if not absent:
+        return found, "" if found else f"No {kind} selected to remove."
+    remaining = ", ".join(sorted(current - set(found))) or "none"
+    return found, (f"{kind} {', '.join(absent)} already absent; "
+                   f"current {kind} ids: {remaining}.")
+
+
 def remove_fx(item_id):
     """The operation that removes one fx item."""
     return {"action": "remove", "layer": "fx", "id": str(item_id)}

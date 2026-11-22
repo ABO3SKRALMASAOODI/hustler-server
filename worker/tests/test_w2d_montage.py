@@ -170,13 +170,9 @@ def test_plan_to_music_writes_one_batch_with_its_intent(monkeypatch):
     assert len(ctx.lines) == 1 and "no sound" not in out.lower()
 
 
-def test_strobe_needs_the_users_ask(monkeypatch):
+def test_editor_chosen_strobe_survives_without_reinterpreting_the_request(monkeypatch):
     modes = {"verse": "strobe"}
     ctx = ctx_with(monkeypatch, pool())
-    out = MT.plan_to_music(ctx, 0, 18, modes=modes)
-    assert "flash safety" in out
-    assert not [f for f in ctx.edl["fx"] if f["type"] == "strobe"]
-    ctx = ctx_with(monkeypatch, pool(), msg="strobe the verse please")
     out = MT.plan_to_music(ctx, 0, 18, modes=modes)
     st = [f for f in ctx.edl["fx"] if f["type"] == "strobe"]
     assert len(st) == 1 and all(fr["hold_f"] == 2 for fr in st[0]["frames"])
@@ -233,7 +229,7 @@ def test_a_recorded_montage_replans_deterministically(monkeypatch):
 def test_a_song_swap_recuts_the_montage_on_the_new_track(monkeypatch,
                                                          tmp_path):
     ctx = ctx_with(monkeypatch, pool())
-    MT.plan_to_music(ctx, 0, 18, seed=4)
+    MT.plan_to_music(ctx, 0, 18, seed=4, modes={"verse": "strobe"})
     e = json.loads(json.dumps(ctx.edl))
     e["music"][0]["storage_key"] = "music/new.mp3"
     e["music"][0]["offset_s"] = None
@@ -242,6 +238,7 @@ def test_a_song_swap_recuts_the_montage_on_the_new_track(monkeypatch,
     e2, notes = hooks.on_music_swap(e, "m1", "m1")
     assert any("re-cut on the new track" in n for n in notes), notes
     e2 = schemas.validate_edl(e2, S.DUR).model_dump()
+    assert any(it["type"] == "strobe" for it in e2["fx"])
     new = rmap(bpm=150.0, n=50, intro=0)
     kick_f = {montage.frame(o["t"], 25.0) for o in new["onsets"]}
     starts = [montage.frame(o["start"] + 0.005, 25.0)

@@ -625,11 +625,14 @@ def remove_world(ctx, ids):
         elif i in motion and motion[i].get("anchor") is not None:
             ops.append(_anchor_op(i, None))
             done.append(i)
-    if not want or len(done) != len(want):
-        bad = [i for i in want if i not in done]
-        return (f"REJECTED: not world items or attached graphics: "
-                f"{', '.join(bad) or '(none)'}.")
-    return _write.commit(ctx, ops, f"removed/detached {', '.join(done)}")
+    current = [i for i, item in fx.items()
+               if item.get("type") in ("track", "object", "plane", "light", "recolour")]
+    current.extend(i for i, item in motion.items() if item.get("anchor") is not None)
+    _, note = _write.removal_targets(want, current, "world item")
+    if not done:
+        return note
+    result = _write.commit(ctx, ops, f"removed/detached {', '.join(done)}")
+    return result + (" " + note if note else "")
 
 
 def look_at_world(ctx, times=None, output_times=None, start=None, end=None):

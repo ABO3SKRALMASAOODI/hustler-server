@@ -56,24 +56,22 @@ def test_a_word_by_word_build_under_the_minimum_plays_without_overlap():
         notes=notes)
     texts = sorted(out["texts"], key=lambda t: t["start"])
     assert len(texts) == len(LINE)
-    for t in texts:
-        assert round(t["end"] - t["start"], 2) >= 0.3, t
+    assert [t["start"] for t in texts] == [t["start"] for t in _line()]
     # the words follow each other: no two on screen together, order kept
     for a, b in zip(texts, texts[1:]):
         assert b["start"] >= a["end"] - 1e-6, (a, b)
     assert [t["text"] for t in texts] == [" ".join(LINE[:k + 1])
                                           for k in range(len(LINE))]
     assert texts[0]["start"] == 0.5 and texts[-1]["end"] == 32.59
-    assert any("now play 0.3s" in n and "promo_1 0.25s" in n for n in notes), \
-        notes
+    assert notes == []
 
 
-def test_a_short_text_at_the_end_moves_back_inside_the_programme():
+def test_a_short_text_at_the_end_keeps_its_onset_inside_the_programme():
     out = edit_batch.apply_batch(default_edl(10.0), [
         {"action": "upsert", "layer": "texts", "id": "end",
          "value": {"text": "Sunday", "start": 9.9, "end": 10.0}}], 10.0, {})
     t = out["texts"][0]
-    assert t["end"] == 10.0 and t["start"] == 9.7
+    assert t["end"] == 10.0 and t["start"] == 9.9
 
 
 def test_overlapping_texts_that_were_meant_together_are_left_together():
@@ -85,3 +83,13 @@ def test_overlapping_texts_that_were_meant_together_are_left_together():
     by = {t["id"]: t for t in out["texts"]}
     assert (by["a"]["start"], by["a"]["end"]) == (1.0, 1.3)
     assert (by["b"]["start"], by["b"]["end"]) == (1.0, 3.0)
+
+
+def test_twenty_spoken_words_and_a_separate_title_keep_their_times():
+    words = [{"id": f"w{i}", "text": str(i), "start": 1+i/4, "end": 1.25+i/4}
+             for i in range(20)]
+    title = {"id": "later", "text": "Doors open", "start": 6, "end": 8}
+    out = edit_batch.apply_batch(default_edl(8), [{"action": "set", "layer": "texts",
+                                  "value": words + [title]}], 8, {})
+    assert [(t["start"], t["end"]) for t in out["texts"]] == [
+        (t["start"], t["end"]) for t in words + [title]]
