@@ -844,6 +844,7 @@ def test_question_need_asks_the_plans_helper_model_not_the_upgrade(monkeypatch):
 def test_paid_opus_week_2026_11_21(plan):
     picked = model_budget.decide(World(wallet=200), CUSTOMER, HAIKU, True, now=NOW, plan=plan)
     assert picked["model"] == OPUS
+    assert picked["credits_charged"] == 0.0
     assert "upgrade your plan" in model_prices.low_balance_notice(picked, 1)
     assert model_prices.low_balance_notice(picked, 5000) is None
     assert model_budget.decide(World(wallet=0), CUSTOMER, HAIKU, True, now=NOW, plan=plan)["model"] == HAIKU

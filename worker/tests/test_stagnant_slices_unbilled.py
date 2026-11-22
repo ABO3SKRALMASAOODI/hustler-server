@@ -96,6 +96,10 @@ class _Cursor:
             self.shared.claimed = float(params[4])
             self._row = {"credits_used": float(params[4])}
             return
+        if normalized.startswith("UPDATE video_jobs SET payload = jsonb_set") and "model_budget,credits_charged" in normalized:
+            assert params[0] == self.shared.claimed
+            self._row = None
+            return
         if normalized.startswith("UPDATE users"):
             self.shared.debited = float(params[2])
             self._row = None

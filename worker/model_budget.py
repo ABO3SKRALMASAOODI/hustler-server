@@ -793,7 +793,9 @@ def plan_rungs(cfg, plan, floor):
 
 
 def _decision(model, plan_model, reason, cfg=None, **numbers):
-    out = {"model": model, "plan_model": plan_model, "reason": reason,
+    # The meter starts at zero. Settlement replaces it on the root job only
+    # when credits are debited. Unbilled requests retain their actual zero.
+    out = {"model": model, "plan_model": plan_model, "reason": reason, "credits_charged": 0.0,
            "upgraded": model != plan_model,
            "markup": (cfg or DEFAULTS)["markup"] if model != plan_model else 2.0,
            "decided_at": _now().isoformat()}
