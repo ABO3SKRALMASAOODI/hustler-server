@@ -149,6 +149,8 @@ def plan(l1, work, ask):
         it["grade"] = gr
         items.append(it)
         f = g
+    for layer in items:
+        layer["text_group"] = ask["id"]
     return {"items": items, "voices": {vname: voice, vname + ".rim": {k: v for k, v in voice.items() if k != "shadow"}},
             "marks": [{"f": a, "what": "diecut lift"}, {"f": z - 1, "what": "diecut seat"}],
             "seat": {"x": sx, "y": sy, "w": bw, "h": bh, "f": [a, z]},

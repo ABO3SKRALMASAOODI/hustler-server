@@ -880,7 +880,7 @@ class Runtime:
             v = self.plan.voices.get(it.get("v")) or {}
             s0 = float(v.get("px", 58)) / m["px"]                 # mask texels to frame pixels at scale 1
             s = s0 * float(A(it.get("s", 1.0), f, lo))
-            X, Y = float(it.get("x0", 0.5)) * W, float(it.get("y0", 0.5)) * H    # the glyph's pen origin on the frame
+            X, Y = float(A(it.get("x0", 0.5), f, lo)) * W, float(A(it.get("y0", 0.5), f, lo)) * H    # the glyph's pen origin on the frame
             gx, gy = X + m["cx"] * s0, Y + m["cy"] * s0           # its centroid: the point it grows from
             rx, ry = gx + (m["x0"] - m["cx"]) * s, gy + (m["y0"] - m["cy"]) * s
             sw, sh_ = self.plan.masks.shape[1], self.plan.masks.shape[0]

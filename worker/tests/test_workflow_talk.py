@@ -54,6 +54,35 @@ def test_wang_02_frame_42_keeps_counter_label_and_ladder():
     assert len(scene["items"]) == 3
 
 
+def test_wang_01_cutout_rim_and_live_letters_stay_registered():
+    voice = {"px": 82, "font": "ArchivoBlack-Regular.ttf"}
+    hole = dict(
+        word("hole", "year", "v", 0.12, 0.44, [42, 44], "big"), text_group="lift"
+    )
+    rim = dict(hole, id="rim", x=0.115, y=0.437)
+    mask = dict(
+        id="live",
+        k="join",
+        mode="glyph",
+        v="v",
+        t="year",
+        x0=0.114,
+        y0=0.438,
+        f=[42, 44],
+        text_group="lift",
+        s=1,
+    )
+    caption = word("caption", "for about a year", "v", 0.12, 0.44, [42, 44], "cap")
+    scene = dict(
+        frame=[1080, 1920], voices={"v": voice}, items=[hole, rim, mask, caption]
+    )
+    resolve(scene)
+    assert (hole["y"], rim["y"], mask["y0"]) == (0.44, 0.437, 0.438)
+    h = item_box(hole, scene["voices"], 1080, 1920, 42)
+    c = item_box(caption, scene["voices"], 1080, 1920, 42)
+    assert h[3] <= c[1] or c[3] <= h[1]
+
+
 def test_scrim_follows_visible_ink_on_bright_ground():
     w = word("cap", "META", "cap", 0.30, 0.64, [1, 2], "cap")
     voice = dict(

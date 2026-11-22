@@ -12,12 +12,62 @@ def resolve(scene):
     occupied = defaultdict(list)
     overflow = set()
     active = defaultdict(list)
-    words = [it for it in scene["items"] if it["k"] == "word"]
+    words, groups = [], {}
+    for layer in scene["items"]:
+        glyph = layer["k"] == "join" and layer.get("mode") == "glyph"
+        if not glyph and layer["k"] != "word":
+            continue
+        group = layer.get("text_group")
+        if group is None and not glyph:
+            words.append(layer)
+            continue
+        key = group or layer["id"]
+        g = groups.setdefault(
+            key, {"id": key, "role": "registered", "layers": [], "boxes": {}}
+        )
+        g["layers"].append(layer)
+        lo, hi = layer["f"]
+        measure = (
+            dict(layer, k="word", x=layer.get("x0", 0.5), y=layer.get("y0", 0.5))
+            if glyph
+            else layer
+        )
+        for f in range(lo, hi):
+            if A(layer.get("a" if glyph else "op", 1), f, lo) <= 0.01:
+                continue
+            box = item_box(measure, voices, width, height, f)
+            if box:
+                old = g["boxes"].get(f, box)
+                g["boxes"][f] = (
+                    min(old[0], box[0]),
+                    min(old[1], box[1]),
+                    max(old[2], box[2]),
+                    max(old[3], box[3]),
+                )
+    for g in groups.values():
+        if g["boxes"]:
+            g["f"] = [min(g["boxes"]), max(g["boxes"]) + 1]
+            words.append(g)
+
+    def frame_box(it, f):
+        if "layers" not in it:
+            return item_box(it, voices, width, height, f)
+        box = it["boxes"].get(f)
+        if box:
+            lo = it["f"][0]
+            dx, dy, scale = (
+                A(it.get(k, v), f, lo) for k, v in (("x", 0), ("y", 0), ("s", 1))
+            )
+            return tuple(
+                0.5 + (n - 0.5) * scale + (dy if i % 2 else dx)
+                for i, n in enumerate(box)
+            )
+
     # One constant translation over an item's life whenever possible. Earlier
     # words at the same priority keep their seat as the next word types on.
     words.sort(
         key=lambda it: (
-            {"cap": 0, "big": 2, "stat": 3}.get(it.get("role"), 1),
+            {"registered": -1, "cap": 0, "big": 2, "stat": 3}.get(it.get("role"), 1),
             it["f"][0],
             -it.get("z", 0),
             it["id"],
@@ -28,7 +78,7 @@ def resolve(scene):
         boxes = {}
         for f in range(lo, hi):
             if A(it.get("op", 1), f, lo) > 0.01:
-                box = item_box(it, voices, width, height, f)
+                box = frame_box(it, f)
                 if box:
                     boxes[f] = box
                     active[f].append(it)
@@ -102,7 +152,7 @@ def resolve(scene):
         stack = active[f]
         slot = 0.86 / len(stack)
         for row, it in enumerate(stack):
-            x0, y0, x1, y1 = item_box(it, voices, width, height, f)
+            x0, y0, x1, y1 = frame_box(it, f)
             scale = min(
                 1.0, 0.93 * slot / max(y1 - y0, 1e-6), 0.94 / max(x1 - x0, 1e-6)
             )
@@ -121,3 +171,25 @@ def resolve(scene):
                 if not isinstance(it.get(key), list):
                     it[key] = [it.get(key, 1 if key == "s" else 0)] * (hi - lo)
                 it[key][f - lo] = val
+
+    # Move all layers of a stencil by the same transform. Separating the dark
+    # cutout, bright rim and live footage mask makes one word read as two.
+    for g in groups.values():
+        if not any(k in g for k in ("x", "y", "s")):
+            continue
+        origin = g["f"][0]
+        for layer in g["layers"]:
+            lo, hi = layer["f"]
+            for coord, offset in (("x", "x"), ("y", "y"), ("s", "s")):
+                key = coord + "0" if layer["k"] == "join" and coord != "s" else coord
+                base = layer.get(key, 1 if key == "s" else 0)
+                values = []
+                for f in range(lo, hi):
+                    scale = A(g.get("s", 1), f, origin)
+                    n = A(base, f, lo)
+                    values.append(
+                        n * scale
+                        if key == "s"
+                        else 0.5 + (n - 0.5) * scale + A(g.get(offset, 0), f, origin)
+                    )
+                layer[key] = values[0] if min(values) == max(values) else values
