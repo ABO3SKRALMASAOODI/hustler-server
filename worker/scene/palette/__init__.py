@@ -108,6 +108,21 @@ def _alien_entries():
                 got = sense.matte()
                 if got:
                     l1 = dict(l1, assets=dict(l1.get("assets") or {}, **got))
+            if name == "diecut" and not ask.get("faces") and not ask.get("seat"):
+                from ..alien import sense as clock
+                span = ask.get("f") or [0, 1]
+                lo, hi = span if isinstance(span, (tuple, list)) else (span, span + 1)
+                W, H = l1["frame"]
+                faces = []
+                for frame in {lo, (lo + hi) // 2, max(lo, hi - 1)}:
+                    sh = sense.shot_at(frame)
+                    asset = (l1.get("assets") or {}).get((sh or {}).get("pic")) or {}
+                    if not sh or not asset.get("w") or not asset.get("h"):
+                        continue
+                    x, y, right, bottom = clock.crop_at(sh, frame, asset["w"], asset["h"], W, H)
+                    for l, t, r, b, _ in sense.faces(sh["pic"], clock.src_time(sh, frame, l1["fps"])):
+                        faces.append([(l-x)/(right-x), (t-y)/(bottom-y), (r-l)/(right-x), (b-t)/(bottom-y)])
+                ask = dict(ask, faces=faces)
             patch = fn(l1, work, ask)
             if got and isinstance(patch, dict) and not patch.get("skip"):
                 patch = dict(patch, assets=dict(patch.get("assets") or {}, **got))
