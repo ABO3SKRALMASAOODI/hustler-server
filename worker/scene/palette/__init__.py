@@ -671,6 +671,13 @@ def apply(l1, work, asks=None, pool=None):
             log.append(dict(row, done=False, tried=tried))
             continue
         dev, (patch, nxt) = landed
+        if l1.get("workflow_text_layout") and dev in SETS_WORDS:
+            original_ids = {i["id"] for i in cur["items"]}
+            new_type = {i["id"] for i in patch.get("items") or [] if i["k"] == "word" and i["id"] not in original_ids}
+            if len(new_type) > 1:
+                for it in nxt["items"]:
+                    if it["id"] in new_type:
+                        it.setdefault("text_group", ask["id"])
         made |= {i["id"] for i in patch.get("items") or []}
         echoes = set()
         if dev in SETS_WORDS:

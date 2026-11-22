@@ -12,6 +12,12 @@ def resolve(scene):
     occupied = defaultdict(list)
     overflow = set()
     active = defaultdict(list)
+    for layer in scene["items"]:
+        if layer.get("source_ink"):
+            lo, hi = layer["f"]
+            for f in range(lo, hi):
+                if A(layer.get("op", 1), f, lo) > .01:
+                    occupied[f].extend(layer["source_ink"])
     words, groups = [], {}
     for layer in scene["items"]:
         glyph = layer["k"] == "join" and layer.get("mode") == "glyph"

@@ -83,6 +83,19 @@ def test_wang_01_cutout_rim_and_live_letters_stay_registered():
     assert h[3] <= c[1] or c[3] <= h[1]
 
 
+def test_source_comparison_labels_keep_their_seat_under_a_device_title():
+    voices = {"v": {"px": 94, "font": "ArchivoBlack-Regular.ttf"}}
+    title = dict(word("image", "IMAGE", "v", .24, .40, [1060, 1064], "big"), text_group="brackets")
+    left = dict(title, id="left", t="[", x=.13)
+    native = [.20, .34, .76, .39]
+    card = {"k": "card", "id": "source", "f": [1057, 1090], "source_ink": [native]}
+    scene = dict(frame=[1080, 1920], voices=voices, items=[card, title, left])
+    resolve(scene)
+    b = item_box(title, voices, 1080, 1920, 1062)
+    assert b[3] <= native[1] or b[1] >= native[3]
+    assert title["y"] == left["y"]
+
+
 def test_scrim_follows_visible_ink_on_bright_ground():
     w = word("cap", "META", "cap", 0.30, 0.64, [1, 2], "cap")
     voice = dict(
