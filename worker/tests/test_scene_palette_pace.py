@@ -518,7 +518,12 @@ def test_shrink_never_lifts_a_layouts_ground_away_from_its_cards(film):
     l1, work = film
     out, _ = lay(l1, work, {"dev": "split", "id": "sp", "f": [120, 180], "pics": ["p1", "p2"]})
     patch = palette.plan(out, work, {"dev": "shrink", "id": "sh", "at": 180, "frames": 14})
-    assert patch.get("skip")
+    cards = {it["id"]: it for it in out["items"] if it["k"] == "card"}
+    assert {it["id"] for it in patch["items"]} == set(cards)
+    for item in patch["items"]:
+        original = cards[item["id"]]
+        assert item["pic"] == original["pic"] and item["f"] == original["f"]
+        assert item["s"][-1] < item["s"][0]
 
 
 def _held(out, prefix):

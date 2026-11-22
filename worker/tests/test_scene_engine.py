@@ -699,7 +699,8 @@ def test_optional_film_layers_draw():
 
 def env_peak(mix):
     """Peak of the 10 ms envelope, in seconds: what the manifest's peak_s measures."""
-    e = np.abs(mix).sum(1)
+    # The library measures the loudest 10 ms of mono power (test_sfx_timing).
+    e = np.square(mix.mean(axis=1))
     return float(np.argmax(np.convolve(e, np.ones(480) / 480, "same"))) / engine.SR
 
 

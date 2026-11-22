@@ -288,7 +288,8 @@ def test_the_default_never_embeds_however_small_the_file():
     for size in (1, 4 * MB, 11 * MB):
         out = mcp_media.prepare(_Ctx(bytes=size), {}, 12 * MB)
         assert out["video"]["inline"] is False, f"{size} bytes was embedded"
-    assert "LINK BELOW IS THE VIDEO" in out["text"]
+        assert out["video"]["storage_key"] == "media/3/prev.mp4"
+        assert "timeline preview" in out["text"]
 
 
 def test_embedding_is_opt_in_and_says_what_it_costs():
