@@ -560,11 +560,14 @@ def hear_devices(ctx, l1, beats, replan, name="l1_heard.json"):
         laid = lay_devices(ctx, path)
         if laid == path:
             return dict(heard=0, why="the devices were not laid")
-        ev = [e for e in json.load(open(laid)).get("device_events") or [] if isinstance(e, dict) and isinstance(e.get("f"), (int, float))]
+        composed = json.load(open(laid))
+        if "story_cues" in l1:
+            l1["story_landings"] = composed.get("story_landings") or []
+        ev = [e for e in composed.get("device_events") or [] if isinstance(e, dict) and isinstance(e.get("f"), (int, float))]
     except Exception as e:  # noqa: BLE001 - the film keeps its sound
         ctx.log(f"sound on the devices skipped: {str(e)[:300]}")
         return dict(fault=str(e)[:300])
-    if not ev:              # nothing landed that the sound could hear (a worker without the palette): the first plan stands
+    if not ev and not l1.get("story_landings"):  # nothing landed that the sound could hear (a worker without the palette): the first plan stands
         return dict(events=0)
     l1["device_events"] = ev
     if beats is not None:
