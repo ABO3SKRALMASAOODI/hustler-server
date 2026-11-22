@@ -46,7 +46,8 @@ from pydantic import (AfterValidator, BaseModel, Field, field_validator,
 # from renderer PTS; do not reuse their word times for a new indexing job.
 # v13 validates uncertain ASR words before caption styling. Reusing a v12
 # index would preserve the confident mishearing this generation corrects.
-PIPELINE_VERSION = 13
+# v14 recovers speech in untranscribed passages of otherwise usable indexes.
+PIPELINE_VERSION = 14
 
 MIN_SPAN_S = 0.05
 GAIN_MIN_DB = -60.0

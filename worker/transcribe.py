@@ -293,10 +293,75 @@ def _report_progress(progress_cb, fraction):
         pass
 
 
+def _voiced_gaps(wav, words):
+    """Yield voiced PCM and its original sample offset inside holes in the index."""
+    import numpy as np
+    from faster_whisper.vad import get_speech_timestamps
+
+    rate = wav.getframerate()
+    end = wav.getnframes()
+    cursor = 0
+    for word in [*words, None]:
+        stop = end if word is None else min(end, round(word.t0 * rate))
+        # Two seconds is Whisper VAD's normal pause between utterances. A
+        # partial index can have long holes even when its total count looks fine.
+        if stop - cursor >= 2 * rate:
+            # Overlap adjacent blocks so a sentence crossing a read boundary
+            # has context on both sides. Each word has one owner by midpoint.
+            for core in range(cursor, stop, 45 * rate):
+                core_end = min(stop, core + 45 * rate)
+                start = max(cursor, core - rate)
+                finish = min(stop, core_end + rate)
+                wav.setpos(start)
+                samples = np.frombuffer(wav.readframes(finish - start), dtype="<i2").astype("float32") / 32768
+                if not samples.any():
+                    continue
+                for speech in get_speech_timestamps(samples, sampling_rate=rate, min_speech_duration_ms=250):
+                    left, right = int(speech["start"]), int(speech["end"])
+                    yield samples[left:right], (start + left) / rate, core / rate, core_end / rate
+        if word is not None:
+            cursor = max(cursor, min(end, round(word.t1 * rate)))
+
+
+def _recover_missing_dialogue(wav_path, words, lang, warnings):
+    """Decode untranscribed voiced passages, keeping primary words and diarization intact."""
+    import wave
+    additions = []
+    try:
+        with wave.open(str(wav_path), "rb") as wav:
+            if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) != (1, 2, 16000):
+                return words, lang
+            for audio, offset, start, end in _voiced_gaps(wav, words):
+                recovered, recovered_lang = _transcribe_whisper(audio, presegmented=True)
+                clip_end = len(audio) / 16000
+                for word in recovered:
+                    t0 = round(offset + max(0.0, word.t0), 3)
+                    t1 = round(offset + min(clip_end, word.t1), 3)
+                    if t1 > t0 and start <= (t0 + t1) / 2 < end:
+                        additions.append(word.model_copy(update={"t0": t0, "t1": t1}))
+                if not words and recovered:
+                    lang = recovered_lang
+    except Exception as exc:
+        print(f"[transcribe] missing-dialogue recovery: {type(exc).__name__}", flush=True)
+    if additions:
+        if warnings is not None:
+            warnings.append(f"Recovered {len(additions)} words from speech in gaps in the original transcript.")
+        return sorted([*words, *additions], key=lambda w: w.t0), lang
+    return words, lang
+
+
 def transcribe(wav_path, warnings=None, progress_cb=None):
     """Returns (words: [Word], language: str)."""
     _report_progress(progress_cb, 0.0)
+    try:
+        words, lang = _primary_transcription(wav_path, warnings, progress_cb)
+        return _recover_missing_dialogue(wav_path, words, lang, warnings)
+    finally:
+        if config.TRANSCRIBER == "deepgram" and _model is not None:
+            _release_model()
 
+
+def _primary_transcription(wav_path, warnings, progress_cb):
     def transcribe_local():
         # Preserve the historical one-argument call when progress is unused;
         # downstream integrations and tests may wrap this seam.
@@ -326,8 +391,6 @@ def transcribe(wav_path, warnings=None, progress_cb=None):
                       "keeping the deepgram result", flush=True)
                 _report_progress(progress_cb, 1.0)
                 return words, lang
-            finally:
-                _release_model()
             if len(w_words) > len(words):
                 if warnings is not None and not any(
                         w.startswith(_SPARSE_PREFIX) for w in warnings):
@@ -353,17 +416,10 @@ def transcribe(wav_path, warnings=None, progress_cb=None):
                 warnings.append(
                     f"{_FALLBACK_PREFIX} ({str(e)[:100]}) — the transcript "
                     "may be less accurate than usual on noisy audio")
-        # Fallback only: whisper is not this deployment's transcriber, so
-        # holding the model resident afterwards buys nothing and can cost the
-        # whole worker. See _release_model.
-        try:
-            return transcribe_local()
-        finally:
-            _release_model()
     return transcribe_local()
 
 
-def _transcribe_whisper(wav_path, progress_cb=None):
+def _transcribe_whisper(wav_path, progress_cb=None, *, presegmented=False):
     """Returns (words: [Word], language: str)."""
     global _supports_hotwords
     model = get_model()
@@ -371,7 +427,7 @@ def _transcribe_whisper(wav_path, progress_cb=None):
     # last words of the clip); 500ms min-silence keeps short gaps inside
     # sentences from being dropped as non-speech.
     kwargs = dict(
-        word_timestamps=True, vad_filter=True,
+        word_timestamps=True, vad_filter=not presegmented,
         beam_size=config.WHISPER_BEAM_SIZE,
         # A temperature-fallback ladder + these thresholds are whisper's own
         # anti-hallucination guard: if a window decodes with a bad avg-logprob
