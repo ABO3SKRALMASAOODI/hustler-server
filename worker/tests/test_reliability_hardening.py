@@ -168,7 +168,7 @@ def test_dispatcher_requeues_prerequisite_without_failing(monkeypatch):
 def test_render_waits_while_the_source_is_being_analyzed():
     original = {"id": 11, "sha256": None, "storage_key": "o.mp4", "meta": {}}
     worker_db = _FnDb({
-        dbx.user_is_paid: True, dbx.video_settings: {},
+        dbx.render_account: (True, "ai"), dbx.video_settings: {},
         dbx.get_edl_version: {"json": default_edl(10)},
         dbx.latest_asset: original,
         dbx.live_index_job: {"id": 501, "state": "running", "progress": 37},

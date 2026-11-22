@@ -47,7 +47,8 @@ def test_the_director_lays_devices_on_a_built_story(tmp_path):
     rec = wf3.director_devices(ctx, dict(style=dict(id="reel")), sc, pack, l1, beats)
     assert rec["by"] == "signal" and rec["asked"]                      # a test never reaches a model: the signal director
     assert l1["devices"] and all(isinstance(a["f"], (int, list)) for a in l1["devices"])
-    assert json.load(open(tmp_path / "director.json"))["contract"] == 4
+    import director
+    assert json.load(open(tmp_path / "director.json"))["contract"] == director.CONTRACT
     worker = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(HERE)))), "worker")
     if not os.path.isdir(os.path.join(worker, "scene", "palette")):
         pytest.skip("no worker beside this plugin")

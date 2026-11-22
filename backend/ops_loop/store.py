@@ -11,7 +11,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from ops_loop import (EVIDENCE_KINDS, EVIDENCE_PREFIX, SEVERITIES, SURFACES,
+from ops_loop import (CAUSE_CLASSES, EVIDENCE_KINDS, EVIDENCE_PREFIX, SEVERITIES, SURFACES,
                       VERDICTS)
 from ops_loop.sessions import evidence_slug
 
@@ -406,9 +406,58 @@ def annotate(cur, session_key, fields, backfilled_from=None):
     return dict(cur.fetchone())
 
 
+def cause_prefix(value):
+    """Read a reviewer-supplied class prefix, never infer a class from prose."""
+    prefix, sep, _ = (value or "").partition(":")
+    return prefix if sep and prefix in CAUSE_CLASSES else None
+
+
+def checked_class(value):
+    if value not in CAUSE_CLASSES:
+        raise StoreError(f"unknown cause class {value!r}")
+    return value
+
+
+def classify_review(cur, session_key, reviewed_at, cause_class):
+    """Annotate the exact review read by the model, preserving subsequent reviews."""
+    _w(cur, """UPDATE session_reviews
+                  SET signals = COALESCE(signals, '{}'::jsonb) || %s::jsonb
+                WHERE session_key = %s AND reviewed_at = %s
+                  AND signals->>'cause_class' IS NULL RETURNING id""",
+       (json.dumps({"cause_class": checked_class(cause_class)}), session_key, reviewed_at))
+    return bool(cur.fetchone())
+
+
+def saved_ticket_class(ticket):
+    for event in reversed(ticket.get("history") or []):
+        if event.get("cause_class") in CAUSE_CLASSES:
+            return event["cause_class"]
+    return None
+
+
+def ticket_class(ticket):
+    return saved_ticket_class(ticket) or cause_prefix(ticket.get("cause_key"))
+
+
+def classify_ticket(cur, ticket_id, cause_class, *, missing_only=False):
+    """Record a diagnosis without altering ticket status or occurrence counts."""
+    checked_class(cause_class)
+    cur.execute("SELECT history, cause_key FROM tickets WHERE id = %s FOR UPDATE",
+                (ticket_id,))
+    ticket = cur.fetchone()
+    if not ticket:
+        raise StoreError(f"unknown ticket {ticket_id}")
+    previous = saved_ticket_class(ticket)
+    if previous == cause_class or (missing_only and previous):
+        return previous
+    _w(cur, "UPDATE tickets SET history = history || %s::jsonb WHERE id = %s",
+       (_history("classified", cause_class=cause_class), ticket_id))
+    return cause_class
+
+
 def write_verdict(cur, session, verdict, score, reasoning, evidence,
                   root_cause=None, request_summary=None, signals=None,
-                  reviewer="claude-opus", journey=None, rating=None):
+                  reviewer="claude-opus", journey=None, rating=None, cause_class=None):
     """Insert or replace the review of one settled session. `session` is the
     discovered session (key, surface, user, project, times, fingerprint and
     request ids come from the database, not from the agent). `journey` (the
@@ -444,6 +493,9 @@ def write_verdict(cur, session, verdict, score, reasoning, evidence,
                          "rates (RUBRIC_V3.md)")
     evidence = check_evidence(evidence, session["key"])
     signals = dict(signals or {})
+    cause_class = cause_class or cause_prefix(root_cause)
+    if cause_class:
+        signals["cause_class"] = checked_class(cause_class)
     signals.update(check_journey(journey, required=True))
     signals.update(check_rating(rating, verdict, score))
     evidence = _keep_old_score(cur, session["key"], evidence, signals)
@@ -534,7 +586,7 @@ def decide(ticket, happened_at, severity):
 
 
 def open_or_attach(cur, cause_key, title, severity, review_id=None,
-                   session_key=None, summary=None):
+                   session_key=None, summary=None, cause_class=None):
     """One ticket per cause. A new cause opens a ticket; a known open one
     gains the session (and the worse severity); a closed one that shows up
     again in a session that STARTED after it was closed reopens with
@@ -609,6 +661,10 @@ def open_or_attach(cur, cause_key, title, severity, review_id=None,
                        updated_at = NOW()
                    WHERE id = %s""",
            (review["settled_at"], review["started_at"], t["id"]))
+    diagnosis = cause_class or cause_prefix(cause_key)
+    inherited = (review.get("signals") or {}).get("cause_class")
+    if diagnosis or inherited:
+        classify_ticket(cur, t["id"], diagnosis or inherited, missing_only=not diagnosis)
     cur.execute("SELECT * FROM tickets WHERE id = %s", (t["id"],))
     return dict(cur.fetchone()), action
 
@@ -651,6 +707,9 @@ def record_failure(cur, f):
              "user": f.get("user_id"), "project": f.get("project_id"),
              "at": at.isoformat(timespec="seconds"),
              "detail": (f.get("detail") or "")[:400] or None}
+    diagnosis = f.get("cause_class") or cause_prefix(key)
+    if diagnosis:
+        entry["cause_class"] = checked_class(diagnosis)
     if f.get("job_id"):
         entry["job"] = f["job_id"]
     title = _clean((f.get("title") or key)[:200], 200, "title",

@@ -312,9 +312,10 @@ def test_a_device_that_sets_his_words_and_got_none_sets_the_words_said():
 
 def test_a_counters_figure_word_lands_on_its_frame():
     """A counter's lands is a word: read as a frame it drew the count in the first second (five Cuban films, 20 Nov)."""
-    d = dict(asks=[dict(dev="counter", at=dict(w=20, seg=1, word="1,200"), args=dict(lands=21, to=1200, fmt="{n} MILES")),
+    d = dict(asks=[dict(dev="counter", at=dict(w=20, seg=1, word="1,200"), args=dict(at=20, lands=21, to=1200, fmt="{n} MILES")),
                    dict(dev="staircase", at=dict(w=20, seg=1, word="x"), args=dict(lines=[dict(t="1,200", at=21), dict(t="MILES", at=22)]))])
     asks, _ = DR.palette_asks(d, lambda w: 10 * w, lambda i: (i * 100, i * 100 + 90), None, 400)
+    assert "at" not in asks[0] and (asks[0]["f"][0] if isinstance(asks[0]["f"], list) else asks[0]["f"]) == 200
     assert asks[0]["lands"] == 210 and asks[0]["to"] == 1200
     assert [x["at"] for x in asks[1]["lines"]] == [210, 220]
 
@@ -322,3 +323,13 @@ def test_a_counters_figure_word_lands_on_its_frame():
 def test_the_strobe_floor_leaves_one_and_two_frame_shots_to_punctuation():
     lo, hi = DR.energy_band("strobe")["hold"]
     assert lo * 30 >= 3.9 and hi <= 0.6
+
+
+def test_only_the_directors_explicit_accent_reaches_the_word_clock():
+    sentences, words = DR.numbered(SENTENCES, rows())
+    result, _ = DR.repair(dict(beats=[
+        dict(w=0, role="hook"),
+        dict(w=3, role="turn", sound="air", sound_reason="the reveal replaces the rehearsal"),
+    ]), sentences, words)
+    assert DR.sound_cues(result, lambda w: 11*w) == [
+        dict(f=33, role="turn", sound="air", why="the reveal replaces the rehearsal")]

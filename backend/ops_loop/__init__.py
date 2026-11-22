@@ -29,6 +29,7 @@ EXCLUDED_USER_IDS = tuple(sorted(set(OWNER_LISTED_INTERNAL)
                                  | set(_COCKPIT_INTERNAL)))
 
 VERDICTS = ("delivered_good", "delivered_poor", "not_delivered")
+CAUSE_CLASSES = ("intelligence", "tool", "production", "product", "outside")
 SURFACES = ("studio", "shorts", "mcp")
 SEVERITIES = ("P0", "P1", "P2")
 TICKET_STATUSES = ("open", "fixing", "fixed", "wont_fix")

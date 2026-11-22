@@ -568,8 +568,9 @@ def _product_call(ctx):
         import llm
     except Exception:  # noqa: BLE001
         return None
-    client = getattr(ctx, "llm_client", None) if ctx is not None else None
-    model = getattr(ctx, "agent_model", None) if ctx is not None else None
+    # The plan's model when only the editing turn was upgraded
+    # (model_budget): llm.helper_lane keeps the forced tool call working.
+    client, model = llm.helper_lane(ctx) if ctx is not None else (None, None)
     if client is None:
         if not getattr(config, "OPENAI_API_KEY", None):
             return None

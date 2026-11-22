@@ -487,6 +487,11 @@ class ToolContext:
         # builds a context without going through run_agent_job working.
         self.llm_client = None
         self.agent_model = config.AGENT_MODEL
+        # The plan's lane for helper calls when the model budget governor
+        # upgraded only the editing turn (llm.helper_lane); None = the
+        # turn's own client and model.
+        self.helper_client = None
+        self.helper_model = None
         # Does this user hold a plan (a trial counts)? Decides the model above
         # and what the out-of-credits message may honestly promise — a
         # subscriber's pool comes back, a free account's does not.
@@ -553,7 +558,7 @@ class ToolContext:
                 out = (u["out"] - audio_out
                        + (u["reasoning"]
                           if p.get("reasoning_separate") else 0))
-                cost += ((u["in"] - audio_in - cached) * p["in"]
+                model_cost = ((u["in"] - audio_in - cached) * p["in"]
                          + cached * p["cached_in"]
                          + audio_in * p["audio_in"]
                          + out * p["out"]
@@ -563,7 +568,10 @@ class ToolContext:
                 # contracted model rate instead. Applying the surcharge here
                 # stopped paid turns with hundreds of credits still available.
                 if not aliases.get(model):
-                    cost += float(u.get("cost_adjustment_usd") or 0)
+                    model_cost += float(u.get("cost_adjustment_usd") or 0)
+                markup = (getattr(self, "upgrade_markups", None) or {}).get(
+                    model, model_prices.PROVIDER_COST_MARKUP)
+                cost += model_prices.credit_cost_basis(model_cost, markup)
         else:
             cached_in = min(max(self.tokens_cached_in, 0), self.tokens_in)
             cost = ((self.tokens_in - cached_in) * config.LLM_PRICE_IN_PER_M +
@@ -27320,10 +27328,17 @@ def _question_can_wait(ctx, question):
 
 
 def _question_needs_customer(ctx, question):
-    lane = (getattr(ctx, "agent_lanes", None) or [{}])[0]
+    # A helper call like the others (llm.helper_lane): when the model budget
+    # upgraded the editing turn to Opus/Sonnet, agent_lanes[0] is that
+    # upgrade, which drops question_need's forced tool_choice
+    # (claude_lane._NO_FORCED_TOOL) and costs the upgrade's price. The plan's
+    # helper model answers it; otherwise the turn's own client and model.
+    client, model = llm.helper_lane(ctx)
+    if client is None or not model:
+        lane = (getattr(ctx, "agent_lanes", None) or [{}])[0]
+        client, model = lane.get("client"), lane.get("model")
     return question_need.needed(
-        lane.get("client"), lane.get("model"),
-        quality_verifier.request_text_for(ctx), question)
+        client, model, quality_verifier.request_text_for(ctx), question)
 
 
 def ask_user(ctx, question):

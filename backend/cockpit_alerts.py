@@ -673,6 +673,9 @@ def digest_sections(f):
                    if res.get("avg_score") is not None else ""),
                 f"Last 7 days: {_pct((res7 or {}).get('rate_pct'))} good of "
                 f"{(res7 or {}).get('judged', 0)} sessions."]
+    classes = (res or {}).get("cause_classes")
+    if classes:
+        good.append("Causes · " + " · ".join(f"{_e(k)} {v}" for k, v in classes.items()))
     thumbs = f.get("thumbnails") or []
     if thumbs:
         good.append("".join(

@@ -170,6 +170,18 @@ def finish(out, script):
     artic0=shared.artic(json.loads(origin_words.read_text()).get('words') or [])
     factor=round(max(.90,208/artic0),5) if artic0 and artic0>216 else 1.0
     fastest=max(1.0,214/artic0) if artic0 else 1.08
+    # A clear native take can still rush through evidence. Measure elapsed time,
+    # including breaths, against the two Madigan reads. Preserve natural pitch
+    # and carry the identical tempo map into captions and chapter boundaries.
+    rates = {"slow": 150, "steady": 159, "brisk": 180}
+    target_seconds = sum(
+        60 * len(seg["text"].split()) / rates.get(seg.get("pace", script.get("pace")), 159)
+        for seg in script["segments"]
+    )
+    if target_seconds and before["seconds"] < target_seconds:
+        reference_tempo = max(.84, before["seconds"] / target_seconds)
+        factor = round(min(factor, reference_tempo), 5)
+        fastest = min(fastest, factor)
     join_aim=14.0
     for attempt in range(3):
         x,sr=sf.read(origin,dtype='float32')

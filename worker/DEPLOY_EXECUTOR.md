@@ -170,14 +170,13 @@ same immutable application image.
   same call reports **32.0 GB**, exactly the memory limit, which is the truth.
   Verify with `curl .../health | jq .workdir` — `fstype` and `free_gb` are
   reported precisely so this is checkable instead of assumed.
-- **`--memory 32Gi`** — this is **the flag that sets the maximum video length**,
-  because the workdir is sized by it. `storage.MAX_UPLOAD_GB` (14) is derived
-  from it: 32 GiB / `WORKDIR_HEADROOM` 2.2 = 14.5 GB, which `/health` reports as
-  `max_source_gb`. **Raising the upload cap without raising this first just
-  moves the refusal to after the user has spent 40 minutes uploading.** 32Gi is
-  Cloud Run's per-instance maximum, so going beyond ~14 GB sources means
-  mounting a volume for `WORKER_TMP_DIR`, not more RAM. Memory is the cheap
-  axis: ~$0.00008/s against ~$0.000192/s for 8 vCPU.
+- **`--memory 32Gi`** sets the size of this Cloud Run scratch filesystem.
+  The executor reports the largest *fully staged* source as
+  `/health.workdir.max_source_gb` (free scratch divided by 2.2). Large
+  originals stay in object storage. Indexing budgets the proxy, audio and
+  evidence by duration, and final renders range-read the original.
+  The API reports the separate multipart upload and duration limits at
+  `/video/limits`. On Contabo the workdir is disk-backed.
 - **(historical)** Cloud Run's `/tmp` is an **in-memory** filesystem, and a
   job downloads the ORIGINAL video there (plus writes the proxy, plus whisper
   holds ~2 GB if it runs locally). This is the flag that decides how long a

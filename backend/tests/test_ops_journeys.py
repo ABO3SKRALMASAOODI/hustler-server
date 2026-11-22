@@ -182,9 +182,11 @@ def test_older_reviews_say_so_and_new_ones_carry_their_asks():
     assert old["review"]["format"] == "older" and old["review"]["asks"] == []
     assert old["review"]["tickets"][0]["commits"][0]["sha"] == "abc1234"
     new = _story(dict(base, signals={
-        "journey_format": 2, "why_short": "Vertical, no captions.",
+        "journey_format": 2, "why_short": "Vertical, no captions.", "cause_class": "tool",
         "asks": [{"text": "vertical", "status": "done", "note": None}],
         "delivered_asset_id": 500}))
+    assert old["review"]["cause_class"] is None
+    assert new["review"]["cause_class"] == "tool"
     assert new["review"]["format"] == "v2"
     assert new["review"]["why_short"] == "Vertical, no captions."
     assert new["got"]["asset_id"] == 500

@@ -14,6 +14,7 @@ class _SharedLedger:
         self.lock = threading.Lock()
         self.barrier = barrier
         self.ledger = {}
+        self.model_budget_charges = {}
         self.pools = {"daily": 10.0, "bonus": 5.0, "monthly": 20.0}
         self.updates = 0
         self.statements = []
@@ -74,6 +75,11 @@ class _Cursor:
                     self.shared.ledger[key] = amount
                     self._row = {"credits_used": amount}
             return
+        if normalized.startswith("UPDATE video_jobs SET payload = jsonb_set") and "model_budget,credits_charged" in normalized:
+            amount, job_id = params
+            self.shared.model_budget_charges[job_id] = amount
+            self._row = None
+            return
         if normalized.startswith("UPDATE users"):
             with self.shared.lock:
                 self.shared.pools["daily"] -= float(params[0])
@@ -103,6 +109,7 @@ def test_duplicate_charge_returns_existing_claim_without_second_debit():
 
     assert first == second
     assert first > 0
+    assert shared.model_budget_charges == {777: first}
     assert shared.updates == 1
     assert len(shared.ledger) == 1
     assert shared.pools["daily"] == 10.0 - first

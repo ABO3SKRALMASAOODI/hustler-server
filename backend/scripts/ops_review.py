@@ -410,6 +410,9 @@ def cmd_verdict(a):
         if spec.get("evidence") and not (a.evidence or a.evidence_json):
             a.evidence_json = a.json
         a.session = a.session or spec.get("session_key")
+    cause_class = a.cause_class or spec.get("class") or spec.get("cause_class") or store.cause_prefix(a.root_cause)
+    if a.verdict != "delivered_good" or a.root_cause:
+        store.checked_class(cause_class)
     journey = _journey(a, spec)
     rating = {k: spec[k] for k in RATING_KEYS if spec.get(k) is not None}
     # Refuse a bad journey or a disproved score before any database work.
@@ -423,15 +426,33 @@ def cmd_verdict(a):
     with Writer(a.dry_run) as w:
         row = store.write_verdict(
             w, s, a.verdict, a.score, a.reasoning, _evidence_items(a),
-            root_cause=a.root_cause, request_summary=a.request_summary,
+            root_cause=a.root_cause, cause_class=cause_class, request_summary=a.request_summary,
             signals=_signals(ctx), journey=journey, rating=rating,
             reviewer=getattr(a, "reviewer", None) or "claude-opus")
     out({"review_id": row["id"], "review_count": row["review_count"],
          "session_key": s["key"], "verdict": a.verdict, "score": int(a.score),
-         "score_exact": rating.get("score_exact"),
+         "cause_class": cause_class, "score_exact": rating.get("score_exact"),
          "tier": rating.get("tier") or "standard",
          "edit_delta_class": (rating.get("edit_delta") or {}).get("class"),
          "dry_run": bool(a.dry_run)})
+    return 0
+
+
+def cmd_classify(a):
+    """Apply model diagnoses to historical reviews and their tickets atomically."""
+    from ops_loop import store
+    with open(a.json, encoding="utf-8") as fh:
+        data = json.load(fh)
+    updated, skipped = 0, []
+    with Writer(a.dry_run) as w:
+        for row in data["reviews"]:
+            if store.classify_review(w, row["session_key"], row["reviewed_at"], row["class"]):
+                updated += 1
+            else:
+                skipped.append(row["session_key"])
+        for ticket_id, cause_class in sorted(data.get("tickets", {}).items()):
+            store.classify_ticket(w, int(ticket_id), cause_class, missing_only=True)
+    out({"updated": updated, "skipped": skipped, "dry_run": a.dry_run})
     return 0
 
 
@@ -491,14 +512,17 @@ def cmd_ticket(a):
                 "project_id": int(a.project), "severity": a.severity,
                 "cause_key": a.cause, "title": a.title,
                 "detail": a.summary})
+            if a.cause_class:
+                t["cause_class"] = store.classify_ticket(w, t["id"], a.cause_class)
         else:
             t, action = store.open_or_attach(
                 w, a.cause, a.title, a.severity, session_key=a.session,
-                summary=a.summary)
+                summary=a.summary, cause_class=a.cause_class)
     if t["severity"] == "P0" and t["status"] in ("open", "fixing") \
             and not a.dry_run:
         _mark_p0(t)
     out({"ticket_id": t["id"], "action": action, "cause_key": t["cause_key"],
+         "cause_class": t.get("cause_class") or store.ticket_class(t),
          "severity": t["severity"], "status": t["status"],
          "occurrences": t["occurrences"],
          "recurrence_count": t["recurrence_count"],
@@ -1026,6 +1050,7 @@ def cmd_whoami(a):
 
 
 def parser():
+    from ops_loop import CAUSE_CLASSES
     ap = argparse.ArgumentParser(
         description="The outcome loop's CLI (Reviewer and Fixer sessions).")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1055,7 +1080,12 @@ def parser():
     p.add_argument("--key", required=True)
     p.add_argument("--out", required=True)
     p.set_defaults(fn=cmd_fetch)
+    p = sub.add_parser("classify", help="annotate historical reviews and tickets from model classifications")
+    p.add_argument("--json", required=True, help="reviews with session_key, reviewed_at, class; tickets mapping IDs to classes")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_classify)
     p = sub.add_parser("verdict", help="write the review of one session")
+    p.add_argument("--class", dest="cause_class", choices=CAUSE_CLASSES)
     p.add_argument("--session")
     p.add_argument("--json", help="a file with all fields")
     p.add_argument("--verdict", choices=("delivered_good", "delivered_poor",
@@ -1099,6 +1129,7 @@ def parser():
     p.add_argument("--project", type=int,
                    help="instead of --session: a project with no reviewable "
                         "session (a first video walled before anything ran)")
+    p.add_argument("--class", dest="cause_class", choices=CAUSE_CLASSES)
     p.add_argument("--cause", required=True)
     p.add_argument("--title", required=True)
     p.add_argument("--severity", required=True, choices=("P0", "P1", "P2"))

@@ -35,6 +35,8 @@ import captions as caplib
 import config
 import execution_inputs
 import db as dbx
+import export_context
+from export_branding import CLEAN_EXPORT_PLANS
 import dialogue_level
 import follow
 import fxgraph
@@ -2759,7 +2761,10 @@ def clean_source_key(edl_json, variant, src_sha=None):
     return key
 
 
-def outro_seconds(preview):
+_RENDER_PLAN = ContextVar("render_plan_id", default=None)
+
+
+def outro_seconds(preview, plan=None):
     """How much time the end card adds to a render of this variant.
 
     The single source of truth for the outro's length. Everything that must
@@ -2767,6 +2772,9 @@ def outro_seconds(preview):
     sampling window, the filtergraph — reads it from here, because these have
     to move together or the render fails verification.
     """
+    plan = plan or _RENDER_PLAN.get() or export_context.account_plan()
+    if plan in CLEAN_EXPORT_PLANS:
+        return 0.0
     if preview and not config.OUTRO_ON_PREVIEW:
         return 0.0
     return config.OUTRO_DURATION_S if endcard_path() else 0.0
@@ -10447,6 +10455,7 @@ def run_render_job(worker_db, job):
         raise dbx.PermanentJobError("Unknown preview quality")
     token = _PREVIEW_QUALITY.set(quality)
     paid_token = _PREVIEW_PAID.set(False)
+    plan_token = _RENDER_PLAN.set("free")
     long_token = _PREVIEW_LONG.set(False)
     job_type_token = _RENDER_JOB_TYPE.set(job.get("type"))
     try:
@@ -10472,6 +10481,7 @@ def run_render_job(worker_db, job):
     finally:
         _PREVIEW_QUALITY.reset(token)
         _PREVIEW_PAID.reset(paid_token)
+        _RENDER_PLAN.reset(plan_token)
         _PREVIEW_LONG.reset(long_token)
         _RENDER_JOB_TYPE.reset(job_type_token)
 
@@ -10643,9 +10653,12 @@ def _run_render_job(worker_db, job):
     # Entitlement is read HERE, once, at render time — not from anything
     # stored on the project. A user who upgraded a minute ago must get a
     # clean file for this export, and a lapsed one must get the mark back.
-    is_paid = bool(worker_db.run(dbx.user_is_paid, job.get("user_id")))
+    is_paid, plan = worker_db.run(dbx.render_account, job.get("user_id"))
+    _RENDER_PLAN.set(plan)
     _PREVIEW_PAID.set(is_paid)
     wm_settings = worker_db.run(dbx.video_settings)
+    if plan in CLEAN_EXPORT_PLANS:
+        wm_settings = dict(wm_settings or {}, force=False)
     want_wm = False if proof_only else \
         wants_watermark(variant, is_paid, wm_settings)
 
@@ -11644,6 +11657,7 @@ def _run_render_job(worker_db, job):
                   **({"requested_ranges": requested_ranges,
                       "proof_set_id": proof_set_id}
                      if proof_only else {}),
+                  "plan_omits_outro": plan in CLEAN_EXPORT_PLANS,
                   "outro_v": (config.OUTRO_VERSION
                               if not proof_only and
                               outro_seconds(variant == "preview") else 0),

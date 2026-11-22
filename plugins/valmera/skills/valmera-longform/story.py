@@ -123,7 +123,7 @@ def dossier(idea, effort="high"):
                "archive.org, Smithsonian, government and university pages) and copy each quote exactly as it stands there, "
                "one or two sentences. Pages behind a paywall or a bot wall (Britannica, most newspapers) cannot be checked.\n\n"
                "Return JSON only: {\"facts\": [45 to 80 {\"id\": \"f1\", \"claim\": the fact in plain words, \"quote\": "
-               "sentences copied exactly from the page, \"url\": the page, \"year\": the year it happened or null}], "
+               "sentences copied exactly from the page, \"url\": the page, \"author\": byline on source, \"date\": publication date as printed, \"year\": the year it happened or null}], "
                "\"named\": [25 to 45 {\"name\", \"is\": person|place|machine|building|document|event|thing, \"searches\": one "
                "to three archive video and original interview searches, most specific first, \"must_show\": what a picture must visibly show, "
                "\"era\": the years a photograph of it must come from to be true to the story, or null}], \"places\": [{\"name\", "
@@ -163,7 +163,7 @@ def write(idea, dos, card, voices=None, notes=None, effort="high"):
     system = ("You are the writer and voice director of Valmera's long-form workflow. You write a 10-20 minute narration "
               "spoken by a synthetic narrator over real archive pictures and designed maps, documents and diagrams. Every "
               "statement of fact comes from the dossier's verified facts; you never add a fact, a figure or a date that is not "
-              "in them, and you never round or dramatise beyond them. You direct the actor too: pace, energy, melody, emphasis "
+              "in them, and you never round or dramatise beyond them. When citing an X post, paper or direct quotation choose design kind document or quote and its exact fact id. Choose the canonical status URL or actual paper PDF. You direct the actor too: pace, energy, melody, emphasis "
               "and pauses per segment. Write for the ear: concrete nouns, numbers a listener can hold, the "
               "voice of a storyteller who knows where the story goes and makes the viewer want the next minute.")
     lo, hi = FORM["words"]
@@ -281,6 +281,12 @@ def narration_script(script):
         for k in ("beat", "melody", "emphasis", "direction", "pace", "energy"):
             if s.get(k):
                 seg[k] = s[k]
+        # Madigan's two reference reads average 157–159 words per elapsed minute.
+        # Articulated pace excludes pauses. Let the writer's brisk turns move
+        # faster, and give reflective evidence passages a warmer, longer vowel.
+        pace = seg.get("pace", script.get("pace", "steady"))
+        seg["wpm"] = {"slow": 158, "steady": 175, "brisk": 190}.get(pace,175)
+        seg["phonon_duration_delta"] = {"slow": .85, "steady": .60, "brisk": .25}.get(pace,.60)
         segs.append(seg)
     segs[-1]["pause_after"] = 0.0
     return dict(title=script.get("title"), voice=script.get("voice") or "sage", band=FORM["band"], pace=script.get("pace") or "steady",

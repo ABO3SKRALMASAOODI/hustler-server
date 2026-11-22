@@ -393,3 +393,14 @@ def test_full_allowance_cost_and_discounted_plan_margin_are_explicit():
         for revenue in (monthly, annual / 12.0):
             margin = (revenue - metered_cost - storage_reserve) / revenue
             assert 0.39 <= margin <= 0.67, (plan, revenue, margin)
+
+
+def test_paid_opus_experiment_2026_11_21():
+    """Owner approved a one-third gross model margin for upgraded turns."""
+    import model_prices as prices
+    opus = prices.claude_usage_cost("claude-opus-5-5", 1000000, 0)
+    haiku = prices.claude_usage_cost("claude-haiku-5-5", 1000000, 0)
+    assert prices.usd_to_credits(prices.credit_cost_basis(opus, 1.5)) == opus * 150
+    assert prices.usd_to_credits(haiku) == haiku * 200
+    assert abs(1 - opus / (1.5 * opus) - 1/3) < 1e-9
+    assert prices.claude_usage_cost("claude-opus-5-5", 0, 0, 0, 1000000, 1000000) == 8

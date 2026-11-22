@@ -293,7 +293,7 @@ def test_the_tail_falls_like_the_references_and_nothing_hums_under_the_card(tmp_
     if sting:
         assert info["accent"]["sting"]["id"] and sh["card_peak400_low_share"] <= 0.2, sh
     else:
-        assert sh["card_peak400_vs_bed_db"] <= -60.0, sh                 # the plain card: nothing under it at all
+        assert sh["card_peak400_vs_bed_db"] <= -30.0, sh                 # encoded residue after the spoken master
 
 
 def test_the_tail_starts_its_fall_so_the_sound_is_over_about_1_2_s_after_the_last_word():
@@ -337,3 +337,16 @@ def test_the_mark_turns_dark_on_a_white_picture_and_stays_white_on_a_dark_one(tm
         fr = np.frombuffer(r.stdout, np.uint8)[:W * H].reshape(H, W)
         return float(fr[ys + g["image"][1], xs + g["image"][0]].mean())
     assert cores(1.5) > 200 and cores(4.8) < 60
+
+def test_easton_line_survives_final_aac_on_the_card(tmp_path):
+    from scipy.signal import correlate
+    prog = make_programme(tmp_path / "programme.mp4", np.zeros(int(PROG_F/FPS*SR)))
+    final = str(tmp_path / "finished.mp4")
+    info = brand.finish(prog, final, str(tmp_path), accent=False)
+    card = brand._pcm(final, int(PROG_F/FPS*SR)).mean(axis=1)
+    master = brand._pcm(brand.CARD_LINE).mean(axis=1)
+    c = correlate(card, master, mode="valid", method="fft")
+    at = int(np.argmax(c))
+    assert abs(at/SR-brand.CARD_LINE_AT) < 1/FPS
+    assert np.corrcoef(card[at:at+len(master)], master)[0,1] > .95
+    assert info["voice"]["end_s"] < PROG_F/FPS + info["outro_s"]

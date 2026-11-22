@@ -556,6 +556,45 @@ def test_create_holds_one_effort_and_raises_it_in_a_message(monkeypatch):
     assert [t["name"] for t in body["tools"]] == ["get_edl", "add_zoom"]
 
 
+def test_opus_sends_identical_stable_prefix_and_short_conversation_cache(monkeypatch):
+    import json
+    import claude_lane
+    import claude_trial
+    seen = []
+    def capture(**body):
+        seen.append(body)
+        raise SystemExit
+    monkeypatch.setattr(claude_lane, "_sdk", lambda: SimpleNamespace(messages=SimpleNamespace(stream=capture)))
+    monkeypatch.setattr(claude_lane, "available", lambda: True)
+    monkeypatch.setattr(claude_lane, "configured", lambda: True)
+    monkeypatch.setattr(claude_trial, "guard_call", lambda: None)
+    tools = [_tool("get_edl"), _tool("add_zoom")]
+    plan = claude_lane.tool_plan(tools[:1], tools[::-1], "low")
+    for step in range(2):
+        state = f"Current cut v{step}"
+        plan["volatile_system"] = state
+        messages = [{"role": "system", "content": "Editing instructions"},
+                    {"role": "system", "content": state}, {"role": "user", "content": "edit"}]
+        if step:
+            messages.extend([{"role": "assistant", "content": "", "tool_calls": [{
+                "id": "c", "type": "function", "function": {"name": "get_edl", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c", "content": "ok"}])
+            claude_lane.surface_tools(plan, messages, tools)
+        with pytest.raises(SystemExit):
+            claude_lane.create("claude-opus-5-5", messages, tools=tools[:step+1],
+                               effort="low" if step else "high", tool_plan=plan)
+    assert json.dumps([seen[0][k] for k in ("tools","system")]) == json.dumps(
+        [seen[1][k] for k in ("tools","system")])
+    for body in seen:
+        for key in ("tools", "system"):
+            assert [block["cache_control"]["ttl"] for block in body[key] if "cache_control" in block] == ["1h"]
+        assert not any(b.get("cache_control", {}).get("ttl") for m in body["messages"]
+                       if isinstance(m["content"], list) for b in m["content"])
+    assert "Current cut v1" in str(seen[1]["messages"][-1])
+    assert seen[0]["messages"][-1]["output_config"]["effort"] == "high"
+    assert seen[1]["output_config"]["effort"] == "low"
+
+
 def test_a_refused_tool_plan_retries_the_old_way_within_the_same_call(monkeypatch):
     import claude_lane
     monkeypatch.setattr(claude_lane, "_plan_off", False)
@@ -1039,3 +1078,12 @@ def test_a_grade_given_in_percent_is_read_as_percent(zoom_ctx):
     assert zoom_ctx.edl["effects"]["grade_custom"]["contrast"] == 0.96
 
 
+
+
+@pytest.mark.parametrize(("measured", "ttl"), [(True, "1h"), (False, "5m"), (None, "1h")])
+def test_cache_ttl_tracks_project_waits(measured, ttl):
+    from unittest.mock import MagicMock
+    import agent_loop
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value.fetchone.return_value = {"long_wait": measured}
+    assert agent_loop._editing_cache_ttl(conn, 9) == ttl

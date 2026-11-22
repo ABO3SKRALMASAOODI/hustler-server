@@ -113,6 +113,12 @@ def view(arr, crop, W, H):
     return cv2.warpAffine(arr, M, (int(W), int(H)), flags=cv2.INTER_AREA if sx < 0.8 else cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
 
 
+def Plan_take(l1, shot):
+    """Does this base shot run on the take's clock, so the matte registers to it (the engine's own test)?"""
+    from ..plan import Plan
+    return Plan.take_shot_of(l1.get("assets") or {}, shot)
+
+
 def shot_at(l1, f):
     for it in l1.get("items") or []:
         if it.get("k") == "shot" and it["f"][0] <= f < it["f"][1]:

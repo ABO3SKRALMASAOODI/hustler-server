@@ -1432,6 +1432,7 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
             print(f"[filmstrip] skipped ({e})", flush=True)
     current_state = state_block(
         ctx, worker_db, include_blueprint=False)
+    ctx._cache_state_text = current_state
     msgs.append({"role": "system", "content": current_state})
     _component("current_project_edl_state", current_state)
     # The last few messages, not the last twenty (round 71f). Twenty was up
@@ -2211,14 +2212,39 @@ def run_agent_job(worker_db, job):
         # Keep contracted credit prices; subscription cohorts still control
         # Studio feature entitlements. Whatever stands behind this lane has
         # passed llm.editing_lanes.
+        # trialing, govern=True: positional, so test doubles of the lane
+        # lookup (lambda *a) keep working.
         paid_claude = _claude_paid_lane(worker_db, job, subscribed, plan,
-                                        payload)
+                                        payload, trialing, True)
         if paid_claude is not None:
             ctx.claude_paid = paid_claude
-            ctx.agent_lanes = [paid_claude["lane"]] + list(ctx.agent_lanes or [])
-            if paid_claude.get("credit_model"):
+            # An upgraded request (model_budget) keeps the plan's lane right
+            # behind it: a provider failure on the upgrade continues there.
+            ctx.agent_lanes = ([paid_claude["lane"]]
+                               + ([paid_claude["helper_lane"]]
+                                  if paid_claude.get("helper_lane") else [])
+                               + list(ctx.agent_lanes or []))
+            helper_lane = paid_claude.get("helper_lane")
+            if helper_lane:
+                # Helpers (request contract, reply rewrites, asks, music)
+                # stay on the plan's model: llm.helper_lane.
+                ctx.helper_client = helper_lane["client"]
+                ctx.helper_model = helper_lane["model"]
+            budget = paid_claude.get("model_budget") or {}
+            if budget.get("upgraded"):
+                ctx.upgrade_markups = {budget["model"]: budget["markup"]}
+                notice = model_prices.low_balance_notice(budget, balance)
+                if notice and not payload.get("continuation_state"):
+                    worker_db.run(_show_credit_estimate, session_id, job["id"], notice)
+            if paid_claude.get("credit_aliases"):
+                ctx.credit_price_aliases = dict(paid_claude["credit_aliases"])
+            elif paid_claude.get("credit_model") and not budget.get("upgraded"):
                 ctx.credit_price_aliases = {
                     paid_claude["lane"]["model"]: paid_claude["credit_model"]}
+            metrics = getattr(ctx, "editing_metrics", None)
+            if paid_claude.get("model_budget") and isinstance(metrics, dict):
+                # job result: what the governor chose and why
+                metrics["model_budget"] = paid_claude["model_budget"]
             print(f"[agent] job {job['id']}: paid Claude lane "
                   f"{paid_claude['lane']['model']} (plan {plan})", flush=True)
         if not ctx.agent_lanes:
@@ -2232,9 +2258,12 @@ def run_agent_job(worker_db, job):
     # Vision is reached from eight places that know nothing about plans, so the
     # plan is published to this THREAD for the duration of the turn and cleared
     # in the finally below (worker threads are reused across jobs).
+    # The helper lane: vision, critics and text helpers keep the plan's model
+    # when the governor upgraded only the editing turn (model_budget).
     llm.set_turn_plan(plan if subscribed else "", project_id=ctx.project_id,
-                      lane=(ctx.agent_lanes[0] if ctx.agent_lanes and
-                            ctx.claude_trial is None else None))
+                      lane=((ctx.claude_paid or {}).get("helper_lane")
+                            or (ctx.agent_lanes[0] if ctx.agent_lanes and
+                                ctx.claude_trial is None else None)))
     if ctx.agent_model != config.AGENT_MODEL:
         print(f"[agent] job {job['id']}: plan {plan} -> {ctx.agent_model}",
               flush=True)
@@ -2295,6 +2324,12 @@ def run_agent_job(worker_db, job):
             if audio_out:
                 extra["audio_out"] = audio_out
             response = dict(response, **extra)
+        markup = (getattr(ctx, "upgrade_markups", None) or {}).get(model)
+        if markup is not None and usage:
+            provider_cost = llm.provider_cost_usd(usage, model)
+            if provider_cost is not None:
+                response = dict(response or {}, credit_cost_usd=model_prices.credit_cost_basis(
+                    provider_cost, markup), credit_markup=markup)
         worker_db.run(dbx.insert_llm_call, job["project_id"], job["id"],
                       purpose, model,
                       request, response,
@@ -2498,7 +2533,8 @@ def _probe_paid_lane(worker_db, job):
         return False
 
 
-def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
+def _claude_paid_lane(worker_db, job, subscribed, plan, payload,
+                      trialing=False, govern=False):
     """A funded paid Claude primary, independent of the trial cutoff.
 
     Trial budget cutoffs do not disable this paid route. Actual provider
@@ -2529,12 +2565,97 @@ def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
                         if flag["credit_parity"] else
                         edit_rung.fallback_model()
                         if edit_rung.is_rung_model(model) else None)
-        return {"lane": claude_lane.lane(model, name="claude_paid"),
-                "credit_model": credit_model}
+        route = {"lane": claude_lane.lane(model, name="claude_paid"),
+                 "credit_model": credit_model,
+                 "credit_aliases": ({model: credit_model} if credit_model
+                                    else {})}
+        if govern:
+            # An editing request (not a Shorts helper lane): the governor.
+            _apply_model_budget(worker_db, job, route, model, subscribed,
+                                trialing, payload, plan)
+        return route
     except Exception as exc:  # noqa: BLE001 - today's lanes on any doubt
         print(f"[agent] job {job.get('id')}: new-subscriber lane lookup "
               f"failed ({str(exc)[:160]}); contracted lanes", flush=True)
         return None
+
+
+def _apply_model_budget(worker_db, job, route, plan_model, subscribed,
+                        trialing, payload, plan):
+    """Reserve the wallet estimate and persist the model in one transaction."""
+    try:
+        import model_budget
+        payload = payload if isinstance(payload, dict) else {}
+        root = int(payload.get("root_agent_job_id") or job.get("id") or 0)
+        # A continuation decides again at its slice boundary from what the
+        # request has really spent (model_budget.reconsider): it keeps its
+        # model while the next slice fits, else continues a rung cheaper.
+        def reserve(conn):
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext('valmera.model_budget'))")
+            decision = model_budget.reconsider(
+                conn, job.get("user_id"), plan_model, payload.get("model_budget"),
+                root, job.get("project_id"), payload.get("continuation_state"))
+            if decision is None:
+                decision = model_budget.decide(conn, job.get("user_id"), plan_model,
+                                               bool(subscribed) and not trialing,
+                                               job.get("project_id"), root, plan=plan)
+            decision = dict(decision, root=root)
+            _stamp_model_budget(conn, job.get("id"), decision)
+            return decision
+
+        decision = worker_db.run(reserve)
+        if not isinstance(decision, dict) or not decision.get("model"):
+            return route
+        model = str(decision["model"])
+        route["model_budget"] = decision
+        if decision.get("upgraded") and model != plan_model \
+                and claude_lane.is_claude_model(model):
+            helper = route["lane"]
+            route["lane"] = claude_lane.lane(model, name="claude_paid")
+            route["helper_lane"] = helper
+        else:
+            decision["model"] = plan_model
+            decision["upgraded"] = False
+        # Continuations copy the payload: the request keeps its model. The
+        # row is stamped too, so a slice resumed after a worker death keeps
+        # it and admin sees the decision on the job.
+        payload["model_budget"] = decision
+        if job.get("payload") is not payload and isinstance(job, dict):
+            job["payload"] = payload
+        print(f"[agent] job {job.get('id')}: model budget -> {model} "
+              f"({decision.get('reason')}; allowance "
+              f"{decision.get('allowance_usd')}, spent today "
+              f"{decision.get('spent_today_usd')})", flush=True)
+    except Exception as exc:  # noqa: BLE001 - the plan's model
+        print(f"[agent] job {job.get('id')}: model budget skipped "
+              f"({type(exc).__name__}: {str(exc)[:160]}); plan model",
+              flush=True)
+    return route
+
+
+def _show_credit_estimate(conn, session_id, job_id, notice):
+    """Post the estimate before editing, once even if a worker restarts."""
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs SET payload = payload || '{"estimate_shown":true}'::jsonb
+                        WHERE id = %s AND NOT (payload ? 'estimate_shown') RETURNING id""",
+                    (job_id,))
+        if cur.fetchone():
+            dbx.add_message(conn, session_id, "assistant", notice,
+                            {"kind": "credit_estimate", "job_id": job_id})
+
+
+def _stamp_model_budget(conn, job_id, decision):
+    """The request's model decision on its job row (payload.model_budget)."""
+    if not job_id:
+        return
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs
+                          SET payload = COALESCE(payload, '{}'::jsonb)
+                                        || jsonb_build_object('model_budget',
+                                                              %s::jsonb)
+                        WHERE id = %s""",
+                    (json.dumps(decision, default=str), int(job_id)))
 
 
 # The outcome of a request that ended on a question to the user (ask_user).
@@ -3851,7 +3972,10 @@ def _reply_after_auto_render(ctx, client, messages, tools, draft, honesty):
         return draft
     msgs = messages + [{"role": "assistant", "content": draft},
                        {"role": "system", "content": _RENDERED_AFTER_DRAFT}]
-    model = ctx.agent_model or config.AGENT_MODEL
+    # Helpers stay on the plan's model when only the editing turn was
+    # upgraded (model_budget): llm.helper_lane.
+    client, model = llm.helper_lane(ctx, client)
+    model = model or config.AGENT_MODEL
     try:
         resp = llm.create_with_dialect(
             client, model, msgs, tools=tools, tool_choice="none",
@@ -4856,7 +4980,10 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
          "do not claim anything the facts do not show."},
     ]
     redraft = ""
-    model = ctx.agent_model or config.AGENT_MODEL
+    # Helpers stay on the plan's model when only the editing turn was
+    # upgraded (model_budget): llm.helper_lane.
+    client, model = llm.helper_lane(ctx, client)
+    model = model or config.AGENT_MODEL
     try:
         resp = llm.create_with_dialect(
             client, model, msgs, tools=tools,
@@ -4957,7 +5084,10 @@ def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
     answered "Sure", four letters, and got a reply in Russian."""
     texts = _customer_texts(ctx, user_text)
     joined = " ".join(x for x in texts if x)
-    model = ctx.agent_model or config.AGENT_MODEL
+    # Helpers stay on the plan's model when only the editing turn was
+    # upgraded (model_budget): llm.helper_lane.
+    client, model = llm.helper_lane(ctx, client)
+    model = model or config.AGENT_MODEL
     verdict = reply_language.judge(client, model, texts, final)
     flip = _language_flip(joined, user_text, final, verdict)
     if flip is None:
@@ -5014,7 +5144,10 @@ def _translate_question(ctx, client, question, texts, flip):
     question unchanged when the rewrite fails (ticket #980: a question still
     judged a flip after one in-loop refusal is repaired, never refused
     again, so the customer always gets it)."""
-    model = ctx.agent_model or config.AGENT_MODEL
+    # Helpers stay on the plan's model when only the editing turn was
+    # upgraded (model_budget): llm.helper_lane.
+    client, model = llm.helper_lane(ctx, client)
+    model = model or config.AGENT_MODEL
     _kind, u_side, _r_side = flip
     msgs = [
         {"role": "system", "content": (
@@ -6082,6 +6215,21 @@ def _follow_up_turn(ctx):
         return False
 
 
+def _editing_cache_ttl(conn, project_id):
+    """Choose once, before the write, from recent gaps on this project's editing jobs."""
+    with conn.cursor() as cur:
+        cur.execute("""WITH recent AS (
+            SELECT job_id, created_at FROM llm_calls
+             WHERE project_id = %s AND purpose = 'agent' ORDER BY created_at DESC LIMIT 64
+        ), gaps AS (
+            SELECT created_at - lag(created_at) OVER (PARTITION BY job_id ORDER BY created_at) AS gap
+              FROM recent
+        ) SELECT max(gap) >= interval '5 minutes' AS long_wait FROM gaps""", (project_id,))
+        row = cur.fetchone() or {}
+    # A new project has no measured waits yet. Protect the first render.
+    return "5m" if row.get("long_wait") is False else "1h"
+
+
 def _tool_schema_refresh_needed(ctx):
     """Whether the next dispatch needs a newly routed tool catalog."""
     return bool(getattr(ctx, "edit_plan", None) or ctx.versions_written
@@ -6246,11 +6394,19 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     if claude_lane.is_claude_model(model):
         ctx._tools_by_name = True
         tools = agent_tools.names_only_load(tools)
-        tool_plan = claude_lane.tool_plan(
-            tools, agent_tools.openai_tools(
-                model, compact=True, names=set(agent_tools.TOOLS),
-                engine=agent_tools.engine_on(ctx)),
-            config.CLAUDE_TRIAL_EFFORT)
+        tool_plan = _cont.get("claude_tool_plan")
+        if not tool_plan:
+            tool_plan = claude_lane.tool_plan(
+                tools, agent_tools.openai_tools(
+                    model, compact=True, names=set(agent_tools.TOOLS),
+                    engine=agent_tools.engine_on(ctx)),
+                "low" if model.startswith("claude-opus-5-5") else config.CLAUDE_TRIAL_EFFORT)
+            if model.startswith("claude-opus-5-5"):
+                tool_plan["prefix_ttl"] = worker_db.run(_editing_cache_ttl, ctx.project_id)
+        else:
+            # Resumed slices rebuild messages. References belonged to the previous history.
+            tool_plan["refs"] = {}
+        tool_plan["volatile_system"] = getattr(ctx, "_cache_state_text", None)
     total_steps = _cont.get("steps", 0)
     t_start = _cont.get("t_start") or time.monotonic()
     turn_started = (time.monotonic() if _cont.get("durable_slice")
@@ -6338,6 +6494,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "honesty": honesty,
             "preview_repair_pushed": preview_repair_pushed,
             "quality_repair_versions": sorted(quality_repair_versions),
+            "claude_tool_plan": ({k: tool_plan[k] for k in ("stable", "catalog", "effort", "prefix_ttl")
+                                 if k in tool_plan} if tool_plan else None),
             "music_turn_choice": getattr(ctx, '_music_turn_choice', None),
             **_tighten_checkpoint(ctx),
             "plan_write_pushed": plan_write_pushed,
@@ -6679,6 +6837,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         if claude_lane.is_claude_model(model):
             step_effort = (config.CLAUDE_TRIAL_PLAN_EFFORT if iteration == 0
                            else config.CLAUDE_TRIAL_EFFORT)
+            if model.startswith("claude-opus-5-5"):
+                step_effort = "high" if iteration == 0 and not total_steps else "low"
         elif edit_rung.is_rung_model(model):
             # The effort the Gauntlet scoreboard measured on every plan.
             step_effort = llm.editor_reasoning_effort(None, iteration)
@@ -7247,10 +7407,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if getattr(ctx, "ask_verdict", None) is None:
                 # A reply never says "done" for what the film does not show
                 # (reply_truth, 14 Nov 2026): the screening sheets beside the
-                # draft, on the turn's own model.
+                # draft, on the turn's own model (the plan's model when only
+                # the editing turn was upgraded: llm.helper_lane).
                 import reply_truth
+                _h_client, _h_model = llm.helper_lane(ctx, client)
                 final = reply_truth.enforce(
-                    ctx, client, ctx.agent_model or model,
+                    ctx, _h_client, _h_model or model,
                     quality_verifier.request_text_for(ctx), final, honesty, strict=True)
             # Language MUST run on the model draft before the English
             # quality advisory is appended — otherwise a Cyrillic reply
@@ -7358,8 +7520,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     # (ticket #980: three refusals in one turn).
                     _u_text = user_message["content"] or ""
                     _u_texts = _customer_texts(ctx, _u_text)
+                    _h_client, _h_model = llm.helper_lane(ctx, client)
                     _q_verdict = reply_language.judge(
-                        client, ctx.agent_model or config.AGENT_MODEL,
+                        _h_client, _h_model or config.AGENT_MODEL,
                         _u_texts, q.question)
                     _q_flip = _language_flip(" ".join(_u_texts), _u_text,
                                              q.question, _q_verdict)
@@ -7377,7 +7540,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     # bypass rendered evidence by claiming completion in its preamble.
                     import reply_truth
                     q.question = reply_truth.enforce(
-                        ctx, client, ctx.agent_model or model,
+                        ctx, _h_client, _h_model or model,
                         quality_verifier.request_text_for(ctx), q.question,
                         honesty, strict=True)
                     _question_outcome = ("partial" if q.question == reply_truth.UNVERIFIED

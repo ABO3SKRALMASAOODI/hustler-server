@@ -43,6 +43,7 @@ os.environ.setdefault("VALMERA_WORKER", brand.worker_dir())
 os.environ.setdefault("VALMERA_SCENE_WORKER", os.environ["VALMERA_WORKER"])
 os.environ.setdefault("WRITER_PROVIDER", "openai")
 
+from director import CONTRACT as DIRECTION_CONTRACT  # noqa: E402
 import chain  # noqa: E402
 import film as F  # noqa: E402
 import pictures as PX  # noqa: E402
@@ -592,7 +593,6 @@ def take_cuts(src, shots, dur, sup_dir, turns=None):
     return out
 
 
-DIRECTION_CONTRACT = 4           # 20 Nov 2026: the Director (_shell/director.py) chooses devices for every moment; the older fields kept
 ROLES = ("hook", "turn", "payoff", "figure", "name", "contrast")
 
 
@@ -696,7 +696,7 @@ def _repair(l1, beats, taste):
         head = pr.split(" ", 2)
         ids.add(head[1] if head[0] == "sound" and len(head) > 1 else head[0])
     n0 = len(l1["items"]) + len(l1.get("sound") or [])
-    l1["items"] = [it for it in l1["items"] if it["id"] not in ids]
+    l1["items"] = [it for it in l1["items"] if it["k"] == "word" or it["id"] not in ids]
     l1["sound"] = [s for s in l1.get("sound") or [] if s["id"] not in ids]
     over = int(taste.get("sounds") or 0) - int(taste.get("sounds_allowed") or 0)
     if over > 0:
@@ -1035,6 +1035,14 @@ def descend(ctx, script, pack, missing):
     return True
 
 
+def film_direction(d):
+    """Carry the Director's authored fields into the picture and sound composers."""
+    knobs = {k: d.get(k) for k in ("display", "past_segs", "turn_seg", "story_turn_seg", "arc")}
+    if d.get("beats") or d.get("sections") or d.get("asks"):
+        knobs["director"] = {k: d.get(k) for k in ("beats", "sections", "asks", "arc", "pictures", "by", "seed")}
+    return knobs
+
+
 def score(ctx, script):
     import wf1_coverage, wf1_alignment
     pack = wf3.load_pack(ctx)
@@ -1058,9 +1066,7 @@ def score(ctx, script):
     if (ctx.args or {}).get('identity'):
         pack['coverage']['context']=ctx.args['identity']
     d = direction_of(ctx, script, pack)
-    knobs = {k: d.get(k) for k in ("display", "past_segs", "turn_seg", "story_turn_seg", "arc")}
-    if d.get("contract") == DIRECTION_CONTRACT:
-        knobs["director"] = {k: d.get(k) for k in ("beats", "sections", "asks", "arc", "pictures", "by", "seed")}
+    knobs = film_direction(d)
     knobs.update({k: v for k, v in ((ctx.args or {}).get("direction") or {}).items()})
     # The composed review's findings, each local to its window: a contradiction gives that window's slot to its next
     # candidate, a crop through a face is framed again (never a global, permanent drop: round 1, 19 Nov).

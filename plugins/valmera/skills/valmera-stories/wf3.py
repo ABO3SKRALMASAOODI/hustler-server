@@ -1749,6 +1749,8 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
 
     def seg_span(i):
         return (F.Clock.f(clock.segs[i][0]), min(F.Clock.f(clock.segs[i][1]) + 6, l1["dur_f"])) if 0 <= i < nseg else (None, None)
+    l1["story_cues"] = DR.sound_cues(d, word_frame)
+    l1["sound"], l1["sound_design"] = F.replan_sound(l1, pack)
     asks, notes = DR.palette_asks(d, word_frame, seg_span, ids.get, l1["dur_f"])
     asks = DR.around(asks, around, l1["dur_f"])         # a reel's own hero device keeps its frames: the Director's land beside it
     if asks:

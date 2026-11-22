@@ -34,7 +34,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-CONTRACT = 4
+CONTRACT = 5
 ROLES = ("hook", "name", "figure", "list", "turn", "past", "quote", "contrast", "payoff", "close")
 ENERGIES = ("strobe", "brisk", "hold")
 LAYOUTS = ("bleed", "window", "prints", "collage", "grid", "split", "type")
@@ -84,6 +84,10 @@ SYSTEM = ("You are the Director of a vertical short film. You choose, moment by 
           "words numbered with their times (^ marks the voice's stress peaks), the pictures the film has (one contact "
           "sheet, each picture with its id and what signal measured), the take, the style's starting palette, and what "
           "the films delivered lately did (do something else). You answer in JSON only.\n\n" + PRINCIPLES + "\n\n"
+          "Sound is optional. Read the story, contact sheet and picture change together. Choose at most two "
+          "moments in the whole short where a sudden reveal, turn, hook or figure would lose force in silence. "
+          "On those beats only include sound (air, rise, sub, impact or tick) and sound_reason explaining what "
+          "changes on screen. Tick only for text landing. Leave ordinary cuts, stressed words and holds silent. "
           "Return JSON only: {\"beats\": [{\"role\": one of hook|name|figure|list|turn|past|quote|contrast|payoff|close, "
           "\"w\": the word number it lands on, \"word\": that word as said, \"energy\": strobe|brisk|hold}], "
           "\"sections\": [{\"from\": first word number, \"to\": last word number (runs of words in order, covering the film "
@@ -439,7 +443,11 @@ def repair(d, sentences, words, names=(), seed=0):
         if why:
             rep.append(f"beat: {why}")
         role = b.get("role") if b.get("role") in ROLES else "quote"
-        beats.append(dict(role=role, energy=b.get("energy") if b.get("energy") in ENERGIES else "brisk", **a))
+        cue = b.get("sound")
+        accent = {"sound": cue, "sound_reason": b["sound_reason"]} if (
+            cue in ("air", "rise", "sub", "impact", "tick") and isinstance(b.get("sound_reason"), str)
+            and b["sound_reason"].strip()) else {}
+        beats.append(dict(role=role, **accent, energy=b.get("energy") if b.get("energy") in ENERGIES else "brisk", **a))
     sections = []
     last = len(words) - 1
     for s_ in d.get("sections") or []:
@@ -503,6 +511,8 @@ def repair(d, sentences, words, names=(), seed=0):
             rep.append(f"ask {k}: device {row['dev']!r} is not in the palette; the palette maps it to its family")
         row["args"], why = said_text(row["dev"], row["args"], row["at"], row.get("until"), words)
         rep += [f"ask {k} {row['dev']}: {w_}" for w_ in why]
+        if row["dev"] == "counter" and any(row["args"].get(k) is None for k in ("from", "to")):
+            row["args"].setdefault("t", at["word"])  # preserve the landing through the palette's word fallback
         asks.append(row)
     display = []
     for r in d.get("display") or []:
@@ -757,6 +767,14 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
                 break
             try:
                 d = shell_llm().json_block(text)
+                missing = [i for i, row in enumerate(d.get("asks", [])) if isinstance(row, dict)
+                           and row.get("dev") == "counter"
+                           and any((row.get("args") or {}).get(k) is None for k in ("from", "to"))]
+                if missing and attempt == 0:
+                    msg = content + [{"type": "text", "text": "Complete your score again. Counter asks "
+                                      + str(missing) + " need numeric from and to from the actual passage. "
+                                      "If there is no spoken number, choose a meaningful word device on that same beat."}]
+                    continue
                 break
             except Exception as e:      # noqa: BLE001 - asked again with the parse error shown
                 repairs.append(f"answer {attempt + 1} had no JSON: {str(e)[:120]}")
@@ -931,6 +949,11 @@ def words_to_frames(row, fields, frame_of, end_of):
     return got
 
 
+def sound_cues(d, word_frame):
+    return [dict(f=int(word_frame(b["w"])), role=b["role"], sound=b["sound"], why=b["sound_reason"])
+            for b in d.get("beats", []) if b.get("sound") and word_frame(b["w"]) is not None]
+
+
 def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
     """The Director's asks as the palette's, in programme frames. frame_of(w) -> the frame word w starts on;
     seg_span(seg) -> (first frame, last frame) of a sentence; pic_key(id) -> the scene's asset key for a picture id (None
@@ -953,6 +976,8 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
         args = dict(a.get("args") or {})
         dev = str(a["dev"])
         row = dict(args, dev=dev, id=f"dr{k}", beat=a.get("beat"))
+        row.pop("at", None)  # the word address above has already been resolved
+        row.pop("until", None)
         row.pop("f", None)                                # the ask's own place is its at/until word, set below
         # every time field the device declares (the palette registry's "words"), plus the ones every card may carry,
         # from word numbers to programme frames

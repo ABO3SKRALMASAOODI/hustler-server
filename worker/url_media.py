@@ -310,11 +310,13 @@ def _extract(url, workdir, prefer=None, client_override=None,
     Cloudflare challenge turns it on (_extract_with_fallback)."""
     max_bytes = _limit("max_bytes", config.FETCH_MAX_BYTES)
     timeout_s = _limit("timeout_s", config.FETCH_TIMEOUT_S)
-    # Cap the resolution rather than taking "best": a 4K source is a ~10x
-    # bigger download and a slower render for a clip that gets composited into
-    # a 1080p timeline anyway.
-    fmt = (f"bv*[height<={config.FETCH_MAX_HEIGHT}]+ba/"
-           f"b[height<={config.FETCH_MAX_HEIGHT}]/bv*+ba/b")
+    # Choose the project delivery height for video inserts and the configured
+    # default when there is no source geometry yet.
+    from export_context import rendition_size
+    size = rendition_size() if prefer != KIND_AUDIO else None
+    max_height = size[1] if size else config.FETCH_MAX_HEIGHT
+    fmt = (f"bv*[height<={max_height}]+ba/"
+           f"b[height<={max_height}]/bv*+ba/b")
     cmd = [sys.executable, "-m", "yt_dlp",
            # No on-disk config may influence this run. A user-level yt-dlp
            # config could otherwise inject --exec or a proxy into a process
@@ -379,7 +381,7 @@ def _extract(url, workdir, prefer=None, client_override=None,
         audio_fmt = "b[height<=480]/b" if progressive else "ba/b"
         cmd += ["-f", audio_fmt, "--extract-audio", "--audio-format", "mp3"]
     else:
-        video_fmt = (f"b[height<={config.FETCH_MAX_HEIGHT}]/b"
+        video_fmt = (f"b[height<={max_height}]/b"
                      if progressive else fmt)
         cmd += ["-f", video_fmt, "--merge-output-format", "mp4"]
     cmd += ["--", url]

@@ -817,11 +817,8 @@ def _answer(ctx, kind, key, what, nbytes, duration, start, height,
                      "download link is below as well, in case your client "
                      "cannot play the attachment.")
     else:
-        lines.append(
-            "THE LINK BELOW IS THE VIDEO. It is a plain, unauthenticated GET "
-            "of an ordinary MP4 — fetch it and watch it with whatever your "
-            "model uses for video. This is the right way to get it, not a "
-            "fallback.")
+        lines.append("The link opens the timeline preview for inspection."
+                     if kind == "timeline" else "The link opens the requested MP4.")
         if nbytes and nbytes <= inline_max_bytes:
             lines.append(
                 "It is small enough to be embedded in the reply itself "

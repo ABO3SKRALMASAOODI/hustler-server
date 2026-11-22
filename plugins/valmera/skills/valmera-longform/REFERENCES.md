@@ -10,6 +10,17 @@ reads this file; it is the bar, not a template. Numbers: `week-1106/atlas/ATLAS.
 | `k9zTr2MAFRg` Chispa Motivation, "Against All Odds" | 7 min 12 s, 3.4 cuts/10 s | Voice over film: the subject's own interviews intercut with the places and machines he talks about (factory, launch pad, cars). One dark, graded look for the whole film; small white captions centred low, a few words at a time, never competing with the picture. The cold open is the conflict (his heroes testifying against him). Pictures change on the noun. |
 | `Zf87y5bWzUA` Motivation Madness, "It Will Give You Goosebumps" | 18 min 47 s, 5.1 cuts/10 s, shots about 2 s | Voice over stock: almost every shot 1.5-3 s, each one the literal noun of the sentence (a stock chart on "stock", a factory floor on "production line", a man asleep on a factory floor on "I slept on the floor"). The voice carries 19 minutes; the picture never sits on one framing for long, but it never cuts mid-thought. A small caption line at the bottom. |
 
+## Minimum bar for every long-form film (owner, 22 November)
+
+| Matt Madigan reference | Structure and pace | What to watch and listen for |
+|---|---|---|
+| [Godlike Technology Just Arrived](https://youtu.be/5RuVxaZwLhY) | About 20 minutes, 159 transcript words per minute. The opening contrasts two timescales in the same cityscape. At 15 seconds dated reactions supply witnesses. At 46 seconds an interview interrupts the narrator. | The narrator gives the first number room, accelerates through corroboration and slows on its consequence. A forecast has a graph, the researchers have names, and a post appears with its handle. The skyline returns under new evidence so the argument stays legible. |
+| [5 Biggest AI Breakthroughs of November](https://youtu.be/B4VNA5cZfNo) | About 10 minutes, 157 transcript words per minute. DeepMind's statement opens the film. A temperature analogy explains the claim before the numbered cases. The ending revisits all five in a single thought. | At 6–10 seconds the cited words emerge from the post. Near 140 seconds the author and post are readable together. Let the voice stress the word that changes the meaning, then leave room to read. Keep a shared graphic language across the papers, charts and demonstrations. |
+
+Alternate breakthrough documentaries with journeys of widely known builders. Aim above these references with original scripts, titles and footage. Show the specific source on the sentence that invokes it. Preserve the post's author and date, the paper's byline, or the speaker and provenance of a quotation. Use the local Easton performance path and direct each passage for pace, warmth and emphasis. Music follows the change in the story. The close should leave the viewer feeling what the evidence means. The owner's test is goosebumps.
+
+The two openings deliver 145 and 150 words per minute. On an original 36-word evidence passage, the local Easton read moved from 190 to 161 words per minute with every word intact. Its measured pitch span was 8.7 semitones against 12.2 and 15.9 in the reference mixes. Give a reversal a stressed word and breathing room. The local read still has a narrower emphasis range.
+
 ## What they share
 
 - **A promise by 30 s and a question held to the end.** Long form holds with lines and open loops, not pace.
@@ -19,4 +30,4 @@ reads this file; it is the bar, not a template. Numbers: `week-1106/atlas/ATLAS.
 - **The voice carries it.** About 1.2 sounds per 10 s; a cinematic music bed carries about 97% of reference picture time, rising with consequential turns. Music selection, volume and flow are part of the story.
 - **The close answers the open.** The last minute pays the promise and says the first line again, changed.
 
-The references are evidence, never a mandatory chapter skeleton. WF4 uses its own narrative chapters for MUSIC2, not automatic eighty-second blocks. Target about 2.2 picture changes and 1.2 sound events per ten seconds; do not import the shorts' sixteen-cuts cadence.
+The references are evidence, never a mandatory chapter skeleton. WF4 uses its own narrative chapters for MUSIC2, not automatic eighty-second blocks. The journey films average about 2.2 picture changes per ten seconds. A sound belongs on a particular change the viewer needs to feel.

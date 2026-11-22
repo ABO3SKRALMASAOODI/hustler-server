@@ -182,11 +182,32 @@ def bucket():
 S3_CONNECT_TIMEOUT_S = float(os.getenv("S3_CONNECT_TIMEOUT_S", "10"))
 S3_READ_TIMEOUT_S = float(os.getenv("S3_READ_TIMEOUT_S", "60"))
 S3_MAX_ATTEMPTS = int(os.getenv("S3_MAX_ATTEMPTS", "3"))
+# Assembling a multipart upload (#1602, 21 Nov 2026). Storage can take
+# minutes to put hundreds of parts together (496 parts, 8.3 GB: over 60 s),
+# and CompleteMultipartUpload is not safe to re-send: storage consumes the
+# upload id when it starts assembling, so a re-send answers NoSuchUpload
+# while the first call is still building the object. Under the general
+# client (60 s read, 3 attempts) botocore itself re-sent the complete after
+# 60 s and the upload was reported failed over an object that landed. The
+# completion therefore waits as long as storage takes, and is sent once.
+S3_ASSEMBLE_READ_TIMEOUT_S = float(os.getenv("S3_ASSEMBLE_READ_TIMEOUT_S",
+                                             "1800"))
+
+
+def _client_limits(fast=False, assemble=False):
+    """(connect_timeout, read_timeout, max_attempts) of a client profile.
+    botocore's ``max_attempts`` counts RETRIES (total = max_attempts + 1),
+    so the assembly's 0 means the complete is sent exactly once."""
+    if assemble:
+        return S3_CONNECT_TIMEOUT_S, S3_ASSEMBLE_READ_TIMEOUT_S, 0
+    if fast:
+        return 5.0, 15.0, 2
+    return S3_CONNECT_TIMEOUT_S, S3_READ_TIMEOUT_S, S3_MAX_ATTEMPTS
 _clients = {}
 _clients_lock = threading.Lock()
 
 
-def client(public=False, fast=False):
+def client(public=False, fast=False, assemble=False):
     """public=True mints URLs the BROWSER will hit. On R2 the two endpoints
     are the same; in docker-compose dev the browser reaches MinIO on
     localhost while containers use the internal hostname, so presigning uses
@@ -201,7 +222,8 @@ def client(public=False, fast=False):
     key = (endpoint, os.environ["S3_ACCESS_KEY_ID"],
            hashlib.sha256(os.environ["S3_SECRET_ACCESS_KEY"].encode())
            .hexdigest(), os.getenv("S3_REGION", "auto"), boto3.client,
-           bool(fast))
+           bool(fast), bool(assemble))
+    connect_s, read_s, attempts = _client_limits(fast, assemble)
     with _clients_lock:
         cached = _clients.get(key)
         if cached is None:
@@ -213,16 +235,13 @@ def client(public=False, fast=False):
                 region_name=os.getenv("S3_REGION", "auto"),
                 config=Config(signature_version="s3v4",
                               s3={"addressing_style": "path"},
-                              connect_timeout=(5.0 if fast else
-                                               S3_CONNECT_TIMEOUT_S),
-                              read_timeout=(15.0 if fast else
-                                            S3_READ_TIMEOUT_S),
-                              retries={"max_attempts": (
-                                           2 if fast else S3_MAX_ATTEMPTS),
+                              connect_timeout=connect_s,
+                              read_timeout=read_s,
+                              retries={"max_attempts": attempts,
                                        "mode": "standard"},
                               max_pool_connections=32),
             )
-            if len(_clients) >= 8:
+            if len(_clients) >= 16:
                 _clients.clear()
             _clients[key] = cached
         return cached
@@ -390,14 +409,16 @@ def routing_status():
     return st
 
 
-def _next_client(public=False, fast=False):
+def _next_client(public=False, fast=False, assemble=False):
     cfg = next_config()
     if cfg is None:
         raise RuntimeError("the next store (S3_NEXT_*) is not configured")
     endpoint = cfg["public_endpoint"] if public else cfg["endpoint"]
     key = ("next", endpoint, cfg["access_key_id"],
            hashlib.sha256(cfg["secret_access_key"].encode()).hexdigest(),
-           cfg["region"], cfg["addressing_style"], boto3.client, bool(fast))
+           cfg["region"], cfg["addressing_style"], boto3.client, bool(fast),
+           bool(assemble))
+    connect_s, read_s, attempts = _client_limits(fast, assemble)
     with _clients_lock:
         cached = _clients.get(key)
         if cached is None:
@@ -408,22 +429,22 @@ def _next_client(public=False, fast=False):
                 region_name=cfg["region"],
                 config=Config(**routing.botocore_config_kwargs(
                     cfg,
-                    connect_timeout=5.0 if fast else S3_CONNECT_TIMEOUT_S,
-                    read_timeout=15.0 if fast else S3_READ_TIMEOUT_S,
-                    retries={"max_attempts": 2 if fast else S3_MAX_ATTEMPTS,
+                    connect_timeout=connect_s,
+                    read_timeout=read_s,
+                    retries={"max_attempts": attempts,
                              "mode": "standard"},
                     max_pool_connections=32)))
             creds.watch_client(cached)
-            if len(_clients) >= 8:
+            if len(_clients) >= 16:
                 _clients.clear()
             _clients[key] = cached
         return cached
 
 
-def store_client(name, public=False, fast=False):
+def store_client(name, public=False, fast=False, assemble=False):
     if name == routing.NEXT:
-        return _next_client(public=public, fast=fast)
-    return client(public=public, fast=fast)
+        return _next_client(public=public, fast=fast, assemble=assemble)
+    return client(public=public, fast=fast, assemble=assemble)
 
 
 def store_bucket(name):
@@ -974,7 +995,7 @@ def complete_multipart(key, upload_id, parts, store=None):
     """parts: [{"part_number": int, "etag": str}] from the browser."""
     ordered = sorted(parts, key=lambda p: int(p["part_number"]))
     store = store or _upload_store(key, upload_id)
-    store_client(store).complete_multipart_upload(
+    store_client(store, assemble=True).complete_multipart_upload(
         Bucket=store_bucket(store), Key=key, UploadId=upload_id,
         MultipartUpload={"Parts": [
             {"PartNumber": int(p["part_number"]), "ETag": p["etag"]}

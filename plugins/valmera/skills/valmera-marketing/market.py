@@ -78,7 +78,7 @@ def environment():
     env = dict(os.environ)
     w = engines_worker()
     env.setdefault("VALMERA_WORKER", w)
-    env.setdefault("VALMERA_SCENE_WORKER", w)
+    env.setdefault("VALMERA_SCENE_WORKER", env["VALMERA_WORKER"])
     env.pop("ANTHROPIC_API_KEY", None)
     env.pop("ANTHROPIC_TRIAL_KEY", None)
     env.update(WRITER_PROVIDER="openai", SHELL_LLM="openai", SHELL_STATE_ROOT=STATE_ROOT, PYTHONDONTWRITEBYTECODE="1", WF2_ENGINE="proof")

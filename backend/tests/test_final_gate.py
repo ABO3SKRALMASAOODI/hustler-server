@@ -69,7 +69,7 @@ class _Cur:
 
     def __init__(self, *, transition_versions=(), confirmed=(), paid=False,
                  pipeline_emits=True, small_finals=(), answers=(),
-                 rendered=()):
+                 rendered=(), plan=None):
         self._tr = list(transition_versions)
         # `confirmed`: assets a final job answered `cached: true` for, by a
         # worker that predates render rules. `answers`: full answer rows.
@@ -79,6 +79,7 @@ class _Cur:
         # default: an executor that writes no rules (the check is off).
         self._rendered = list(rendered)
         self._paid = paid
+        self.plan = plan
         self._emits = pipeline_emits
         self._small_finals = small_finals
         self._rows = []
@@ -98,7 +99,7 @@ class _Cur:
             self._rows = list(self._conf)
         elif "FROM users" in sql:
             self._one = {"is_subscribed": 1 if self._paid else 0,
-                         "plan": "ai" if self._paid else "free"}
+                         "plan": self.plan or ("ai" if self._paid else "free")}
         elif "to_regclass" in sql:
             self._one = {"t": None}          # no video_settings table: defaults
         else:                                 # pragma: no cover - unexpected
@@ -352,3 +353,14 @@ def test_the_backend_and_worker_transition_rules_are_the_same_rule():
 
 if __name__ == "__main__":                                  # pragma: no cover
     sys.exit(pytest.main([__file__, "-q"]))
+
+def test_pro_download_replaces_branded_final_even_after_a_cache_hit():
+    ok = _gate(plan="ai_pro", confirmed=[100])
+    assert not ok(100, CURRENT, 1)
+    assert not ok(100, dict(CURRENT, outro_v=0, wm_v=7), 1)
+    assert ok(100, dict(CURRENT, outro_v=0, plan_omits_outro=True), 1)
+
+
+def test_creator_download_after_plan_change_restores_the_end_card():
+    ok = _gate(plan="ai", confirmed=[100])
+    assert not ok(100, dict(CURRENT, outro_v=0, plan_omits_outro=True), 1)

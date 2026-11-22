@@ -3719,15 +3719,13 @@ def _export_for_download(tok, project_id, args):
                 content[0] = dict(content[0], text=(
                     "No full-quality export of this edit existed, so "
                     "download_url started it (a preview is only a "
-                    "low-resolution draft, never the user's video).\n"
+                    "draft for inspection).\n"
                     + content[0]["text"]))
             got = dict(got, content=content)
             got["structuredContent"] = dict(
                 got["structuredContent"], started_by="download_url")
         return got, None
-    text = " ".join(c.get("text", "") for c in got.get("content") or []
-                    if c.get("type") == "text")
-    return None, text[:600] or "the export could not start"
+    return got, None
 
 
 def _t_download_url(tok, args):
@@ -3743,10 +3741,12 @@ def _t_download_url(tok, args):
     except (TypeError, ValueError):
         return _session_error("asset_id must be an integer.")
     export_note = None
-    if not explicit_kind and asset_id is None:
+    if explicit_kind in (None, "final") and asset_id is None:
         exported, export_note = _export_for_download(tok, project_id, args)
         if exported is not None:
             return exported
+        if export_note:
+            kind = "final"
     with vdb() as conn:
         cur = conn.cursor()
         project = _project_for_user(cur, project_id, tok["user_id"])
@@ -3989,16 +3989,13 @@ def _t_download_url(tok, args):
 
 
 def _draft_notice(row, project_id, version):
-    """What a preview link IS, in words an AI app passes on: a low-
-    resolution draft for checking the edit, not the video to keep."""
-    w, h = (row or {}).get("width"), (row or {}).get("height")
-    size = f" ({w}x{h})" if w and h else ""
-    return (f"DRAFT PREVIEW{size}: a low-resolution check of the edit, NOT "
-            "the finished video. Do not hand this link to the user as their "
-            "video: for the full-quality MP4 call export_final(project_id="
-            f"{project_id}, edl_version={version}), wait_for_job, then "
-            f"download_url(project_id={project_id}, kind='final', "
-            f"edl_version={version}).")
+    """Describe the file the client actually receives."""
+    row = row or {}
+    w, h = row.get("width"), row.get("height")
+    size = f" ({w}x{h})" if w and h else (f" ({h}p)" if h else "")
+    return (f"DRAFT PREVIEW{size} of EDL v{version} for inspection. "
+            f"For the finished video call download_url(project_id={project_id}, "
+            f"kind='final', edl_version={version}).")
 
 
 def _t_watch_video(tok, args):
@@ -4097,9 +4094,23 @@ def _t_watch_video(tok, args):
                  + ". The download link in this response remains usable, "
                    "but do not "
                    "claim the missing attachment was received.")
+    # A rendered program here is the draft preview (480p on a vertical
+    # source), made to be watched. Labelled "Download:", it was what AI apps
+    # handed their users as the video and export_final never ran (p5909,
+    # 16 Nov: two watch_video links of a 480x480 draft, no final). The same
+    # answer now names it a draft and gives the one call that makes the
+    # user's full-quality video.
+    preview = result.get("preview") if isinstance(
+        result.get("preview"), dict) else None
+    if preview:
+        ver = preview.get("edl_version")
+        link = (f"\n\nWatch (draft preview): {url}\n\n"
+                + _draft_notice(video, project_id, ver))
+    else:
+        link = f"\n\nDownload: {url}"
     # Text FIRST: it is what orients the model — which clock the video runs
     # on, what is in it, what to do next — and it says the pictures follow.
-    content = [{"type": "text", "text": f"{text}\n\nDownload: {url}"}]
+    content = [{"type": "text", "text": f"{text}{link}"}]
     content += image_content
     content += audio_content
     if blob:
@@ -4126,13 +4137,23 @@ def _t_watch_video(tok, args):
             continue
     if frame_urls:
         structured["frame_urls"] = frame_urls
-    if isinstance(result.get("preview"), dict):
+    if preview:
+        next_step = (f"export_final(project_id={project_id}, "
+                     f"edl_version={preview.get('edl_version')})")
+        structured["deliverable"] = False
+        structured["deliverable_next_step"] = next_step
         try:
             structured["download_receipt"] = _record_download_receipt(
-                tok, project_id, result["preview"])
+                tok, project_id, dict(preview, deliverable=False,
+                                      deliverable_next_step=next_step))
             structured["download_receipt"]["url"] = url
         except Exception:
             structured["download_receipt_error"] = "receipt_persistence_failed"
+        # A whole-program link without inspection frames is the handoff p5909 used.
+        if (delivery != "inline" and args.get("start") is None and args.get("end") is None
+                and (args.get("frames") is False or delivery == "url")):
+            return _t_download_url(tok, {"project_id": project_id, "kind": "final",
+                                         "edl_version": preview["edl_version"]})
     if missing:
         structured["delivery_outcome"] = _delivery_failure(
             "One or more promised watch_video attachments were not "

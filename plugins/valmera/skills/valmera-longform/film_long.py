@@ -85,6 +85,17 @@ def _designs(ctx, sc, dos, world, out_dir):
         k = d.get("kind")
         p = os.path.join(out_dir, f"d{i:03d}_{k}.png")
         try:
+            if k in ("document", "quote") and d.get("fact") in facts:
+                import cited_page
+                fact = facts[d["fact"]]
+                F._engines()  # use the workflow worker's public-source fetch and browser route
+                try:
+                    original = cited_page.capture(dict(fact, quote=d.get("text") or fact["quote"]), p)
+                except Exception as exc:
+                    ctx.log(f"cited original {fact['url']} unavailable: {str(exc)[:140]}")
+                else:
+                    made[str(i)] = dict(original, kind="original", seg=i)
+                    continue
             if k == "document" and d.get("fact") in facts:
                 f = facts[d["fact"]]
                 rec = design.document(f["quote"], d.get("title") or f.get("claim") or "", f.get("url"), d.get("mark"), f.get("year"), p, seed=i)

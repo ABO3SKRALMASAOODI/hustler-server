@@ -3222,6 +3222,24 @@ def video_cohorts():
     })
 
 
+@admin_video_bp.put("/admin/video/users/<int:user_id>/business-plan")
+@admin_required
+def assign_business_plan(user_id):
+    """Activate a manually billed Enterprise contract without changing credit pools."""
+    with adb() as conn, conn.cursor() as cur:
+        cur.execute("""UPDATE users SET plan = 'business', is_subscribed = 1
+                        WHERE id = %s AND (plan = 'business' OR
+                              (COALESCE(is_subscribed, 0) = 0 AND subscription_id IS NULL))
+                    RETURNING plan""", (user_id,))
+        updated = cur.fetchone()
+        if updated:
+            return jsonify(plan=updated["plan"])
+        cur.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+        if not cur.fetchone():
+            return jsonify(error="User not found"), 404
+        return jsonify(error="This account has a billing subscription. Manage its existing contract first."), 409
+
+
 USER_DETAIL_PROJECTS = 200
 
 

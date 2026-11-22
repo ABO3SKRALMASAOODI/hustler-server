@@ -13,6 +13,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import sys
@@ -1379,11 +1380,24 @@ def _message_out(row):
             else created}
 
 
-def _blocked_prompt(text, attachment_ids=None, client_msg_id=None):
+def _studio_playhead(data):
+    """Capture the timeline position visible at send, independently of the chat text."""
+    at = data.get("playhead_s")
+    if type(at) in (int, float):
+        try:
+            seconds = float(at)
+        except OverflowError:
+            return {}
+        if math.isfinite(seconds) and seconds >= 0:
+            return {"playhead_s": round(seconds, 3)}
+    return {}
+
+
+def _blocked_prompt(text, attachment_ids=None, client_msg_id=None, playhead=None):
     """The request a wall refused, kept so checkout can return the user to
     this project and send it for them (PLAN.md P1, 25 Oct 2026: 210 blocked
     first prompts in 14 days were discarded)."""
-    return {"text": str(text or "")[:4000],
+    return {**(playhead or {}), "text": str(text or "")[:4000],
             "attachments": [int(a) for a in (attachment_ids or [])][:4],
             "client_msg_id": (str(client_msg_id)[:64] if client_msg_id
                               else None),
@@ -3116,6 +3130,27 @@ def _one_complete_per_key(key, wait_s=None, db_url=None):
                 pass
 
 
+def _assembled_object_bytes(key, wait=False, wait_s=None, poll_s=1.0):
+    """The size of the object a completion assembled, or None.
+
+    A consumed upload id ("gone") with no readable object yet is what a
+    completion still assembling in storage looks like from a second call
+    (#1602: the object appeared 3-60 s after the id was consumed). Then the
+    object is looked for again until ``wait_s`` before the call reports a
+    failure; a truly expired or aborted upload costs that wait once."""
+    nbytes = storage.head_bytes(key)
+    if nbytes is not None or not wait:
+        return nbytes
+    deadline = time.monotonic() + max(
+        0.0, UPLOAD_COMPLETE_WAIT_S if wait_s is None else wait_s)
+    while time.monotonic() < deadline:
+        time.sleep(poll_s)
+        nbytes = storage.head_bytes(key)
+        if nbytes is not None:
+            return nbytes
+    return None
+
+
 def _finish_multipart(user_id, project_id, key, upload_id, parts, detail,
                       repaired_out=None):
     """Complete a multipart upload through storage.finish_multipart, which
@@ -3142,7 +3177,7 @@ def _finish_multipart(user_id, project_id, key, upload_id, parts, detail,
                                         "parts": res["repaired"][:50]},
                                 origin="server")
         return None
-    if storage.head_bytes(key) is not None:
+    if _assembled_object_bytes(key, wait=res.get("gone")) is not None:
         return None                      # a retry of a complete that landed
     text = storage.finish_failure_text(res)
     record_client_event(user_id, project_id, "upload_failed",
@@ -4876,7 +4911,7 @@ def replay_blocked(user_id, project_id):
                                         "prompt_chars": len(blocked["text"])},
                                 origin="server")
             return jsonify({
-                "replay": "send", "text": blocked["text"],
+                "replay": "send", "text": blocked["text"], **_studio_playhead(blocked),
                 "attachments": blocked.get("attachments") or [],
                 "client_msg_id": f"replay-{last['id']}"})
         original = _active_original(cur, project_id)
@@ -5062,7 +5097,7 @@ def post_message(user_id, project_id, data=None):
                 body["subscription_message"] = _record_plans_message(
                     cur, p["chat_session_id"], "chat",
                     blocked_prompt=_blocked_prompt(text, attachment_ids,
-                                                   client_msg_id))
+                                                   client_msg_id, _studio_playhead(data)))
                 return jsonify(body), 402
         trial_lane = bool(trial and trial.get("allowed"))
 
@@ -5223,7 +5258,7 @@ def post_message(user_id, project_id, data=None):
                 if differs:
                     branch_base = picked
 
-        meta = {}
+        meta = _studio_playhead(data)
         if msg_version is not None:
             meta["edl_version"] = msg_version
         if stepped_back:
@@ -7518,22 +7553,23 @@ def _rules_vouched(meta, answer, deployed):
 WATERMARK_VERSION = 7
 
 
-def _user_is_paid(cur, user_id):
-    """Same rule as worker/db.user_is_paid, and deliberately the same bias:
+def _render_account(cur, user_id):
+    """Same rule as worker/db.render_account, and deliberately the same bias:
     either signal counts as paid, because marking a paying customer's export
     is a broken promise while missing a mark on a free one costs nothing."""
     if not user_id:
-        return False
+        return False, "free"
     cur.execute("SELECT is_subscribed, plan FROM users WHERE id = %s",
                 (user_id,))
     row = cur.fetchone()
     if not row:
-        return False
+        return False, "free"
     plan = ((row.get("plan") if isinstance(row, dict) else row["plan"])
             or "free").strip().lower()
     sub = row.get("is_subscribed") if isinstance(row, dict) \
         else row["is_subscribed"]
-    return bool(sub) or plan not in ("", "free")
+    paid = bool(sub) or plan not in ("", "free")
+    return paid, plan
 
 
 def _watermark_settings(cur):
@@ -7640,8 +7676,12 @@ def _final_gate(cur, project_id, user_id):
     """
     answers = _worker_answers(cur, project_id)
     deployed = _deployed_render_rules(cur)
-    is_paid = _user_is_paid(cur, user_id)
+    from export_branding import CLEAN_EXPORT_PLANS
+    is_paid, plan = _render_account(cur, user_id)
+    clean = plan in CLEAN_EXPORT_PLANS
     wm = _watermark_settings(cur)
+    if clean:
+        wm = dict(wm, force=False)
     # Only ask the EDLs which versions carry a transition when the answer can
     # still change something — with the stamp unwritten the check is off anyway.
     stamps_transitions = _pipeline_emits(cur, "trans_v")
@@ -7665,6 +7705,12 @@ def _final_gate(cur, project_id, user_id):
         small_finals = {r["id"] for r in cur.fetchall()}
 
     def ok(asset_id, meta, version):
+        # Entitlements can change after a worker vouched for a cached asset.
+        branding = meta or {}
+        if clean and (branding.get("outro_v") or branding.get("wm_v")):
+            return False
+        if not clean and branding.get("plan_omits_outro"):
+            return False
         if asset_id in small_finals:
             return False
         if final_degraded_hold(meta):

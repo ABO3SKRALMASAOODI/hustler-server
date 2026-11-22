@@ -266,6 +266,20 @@ def _eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log, motivate
     return it
 
 
+TAKE_PICS = ("main", "own:")          # the speaker's own take, as the scene names it (scene.plan, palette.picks)
+
+
+def is_take(sh):
+    """Is this shot the speaker's own take? Only the take is eased the talking-head way (a few per cent on his stressed
+    words, a 1% drift between); a cutaway clip is a picture like any other and moves the way the references move
+    pictures: a push of 5-15% a second, an eased move on its strongest word, a settle on a cut-in (20 Nov rating: every
+    clip went the take's way, so 98% cutaway films measured 1% a second of camera and read as static)."""
+    if sh.get("take") is not None:
+        return bool(sh["take"])
+    pic = str(sh.get("pic") or "")
+    return pic == TAKE_PICS[0] or pic.startswith(TAKE_PICS[1])
+
+
 def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, band=None):
     """The film's pictures, cut into framings on the voice's stress and set moving.
 
@@ -307,7 +321,7 @@ def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, b
         faces = [f[:4] for f in sh.get("faces") or []]
         eyes = {tuple(f[:4]): f[4] for f in sh.get("faces") or [] if len(f) > 4}
         M = menu(cam, sh, W)
-        if B.get("ease_takes") and sh.get("src"):
+        if B.get("ease_takes") and sh.get("src") and is_take(sh):
             items.append(_eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log, B.get("motivated_frames"),
                                      ease=B.get("take_ease") or (0.043, 0.070), drift=float(B.get("take_drift") or 0.0)))
             prev = None

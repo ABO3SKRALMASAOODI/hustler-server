@@ -355,10 +355,10 @@ def test_a_verdict_needs_pictures_under_the_sessions_own_folder():
                             _evidence(s, 2), root_cause="story selection")
     with pytest.raises(store.StoreError, match="rubric"):
         store.write_verdict(Cur([None]), s, "delivered_poor", 3, "x",
-                            _evidence(s, 2), root_cause="story selection",
+                            _evidence(s, 2), root_cause="story selection", cause_class="intelligence",
                             journey=JOURNEY)
     row = store.write_verdict(cur, s, "delivered_poor", 3, "cuts the payoff",
-                              _evidence(s, 2), root_cause="story selection",
+                              _evidence(s, 2), root_cause="story selection", cause_class="intelligence",
                               journey=JOURNEY, rating=RATING)
     assert row == {"id": 1, "review_count": 1}
     sql, p = cur.sql[-1]
@@ -367,6 +367,7 @@ def test_a_verdict_needs_pictures_under_the_sessions_own_folder():
         s["fingerprint"]
     assert len(json.loads(p["evidence"])) == 2
     sig = json.loads(p["signals"])
+    assert sig["cause_class"] == "intelligence"
     assert sig["asks"][0]["status"] == "not_done"
     assert sig["why_short"].startswith("The cut drops")
     assert sig["journey_format"] == 2
@@ -903,3 +904,20 @@ def test_all_tickets_keeps_oldest_ticket_after_three_hundred_causes():
     assert {t["id"] for g in got["groups"] for t in g["tickets"]}==set(range(301))
     cur=TicketCursor([{"r":"x","t":"y","l":"z"}])
     assert views.tickets(cur,limit=20)["total"]==20
+
+
+def test_historical_classification_preserves_ratings_and_ticket_state():
+    cur = Cur([{"id": 17}])
+    assert store.classify_review(cur, "p1-22", NOW, "production")
+    sql, params = cur.sql[-1]
+    assert "reviewed_at = %s" in sql and "score" not in sql
+    assert params == ('{"cause_class": "production"}', "p1-22", NOW)
+    cur = Cur([{"history": [], "cause_key": "index-scratch"}])
+    assert store.classify_ticket(cur, 7, "tool") == "tool"
+    sql, params = cur.sql[-1]
+    assert "SET history =" in sql and "status" not in sql
+    ticket = {"history": json.loads(params[0])}
+    assert store.ticket_class(ticket) == "tool"
+    cur = Cur([ticket])
+    assert store.classify_ticket(cur, 7, "production", missing_only=True) == "tool"
+    assert len(cur.sql) == 1
