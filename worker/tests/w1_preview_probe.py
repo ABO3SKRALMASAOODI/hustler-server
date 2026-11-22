@@ -47,6 +47,7 @@ def _without_inert(dump):
     assert d.pop("noise_clean", None) is None
     for m in d.get("music") or []:
         assert m.pop("provenance") is None and m.pop("automation") is None
+        assert m.pop("duck_db") is None
     for m in d.get("motion") or []:
         assert m.pop("composite") is None and m.pop("anchor") is None
     tr = (d.get("effects") or {}).get("transition")

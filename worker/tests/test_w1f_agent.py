@@ -411,8 +411,8 @@ def test_follow_crop_caveats_are_gone():
     # v10 uses the scene engines and the November ALIEN gates instead.
     current = active_text()
     for phrase in ("faces stay whole", "worker/scene/pace.py", "motion.py",
-                   "`diecut` and `answer` are gimmicks: never used",
-                   "`lamp` is not ready", "only behind its gate"):
+                   "diecut, lamp, arc and answer", "nothing sits on a face",
+                   "runs its device's fallback chain"):
         assert phrase in current, phrase
     plugin = LEGACY / "references"
     with open(os.path.join(plugin, "editing.md")) as fh:

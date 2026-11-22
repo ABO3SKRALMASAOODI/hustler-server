@@ -47,13 +47,23 @@ def test_footage_batches_contain_identical_words_and_image_bytes(tmp_path,monkey
     monkeypatch.setattr(look.ask,'image_block',lambda p:{'type':'image','source':{'type':'base64','data':Path(p).name}})
     monkeypatch.setattr(look.ask,'ask',lambda s,c,*a,**k: (captures.append((s,copy.deepcopy(c))) or ('{"cells":[]}',0)))
     monkeypatch.setattr(look,'PER_SHEET',2)
+    # Compare the same transport unit as the original one-sheet reader.
+    monkeypatch.setattr(look,'SHEETS_PER_CALL',1)
     args=(dict(name='Ada',must_show='Ada at work'),[dict(i=0,say='A real line.')],
           [dict(src=0,t=float(i),jpg=str(i),said='heard words') for i in range(5)],
           [dict(title='Source title',channel='source channel')],str(tmp_path))
     before,after=functions('look',vars(look))
-    before(*args); old=sorted([content(*x) for x in captures],key=str);captures.clear()
-    after(*args); new=sorted([content(*x) for x in captures],key=str)
-    assert old == new and len(new)==3
+    def by_sheet(calls):
+        return sorted((content(*call) for call in calls), key=lambda row: row[1][0]['data'])
+
+    before(*args)
+    old = by_sheet(captures)
+    captures.clear()
+    after(*args)
+    new = by_sheet(captures)
+    for (old_words, old_images), (new_words, new_images), cells in zip(old, new, (2, 2, 1), strict=True):
+        assert old_images == new_images
+        assert new_words == old_words + Counter({f'Sheet 1: cells 1 to {cells}': 1})
 
 
 def test_named_check_preserves_pixels_labels_and_rubric(tmp_path,monkeypatch):
