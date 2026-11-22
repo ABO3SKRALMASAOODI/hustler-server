@@ -598,6 +598,7 @@ def _review_card(r):
         "next_actions": sig.get("next_actions") or [],
         "request_summary": r.get("request_summary"),
         "reasoning": r.get("reasoning"), "root_cause": r.get("root_cause"),
+        "cause_class": sig.get("cause_class"),
         "evidence": r.get("evidence") or [],
         "reviewer": r.get("reviewer"), "review_count": r.get("review_count"),
         "reviewed_at": _iso(r.get("reviewed_at")),

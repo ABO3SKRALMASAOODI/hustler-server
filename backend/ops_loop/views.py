@@ -174,7 +174,7 @@ def sessions(cur, days=30, verdict=None, page=1, per_page=30, presign=None,
     cur.execute(f"""
         SELECT r.id, r.session_key, r.surface, r.user_id, r.project_id,
                r.request_ids, r.started_at, r.settled_at, r.verdict, r.score,
-               r.reasoning, r.root_cause, r.request_summary, r.evidence,
+               r.reasoning, r.root_cause, r.signals->>'cause_class' AS cause_class, r.request_summary, r.evidence,
                r.signals, r.reviewer, r.review_count, r.reviewed_at,
                u.email, LEFT(pr.title, 160) AS project_title,
                pr.kind AS project_kind,
@@ -284,6 +284,7 @@ def tickets(cur, status="all", presign=None, limit=None, now=None):
     groups = {}
     for t in cur.fetchall():
         t = dict(t)
+        t["cause_class"] = store.ticket_class(t)
         reviews = t.pop("reviews") or []
         for r in reviews:
             r["evidence"] = _evidence((r.get("evidence") or [])[:2], presign)
@@ -345,8 +346,11 @@ def commit_links(fix_sha):
 
 
 def results_between(cur, start, end):
-    cur.execute("""
-        SELECT count(*) AS judged,
+    class_counts = ", ".join(
+        f"count(*) FILTER (WHERE signals->>'cause_class' = '{name}') AS {name}"
+        for name in store.CAUSE_CLASSES)
+    cur.execute(f"""
+        SELECT {class_counts}, count(*) AS judged,
                count(*) FILTER (WHERE verdict = 'delivered_good') AS good,
                count(*) FILTER (WHERE verdict = 'delivered_poor') AS poor,
                count(*) FILTER (WHERE verdict = 'not_delivered') AS not_d,
@@ -357,7 +361,8 @@ def results_between(cur, start, end):
     r = cur.fetchone() or {}
     judged = int(r.get("judged") or 0)
     good = int(r.get("good") or 0)
-    return {"judged": judged, "good": good, "poor": int(r.get("poor") or 0),
+    return {"cause_classes": {k: int(r.get(k) or 0) for k in store.CAUSE_CLASSES},
+            "judged": judged, "good": good, "poor": int(r.get("poor") or 0),
             "not_delivered": int(r.get("not_d") or 0),
             "rate_pct": _rate(good, judged),
             "avg_score": float(r["score"]) if r.get("score") is not None

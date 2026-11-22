@@ -214,7 +214,8 @@ def _reviews(cur, roots, since):
         return {}, {}
     cur.execute("""
             SELECT r.id, r.session_key, r.project_id, r.started_at,
-                   r.verdict, r.score
+                   r.verdict, r.score, r.signals->>'cause_class' AS cause_class,
+                   r.signals->>'why_short' AS why_short
               FROM session_reviews r
              WHERE r.project_id = ANY(%(roots)s)
                AND r.started_at >= %(since)s""",
@@ -294,7 +295,8 @@ def compute(cur, now, days):
                 "first_ask": (S._redact(" ".join(first_ask.split()))[:ASK_CHARS]
                               if first_ask else None),
                 "review": ({"id": rv["id"], "verdict": rv["verdict"],
-                            "score": rv["score"]} if rv else None),
+                            "score": rv["score"], "cause_class": rv.get("cause_class"),
+                            "why_short": rv.get("why_short")} if rv else None),
             })
     rows.sort(key=lambda r: (r["started_at"], r["key"]), reverse=True)
     return {"days": days, "since": S._iso(since), "sessions": rows}

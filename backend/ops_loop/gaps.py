@@ -427,7 +427,7 @@ def _below_the_bar(cur, since, now, p):
             ("quality", trait),
             f"Rated {s.get('score_exact') or r['score']}/10: {trait}",
             f"{r['session_key']} · {r['verdict']} · "
-            f"{s.get('why_short') or ''}", review_id=r["id"]))
+            f"{s.get('why_short') or ''}", review_id=r["id"], cause_class=s.get("cause_class")))
     return out
 
 
