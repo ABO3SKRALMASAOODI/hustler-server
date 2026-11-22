@@ -1115,6 +1115,7 @@ def engines_finish(l1, sup, stress, drive_ids, meta, d, turn_f=None, mono=(), cl
         # device spans (mono), through their own finish
         out["film"]["vignette"] = float(d["film_vignette"])
     # the sound design, against this film's own voice
+    out["workflow_text_layout"] = True
     out["sound"], out["sound_design"] = design_sound(out, sup, d, turn_f=turn_f, spoken=spoken, np10=np10)
     return out
 
@@ -1406,8 +1407,6 @@ def character_sheet(script, sup, direction=None):
         stat_rows.append(dict(id=st["id"], y=r4(y_base), right=r4(right), values=[v[1] for v in vals]))
     # ---- the captions, yielding the seat to a display word
     lines = caption_build(P, clock, "cap", cap_y, f_end=f_voice_end + 8, skip=skip_caps, hold=[(a - 1, b) for a, b, _ in shown])
-    # a soft pool of shade under the one seat, so white ink reads on a bright sky as on a dark room (TASTE P4)
-    P.flash([0, f_voice_end + 8], mode="pool", a=float(d.get("pool", 0.42)), rect=[0.06, cap_y - 0.105, 0.94, cap_y + 0.075], z=-1)
     # ---- the turn: the first change of the sheet on the payoff, else the payoff's first word. A white frame lands on it
     pay = next((i for i, s in enumerate(script["segments"]) if s.get("beat") == "payoff"), None)
     turn_f = next((t["f"] for t in ticks if t["seg"] == pay), None) if pay is not None else None
@@ -2279,10 +2278,8 @@ def podcast_cut(script, sup, direction=None):
         if wd > 0.8:
             continue
         y = 0.752
-        P.block([a, b], [0.5 - wd / 2 - 0.022, y - 0.030, 0.5 + wd / 2 + 0.022, y + 0.013], pal["plate"], z=4, op=0.78, radius=0.008)
         P.word([a, b], t, "lab", 0.5, y, pal["ink"], 0.95, align="c", z=5, role="stat")
     lines = caption_build(P, clock, "cap", cap_y, f_end=f_voice_end + 8, hold=[(a - 1, b) for a, b, _ in shown])
-    P.flash([0, f_end], mode="pool", a=float(d.get("pool", 0.42)), rect=[0.06, cap_y - 0.105, 0.94, cap_y + 0.075], z=-1)
     film = dict(grain=0.012, vignette=0.34, over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))
     l1 = P.done(sup.get("sid", "wf1"), f_end, int(d.get("seed", 1113)), film)
     l1 = engines_finish(l1, sup, stress, drive_ids, meta, dict(d, look_pictures=look_pics), turn_f=turn_f,

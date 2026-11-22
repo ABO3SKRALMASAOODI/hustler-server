@@ -696,7 +696,7 @@ def _repair(l1, beats, taste):
         head = pr.split(" ", 2)
         ids.add(head[1] if head[0] == "sound" and len(head) > 1 else head[0])
     n0 = len(l1["items"]) + len(l1.get("sound") or [])
-    l1["items"] = [it for it in l1["items"] if it["id"] not in ids]
+    l1["items"] = [it for it in l1["items"] if it["k"] == "word" or it["id"] not in ids]
     l1["sound"] = [s for s in l1.get("sound") or [] if s["id"] not in ids]
     over = int(taste.get("sounds") or 0) - int(taste.get("sounds_allowed") or 0)
     if over > 0:

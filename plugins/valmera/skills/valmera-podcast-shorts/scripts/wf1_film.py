@@ -292,28 +292,6 @@ def section_spans(segs, seg_f, f_stop, min_f=36):
     return [(a, b) for a, b in out if b - a >= min_f]
 
 
-def caption_pools(l1, ruler, bright, a=0.42, pad=(0.05, 0.045, 0.04)):
-    """The shade under the captions, one pool a caption page, centred on and sized to that page's own shaped words
-    where they finally sit (after the seat moved them), never where the ink is dark (bright ground)."""
-    from wf1_layout import caption_pages, _bounds
-    caps = [i for i in l1["items"] if i["k"] == "word" and i.get("role") == "cap"]
-    out = []
-    for fa, fb, words in caption_pages(caps):
-        bs = [b for _, b, _ in _bounds(l1, words, ruler)]
-        if not bs:
-            continue
-        x0, y0 = min(b[0] for b in bs), min(b[1] for b in bs)
-        x1, y1 = max(b[2] for b in bs), max(b[3] for b in bs)
-        rect = [r4(max(x0 - pad[0], 0.02)), r4(y0 - pad[1]), r4(min(x1 + pad[0], 0.98)), r4(y1 + pad[2])]
-        cuts = sorted({fa, fb, *[f for s0, s1 in bright for f in (s0, s1) if fa < f < fb]})
-        for ca, cb in zip(cuts, cuts[1:]):
-            if cb > ca and not any(s0 <= ca < s1 for s0, s1 in bright):
-                out.append(dict(k="flash", f=[ca, cb], mode="pool", c="#FFFFFF", a=a, rect=rect, z=-1))
-    for n, it in enumerate(out):
-        it["id"] = f"pool{n:03d}"
-    return out
-
-
 def inside(items, f_end):
     """Nothing outlives the film: an item that would run past the last frame ends on it (its per-frame values cut
     with it), and one that would start on or after it is left out. A clip cut close to its last word has no tail."""
@@ -1209,8 +1187,6 @@ def build(script, sup, style_id, direction=None):
         if wd > 0.66:
             continue
         y = 0.752
-        y_last = y + 0.036 * (len(rows) - 1)
-        P.block([a, b], [0.5 - wd / 2 - 0.022, y - 0.030, 0.5 + wd / 2 + 0.022, y_last + 0.013], pal["plate"], z=6, op=0.78, radius=0.008)
         for n, r_ in enumerate(rows):
             P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat")
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), hold=[(a - 1, b) for a, b, t in shown if (a, b, t) not in free], z=5,
@@ -1251,6 +1227,8 @@ def build(script, sup, style_id, direction=None):
     l1["sound_beats"] = [dict(f=int(word_frame(b["w"])), role=b.get("role"), energy=b.get("energy"))
                          for b in (dr.get("beats") or []) if isinstance(b, dict) and isinstance(b.get("w"), int)
                          and b.get("role") in ("hook", "turn", "payoff", "close") and word_frame(b["w"]) is not None]
+    l1["workflow_text_layout"] = True
+    l1["story_cues"] = _director().sound_cues(dr, word_frame)
     if devices:
         l1["devices"] = devices
     l1 = F.engines_finish(l1, sup, stress, drive_ids, meta, dict(d, look_pictures=look_pics),
@@ -1267,9 +1245,7 @@ def build(script, sup, style_id, direction=None):
     title_layout = seat_display(l1, meta, P.R)
     caps = [i for i in l1["items"] if i["k"] == "word" and i.get("role") == "cap"]
     if caps:
-        # The shade under the captions: one pool a page, on that page's own words where the seat finally put them
-        # (round1: one fixed 0.06-0.94 shape showed as a dark blob beside a one-word caption)
-        l1["items"] += caption_pools(l1, P.R, bright, a=float(d.get("pool", 0.42)))
+        # The final renderer measures contrast beneath the actual positioned glyphs.
         first_word = caption_pages(caps)[0][2][0]
         cap_y = float(first_word["y"][-1] if isinstance(first_word["y"], list) else first_word["y"])
     restarts = caption_restarts(l1)

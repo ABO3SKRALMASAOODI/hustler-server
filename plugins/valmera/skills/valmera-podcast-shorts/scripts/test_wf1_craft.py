@@ -79,23 +79,6 @@ def test_the_caption_leaves_out_the_words_the_display_printed_by_their_position(
     assert F.said_span(c2, 0, "financial terms") == []
 
 
-def test_one_shade_a_caption_page_sized_to_its_own_words():
-    voices = {"cap": dict(font="InterDisplay-Bold.ttf", px=58, track=0)}
-    R = F.Ruler(voices)
-    words = [dict(k="word", role="cap", v="cap", t="is", f=[0, 20], x=.48, y=.62),
-             dict(k="word", role="cap", v="cap", t="the", f=[30, 50], x=.30, y=.62),
-             dict(k="word", role="cap", v="cap", t="whole", f=[32, 50], x=.40, y=.62),
-             dict(k="word", role="cap", v="cap", t="company", f=[34, 50], x=.53, y=.62)]
-    l1 = dict(frame=[1080, 1920], voices=voices, items=words)
-    pools = film.caption_pools(l1, R, bright=[(40, 45)])
-    one = [p for p in pools if p["f"][0] == 0][0]
-    assert one["f"] == [0, 20] and one["rect"][2] - one["rect"][0] < 0.3          # narrow, round the one word
-    line = [p for p in pools if p["f"][0] == 30][0]
-    assert line["rect"][2] - line["rect"][0] > one["rect"][2] - one["rect"][0]
-    assert not any(p["f"][0] < 45 and p["f"][1] > 40 for p in pools)             # never under dark ink
-    assert {tuple(p["f"]) for p in pools} == {(0, 20), (30, 40), (45, 50)}
-
-
 def _bar_scene(face, bright=None):
     voices = {"d0": dict(font="InterDisplay-Black.ttf", px=70, track=0), "d1": dict(font="InterDisplay-Black.ttf", px=140, track=0),
               "cap": dict(font="InterDisplay-Black.ttf", px=58, track=0)}

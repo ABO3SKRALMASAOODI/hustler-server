@@ -877,6 +877,15 @@ def build(sc,pack):
             continue
         key=P.image('evidence-'+sid,rec)
         n=b-a
+        if rec['kind'] == 'original':
+            # Fit the publisher's aspect ratio. A crop of the standard design
+            # window would cut off the byline and timestamp on a wide post.
+            ratio = rec['w']/rec['h'] * H/W
+            width = min(.84, .63*ratio)
+            height = width/ratio
+            P.card([a,b],key,[.5-width/2,.46-height/2,.5+width/2,.46+height/2],z=2)
+            P.word([a,b],rec['attribution'],'source',.5,.50+height/2,align='c',z=3,note=False)
+            continue
         P.card([a,b],key,[0.52,0.15,0.95,0.80],z=2,
                op=[min(1,q/7) for q in range(n)],
                s=[round(1.04-0.04*min(1,q/10)**0.5,5) for q in range(n)])

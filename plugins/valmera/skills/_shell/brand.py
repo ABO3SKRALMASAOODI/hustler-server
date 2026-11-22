@@ -68,6 +68,10 @@ def probe(path):
 # The end accent's numbers. Levels are K-weighted (score.sound_signal's ruler, the one the library's hit_lufs is on),
 # taken against the programme's own closing loudness (its last CLOSE_S), so a quiet film gets a quiet sting.
 SR = 48000
+# Phonon 31M q8, Easton, seed 108. The middle vowel uses the spelling
+# "Edited using Val Merrah." The checked, silence-trimmed master ships with the skill.
+CARD_LINE = os.path.join(HERE, "narrate", "edited_using_valmera.wav")
+CARD_LINE_AT = 0.35
 CLOSE_S = 3.0               # the programme's closing loudness: its last 3 s (a short-term window)
 # The sting (owner, 15 Nov: the 1.4 s ring rule chose impact_10, "a mountain fall sound"). It is now the recording
 # nearest the 28 metromedia reels' own close / reveal / transition / title / lead-in effects (147 events, measured with
@@ -461,6 +465,21 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
         info["sting"] = dict(id=st["id"], file=os.path.basename(st["path"]), gain_db=round(gdb, 1),
                              hit_in_file_s=d["hit_s"], license=st["license"], title=st["title"], author=st["author"],
                              distance=st["distance"], numbers=st["numbers"], vs_voice_db=st["vs_voice_db"])
+    voice = _pcm(CARD_LINE)
+    word_end = min(total, round((last_word_s if last_word_s is not None else prog_s) * SR))
+    excerpt = tail_prog[max(0, word_end - w0 - 3 * SR):max(0, word_end - w0)]
+    levels = [_k_db(excerpt[i:i + SR//4]) for i in range(0, len(excerpt) - SR//4 + 1, SR//4)]
+    active = [lv for lv in levels if lv > -45]
+    target = float(np.median(active)) if active else ref
+    gain = min(target - _k_db(voice), TP_CEIL_DB - _true_peak_db(voice))
+    at = min(total - cut + round(CARD_LINE_AT * SR), n_tail - len(voice))
+    end = at + len(voice)
+    duck = np.interp(np.arange(n_tail), [at - .06*SR, at, end, end + .12*SR],
+                     [1., .25, .25, 1.])[:, None]
+    acc *= duck
+    out *= duck
+    acc[at:end] += voice * 10 ** (gain / 20)
+    info["voice"] = dict(at_s=(cut+at)/SR, end_s=(cut+end)/SR, target_lufs=round(target,1))
     # the closing section's true peak, kept under the ceiling by lowering the accent only (the programme is as it was)
     s = 1.0
     if acc.any() and _true_peak_db(out + acc) > TP_CEIL_DB:
@@ -508,6 +527,15 @@ def tail_shape(final, prog_s, last_word_s=None, outro_s=None):
     fall_s = None if (f3 is None or m20 is None) else float(tl[m20] - tl[f3])
     pre = (tl >= prog_s - 0.5) & (tl < prog_s)
     card = x[int((prog_s - s0) * SR):]
+    # Project out only the cached voice. A bed or sting underneath the line
+    # remains in the residue and is measured throughout the card.
+    line = _pcm(CARD_LINE)
+    at = min(round(CARD_LINE_AT * SR), len(card) - len(line))
+    if at >= 0:
+        card = card.copy()
+        window = card[at:at+len(line)]
+        gain = np.sum(window * line, axis=0) / np.maximum(np.sum(line * line, axis=0), 1e-9)
+        window -= line * gain
     sec = int(0.4 * SR)
     card_db, card_low = -140.0, 0.0
     for i in range(0, max(1, len(card) - sec + 1), sec // 2):
@@ -561,6 +589,13 @@ def ink_spans_of(programme, W, H, fps, geo, workdir, prog_s):
     return spans, (BM.image_path(H, workdir, dark=True) if spans else None)
 
 
+def card_duration(config):
+    import wave
+    with wave.open(CARD_LINE, "rb") as wav:
+        minimum = CARD_LINE_AT + wav.getnframes() / wav.getframerate() + .25
+    return max(float(config.OUTRO_DURATION_S), minimum)
+
+
 def finish(programme, out, workdir, used=(), accent=True, last_word_s=None):
     """programme (the engine's film) -> out, with the mark on every programme frame and the end card joined.
     The film's sound holds a little past its last word (`last_word_s`, programme seconds; brand.last_word reads it from
@@ -572,7 +607,7 @@ def finish(programme, out, workdir, used=(), accent=True, last_word_s=None):
     p = probe(programme)
     W, H, fps = p["w"], p["h"], round(p["fps"])
     prog_s = p["frames"] / fps if p["frames"] else p["dur"]
-    outro_s = float(config.OUTRO_DURATION_S)
+    outro_s = card_duration(config)
     card = R.endcard_path()
     mark = R.watermark_image(workdir, W, H)
     if not card or not mark:
@@ -609,6 +644,7 @@ def finish(programme, out, workdir, used=(), accent=True, last_word_s=None):
     subprocess.run(cmd, check=True, capture_output=True, text=True)
     res = dict(programme_s=round(prog_s, 3), outro_s=outro_s, join_frames=j, mark_xy=[x, y], card=os.path.basename(card),
                mark_ink=dict(dark_spans=spans))
+    res["voice"] = info["voice"]
     res["tail"] = {k: v for k, v in info.items() if k in ("last_word_s", "fall_from_s")}
     if last_word_s is not None:                       # the breath between the last word and the card's first frame
         res["tail"]["word_to_card_s"] = round(t_join - float(last_word_s), 3)
@@ -649,7 +685,7 @@ def check(programme, final, workdir):
     p, f = probe(programme), probe(final)
     W, H = f["w"], f["h"]
     prog_s = p["frames"] / round(p["fps"]) if p["frames"] else p["dur"]
-    want = prog_s + float(config.OUTRO_DURATION_S)
+    want = prog_s + card_duration(config)
     out = dict(final_s=round(f["dur"], 3), want_s=round(want, 3), length_ok=abs(f["dur"] - want) <= 0.1,
                programme_s=round(prog_s, 3), outro_s=round(f["dur"] - prog_s, 3))
     ix0, iy0, iw, ih = R.watermark_geometry(W, H)["image"]
