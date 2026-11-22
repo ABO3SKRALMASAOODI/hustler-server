@@ -643,15 +643,15 @@ def test_a_replay_account_is_governed_when_the_replay_is_listed(monkeypatch):
     assert _decide(w, user=INTERNAL)["reason"] == "not_customer"
 
 
-def test_a_slice_that_failed_on_the_upgrade_continues_on_the_plan_model(
+def test_a_retried_slice_stays_on_opus_with_wallet_room(
         lane_up):
     previous = model_budget._decision(OPUS, HAIKU, "fits", None)
     previous["root"] = 501
     cont = {"model_budget": previous, "root_agent_job_id": 501,
             "continuation_state": {"exception_fingerprint": "boom #"}}
     route = _route(World(), cont, job={"id": 502, "user_id": CUSTOMER})
-    assert route["lane"]["model"] == HAIKU and "helper_lane" not in route
-    assert cont["model_budget"]["reason"] == "after_error"
+    assert route["lane"]["model"] == OPUS
+    assert cont["model_budget"]["reason"] == "continuation"
 
 
 def test_the_governor_reaches_the_lane_with_a_real_world(lane_up):
@@ -743,7 +743,7 @@ def test_a_governed_opus_turns_request_contract_call_goes_to_haiku_forced(
 
 # ------------------------------------------------------------------ billing
 
-def test_an_upgraded_call_is_charged_at_the_haiku_card():
+def test_an_explicit_legacy_credit_parity_alias_is_still_honored():
     usage = SimpleNamespace(prompt_tokens=40_000, completion_tokens=3_000,
                             prompt_tokens_details={"cached_tokens": 30_000,
                                                    "cache_write_tokens": 5_000},

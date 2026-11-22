@@ -115,7 +115,6 @@ REASONS = {
     "continuation": "the request's next slice still fits; it keeps its model",
     "stepped_down": "the request's next slice no longer fits on its model; "
                     "it continues on a cheaper one",
-    "after_error": "the previous slice failed on the upgraded model",
     "off": "the governor is switched off",
     "not_paying": "premium models go to paying accounts",
     "not_customer": "internal and replay work keep the plan's model",
@@ -853,9 +852,8 @@ def decide(conn, user_id, plan_model, paying, project_id=None, root=None,
 
 def kept(previous, root_id, plan_model, continuation_state=None):
     """A continuation of the same request starts from the model it ran on.
-    None when ``previous`` is not this request's decision. A slice that
-    failed with an exception on an upgraded model continues on the plan's
-    model: the request still finishes."""
+    None when ``previous`` is not this request's decision. A retried slice
+    rechecks the same model against the current company allowance."""
     if not isinstance(previous, dict) or not previous.get("model"):
         return None
     try:
@@ -864,11 +862,6 @@ def kept(previous, root_id, plan_model, continuation_state=None):
     except (TypeError, ValueError):
         return None
     out = dict(previous)
-    state = continuation_state if isinstance(continuation_state, dict) else {}
-    if out["model"] != plan_model and state.get("exception_fingerprint"):
-        out.update(model=plan_model, upgraded=False, reason="after_error",
-                   failed_model=previous["model"])
-        return out
     out["reason"] = "continuation"
     return out
 
