@@ -367,6 +367,7 @@ def record(purpose, request, response, usage=None):
                 response['cache_write_in'] = (
                     details.get('cache_write_tokens', 0)
                     if isinstance(details, dict) else 0)
+                response['cache_write_1h_in'] = getattr(usage, 'hour_write_tokens', 0)
                 response['uncached_in'] = max(0,
                     int(getattr(usage, 'prompt_tokens', 0) or 0)
                     - response['cached_in'] - int(response['cache_write_in'] or 0))
@@ -942,6 +943,25 @@ def cache_affinity(model):
 
 def turn_plan():
     return getattr(_turn, "plan", "") or ""
+
+
+def helper_lane(ctx, client=None):
+    """(client, model) for a turn's helper calls: the request contract, the
+    reply rewrites (auto-render reply, honesty, language, question
+    translation), score asks and the music choosers. When the model budget
+    governor upgraded only the editing turn (model_budget, 20 Nov 2026) the
+    helpers stay on the plan's model (ctx.helper_client / ctx.helper_model):
+    they cost what they cost before, and their forced tool calls keep working
+    (Claude Sonnet/Opus drop a forced tool_choice, claude_lane._NO_FORCED_TOOL).
+    Otherwise the turn's own client (``client`` when the caller holds it)
+    and model, exactly as before."""
+    helper_client = getattr(ctx, "helper_client", None)
+    helper_model = getattr(ctx, "helper_model", None)
+    if helper_client is not None and helper_model:
+        return helper_client, helper_model
+    if client is None:
+        client = getattr(ctx, "llm_client", None)
+    return client, getattr(ctx, "agent_model", None)
 
 
 # The provider's own words for "I do not take images". Matched on the error

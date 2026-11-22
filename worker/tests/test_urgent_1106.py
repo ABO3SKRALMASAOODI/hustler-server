@@ -229,6 +229,41 @@ def test_a_paying_turn_with_a_funded_key_runs_on_claude_alone(funded, monkeypatc
     ctx = box["ctx"]
     assert [lane["model"] for lane in ctx.agent_lanes] == ["claude-haiku-5-5"]
     assert ctx.agent_model == "claude-haiku-5-5"
+    assert ctx.credit_price_aliases == {"claude-haiku-5-5": "gpt-6-luna"}
+
+
+def test_an_upgraded_turn_edits_on_opus_with_haiku_behind_and_for_helpers(
+        funded, monkeypatch, tmp_path):
+    """model_budget (20 Nov 2026): the governor upgrades only the editing
+    turn. The plan's Haiku lane stands right behind it and is the thread's
+    lane for vision, critics and text helpers; the upgrade is charged at
+    Haiku's card."""
+    haiku = claude_lane.lane("claude-haiku-5-5", name="claude_paid")
+    paid = {"lane": claude_lane.lane("claude-opus-5-5", name="claude_paid"),
+            "helper_lane": haiku, "credit_model": None,
+            "credit_aliases": {"claude-opus-5-5": "claude-haiku-5-5"},
+            "model_budget": {"model": "claude-opus-5-5", "reason": "fits"}}
+    box, said, db, job = _turn(monkeypatch, tmp_path, True, "plus_2026", paid)
+    seen = {}
+
+    def stop(plan, project_id=None, lane=None):
+        seen["lane"] = lane
+        raise _StopTurn()
+
+    monkeypatch.setattr(llm, "set_turn_plan", stop)
+    with pytest.raises(_StopTurn):
+        agent_loop.run_agent_job(db, job)
+    ctx = box["ctx"]
+    assert [lane["model"] for lane in ctx.agent_lanes] == [
+        "claude-opus-5-5", "claude-haiku-5-5"]
+    assert ctx.agent_model == "claude-opus-5-5"
+    assert seen["lane"] is haiku
+    # text helpers (request contract, reply rewrites, asks, music) go to the
+    # plan's Haiku, not the upgraded editing model (llm.helper_lane)
+    assert (ctx.helper_client, ctx.helper_model) == (haiku["client"],
+                                                     "claude-haiku-5-5")
+    assert llm.helper_lane(ctx) == (haiku["client"], "claude-haiku-5-5")
+    assert ctx.credit_price_aliases == {"claude-opus-5-5": "claude-haiku-5-5"}
 
 
 def test_a_subscriber_with_no_claude_lane_is_told_never_moved_to_luna(

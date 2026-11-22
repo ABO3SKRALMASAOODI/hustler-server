@@ -248,12 +248,15 @@ def _call(ctx, name, schema, system, evidence):
         "parameters": schema, "strict": True}}
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": json.dumps(evidence, ensure_ascii=False, default=str)}]
+    # The plan's model when only the editing turn was upgraded
+    # (model_budget): its forced tool call is kept (llm.helper_lane).
+    client, model = llm.helper_lane(ctx)
     response = llm.create_with_dialect(
-        ctx.llm_client, ctx.agent_model, messages, max_tokens=8000,
+        client, model, messages, max_tokens=8000,
         tools=[tool], tool_choice={"type": "function", "function": {"name": name}})
     message = response.choices[0].message
     calls = list(message.tool_calls or [])
-    llm.record(name, {"model": ctx.agent_model},
+    llm.record(name, {"model": model},
                {"finish_reason": getattr(response.choices[0], "finish_reason", None),
                 "tool_calls": [c.model_dump() if hasattr(c, "model_dump") else
                                {"name": c.function.name, "arguments": c.function.arguments}
