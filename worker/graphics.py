@@ -387,6 +387,17 @@ def _wrap_hard(text, line_chars):
     return lines or [""]
 
 
+def soft_title_shadow(tx):
+    """An explicit drop shadow on unboxed type with no visible outline."""
+    tpl = TEMPLATES.get(tx.get("template")) or TEMPLATES["title"]
+    box = tpl["box"] if tx.get("box") is None else tx["box"]
+    outline = tpl["outline"] if tx.get("outline_width") is None else tx["outline_width"]
+    # Blur transitions animate the face itself and own libass's blur channel.
+    face_blur = {"blur_in", "zoom_blur"}
+    return (not box and not outline and (tx.get("shadow") or 0) > 0
+            and tx.get("entrance") not in face_blur and tx.get("exit") not in face_blur)
+
+
 def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
                   size_scale_bounds=(0.4, 3.0)):
     """One TextItem dict -> event dict or None (fully outside the program).
@@ -604,7 +615,12 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
     shadow = tx.get("shadow")
     edge_scale = px / tpl["base_size"] if tx.get("font_size") is not None else f
     head += rf"\bord{round((tpl['outline'] if outline is None else outline) * edge_scale, 1)}"
-    head += rf"\shad{round((tpl['shadow'] if shadow is None else shadow) * edge_scale, 1)}"
+    offset = round((tpl["shadow"] if shadow is None else shadow) * edge_scale, 1)
+    head += rf"\shad{offset}"
+    if offset and soft_title_shadow(tx):
+        # libass blurs the glyph itself when there is no border. A transparent
+        # subpixel border keeps the ink sharp and spreads the shadow only.
+        head += rf"\bord0.025\3a&HFF&\blur{offset}"
     if italic:
         head += r"\i1"
     if box:

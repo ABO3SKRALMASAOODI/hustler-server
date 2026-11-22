@@ -697,10 +697,15 @@ IMAGE_CAPTION_PROMPT = (
 def _attachment_context(worker_db, ctx, user_message):
     """Chat attachments on this message -> honest context lines. New images
     are captioned once via the vision model (cached on the asset)."""
-    ids = (user_message.get("meta") or {}).get("attachments") or []
-    if not isinstance(ids, list):
-        return ""
+    meta = user_message.get("meta") or {}
     notes = []
+    at = meta.get("playhead_s")
+    if type(at) in (int, float) and 0 <= at < float("inf"):
+        notes.append(f"[Studio playhead when this message was sent: {at:.3f}s "
+                     "on the programme timeline.]")
+    ids = meta.get("attachments") or []
+    if not isinstance(ids, list):
+        ids = []
     for aid in ids[:4]:
         if isinstance(aid, dict):
             aid = aid.get("id")

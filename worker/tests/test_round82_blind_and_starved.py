@@ -532,3 +532,10 @@ def test_zero_write_correction_claim_is_caught():
     # the same sentence on a turn that DID write is honest
     assert not _al._reply_violations(reply, wrote=True, previewed=False,
                                      acted=True)
+
+
+def test_playhead_reaches_the_editor_in_programme_time_without_an_attachment():
+    from agent_loop import _attachment_context
+    note = _attachment_context(None, None, {"meta": {"playhead_s": 9.125}})
+    assert "9.125" in note and "programme" in note
+    assert _attachment_context(None, None, {"meta": {}}) == ""

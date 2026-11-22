@@ -34,3 +34,22 @@ def test_well_covered_program_says_nothing():
         {"asset_key": str(i), "kind": "video", "start": s, "duration_s": 3.0, "scale": 1.0}
         for i, s in enumerate((1.0, 5.0, 9.0, 12.0))])
     assert agent_tools._broll_coverage_line(edl) == ""
+
+
+def test_preview_quotes_the_speech_in_the_uncovered_program_range():
+    edl = {"keep": [[100, 120]], "overlays": [
+        {"asset_key": "a", "kind": "image", "start": 0, "duration_s": 5,
+         "scale": 1}]}
+    words = [{"t0": t, "t1": t + .4, "w": w} for t, w in [
+        (8, "deleted"), (101, "covered"), (108, "pulmão"), (117, "diafragma")]]
+    note = agent_tools._broll_coverage_line(edl, {"words": words})
+    assert "8s" in note and "pulmão" in note
+    assert "17s" in note and "diafragma" in note
+    assert "deleted" not in note and "covered" not in note
+
+
+def test_preview_still_reports_coverage_with_an_unusable_word_index():
+    edl = dict(TALK, overlays=[{"asset_key": "a", "kind": "video",
+                                "start": 0, "duration_s": 3, "scale": 1}])
+    assert agent_tools._broll_coverage_line(edl, {"words": [{"w": "hello"}]}) == (
+        agent_tools._broll_coverage_line(edl))

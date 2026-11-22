@@ -63,7 +63,7 @@ MAX_PHOTO_BYTES = int(os.getenv("STOCK_MAX_PHOTO_BYTES", str(15 * 1024 * 1024)))
 # A search result set the model can actually reason about. More than this and
 # the tool result becomes a wall of near-identical clips that costs tokens and
 # buys no better a choice.
-MAX_RESULTS = 8
+DEFAULT_RESULTS = 8
 
 KIND_VIDEO = "video"
 KIND_PHOTO = "photo"
@@ -71,6 +71,26 @@ KIND_PHOTO = "photo"
 
 class StockError(Exception):
     """Anything the user should be told about in a plain sentence."""
+
+
+def _catalog_rows(fetch, url, params, field, count, page_param, page_size, **options):
+    """Keep each request within one provider page and return distinct catalog IDs."""
+    found = {}
+    page = 1
+    while len(found) < count:
+        try:
+            data = fetch(url, params={**params, page_param: page_size, "page": page}, **options)
+        except Exception:
+            if found:
+                break
+            raise
+        rows = data.get(field) or []
+        previous = len(found)
+        found.update((row["id"], row) for row in rows if row.get("id") is not None)
+        if len(rows) < page_size or len(found) == previous:
+            break
+        page += 1
+    return list(found.values())[:count]
 
 
 def _openverse_search(query, kind, orientation, count):
@@ -88,15 +108,16 @@ def _openverse_search(query, kind, orientation, count):
     # several candidates before the editor sees the contact sheet.
     params = {"q": query, "license_type": "commercial,modification",
               "size": "large", "mature": "false", "filter_dead": "true",
-              "unstable__authority": "true",
-              "page_size": max(12, count * 3)}
+              "unstable__authority": "true"}
     aspect = {"portrait": "tall", "landscape": "wide",
               "square": "square"}.get(orientation)
     if aspect:
         params["aspect_ratio"] = aspect
-    data = _openverse_get_json(OPENVERSE_IMAGE_API, params=params)
+    pool_size = max(12, count * 3)
+    rows = _catalog_rows(_openverse_get_json, OPENVERSE_IMAGE_API, params, "results",
+                         pool_size, "page_size", min(pool_size, 20))
     out = []
-    for p in (data.get("results") or []):
+    for p in rows:
         if not commercial_ok(p.get("license")):
             continue
         url = p.get("url")
@@ -260,17 +281,18 @@ def _page_title(url):
 
 def _pexels_search(query, kind, orientation, count):
     url = PEXELS_VIDEO_API if kind == KIND_VIDEO else PEXELS_PHOTO_API
-    params = {"query": query, "per_page": count}
+    params = {"query": query}
     if orientation in ("landscape", "portrait", "square"):
         params["orientation"] = orientation
-    data = net_fetch.get_json(
-        url, params=params, timeout_s=API_TIMEOUT_S,
+    rows = _catalog_rows(
+        net_fetch.get_json, url, params, "videos" if kind == KIND_VIDEO else "photos",
+        count, "per_page", min(count, 80), timeout_s=API_TIMEOUT_S,
         allowed_hosts=["api.pexels.com"],
         headers={"Authorization": PEXELS_KEY})
 
     out = []
     if kind == KIND_VIDEO:
-        for v in (data.get("videos") or []):
+        for v in rows:
             out.append({
                 "provider": "pexels", "kind": KIND_VIDEO,
                 "id": f"pexels:video:{v.get('id')}",
@@ -284,7 +306,7 @@ def _pexels_search(query, kind, orientation, count):
                 "_thumb": v.get("image"),
             })
     else:
-        for p in (data.get("photos") or []):
+        for p in rows:
             src = p.get("src") or {}
             out.append({
                 "provider": "pexels", "kind": KIND_PHOTO,
@@ -305,7 +327,7 @@ def _pexels_search(query, kind, orientation, count):
 
 def _pixabay_search(query, kind, orientation, count):
     url = PIXABAY_VIDEO_API if kind == KIND_VIDEO else PIXABAY_API
-    params = {"key": PIXABAY_KEY, "q": query, "per_page": max(3, count),
+    params = {"key": PIXABAY_KEY, "q": query,
               "safesearch": "true"}
     if kind == KIND_PHOTO:
         params["image_type"] = "photo"
@@ -313,11 +335,12 @@ def _pixabay_search(query, kind, orientation, count):
             params["orientation"] = "vertical"
         elif orientation == "landscape":
             params["orientation"] = "horizontal"
-    data = net_fetch.get_json(url, params=params, timeout_s=API_TIMEOUT_S,
-                              allowed_hosts=["pixabay.com"])
+    rows = _catalog_rows(net_fetch.get_json, url, params, "hits", max(3, count),
+                         "per_page", max(3, min(count, 200)), timeout_s=API_TIMEOUT_S,
+                         allowed_hosts=["pixabay.com"])
 
     out = []
-    for h in (data.get("hits") or []):
+    for h in rows:
         tags = (h.get("tags") or "").strip() or None
         credit = (h.get("user") or "").strip() or None
         if kind == KIND_VIDEO:
@@ -355,7 +378,7 @@ def _pixabay_search(query, kind, orientation, count):
 
 # ── public API ───────────────────────────────────────────────────────────
 
-def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
+def search(query, kind=KIND_VIDEO, orientation=None, count=DEFAULT_RESULTS):
     """Search the configured providers. Returns [] when nothing matched.
 
     Every configured provider is searched in parallel. Results are quality-
@@ -367,7 +390,7 @@ def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
     query = (query or "").strip()
     if not query:
         raise StockError("a search query is required")
-    count = max(1, min(int(count or MAX_RESULTS), MAX_RESULTS))
+    count = max(1, int(count or DEFAULT_RESULTS))
     if kind not in (KIND_VIDEO, KIND_PHOTO):
         raise StockError(f"unknown stock kind '{kind}'")
     if kind == KIND_VIDEO and not video_available():

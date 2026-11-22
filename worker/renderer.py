@@ -2862,6 +2862,12 @@ def shaping_current(meta, edl):
     return ((meta or {}).get("gfx_shape_v") or 0) == config.GFX_SHAPING_VERSION
 
 
+def title_shadow_current(meta, edl):
+    if not any(graphics.soft_title_shadow(t) for t in (edl or {}).get("texts") or []):
+        return True
+    return (meta or {}).get("title_shadow_v") == config.TITLE_SHADOW_VERSION
+
+
 def _music_overhang(edl, out_duration):
     """Seconds authored music extends past the picture/program boundary."""
     ends = [float(m.get("end") or 0.0) for m in (edl or {}).get("music") or []
@@ -10433,6 +10439,7 @@ def cache_rules_current(cached, edl, variant, *, src_shape=(None, None),
         and audio_peak_current(meta, edl)
         and true_peak_current(meta)
         and master_current(meta, edl, *src_shape)
+        and title_shadow_current(meta, edl)
         and shaping_current(meta, edl)
         and transitions_current(meta, edl)
         and music_tail_current(meta, edl, tail_out)
@@ -11072,6 +11079,7 @@ def _run_render_job(worker_db, job):
                             and audio_peak_current(pm, prev_row["json"]) \
                             and master_current(pm, prev_row["json"],
                                                *src_shape) \
+                            and title_shadow_current(pm, prev_row["json"]) \
                             and shaping_current(pm, prev_row["json"]) \
                             and transitions_current(pm, prev_row["json"]) \
                             and camera_current(pm, prev_row["json"], index) \
@@ -11662,6 +11670,7 @@ def _run_render_job(worker_db, job):
                               if not proof_only and
                               outro_seconds(variant == "preview") else 0),
                   "gfx_shape_v": config.GFX_SHAPING_VERSION,
+                  "title_shadow_v": config.TITLE_SHADOW_VERSION,
                   "delivery_v": config.DELIVERY_VERSION,
                   "trans_v": config.TRANSITION_VERSION,
                   "cam_v": config.CAMERA_VERSION,
