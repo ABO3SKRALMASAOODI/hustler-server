@@ -535,48 +535,33 @@ def _give_missing_ids(edl, layers):
 
 
 def _texts_long_enough(edl):
-    """A text shorter than TEXT_MIN_SPAN_S plays for TEXT_MIN_SPAN_S: its
-    end is stretched, and a text that started where it ended (the next word
-    of a build) starts where it now ends, so two words never sit on screen
-    together. Near the programme's end the span is moved back instead.
+    """Use available time at the authored position, preserving every onset."""
+    from bisect import bisect_right
+    from collections import defaultdict
 
-    p5993 (19 Nov 2026): a promo line built word by word, 0.25 s a word,
-    was refused ("span [0.5, 0.75] is 0.250s, shorter than 0.3s") and the
-    editor lost a turn re-sending it."""
-    items = [t for t in edl.get("texts") or [] if isinstance(t, dict)]
-    try:
-        spans = [(float(t["start"]), float(t["end"])) for t in items]
-    except (KeyError, TypeError, ValueError):
-        return []                     # the schema words a missing time
-    prog = _programme_end(edl)
-    order = sorted(range(len(items)), key=lambda k: (spans[k][0], k))
-    stretched, moved = [], 0
-    for pos, k in enumerate(order):
-        t = items[k]
-        s, e = float(t["start"]), float(t["end"])
-        if e - s >= TEXT_MIN_SPAN_S - 1e-6 or e < s:
-            continue
-        new_e = round(s + TEXT_MIN_SPAN_S, 2)
-        if prog is not None and new_e > prog:
-            new_e = round(prog, 2)
-            t["start"] = round(max(0.0, new_e - TEXT_MIN_SPAN_S), 2)
-        t["end"] = new_e
-        stretched.append(f"{t.get('id') or '?'} {e - s:.2f}s")
-        for j in order[pos + 1:]:
-            nxt = items[j]
-            ns = float(nxt["start"])
-            if e - 0.01 <= ns < new_e:
-                nxt["start"] = new_e
-                if float(nxt["end"]) < new_e:
-                    nxt["end"] = new_e
-                moved += 1
-    if not stretched:
-        return []
-    return [f"texts shorter than {TEXT_MIN_SPAN_S:g}s now play "
-            f"{TEXT_MIN_SPAN_S:g}s ({', '.join(stretched[:8])}"
-            + (", ..." if len(stretched) > 8 else "") + ")"
-            + (f"; {moved} text(s) that began where one ended now begin "
-               "where it ends, so none overlap" if moved else "")]
+    tracks = defaultdict(list)
+    for item in edl.get("texts") or []:
+        if isinstance(item, dict) and isinstance(item.get("start"), (int, float)):
+            tracks[(item.get("x"), item.get("y"))].append(item)
+    program_end = _programme_end(edl)
+    notes = []
+    for items in tracks.values():
+        starts = sorted({item["start"] for item in items})
+        for item in items:
+            start, end = item["start"], item.get("end")
+            if not isinstance(end, (int, float)) or not 0 <= end - start < TEXT_MIN_SPAN_S - 1e-6:
+                continue
+            pos = bisect_right(starts, start)
+            limits = [start + TEXT_MIN_SPAN_S]
+            if pos < len(starts):
+                limits.append(starts[pos])
+            if program_end is not None:
+                limits.append(program_end)
+            repaired = round(min(limits), 2)
+            if repaired > start and abs(repaired - end) > 1e-6:
+                item["end"] = repaired
+                notes.append(f"text {item.get('id')} at {start:g}s: end {end:g}s to {repaired:g}s")
+    return notes
 
 
 _INSERT_FIT = {"cover": "crop", "fill": "crop", "contain": "pad",

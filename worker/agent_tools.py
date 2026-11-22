@@ -8538,14 +8538,18 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
     return res
 
 
+def _already_absent(kind, item_id, current_ids):
+    return (f"{kind} {item_id} is already absent; nothing to remove; "
+            f"current {kind} ids: {current_ids or 'none'}.")
+
+
 def remove_music(ctx, id):
     edl = dict(ctx.latest_edl()["json"])
     items = [dict(m) for m in (edl.get("music") or [])]
     hit = next((m for m in items if m.get("id") == id), None)
     if not hit:
         have = ", ".join(m.get("id") or "?" for m in items) or "none"
-        return (f"REJECTED: no music with id '{id}'. Existing music ids: "
-                f"{have}. Call get_edl to see them.")
+        return _already_absent("music", id, have)
     edl["music"] = [m for m in items if m.get("id") != id]
     return ctx.write_edl(
         edl, f"removed music {id} "
@@ -8911,8 +8915,7 @@ def remove_sfx(ctx, id):
     hit = next((s for s in items if s.get("id") == id), None)
     if not hit:
         have = ", ".join(s.get("id") or "?" for s in items) or "none"
-        return (f"REJECTED: no sfx with id '{id}'. Existing sfx ids: {have}. "
-                "Call get_edl to see them.")
+        return _already_absent("sfx", id, have)
     edl["sfx"] = [s for s in items if s.get("id") != id]
     return ctx.write_edl(
         edl, f"removed sfx {id} ('{_track_name(ctx, hit['storage_key'])}' "
@@ -8932,7 +8935,11 @@ def move_sfx(ctx, id, at):
     hit = next((s for s in items if s.get("id") == id), None)
     if not hit:
         have = ", ".join(s.get("id") or "?" for s in items) or "none"
-        return (f"REJECTED: no sfx with id '{id}'. Existing sfx ids: {have}.")
+        nearest = min(items, key=lambda item: abs(sound_library.hit_at(item) - at),
+                      default=None)
+        hint = (f" Nearest sound to {at:g}s: {nearest['id']} at "
+                f"{sound_library.hit_at(nearest):g}s." if nearest else "")
+        return f"No sound moved. Current sfx ids: {have}.{hint}"
     prog = program_duration(edl)
     if at < 0 or at > max(0.0, prog - 0.05):
         return (f"REJECTED: at={at}s is outside the program "
@@ -11891,8 +11898,7 @@ def remove_zoom(ctx, id):
     hit = next((z for z in zooms if z.get("id") == id), None)
     if not hit:
         have = ", ".join(z.get("id", "?") for z in zooms) or "none"
-        return (f"REJECTED: no zoom with id '{id}'. Existing zooms: {have}. "
-                "Call get_edl to see them.")
+        return _already_absent("zoom", id, have)
     fx["zooms"] = [z for z in zooms if z.get("id") != id]
     edl["effects"] = fx
     return ctx.write_edl(
@@ -12096,8 +12102,7 @@ def remove_zoom_path(ctx, id):
     if not hit:
         paths = [z.get("id", "?") for z in zooms if z.get("mode") == "path"]
         have = ", ".join(paths) or "none"
-        return (f"REJECTED: no keyframed zoom with id '{id}'. Existing "
-                f"keyframed zooms: {have}. Call get_edl to see them.")
+        return _already_absent("keyframed zoom", id, have)
     if hit.get("mode") != "path":
         return (f"REJECTED: '{id}' is a {hit.get('mode') or 'punch'} zoom, "
                 "not a keyframed path. Remove it with remove_zoom.")
@@ -13597,9 +13602,7 @@ def remove_erase(ctx, id=None):
         if not hit:
             have = ([r.get("id", "?") for r in regions]
                     + [p.get("id", "?") for p in patches])
-            return (f"REJECTED: no erased region with id '{id}'. Existing: "
-                    f"{', '.join(have)}. Call get_edl to see them, or omit "
-                    "id to restore the whole original picture.")
+            return _already_absent("erased region", id, ", ".join(have))
         regions = [r for r in regions if r.get("id") != id]
         try:
             return _apply_clean(ctx, regions,
@@ -13770,9 +13773,7 @@ def remove_blur(ctx, id=None):
         hit = next((r for r in regions if r.get("id") == id), None)
         if not hit:
             have = ", ".join(r.get("id", "?") for r in regions)
-            return (f"REJECTED: no censor region with id '{id}'. Existing: "
-                    f"{have}. Call get_edl to see them, or omit id to "
-                    "remove all.")
+            return _already_absent("censor region", id, have)
         fx["regions"] = [r for r in regions if r.get("id") != id]
         desc = f"removed censor region {id}"
     else:
@@ -14507,8 +14508,7 @@ def remove_insert(ctx, id):
     hit = next((i for i in inserts if i.get("id") == id), None)
     if not hit:
         have = ", ".join(i.get("id", "?") for i in inserts) or "none"
-        return (f"REJECTED: no insert with id '{id}'. Existing inserts: "
-                f"{have}. Call get_edl to see them.")
+        return _already_absent("insert", id, have)
     edl["inserts"] = [i for i in inserts if i.get("id") != id]
     # Removing an insert shifts everything after it earlier and shortens the
     # program — the SAME re-anchoring as a keep cut. The old sfx-only drop
@@ -14746,7 +14746,7 @@ def remove_voiceover(ctx, id):
     hit = next((v for v in vos if v.get("id") == id), None)
     if not hit:
         have = ", ".join(v.get("id", "?") for v in vos) or "none"
-        return (f"REJECTED: no voiceover with id '{id}'. Existing: {have}.")
+        return _already_absent("voiceover", id, have)
     edl["voiceover"] = [v for v in vos if v.get("id") != id]
     return ctx.write_edl(
         edl, f"removed voiceover {id} "
@@ -14851,8 +14851,7 @@ def remove_speed(ctx, id):
     hit = next((sp for sp in spans if sp.get("id") == id), None)
     if not hit:
         have = ", ".join(sp.get("id") or "?" for sp in spans) or "none"
-        return (f"REJECTED: no speed span with id '{id}'. Existing speed "
-                f"spans: {have}. Call get_edl to see them.")
+        return _already_absent("speed span", id, have)
     edl["speed"] = [sp for sp in spans if sp.get("id") != id]
     return _write_speed(
         ctx, prev, edl,
@@ -15311,8 +15310,7 @@ def remove_overlay(ctx, id):
     hit = next((o for o in items if o.get("id") == id), None)
     if not hit:
         have = ", ".join(o.get("id") or "?" for o in items) or "none"
-        return (f"REJECTED: no overlay with id '{id}'. Existing overlays: "
-                f"{have}. Call get_edl to see them.")
+        return _already_absent("overlay", id, have)
     if hit.get("screen"):
         # Dropping the pin alone leaves the handoff clip cutting in cold, with
         # no push into it — a jump cut the user never asked for, from a tool
@@ -16728,9 +16726,7 @@ def remove_screen_takeover(ctx, id, keep_clip=False):
                None)
     if not hit:
         have = ", ".join(o.get("id") or "?" for o in items if o.get("screen"))
-        return (f"REJECTED: no screen takeover with id '{id}'. Existing "
-                f"takeovers: {have or 'none'}. (Use remove_overlay for an "
-                "ordinary overlay.) Call get_edl to see them.")
+        return _already_absent("screen takeover", id, have)
     hand = round(float(hit["start"]) + float(hit["duration_s"]), 2)
     edl["overlays"] = [o for o in items if o.get("id") != id]
     dropped = ""
@@ -17957,8 +17953,7 @@ def remove_text(ctx, id):
     hit = next((tx for tx in items if tx.get("id") == id), None)
     if not hit:
         have = ", ".join(tx.get("id") or "?" for tx in items) or "none"
-        return (f"REJECTED: no text with id '{id}'. Existing texts: {have}. "
-                "Call get_edl to see them.")
+        return _already_absent("text", id, have)
     edl["texts"] = [tx for tx in items if tx.get("id") != id]
     return ctx.write_edl(
         edl, f"removed {hit.get('template', 'text')} text "
@@ -18142,8 +18137,7 @@ def remove_vector_graphic(ctx, id):
     hit = next((v for v in items if v.get("id") == id), None)
     if not hit:
         have = ", ".join(v.get("id") or "?" for v in items) or "none"
-        return (f"REJECTED: no vector graphic with id '{id}'. Existing "
-                f"vectors: {have}. Call get_edl to see them.")
+        return _already_absent("vector graphic", id, have)
     edl["vectors"] = [v for v in items if v.get("id") != id]
     return ctx.write_edl(
         edl, f"removed {hit.get('kind', 'vector')} graphic ({id})")
@@ -20299,8 +20293,7 @@ def remove_aspect_shift(ctx, id):
     hit = next((s for s in shifts if s.get("id") == id), None)
     if not hit:
         have = ", ".join(s.get("id", "?") for s in shifts) or "none"
-        return (f"REJECTED: no aspect shift with id '{id}'. Existing: "
-                f"{have}. Call get_edl to see them.")
+        return _already_absent("aspect shift", id, have)
     rest = [s for s in shifts if s.get("id") != id]
     fx["frame_shifts"] = rest or None
     edl["effects"] = fx
@@ -21273,8 +21266,7 @@ def remove_stylize(ctx, id):
     hit = next((sx for sx in sts if sx.get("id") == id), None)
     if not hit:
         have = ", ".join(sx.get("id") or "?" for sx in sts) or "none"
-        return (f"REJECTED: no stylize effect with id '{id}'. Existing: "
-                f"{have}. Call get_edl to see them.")
+        return _already_absent("stylize effect", id, have)
     fx["stylize"] = [sx for sx in sts if sx.get("id") != id]
     edl["effects"] = fx
     return ctx.write_edl(edl, f"removed stylize {hit['kind']} ({id})")
@@ -21595,8 +21587,7 @@ def remove_custom_filter(ctx, id):
     hit = next((c for c in cfs if c.get("id") == id), None)
     if not hit:
         have = ", ".join(c.get("id") or "?" for c in cfs) or "none"
-        return (f"REJECTED: no custom filter with id '{id}'. Existing: "
-                f"{have}. Call get_edl to see them.")
+        return _already_absent("custom filter", id, have)
     fx["custom"] = [c for c in cfs if c.get("id") != id]
     edl["effects"] = fx
     name = hit.get("label") or (hit.get("chain") or "")[:40]

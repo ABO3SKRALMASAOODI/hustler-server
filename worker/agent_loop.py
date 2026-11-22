@@ -4400,19 +4400,11 @@ def _verification_complete(ctx):
             and not record.get("unresolved_findings"))
 
 
-# Findings that keep holding the export once the request's repairs are done:
-# the flash safety limit (owner decision, Wave 0) protects viewers, and
-# corrupt glyphs are text that visibly cannot ship. Everything else a critic
-# or verifier raises advises once the request's repairs are spent.
-_HOLDS_AFTER_BUDGET = frozenset({quality_verifier.FLASH_FINDING,
-                                 "corrupt_glyph"})
-
-
 def _safety_hold(ctx):
     _latest, verification = _latest_verification(ctx)
     return [row for row in verification.get("unresolved_findings") or []
             if isinstance(row, dict)
-            and str(row.get("code") or "") in _HOLDS_AFTER_BUDGET]
+            and str(row.get("code") or "") == "corrupt_glyph"]
 
 
 def _quality_handoff(ctx):
@@ -4424,7 +4416,7 @@ def _quality_handoff(ctx):
     closed export the user can only reopen by asking again. When the
     customer's own contract (programme length, captions off, ...) is met,
     ``contract_met`` is True and the request counts as fulfilled; "Improve
-    it" is then an optional extra. Flash safety still holds the export."""
+    it" is then an optional extra."""
     quality = _strict_quality_handoff(ctx)
     if (getattr(ctx, "critics_advisory", False)
             and quality.get("quality_status") == "repair_required"
