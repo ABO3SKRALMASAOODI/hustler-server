@@ -64,3 +64,62 @@ def test_director_selects_only_discovered_library_ids(monkeypatch):
     rows = [{"say": "These are the chambers."}]
     mcp_film.picture_plan(rows, "documentary", [picture])
     assert rows[0]["leads"] == [picture]
+
+
+def test_archive_render_keeps_photo_holds_motion_and_fractional_cuts(tmp_path, monkeypatch):
+    import subprocess
+    from PIL import Image
+    import renderer
+    from schemas import canvas_edl
+
+    def ffmpeg(*args):
+        return subprocess.check_output(["ffmpeg", "-nostdin", "-v", "error", *args])
+
+    edl = canvas_edl()
+    edl["canvas"].update(width=320, height=180, fps=10.0)
+    local = {}
+    for name, color in [("red", (255, 0, 0)), ("green", (0, 255, 0))]:
+        path = tmp_path / (name + ".png")
+        Image.new("RGB", (64, 64), color).save(path)
+        local["films/1/" + name] = str(path)
+    motion = tmp_path / "motion.mp4"
+    ffmpeg("-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10", "-t", "1",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", str(motion))
+    local["films/1/motion"] = str(motion)
+    clock = 0.0
+    for i, (name, duration) in enumerate(
+            [("red", 1.24), ("motion", 0.72), ("green", 0.91), ("red", 0.73)]):
+        edl["inserts"].append(dict(id=f"p{i}", asset_key="films/1/" + name,
+                                   kind="video" if name == "motion" else "image",
+                                   at_output_s=clock, duration_s=duration,
+                                   fit="pad_blur", mute=True))
+        clock += duration
+    monkeypatch.setattr(renderer, "CANVAS_MAX_DIRECT_INPUTS", 3)
+    out = tmp_path / "movie.mp4"
+    renderer._render_canvas_edl(edl, str(out), str(tmp_path), False,
+                                asset_locals=local, suppress_outro=True)
+    raw = ffmpeg("-i", str(out), "-vf", "scale=8:8", "-f", "rawvideo",
+                 "-pix_fmt", "rgb24", "-")
+    frames = [raw[i:i + 192] for i in range(0, len(raw), 192)]
+    assert len(frames) == 36
+
+    def center(frame):
+        return list(frame[108:111])
+
+    def dominant(frame, channel):
+        rgb = center(frame)
+        return rgb[channel] > 200 and max(rgb[:channel] + rgb[channel + 1:]) < 40
+
+    assert all(dominant(frame, 0) for frame in frames[:13])
+    assert frames[14] != frames[18]
+    assert all(dominant(frame, 1) for frame in frames[20:29])
+    assert all(dominant(frame, 0) for frame in frames[29:])
+
+
+def test_edited_archive_motion_uses_the_existing_full_renderer():
+    import renderer
+
+    shot = {"asset_key": "films/1/picture", "mute": True, "fit": "pad_blur"}
+    assert renderer._plain_archive_shots({"inserts": [shot]})
+    assert not renderer._plain_archive_shots({"inserts": [{**shot, "motion": "zoom_in"}]})
+    assert not renderer._plain_archive_shots({"inserts": [shot], "effects": {"transition": {"style": "dip_black"}}})

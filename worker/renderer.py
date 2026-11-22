@@ -7647,6 +7647,58 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     return media.duration_of(out_path)
 
 
+def _archive_picture_program(edl, stage_dir, preview, asset_locals, cancelled_cb,
+                             progress_cb, fps):
+    """Retain each held archive frame until its next cut on the programme clock.
+
+    A still needs its native crop and blur once. Giving FFmpeg the next
+    picture's timestamp preserves the hold without filtering, writing and
+    decoding hundreds of identical lossless frames per shot.
+    """
+    inserts = edl["inserts"]
+    lengths = block_clock([shot["duration_s"] for shot in inserts], fps)
+    normalized = {}
+    listing = os.path.join(stage_dir, "pictures.ffconcat")
+    with open(listing, "w", encoding="utf-8") as handle:
+        for i, (shot, frames) in enumerate(zip(inserts, lengths)):
+            if cancelled_cb and cancelled_cb():
+                raise dbx.JobLeaseLost("Documentary picture assembly lease ended")
+            still = shot["kind"] == "image"
+            identity = (shot["asset_key"], shot["fit"]) if still else i
+            if identity not in normalized:
+                folder = os.path.join(stage_dir, str(i))
+                os.makedirs(folder)
+                filename = os.path.join(str(i), "picture.nut")
+                clip = {**shot, "at_output_s": 0.0,
+                        "duration_s": 1 / fps if still else frames / fps}
+                _render_canvas_edl(
+                    {"keep": [], "canvas": edl["canvas"], "inserts": [clip]},
+                    os.path.join(stage_dir, filename), folder, preview,
+                    cancelled_cb=cancelled_cb, asset_locals=asset_locals,
+                    suppress_outro=True, render_fragment=True, _base_stage=True)
+                normalized[identity] = filename
+            handle.write(f"file '{normalized[identity]}'\nduration {frames / fps:.9f}\n")
+            if progress_cb:
+                progress_cb((i + 1) / len(inserts))
+        if still:
+            # concat's last duration needs a packet at that timestamp.
+            handle.write(f"file '{normalized[identity]}'\n")
+    path = os.path.join(stage_dir, "program.nut")
+    media.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+               "-i", listing, "-map", "0:v:0", "-an", "-c:v", "copy", path],
+              timeout=180, cancelled_cb=cancelled_cb)
+    return path
+
+
+def _plain_archive_shots(edl):
+    return (not (edl.get("effects") or {}).get("transition")
+            and all(shot["asset_key"].startswith("films/") and shot.get("mute")
+                    and shot.get("fit") == "pad_blur"
+                    and not any(shot.get(field) for field in
+                                ("motion", "motion_motif", "hold", "rate", "crop", "rotation"))
+                    for shot in edl["inserts"]))
+
+
 def _bounded_canvas_program(edl, workdir, preview, asset_locals,
                             cancelled_cb, progress_cb):
     """Materialize a large clip assembly without parallel remote decoders.
@@ -7661,6 +7713,14 @@ def _bounded_canvas_program(edl, workdir, preview, asset_locals,
         _w, _h, fps = preview_geometry(canvas["width"], canvas["height"], fps)
     stage_dir = os.path.join(workdir, "canvas_base_" + uuid.uuid4().hex[:12])
     os.makedirs(stage_dir)
+    if _plain_archive_shots(edl):
+        program = _archive_picture_program(edl, stage_dir, preview, asset_locals,
+                                           cancelled_cb, progress_cb, fps)
+        key = "internal-canvas-program-" + uuid.uuid4().hex + ".nut"
+        composed = {**edl, "inserts": [{"id": "ins_base", "asset_key": key,
+                    "kind": "video", "at_output_s": 0.0, "source_start_s": 0.0,
+                    "duration_s": duration, "mute": True}]}
+        return composed, {**(asset_locals or {}), key: program}
     pieces, durations = [], []
     normalized = {}
     for i, batch in enumerate(render_plan.canvas_batches(edl)):
