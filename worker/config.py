@@ -2670,6 +2670,7 @@ SHORTS_CLIP_CREDITS = float(os.getenv("SHORTS_CLIP_CREDITS", "2.0"))
 # invalidation would re-encode the whole platform on a ~1 vCPU box.
 # Bump when the shaped-text emission changes again.
 GFX_SHAPING_VERSION = 1
+TITLE_SHADOW_VERSION = 1
 
 # ── Where transitions land (round 48) ─────────────────────────────────────
 # Stamped as `trans_v` on every render and compared ONLY for EDLs that carry a
@@ -3011,7 +3012,7 @@ CAPTION_PLATE_VERSION = 1
 # final, so this cache was never asked. tests/test_render_rules.py fails
 # when a version the cache check reads is missing here.
 RENDER_RULE_CONSTANTS = (
-    "OUTRO_VERSION", "GFX_SHAPING_VERSION", "TRANSITION_VERSION",
+    "OUTRO_VERSION", "GFX_SHAPING_VERSION", "TITLE_SHADOW_VERSION", "TRANSITION_VERSION",
     "MASTER_VERSION", "TRUE_PEAK_GUARD_VERSION", "MUSIC_TAIL_VERSION",
     "LEGIBILITY_VERSION", "CAPTION_CARRY_VERSION", "FOLLOW_VERSION",
     "CARD_LAYOUT_VERSION", "PATCH_CLOCK_VERSION", "HANDOFF_VERSION",
