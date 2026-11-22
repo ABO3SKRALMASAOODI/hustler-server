@@ -14,7 +14,7 @@ import tempfile
 import time
 
 from .faults import SceneFault
-from .plan import ANIM, ANIM_RECT, canon
+from .plan import ANIM, ANIM_RECT, canon, keep_on
 
 MIN_S, MAX_S = 1.5, 4.0
 # what an item carries for logs and lowering, not for pixels: left out of a segment's hash (``on`` is
@@ -99,7 +99,7 @@ def stamp(d):
                 voices.add(it.get("v"))
             if it.get("mask"):
                 masks.add(it["mask"])
-            under = under or bool(it.get("behind"))
+            under = under or bool(it.get("behind")) or bool(keep_on(it, lo, hi))
             its.append(o)
         if under:
             pics.add("matte")

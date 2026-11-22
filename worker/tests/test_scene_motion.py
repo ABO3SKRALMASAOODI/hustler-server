@@ -371,3 +371,25 @@ def test_the_cost_program_counts_the_frames_the_shutter_blurs(tmp_path):
     assert "shutter" not in still.doc["program"][0]["ops"] and "shutter" not in off.doc["program"][0]["ops"]
     assert 3 <= moving.doc["program"][0]["ops"]["shutter"] <= 5
     assert SC.estimate(moving, "llvmpipe") > SC.estimate(off, "llvmpipe")
+
+
+def test_a_podcast_cutaway_clip_moves_like_a_picture_and_only_the_take_is_eased():
+    """20 Nov rating: every clip went the take's way (a 1% a second drift between the speaker's motivated moves), so the
+    Cuban films, almost all cutaways, measured about 1% a second of camera and read as static. A cutaway clip is pushed
+    the references' way (5-15% a second); the take keeps its eased re-framing, never cut."""
+    face = [0.42, 0.2, 0.14, 0.28]
+    shots = [{"id": "take", "f": [0, 90], "pic": "main", "pw": 1920, "ph": 1080, "src": [0.0, 3.0], "faces": [face], "max_up": 2.7},
+             {"id": "c1", "f": [90, 115], "pic": "v01", "pw": 1920, "ph": 1080, "src": [5.0, 5.83]},
+             {"id": "c2", "f": [115, 145], "pic": "v02", "pw": 1920, "ph": 1080, "src": [8.0, 9.0]},
+             {"id": "cut1", "f": [145, 240], "pic": "own:cut1", "pw": 1920, "ph": 1080, "src": [3.0, 6.17], "faces": [face], "max_up": 2.7}]
+    band = dict(pace.BANDS["podcast"], motivated_frames=[], take_drift=0.01)
+    items, log = pace.drive(shots, [], FPS, (W, H), "podcast", seed=3, band=band)
+    by = {it["id"]: it for it in items}
+    for cid in ("c1", "c2"):
+        w = [c[2] - c[0] for c in by[cid]["crop"]]
+        n = by[cid]["f"][1] - by[cid]["f"][0]
+        assert abs(math.log(w[0] / w[-1])) / (n / FPS) >= 0.04             # 4% a second or more: a push the eye sees
+    for tid in ("take", "cut1"):
+        assert tid in by and len([i for i in items if i["id"].split(".")[0] == tid]) == 1     # the take is eased, never cut
+        w = [c[2] - c[0] for c in by[tid]["crop"]]
+        assert abs(math.log(w[0] / w[-1])) / ((by[tid]["f"][1] - by[tid]["f"][0]) / FPS) < 0.03

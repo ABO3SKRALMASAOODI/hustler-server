@@ -11,6 +11,7 @@ uniform float uLod;
 uniform vec3 uInk;
 uniform float uOp;
 uniform float uShadow;
+uniform int uAdaptive;
 uniform float uGlow;
 uniform float uBlur;       // sigma, sprite texels
 uniform int uPre;          // 1: this sprite at this blur was drawn once into uPreTex (wblur.frag); read it there
@@ -67,6 +68,22 @@ void main() {
   if (uFade == 1) cov *= smoothstep(0.1, 1.0, v.y) * smoothstep(0.1, 1.0, v.y);
   if (uBlend == 0) {
     float sh = uShadow * t.g * uOp;
+    float lightSupport = 0.;
+    if (uAdaptive == 1) {
+      vec3 bg = texelFetch(uBg, ivec2(gl_FragCoord.xy), 0).rgb;
+      vec3 weights = vec3(.2126, .7152, .0722);
+      float ground = dot(pow(max(bg, vec3(0)), vec3(2.2)), weights);
+      float ink = dot(pow(uInk, vec3(2.2)), weights);
+      float ratio = (max(ground, ink) + .05) / (min(ground, ink) + .05);
+      float target = max(0., (ink + .05) / 4.5 - .05);
+      float need = 1. - pow(clamp(target / max(ground, .0001), 0., 1.), 1./2.2);
+      sh = ratio < 4.5 && ink >= ground ? need * t.g * uOp : 0.;
+      if (ratio < 4.5 && ink < ground) {
+        float light = pow(clamp(4.5 * (ink + .05) - .05, 0., 1.), 1./2.2);
+        float current = pow(ground, 1./2.2);
+        lightSupport = clamp((light-current)/max(1.-current,.001),0.,1.) * t.g * uOp;
+      }
+    }
     float gl = uGlow * t.b * uOp;
     vec3 ink = uInk;
     if (uFill == 1) ink = texture(uFillTex, mix(uFillCrop.xy, uFillCrop.zw, v)).rgb;
@@ -74,6 +91,8 @@ void main() {
     if (uFill == 3) ink = window(gl_FragCoord.xy);
     vec3 rgb = ink * clamp(cov * uOp + gl * (1.0 - cov * uOp), 0.0, 1.0);
     float a = 1.0 - (1.0 - cov * uOp) * (1.0 - gl) * (1.0 - sh);
+    rgb += vec3(lightSupport * (1.0-a));
+    a += lightSupport * (1.0-a);
     if (stroke > 0.0) {      // the stroke sits under the letter and over its shadow
       float sa = stroke * uOp * (1.0 - cov * uOp);
       rgb += uStrokeC * sa;

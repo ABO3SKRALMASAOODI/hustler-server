@@ -97,14 +97,54 @@ def _rungs(url):
     except Exception:  # noqa: BLE001 outside the worker: yt-dlp's own defaults
         routes, strategies, pot = [None], [], []
     out = []
+    v4_first = family_first() == "4"
     for route in routes:
         via = ["--proxy", route] if route else []
-        out.append((via + pot, "default" + ("+proxy" if route else "")))
+        rungs = [(via + pot, "default" + ("+proxy" if route else ""))]
         for s in strategies:
             if s.get("client"):
-                out.append((via + pot + ["--extractor-args", f"youtube:player_client={s['client']}"],
-                            s["name"] + ("+proxy" if route else "")))
+                rungs.append((via + pot + ["--extractor-args", f"youtube:player_client={s['client']}"],
+                              s["name"] + ("+proxy" if route else "")))
+        if route:
+            out += rungs
+            continue
+        # The direct route asks on both address families. 20 Nov (Alexandr Wang m05): YouTube walled this Mac's
+        # IPv6 range ("Sign in to confirm you're not a bot" on every client) while its IPv4 address opened every
+        # refused source; yt-dlp takes the system's preferred family (IPv6), so the whole ladder met the wall. Each
+        # rung is asked again on IPv4 at once, and once IPv4 has opened a source the run leads with it.
+        v4 = [(["--force-ipv4"] + extra, label + "+ipv4") for extra, label in rungs]
+        out += (v4 + rungs) if v4_first else [r for pair in zip(rungs, v4) for r in pair]
     return out
+
+
+_FAMILY = {}
+FAMILY_FILE = "youtube.family"
+
+
+def family_first():
+    """'4' once IPv4 has opened a YouTube source the default family could not (this run's shared pace folder, else
+    this process), so the run's later fetches lead with it; None otherwise."""
+    folder = os.environ.get("FOOTAGE_PACE_DIR")
+    if folder:
+        try:
+            got = open(os.path.join(folder, FAMILY_FILE)).read().strip()
+            if got:
+                return got
+        except OSError:
+            pass
+    return _FAMILY.get("first")
+
+
+def remember_family(fam):
+    _FAMILY["first"] = fam
+    folder = os.environ.get("FOOTAGE_PACE_DIR")
+    if folder:
+        try:
+            os.makedirs(folder, exist_ok=True)
+            with open(os.path.join(folder, FAMILY_FILE), "w") as f:
+                f.write(fam)
+        except OSError:
+            pass
 
 
 def _walled(text):
@@ -187,11 +227,15 @@ def run_ladder(url, args, timeout_s=CALL_S, done=None, lighter=None):
     for extra, label in _rungs(url):
         out, status, last = attempt(extra, args, label)
         if status == "ok":
+            if label.endswith("+ipv4") and family_first() != "4":
+                remember_family("4")
             return out, label
         if lighter is not None and args is not lighter and status in ("timeout", "failed"):
             args = lighter
             out, status, why = attempt(extra, args, label + "+lighter")
             if status == "ok":
+                if label.endswith("+ipv4") and family_first() != "4":
+                    remember_family("4")
                 return out, label + "+lighter"
             last += " || " + why
         if status == "failed" and is_youtube(url):

@@ -61,6 +61,11 @@ void main() {
     vec2 q = clamp((px - uMR.xy) / uMR.zw, 0.0, 1.0);
     float d = (texture(uMask, uMUV.xy + q * uMUV.zw).r - 0.5) * 2.0 * uMSpread;
     if (uJ.x > 0.0) d += texelFetch(uNoise, (ivec2(px) + uNoiseAt) & ivec2(1023), 0).r * uJ.x;
+    // Keep moving photographic detail inside a talk title, even on a dark suit.
+    // A narrow dark keyline separates the same ink from a bright or busy shot.
+    b = mix(b, vec3(0.99, 0.96, 0.88), 0.57 * uJ.y);
+    float edge = uJ.y * (1.0 - smoothstep(0.0, 2.25 * uJ.z, max(d, 0.0)));
+    b *= 1.0 - 0.72 * edge;
     c = mix(a * uDim, b, clamp(d + 0.5, 0.0, 1.0));
   }
   o = vec4(mix(a, c, uA), 1.0);

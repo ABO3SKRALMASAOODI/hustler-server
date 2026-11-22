@@ -7,6 +7,8 @@ uniform float uRadius;
 uniform float uSigma;
 uniform float uA;
 uniform vec2 uRot;
+uniform int uTilt;          // a tilted card's shadow: frame pixel -> its plane, in frame pixels (uHom)
+uniform mat3 uHom;
 
 float gauss(float x, float s) { return exp(-(x * x) / (2.0 * s * s)) / (2.5066283 * s); }
 vec2 erf2(vec2 x) {
@@ -24,6 +26,11 @@ float rowX(float x, float y, float s, float corner, vec2 half_) {
 void main() {
   vec2 d = gl_FragCoord.xy - uCentre;
   vec2 p = vec2(uRot.x * d.x + uRot.y * d.y, -uRot.y * d.x + uRot.x * d.y);
+  if (uTilt == 1) {
+    vec3 h = uHom * vec3(gl_FragCoord.xy, 1.0);
+    if (h.z <= 0.0) discard;
+    p = h.xy / h.z;
+  }
   float low = p.y - uHalf.y, high = p.y + uHalf.y;
   float start = clamp(-3.0 * uSigma, low, high), end = clamp(3.0 * uSigma, low, high);
   float step_ = (end - start) / 4.0, y = start + step_ * 0.5, val = 0.0;

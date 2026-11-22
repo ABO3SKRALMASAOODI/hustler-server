@@ -18,6 +18,7 @@ from . import type as T
 GRID = 8                # atlas placement grid, texels: the largest supersample, so mips stay registered
 GUTTER = 16
 PAGE = 4096
+BIG_PAGE = 8192        # one sprite on a page of its own: within every GPU's texture limit
 SPREAD = 4.0            # distance field reach, output pixels each side of the outline
 
 
@@ -219,7 +220,14 @@ def pack(sprites):
         arr, meta = sprites[k]
         h, w = arr.shape[:2]
         if w > PAGE or h > PAGE:
-            raise ValueError(f"sprite {k!r} is {w}x{h}: larger than an atlas page")
+            # A sprite wider or taller than the shelf grid (a marquee line, a long stat) gets a page of its own,
+            # sized to it, while it fits a GPU texture; the grid's pages carry on around it (20 Nov m06:
+            # a 5434x922 marquee stopped the short).
+            if w > BIG_PAGE or h > BIG_PAGE:
+                raise ValueError(f"sprite {k!r} is {w}x{h}: larger than a texture ({BIG_PAGE})")
+            pages.append({"shelves": [], "y": up(h), "items": [(k, 0, 0)]})
+            out[k] = dict(meta, page=len(pages) - 1, ax=0, ay=0, aw=w, ah=h)
+            continue
         placed = False
         while not placed:
             if cur is None:

@@ -532,6 +532,41 @@ def reframe_change(before, after):
     return round(1.0-overlap/union, 4)
 
 
+# the palette's device landings (worker/scene/palette, ``device_events``: {f, kind, strength, dev}) as sound events.
+# A device that tears, flips or burns the whole frame is a flash (a glitch when it tears); one that brings a new world
+# in is a picture landing over the frame. A soft change (a leak drifting in, colour returning, a halo, a vignette, a
+# strobe of plates every few frames) is not a moment that sounds, and nothing under DEVICE_MIN is.
+DEVICE_GLITCH = ("glitch", "smear", "tear", "slice", "rgb_split", "split_picture")
+DEVICE_PICTURE = ("swap", "silhouette", "poster", "sticker", "clones", "flight", "answer", "rhyme", "proof_object", "mark")
+DEVICE_QUIET = ("light", "colour", "colour_bloom", "glow", "spotlight", "blur_in", "strobe", "word_blend", "paper", "keep_colour")
+DEVICE_MIN = 0.45
+
+
+def device_landings(l1):
+    """The landings of the devices a scene carries, as sound events: [{f, kind, size, device, landing}] where size is the
+    device's own strength (sound_choice.weight_of reads it as the share of the frame that changed). [] without
+    ``device_events``."""
+    out, D = [], int(l1.get("dur_f") or 0)
+    for e in l1.get("device_events") or []:
+        if not isinstance(e, dict):
+            continue
+        try:
+            f, s = int(e["f"]), float(e.get("strength", 0.5))
+        except (KeyError, TypeError, ValueError):
+            continue
+        kind = str(e.get("kind") or e.get("dev") or "")
+        if s < DEVICE_MIN or kind in DEVICE_QUIET or kind.startswith("finish") or not (0 <= f < (D or f + 1)):
+            continue
+        row = {"f": f, "id": f"device:{e.get('id') or kind}:{f}", "device": kind, "size": round(min(s, 1.0), 3), "landing": True}
+        if kind in DEVICE_PICTURE:
+            row.update(kind="card", photo=True, area=1.0)
+        else:
+            row.update(kind="flash", glitch=kind in DEVICE_GLITCH or "glitch" in kind)
+        if not any(abs(f - o["f"]) <= 2 for o in out):
+            out.append(row)
+    return out
+
+
 def landing_events(l1):
     """The landings a source's own edit makes inside the items that play it, by programme frame: [{f, kind, ...}].
     An asset may carry ``landings``: [{t: source second, kind: picture|title}] (a recorded export's b-roll and titles
@@ -670,6 +705,13 @@ def l1_events(l1, kshots=()):
             e["moving"] = True                    # the cut travels (a whip, a slide): the picture itself asks for a sweep
     for s in shots:                               # a fast camera move inside a shot (a punch-in, a whip): its start is a moment
         ev += [{"f": f, "kind": "move", "id": s["id"]} for f in move_starts(s)]
+    # the devices a workflow's Director laid (worker/scene/palette) name their own landings (``device_events``): each
+    # one strong enough to sound takes the place of the plain event at its frame, so the sound answers what the device
+    # does there (a tear sounds as a glitch, a world swapped behind the speaker as a picture landing). Scenes without
+    # ``device_events`` (every customer film) add nothing here.
+    devs = device_landings(l1)
+    if devs:
+        ev = [e for e in ev if not (e["kind"] in ("picture", "cut", "flash", "card") and any(abs(e["f"] - d["f"]) <= 2 for d in devs))] + devs
     out = []
     for e in sorted(ev, key=lambda e: (e["f"], KIND_RANK.get(e["kind"], 9))):
         if 0 <= e["f"] < D and not any(abs(e["f"] - o["f"]) <= 2 for o in out):
@@ -974,7 +1016,9 @@ def plan_sounds(events, ctx):
     end_f = int(ctx.get("prog_end_f") or D)
     dur_s = end_f / fps
     lib = library()
-    pics = [e for e in events if e["kind"] in ("picture", "cut") or (e["kind"] in ("card",) and e.get("area", 0) >= 0.35)]
+    # a device's landing is a moment, not a new picture of the supply: it competes for the allowance, never widens it
+    pics = [e for e in events if not e.get("device") and
+            (e["kind"] in ("picture", "cut") or (e["kind"] in ("card",) and e.get("area", 0) >= 0.35))]
     np10 = ctx.get("np10")
     if np10 is None:
         np10 = len(pics) / max(dur_s, 1e-3) * 10
@@ -2194,6 +2238,50 @@ def _asked(asks):
     return False
 
 
+# Auditioned neutral masters from the workflow reference set. Each file is a single
+# gesture. The director reads the actual moment and selects its shape.
+STORY_SOUNDS = {"air": "mx_whoosh_1462", "rise": "mx_riser_1492", "sub": "mx_impact_2299",
+                "impact": "mx_hit_2148", "tick": "mx_click_2582"}
+
+
+def story_accents(cues, events, voice, fps):
+    from scipy.signal import resample_poly
+    from . import sound_signal
+    placed, sounds = [], []
+    for cue in cues:
+        sid = STORY_SOUNDS.get(cue.get("sound"))
+        if len(sounds) == 2 or sid not in library() or cue.get("role") not in ("hook", "figure", "turn", "payoff", "contrast"):
+            continue
+        partners = [e for e in events if abs(e["f"] - cue["f"]) <= max(2, round(.12 * fps))
+                    and (e["kind"] in ("display", "counter") if cue["sound"] == "tick"
+                         else e["kind"] in ("picture", "cut", "card", "display", "counter") or e.get("landing"))]
+        if not partners:
+            continue
+        partner = min(partners, key=lambda e: abs(e["f"] - cue["f"]))
+        f = partner["f"]
+        if any(abs(f - s["event_f"]) < 2 * fps for s in sounds):
+            continue
+        t = round(f * AR / fps)
+        region = np.asarray(voice[max(0, t-AR):t+AR]) if voice is not None else np.array([])
+        if not region.size:
+            continue
+        levels = sound_signal.k_level(sound_signal.power(resample_poly(region, SR // AR, 1)))
+        ref = float(np.percentile(levels[levels > -60], 70)) if np.any(levels > -60) else VOICE_LUFS
+        # Median 50 ms event peak in the reference reels is 10.7 dB below speech.
+        recording = _full_band(sid)
+        if not len(recording):
+            continue
+        power = 10 ** (sound_signal.k_level(sound_signal.power(recording)) / 10)
+        window = min(len(power), max(1, round(.05 * SR / sound_signal.HOP)))
+        peak = 10 * math.log10(np.convolve(power, np.ones(window)/window, mode="valid").max())
+        db = round(min(0., ref - 10.7 - peak), 1)
+        sounds.append(_item("accent" + str(len(sounds)), sid, f, fps, db, partner, cue["role"], "single"))
+        placed.append(dict(t=round(f / fps, 3), part=cue["role"], kind=partner["kind"], why=cue["why"],
+                           layers=[[sid, db, 1]], voice_db=round(ref, 1), peak_db=round(peak+db, 1)))
+    return sounds, dict(placed=placed, body=[], ticks=[], gestures=len(sounds), sounds=len(sounds),
+                        allow=2, allow_ticks=0, dropped=[], placement="director")
+
+
 def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=None, turn_s=None, bed=None, own_tiers=False, level_source=None):
     """The designed sound for a compiled film: (sounds, report). The Director's own sounds stay and count first.
     supply: the governor's {np10, bed} (taste.supply) when the compiler has it; else read from the L1 and the upload.
@@ -2276,6 +2364,8 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
            "tick_10s": (supply or {}).get("tick_10s"), "screen": screen, "beats": l1.get("sound_beats") if screen else None,
            "seed": film_seed(l1.get("sid"), l1.get("seed"), D, [e.get("src") for e in (l1.get("spine") or [])][:64],
                              sorted(str((a or {}).get("path")) for a in (l1.get("assets") or {}).values())[:64])}
+    if "story_cues" in l1:
+        return story_accents(l1["story_cues"], events + list(l1.get("story_landings") or []), voice, fps)
     sounds, report = plan_sounds(events, ctx)
     if screen:                               # the ceilings: no 2-8 kHz spike, never louder than LEVEL_TOP over the voice
         sounds = SCR.restrain(sounds, voice, AR, shift, library(), report, fps=fps, sample=_full_band, srate=SR)
