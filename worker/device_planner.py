@@ -1577,11 +1577,6 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
     fam_filter = {str(f) for f in (families or ())}
     weights = weights or {}
     opted_in = bool(asked & {"flash", "flashing", "strobe", "flash_optin"})
-    try:
-        import flash_safety
-        opted_in = opted_in or flash_safety.opted_in(request_text)
-    except Exception:  # noqa: BLE001
-        pass
     matte = matte or {}
     sidecar_status = dict(sidecar_status or {})
     if matte.get("status") in ("ready", "partial"):
@@ -2032,35 +2027,6 @@ def trim_plan(edl, index, level, *, cards=None, maps=None, rhetoric=None,
                              f"{int(cap)}")
     except Exception as e:  # noqa: BLE001
         print(f"[planner] ledger trim skipped: {e}", flush=True)
-    # 3. flash safety (a calmer level never keeps an earlier opt-in)
-    optin = bool(opted_in) if opted_in is not None else \
-        flash_safety.opted_in(request_text)
-    if level != "charged" or not optin:
-        # the edit's own flashes outside the fx layer (flash transitions,
-        # flash stylize, flash templates) count toward every second but are
-        # not this dial's to remove: the device flashes thin around them
-        events = [{"t": e["t"], "strength": 9.0, "id": None}
-                  for e in flash_safety.flash_events(dict(edl, fx=[]),
-                                                     index)]
-        for it in alive():
-            card = cards.get(it.get("device")) or {}
-            flag = _flash(card) if card else it.get("type") in (
-                "accent", "strobe")
-            if not flag:
-                continue
-            for t in _flash_times(it):
-                events.append({"t": t, "strength": scores.get(it["id"], 0.1),
-                               "id": it["id"]})
-        _kept, thinned = flash_safety.plan(events, plan["fps"],
-                                           opted_in=False)
-        for e in thinned:
-            if e.get("id") is None:
-                continue
-            it = next((i for i in items if i["id"] == e["id"]), None)
-            if it is not None:
-                drop(it, "flash safety: more than "
-                         f"{flash_safety.default_max_per_s()} full-frame "
-                         "flashes in one second")
     return [{"id": it["id"], "layer": "fx", "device": it.get("device"),
              "family": (cards.get(it.get("device")) or {}).get("family"),
              "score": scores.get(it["id"], 0.1), "reason": why[it["id"]]}

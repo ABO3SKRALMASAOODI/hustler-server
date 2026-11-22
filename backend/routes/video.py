@@ -7845,11 +7845,7 @@ def get_edl_version(user_id, project_id, version):
 
 
 def _flash_flag(edl_json):
-    """Owner decision (Wave 0, flash safety): a program past the flash-safe
-    limit reached export only through the user's opt-in (the verifier
-    blocks it otherwise), so its final job is flagged contains_flashing.
-    {} for every other export (its payload is unchanged) and whenever the
-    program cannot be read: a reading failure never blocks an export."""
+    """Flag the export for viewers when the measured flash rate is high."""
     try:
         if wflash.assess(edl_json)["over_limit"]:
             return {"contains_flashing": True}

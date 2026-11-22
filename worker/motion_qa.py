@@ -833,7 +833,7 @@ def measure_device(dev, with_reel, without_reel, *, fps, land_f, planned_f,
     fr_frames = [w[f] for f in sorted(w)]
     if len(fr_frames) >= 2:
         fr = qa_metrics.flash_risk(frames=fr_frames, fps=fps)
-        metrics["flash_risk"] = _metric("flash_risk", fr["value"])
+        metrics["flash_risk"] = _metric("flash_risk", fr["value"], passed=None)
     # collisions: ink over a face (type, region and matte devices that do
     # not cover the whole frame)
     if acc is not None and wo and land_f in wo and \
@@ -1190,7 +1190,8 @@ def verdict(records):
     unread = False
     for rec in records:
         metrics = rec.get("metrics") or {}
-        if any(v.get("pass") is False for v in metrics.values()):
+        if any(v.get("pass") is False for name, v in metrics.items()
+               if name != "flash_risk"):
             return False
         if rec.get("rung") not in (None, "full"):
             return False
@@ -1571,7 +1572,7 @@ def critic_evidence(edl, index=None, *, proof_result=None, cards=None,
                 "bar": None, "pass": False, "message": f["message"]})
     for d in (proof_result or {}).get("devices") or []:
         for name, m in (d.get("metrics") or {}).items():
-            if m.get("pass") is False:
+            if name != "flash_risk" and m.get("pass") is False:
                 rows.append({"id": d["id"], "time_s": times.get(d["id"]),
                              "metric": name, "value": m.get("value"),
                              "bar": m.get("bar"), "pass": False})

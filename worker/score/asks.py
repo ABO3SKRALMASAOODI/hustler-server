@@ -421,9 +421,11 @@ LEDGER_SCHEMA = {
                   "description": "upload when the current film is an automatic first cut the product made by itself and the customer's words are about their uploaded video, not that cut (they ask to keep the upload's length, format or narration, or to work on a part of it the first cut left out); current otherwise, and always when the customer has built on the current film."},
         "asks": {"type": "array", "maxItems": 24, "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["id", "said", "want", "kind", "span", "cut", "length", "items", "how", "where", "pass", "otherwise"],
+            "required": ["id", "said", "want", "kind", "span", "cut", "length", "items", "how", "where", "pass", "otherwise", "devices"],
             "properties": {
                 "id": {"type": "string", "description": "a1, a2, ..."},
+                "devices": {"type": "array", "items": {"type": "string", "enum": ["flash", "zoom", "sfx"]},
+                            "description": "Devices this ask wants added or retained. Exclude devices it asks to avoid or remove."},
                 "said": {"type": "string", "description": "The customer's own words for this ask, verbatim and short."},
                 "want": {"type": "string", "description": "One plain sentence: what the delivered film shows or does when this ask is done."},
                 "kind": {"type": "string", "enum": ["film", "change", "edit", "keep", "answer"]},
@@ -524,7 +526,7 @@ def settle(value, edl, usage=None):
     for n, a in enumerate(value.get("asks") or [], 1):
         if not isinstance(a, dict):
             continue
-        a = {k: a.get(k) for k in ("said", "want", "kind", "span", "cut", "length", "items", "how", "where", "pass", "otherwise")}
+        a = {k: a.get(k) for k in ("said", "want", "kind", "span", "cut", "length", "items", "how", "where", "pass", "otherwise", "devices")}
         a["id"] = f"a{n}"
         a["kind"] = a["kind"] if a["kind"] in ("film", "change", "edit", "keep", "answer") else "edit"
         a["span"] = a["span"] if a["span"] in ("whole", "part") else "part"
@@ -540,6 +542,11 @@ def settle(value, edl, usage=None):
     return {"lang": str(value.get("lang") or "en")[:8], "asks": asks, "route": route(asks),
             "start": value.get("start") if value.get("start") in ("current", "upload") else "current",
             "usage": usage or {}, "checks": [], "repairs": 0}
+
+
+def requested_devices(ctx):
+    ledger = getattr(ctx, "ask_ledger", None) or {}
+    return {device for ask in ledger.get("asks", []) for device in ask.get("devices") or []}
 
 
 def pass_asks(asks):
@@ -600,9 +607,11 @@ CHECK_SCHEMA = {
         }}},
         "asks": {"type": "array", "items": {
         "type": "object", "additionalProperties": False,
-        "required": ["id", "seen", "rests_on", "state", "said_why_not", "made_against", "full_length", "line"],
+        "required": ["id", "seen", "rests_on", "state", "said_why_not", "made_against", "full_length", "line", "fulfilled_by"],
         "properties": {
             "id": {"type": "string"},
+            "fulfilled_by": {"type": "array", "items": {"type": "string"},
+                             "description": "Exact item ids from the film that fulfil this ask, or [] for an answer or a film-wide measurement."},
             "full_length": {"type": "boolean",
                             "description": "This ask wants the film as long as the whole upload, nothing of it cut (keep my full narration, my duration, do not shorten)."},
             "seen": {"type": "string", "description": "First: what the numbers, the frames or the reply show for this ask, with times and figures. At most two short sentences."},
@@ -1206,7 +1215,7 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes="", fixed=None):
     rows = []
     for a in ledger["asks"]:
         if a["id"] in fixed:
-            rows.append(dict(fixed[a["id"]], id=a["id"]))
+            rows.append({"fulfilled_by": [], **fixed[a["id"]], "id": a["id"]})
             continue
         r = by_id.get(a["id"]) or {}
         state = r.get("state") if r.get("state") in ("done", "partly", "not_done", "cannot_tell") else "cannot_tell"
@@ -1228,13 +1237,25 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes="", fixed=None):
             # and the check saw exactly that: two facts, combined here, never one free answer.
             state, seen = "done", "their alternative was taken: " + seen
         row = {"id": a["id"], "state": state, "seen": seen[:400], "line": str(r.get("line") or "")[:300]}
+        row["fulfilled_by"] = [str(i) for i in r.get("fulfilled_by") or []]
         if r.get("full_length") is True:
             row["full_length"] = True
         rows.append(row)
     out = {"asks": rows, "usage": usage, "edl_version": None}
     if unasked is not None:
-        out["unasked"] = unasked
+        out["unasked"] = _unasked_only(rows, unasked)
     return out
+
+
+def _unasked_only(asks, findings):
+    protected = {item for ask in asks if ask["state"] == "done"
+                 for item in ask["fulfilled_by"]}
+    remaining = []
+    for finding in findings:
+        items = [item for item in finding["items"] if item not in protected]
+        if items or not finding["items"]:
+            remaining.append(dict(finding, items=items))
+    return remaining
 
 
 def harm_rows(raw):
