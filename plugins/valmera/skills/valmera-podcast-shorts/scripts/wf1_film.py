@@ -478,6 +478,26 @@ def fill_size(rec, work, ffmpeg):
     return dict(rec, path=dst, w=w2, h=h2, upscaled_from=dict(path=path, w=int(rec["w"]), h=int(rec["h"]), up=round(up, 3)))
 
 
+def clips_source_lettering(rec):
+    """Would the phone crop slice through measured lettering on an attributed source?"""
+    if not rec.get("attribution") or rec.get("faces") or not rec.get("still"):
+        return False
+    import cv2
+    from footage import overlay
+    image = cv2.imread(rec["still"])
+    if image is None:
+        return False
+    height, width = image.shape[:2]
+    span = (W / H) / (width / height)
+    if span >= 1:
+        return False
+    centre = .5 if rec.get("x") is None else float(rec["x"])
+    left = max(0., min(1. - span, centre - span / 2))
+    preview = cv2.resize(image, (overlay.WIDTH, round(height * overlay.WIDTH / width)))
+    _, boxes = overlay.lines(preview)
+    return any(x0 + .008 < edge < x1 - .008 for x0, _, x1, _ in boxes for edge in (left, left + span))
+
+
 def clip_meta(rec):
     """What the pacing driver needs to frame a clip full bleed: its size, its faces, where the look placed its subject
     (x, the vertical crop centred there) and how far it may be pushed in. A clip already at the frame's shape keeps
@@ -849,9 +869,11 @@ def build(script, sup, style_id, direction=None):
     # The Director's devices that stand on the speaker (a lamp relights his take, the world goes negative round him, a
     # spotlight finds his face) need him on screen over their span: the take holds there and the cutaways step round it
     # (coverage and the speaker's moves were measured above, before the hold, so their cached checks stay valid)
-    if dr and take.get("on_camera") is not False:
+    pre = []
+    if dr:
         DR = _director()
         pre, _ = DR.palette_asks(dr, word_frame, seg_span, None, f_end)
+    if pre and take.get("on_camera") is not False:
         held = DR.take_spans(pre, f_end)
         if held:
             ins, cleared = DR.hold_take(ins, held, fps=FPS)
@@ -960,7 +982,7 @@ def build(script, sup, style_id, direction=None):
         note(f0, f1, kind, name, rec, "window")
 
     def bleed(f0, f1, kind, name, rec, key):
-        if rec.get('provider')=='primary-document':
+        if rec.get('provider')=='primary-document' or (kind == "clip" and clips_source_lettering(rec)):
             return window(f0,f1,kind,name,rec,key)             # the approved document crop is already the editorial rectangle
         bal = None if is_mono(f0) else clip_balance(take.get("still"), rec.get("still") if kind == "clip" else rec.get("path"))
         gk = dict(grade=bal) if bal else {}               # matched to the take it cuts against, part of the way (round1 colour)
@@ -1035,12 +1057,12 @@ def build(script, sup, style_id, direction=None):
             cut_pts.append(f0)
             P.events.append(f0)
             who = rec.get("name_super")
-            if who and who not in labelled:
+            if who and ("person", name) not in labelled:
                 # The person the picture shows, named as its source names them (a lower third the phone slice cuts
                 # away, the source's title or channel: placement_check name_super), in the label type, once.
-                labelled.add(who)
+                labelled.add(("person", name))
                 b_lab, j = f1, k + 1
-                while j < len(ins) and ins[j][0] == b_lab and ins[j][4].get("name_super") == who:
+                while j < len(ins) and ins[j][0] == b_lab and ins[j][3] == name and ins[j][4].get("name_super"):
                     b_lab, j = ins[j][1], j + 1
                 labels.append((f0 + 2, min(b_lab, f0 + int(2.4 * FPS)), str(who)))
             elif not who and d.get("labels", False) and name not in labelled:            # a named thing is labelled once, small, while its own pictures are up
@@ -1158,6 +1180,17 @@ def build(script, sup, style_id, direction=None):
                 P.events.append(a)
                 shown.append((a, b, text))
                 continue
+        spoken_a = a
+        # If a stencil already performs this same word, show the display
+        # phrase on its release. Its words and the original caption survive.
+        tokens = {F.norm_word(w) for w in text.split()}
+        for ask in pre:
+            span = ask.get("f")
+            if ask.get("dev") != "diecut" or not isinstance(span, list) or F.norm_word(str(ask.get("t", ""))) not in tokens:
+                continue
+            if a < span[1] and span[0] < b and f_end - span[1] >= 10:
+                length = b - a
+                a, b = span[1], min(f_end, span[1] + length)
         rows = display_rows(P.R, P.voices["dsp"], cased(text), cased(str(row.get("key") or "")), role)
         base_y = cap_y - 0.062                           # the lowest baseline of the block, clear above the caption seat
         ys = [base_y]
@@ -1178,7 +1211,8 @@ def build(script, sup, style_id, direction=None):
             vk = f"dsp{a}_{k}"
             line_ink, line_edge = (DARK_INK, pal["accent"]) if role == "contrast" and k == big else (ink, edge)
             land(a, b, line, vk, ys[k], line_ink, delay=0 if k == big else min(2, b - a - 1), stroke=line_edge, on=a)
-        omit += F.said_span(clock, seg, text)
+        if a == spoken_a:
+            omit += F.said_span(clock, seg, text)
         P.events.append(a)
         shown.append((a, b, text))
     shown.sort()
