@@ -247,3 +247,21 @@ def test_openverse_photos_carry_their_license_line(monkeypatch):
     assert seen.get("filter_dead") == "true"
     assert seen.get("unstable__authority") == "true"
     assert seen.get("page_size") >= 12
+
+
+@pytest.mark.parametrize("count", [18, 85, 105])
+def test_search_returns_requested_distinct_video_candidates(monkeypatch, count):
+    monkeypatch.setattr(stock, "PEXELS_KEY", "test")
+    monkeypatch.setattr(stock, "PIXABAY_KEY", "")
+    monkeypatch.setattr(stock, "NAMED_ROUTE", False)
+
+    def catalog(url, *, params, **kwargs):
+        page = params.get("page", 1)
+        size = params["per_page"]
+        start = (page - 1) * size
+        return {"videos": [{"id": i, "width": 1920, "height": 1080}
+                           for i in range(start, min(start + size, 95))]}
+
+    monkeypatch.setattr(stock.net_fetch, "get_json", catalog)
+    hits = stock.search("blood glucose testing", orientation="landscape", count=count)
+    assert len({hit["id"] for hit in hits}) == min(95, count)
