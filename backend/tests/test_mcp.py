@@ -1284,7 +1284,7 @@ def test_watch_video_public_result_preserves_false_preview_receipt(
         "asset_id": 44, "edl_version": 8, "duration_s": 61.2,
         "audio_model_review": False}
 
-    public = _call_watch(client, frames=False)
+    public = _call_watch(client, frames=False, end=5)
 
     assert DB["enqueued"][-1]["args"]["frames"] is False
     assert "audio_model_review=false" in public["content"][0]["text"]
@@ -1316,12 +1316,40 @@ def test_watch_video_structured_result_carries_the_link_and_the_frames(
     structured = public["structuredContent"]
     assert structured["url"] == url
     assert structured["download_receipt"]["url"] == url
-    assert "Download: " + url in structured["message"]
+    assert "Watch (draft preview): " + url in structured["message"]
     assert structured["attached"] == {"frame_sheets": 1, "audio": False,
                                       "video_inline": False}
     assert structured["frame_urls"] == [
         "https://cdn.example/media/3/look_1.jpg?sig=1"]
     assert [b["type"] for b in public["content"]] == ["text", "text", "image"]
+
+
+def test_watch_video_draft_preview_is_never_labelled_the_download(
+        client, monkeypatch):
+    """p5909 (16 Nov): the AI app took watch_video's "Download:" link of a
+    480x480 draft preview as the user's video, and export_final never ran.
+    The same answer now calls it a draft and names the call that makes the
+    full-quality file, in the text and in the structured result."""
+    _served(monkeypatch)
+    DB["job_result"]["preview"] = {
+        "asset_id": 44, "edl_version": 8, "duration_s": 61.2,
+        "audio_model_review": False}
+
+    calls = []
+    def export(tok, project_id, args):
+        calls.append((project_id, args["edl_version"]))
+        return {"content": [{"type": "text", "text": "Final export started"}],
+                "structuredContent": {"export": {"job_id": 99}}, "isError": False}, None
+    monkeypatch.setattr(mcpmod, "_export_for_download", export)
+    public = _call_watch(client, frames=False)
+    assert calls == [(3, 8)]
+    assert public["structuredContent"]["export"]["job_id"] == 99
+    assert "url" not in public["structuredContent"]
+
+
+def test_preview_notice_reports_actual_dimensions():
+    assert "1920x1080" in mcpmod._draft_notice({"width": 1920, "height": 1080}, 3, 8)
+    assert "low-resolution" not in mcpmod._draft_notice({}, 3, 8)
 
 
 def test_version_pinned_preview_download_returns_server_receipt(
@@ -2866,8 +2894,7 @@ def test_download_without_kind_hands_out_the_finished_export(client,
     assert exports == [{"project_id": 3, "edl_version": 9}]
     assert got["structuredContent"]["export"]["job_id"] == 777
     DB["render_assets"] = DB["render_assets"][:1]
-    # When the export cannot start (open findings to repair, a wall), the
-    # draft still comes back, says what it is and why no export ran.
+    # Preserve the export error and its recovery details on a delivery request.
     monkeypatch.setattr(mcpmod, "_t_export_final", lambda tok, args: {
         "content": [{"type": "text", "text": "EDL v9 still has 1 unresolved "
                      "verification finding(s), so no export was started"}],
@@ -2876,14 +2903,8 @@ def test_download_without_kind_hands_out_the_finished_export(client,
         "name": "download_url", "arguments": {"project_id": 3},
     }).get_json()["result"]
     text = got["content"][0]["text"]
-    assert "DRAFT PREVIEW (270x480)" in text and "NOT the finished video" \
-        in text
-    assert "export could not start yet" in text and "unresolved" in text
-    assert "export_final(project_id=3, edl_version=9)" in text
-    assert got["structuredContent"]["preview_receipt"]["deliverable"] is \
-        False
-    assert "unresolved" in got["structuredContent"]["preview_receipt"][
-        "export_blocked"]
+    assert got["isError"] and "unresolved" in text
+    assert "preview_receipt" not in got.get("structuredContent", {})
     # An explicit preview request is still served (the editors' evidence),
     # with the same label.
     got = rpc(client, "tools/call", STATIC_TOKEN, {

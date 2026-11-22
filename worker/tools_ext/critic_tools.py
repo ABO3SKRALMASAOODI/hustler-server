@@ -79,6 +79,28 @@ def _cut_level(ctx, edl):
         return None
 
 
+def _silence_by_design(ctx, request):
+    """Read the brief once for this tool context, including negation and alternatives."""
+    if not request:
+        return False
+    prior = getattr(ctx, "_critic_sound_request", None)
+    if prior and prior[0] == request:
+        return prior[1]
+    from score import asks
+    try:
+        reading, _ = asks._call(ctx, "read_sound_brief", {
+            "type": "object", "properties": {"intentional": {"type": "boolean"}},
+            "required": ["intentional"], "additionalProperties": False},
+            "Does the customer want silence, original dialogue alone, or no added music "
+            "or sound design? Read their request in context. Return intentional=true "
+            "when an added bed would contradict the brief.", request, max_tokens=128)
+    except Exception:
+        return False
+    intentional = reading.get("intentional") is True
+    ctx._critic_sound_request = (request, intentional)
+    return intentional
+
+
 def critique_short(ctx, variant="auto", asset_key=None, deep=True,
                    board=True, format=None):
     import motion_critic
@@ -127,6 +149,7 @@ def critique_short(ctx, variant="auto", asset_key=None, deep=True,
     res = motion_critic.critique(
         local, edl, getattr(ctx, "index", None) or {},
         request_text=getattr(ctx, "user_message", None), report=meta,
+        silence_by_design=_silence_by_design(ctx, getattr(ctx, "user_message", None)),
         previous=previous, intensity=intensity, final=final, fmt=fmt,
         want_wm=bool(final and (meta.get("picture_qc") or {}).get(
             "watermark") is not None), maps=maps, deep=bool(deep),
