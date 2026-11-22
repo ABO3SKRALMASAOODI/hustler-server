@@ -7539,22 +7539,23 @@ def _rules_vouched(meta, answer, deployed):
 WATERMARK_VERSION = 7
 
 
-def _user_is_paid(cur, user_id):
-    """Same rule as worker/db.user_is_paid, and deliberately the same bias:
+def _render_account(cur, user_id):
+    """Same rule as worker/db.render_account, and deliberately the same bias:
     either signal counts as paid, because marking a paying customer's export
     is a broken promise while missing a mark on a free one costs nothing."""
     if not user_id:
-        return False
+        return False, "free"
     cur.execute("SELECT is_subscribed, plan FROM users WHERE id = %s",
                 (user_id,))
     row = cur.fetchone()
     if not row:
-        return False
+        return False, "free"
     plan = ((row.get("plan") if isinstance(row, dict) else row["plan"])
             or "free").strip().lower()
     sub = row.get("is_subscribed") if isinstance(row, dict) \
         else row["is_subscribed"]
-    return bool(sub) or plan not in ("", "free")
+    paid = bool(sub) or plan not in ("", "free")
+    return paid, plan
 
 
 def _watermark_settings(cur):
@@ -7661,8 +7662,12 @@ def _final_gate(cur, project_id, user_id):
     """
     answers = _worker_answers(cur, project_id)
     deployed = _deployed_render_rules(cur)
-    is_paid = _user_is_paid(cur, user_id)
+    from export_branding import CLEAN_EXPORT_PLANS
+    is_paid, plan = _render_account(cur, user_id)
+    clean = plan in CLEAN_EXPORT_PLANS
     wm = _watermark_settings(cur)
+    if clean:
+        wm = dict(wm, force=False)
     # Only ask the EDLs which versions carry a transition when the answer can
     # still change something — with the stamp unwritten the check is off anyway.
     stamps_transitions = _pipeline_emits(cur, "trans_v")
@@ -7686,6 +7691,12 @@ def _final_gate(cur, project_id, user_id):
         small_finals = {r["id"] for r in cur.fetchall()}
 
     def ok(asset_id, meta, version):
+        # Entitlements can change after a worker vouched for a cached asset.
+        branding = meta or {}
+        if clean and (branding.get("outro_v") or branding.get("wm_v")):
+            return False
+        if not clean and branding.get("plan_omits_outro"):
+            return False
         if asset_id in small_finals:
             return False
         if final_degraded_hold(meta):

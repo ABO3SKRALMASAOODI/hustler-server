@@ -511,7 +511,9 @@ def resolve(item, want_w, want_h):
         raise StockError("that result has no downloadable video file")
     item["picked_width"] = f.get("width")
     item["picked_height"] = f.get("height")
-    return f["link"], MAX_VIDEO_BYTES
+    # The HD transfer budget scales with the pixels the final actually uses.
+    scale = max(1.0, min(want_w * want_h, 3840 * 2160) / (1920 * 1080))
+    return f["link"], int(MAX_VIDEO_BYTES * scale)
 
 
 def _too_big(exc):
@@ -543,6 +545,9 @@ def download(item, out_path, want_w, want_h):
     if item.get("provider") == "footage":      # worker/footage: the cut clip, or its section cut again
         import footage.seam
         return footage.seam.acquire(item, out_path, want_w, want_h)
+    if item.get("kind") == KIND_VIDEO:
+        from export_context import rendition_size
+        want_w, want_h = rendition_size() or (want_w, want_h)
     url, cap = resolve(item, want_w, want_h)
     try:
         net_fetch.download(url, out_path, max_bytes=cap,

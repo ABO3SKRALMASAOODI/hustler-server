@@ -51,8 +51,8 @@ def job(monkeypatch, tmp_path):
     class DB:
         def run(self, fn, *args, **kwargs):
             name = fn.__name__
-            if name == 'user_is_paid':
-                return False
+            if name == 'render_account':
+                return False, 'free'
             if name == 'video_settings':
                 return {}
             if name == 'get_edl_version':

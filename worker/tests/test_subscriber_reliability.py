@@ -221,7 +221,7 @@ def test_approval_preview_recovers_in_same_job_without_downgrading_final(monkeyp
 def test_pending_original_serves_proxy_draft_but_keeps_final_blocked(monkeypatch):
     class WorkerDb:
         def run(self, fn, *args):
-            if fn is db.user_is_paid: return True
+            if fn is db.render_account: return True, 'ai'
             if fn is db.video_settings: return {}
             if fn is db.get_edl_version: return {"json": default_edl(10)}
             if fn is db.latest_asset:

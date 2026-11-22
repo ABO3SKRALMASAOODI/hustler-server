@@ -16,6 +16,7 @@ import psycopg2
 import compute_cost
 import config
 import db as dbx
+import export_context
 import failure_policy
 import io_telemetry
 import job_completion
@@ -339,7 +340,8 @@ def execute(job, runners):
         # Another release wrote this job: check it against this release
         # before any work (nothing has run yet; see skew_guard).
         skew_guard.check(db, job, runners)
-        result = runner(db, job)
+        with export_context.job_scope(db, job):
+            result = runner(db, job)
         dt = round(time.monotonic() - t0, 2)
         execution_timings = {"total_s": dt}
         execution_timings.update(measured_resources())

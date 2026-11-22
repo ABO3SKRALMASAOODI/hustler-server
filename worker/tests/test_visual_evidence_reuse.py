@@ -57,7 +57,7 @@ def render_sequence(monkeypatch, tmp_path):
     class DB:
         def run(self, fn, *args, **kwargs):
             name = fn.__name__
-            if name == 'user_is_paid': return True
+            if name == 'render_account': return True, 'ai'
             if name == 'video_settings': return {}
             if name == 'get_edl_version': return rows[args[1]]
             if name in {'latest_asset', 'find_render_asset'}: return None

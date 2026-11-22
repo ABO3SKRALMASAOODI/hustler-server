@@ -174,8 +174,8 @@ def export_ceiling_line(edl):
     target = (edl or {}).get("export") if isinstance(edl, dict) else None
     if not isinstance(target, dict) or not _r.export_target(edl):
         return ""
-    dur = (float(_schemas_mod.program_duration(edl))
-           + _r.outro_seconds(False))
+    outro = _r.outro_seconds(False)
+    dur = float(_schemas_mod.program_duration(edl)) + outro
     if dur <= 0:
         return ""
     vk = _r.export_video_kbps(edl, dur)
@@ -184,8 +184,8 @@ def export_ceiling_line(edl):
                + _r.EXPORT_CONTAINER_FIXED_BYTES)
     mins = int(dur // 60)
     return (
-        f"Measured for this film ({mins} min {dur - mins * 60:.0f} s with "
-        f"the end card): the export's picture is held at or under {vk} "
+        f"Measured for this film ({mins} min {dur - mins * 60:.0f} s"
+        f"{' with the end card' if outro else ''}): the export's picture is held at or under {vk} "
         f"kb/s with {_r.EXPORT_AUDIO_KBPS} kb/s sound, so the file is at "
         f"most {ceiling / 1e9:.2f} GB"
         + (f" (the target is {float(target['max_size_mb']) / 1000:g} GB)"

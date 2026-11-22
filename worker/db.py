@@ -4184,7 +4184,7 @@ def video_settings(conn):
         return default
 
 
-def user_is_paid(conn, user_id):
+def render_account(conn, user_id):
     """Is this user on a paid plan right now? Decides the free-tier
     watermark, so the failure directions are NOT symmetric.
 
@@ -4200,15 +4200,16 @@ def user_is_paid(conn, user_id):
     anonymous/unresolvable case, not a lapsed customer.
     """
     if not user_id:
-        return False
+        return False, "free"
     with conn.cursor() as cur:
         cur.execute("SELECT is_subscribed, plan FROM users WHERE id = %s",
                     (user_id,))
         row = cur.fetchone()
     if not row:
-        return False
+        return False, "free"
     plan = (row["plan"] or "free").strip().lower()
-    return bool(row["is_subscribed"]) or plan not in ("", "free")
+    paid = bool(row["is_subscribed"]) or plan not in ("", "free")
+    return paid, plan
 
 
 # A metered turn charges at least this much (CLAUDE.md: "min 1 credit").

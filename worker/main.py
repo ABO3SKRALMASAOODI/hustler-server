@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 import agent_loop
 import config
 import db as dbx
+import export_context
 import filmstrip
 import failure_policy
 import indexer
@@ -222,7 +223,8 @@ def process_one(worker_db, job):
               f"attempt={job['attempts']} queue_wait={queue_wait}s "
               f"policy={execution_policy} provider={provider}", flush=True)
         try:
-            result = runner(worker_db, job)
+            with export_context.job_scope(worker_db, job):
+                result = runner(worker_db, job)
         finally:
             # The provider call (if any) has answered; what remains is this
             # process's own queue write, which a planned shutdown waits for.

@@ -1813,13 +1813,11 @@ def lens_brand(path, edl, index, info, *, final, want_wm, budget_s=30.0,
             "checked": True, "endcard": ec, "watermark": rb,
             "from": "render picture check"}
     try:
-        import config
         import render_qc
         import renderer
         W, H = info.get("width"), info.get("height")
         fps = float(info.get("fps") or 30.0)
-        outro = float(getattr(config, "OUTRO_DURATION_S", 5.0) or 5.0) \
-            if renderer.endcard_path() else 0.0
+        outro = renderer.outro_seconds(False) if (report or {}).get("outro_v") != 0 else 0.0
         p = render_qc.plan(edl, index, W=W, H=H, fps=fps, outro_s=outro,
                            want_wm=want_wm)
         deadline = time.monotonic() + budget_s
@@ -1841,7 +1839,6 @@ def lens_ending(path, edl, info, *, final, report=None, budget_s=10.0):
         (report or {}).get("picture_qc") or {}, edl)
     rows = qc.get("stall")
     if rows is None:
-        import config
         import renderer
         from timeline import Timeline
         e = edl or {}
@@ -1849,10 +1846,10 @@ def lens_ending(path, edl, info, *, final, report=None, budget_s=10.0):
         tl = Timeline(e.get("keep") or [], e.get("inserts") or [],
                       e.get("speed"))
         prog = renderer.program_render_s(tl, fps)
-        outro = float(getattr(config, "OUTRO_DURATION_S", 5.0) or 0.0)
+        outro = renderer.outro_seconds(False) if (report or {}).get("outro_v") != 0 else 0.0
         p = {"program_s": prog, "fps": fps, "W": int(info["width"]),
              "H": int(info["height"]),
-             "endcard": ({"s": outro} if final and renderer.endcard_path()
+             "endcard": ({"s": outro} if final and outro
                          else None),
              "tail": render_qc.tail_plan(e, tl, prog)}
         rows = render_qc.boundary_stall(path, p,
