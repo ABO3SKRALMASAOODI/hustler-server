@@ -301,3 +301,24 @@ def test_full_width_headline_has_margins_on_a_tracked_closeup():
     for frame in range(2):
         left, top, right, _ = item_box(title, scene["voices"],1080,1920,frame)
         assert left >= .065 and right <= .935 and top >= MARK[3]+.018
+
+
+def test_podcast_bed_yields_to_quiet_midphrase_speech_without_moving_the_tail(tmp_path):
+    from score import music
+    import numpy as np
+
+    # Ghodsi m04's 37–38 s spot: a nearly level low bed overtakes a softer phrase.
+    sr = music.SR
+    voice = np.zeros((40*sr, 2), np.float32)
+    voice[37*sr:38*sr] = .10
+    bed = np.full_like(voice, .106)
+    original = bed.copy()
+    marks = dict(words=[(37.0,37.26),(37.26,37.50),(37.50,37.76),(37.76,38.)],dur_s=40.)
+    plan = dict(tempo=1.,end_hit_s=39.,end_hit_bar=0,segments=[dict(tempo=1.)])
+    report = {}
+    music.podcast_bed(bed,voice,marks,dict(bars=[dict(t0=25.)]),plan,tmp_path/'score.mp3',report)
+    phrase = slice(37*sr,38*sr)
+    assert np.mean(bed[phrase]**2) < np.mean(voice[phrase]**2)
+    assert np.array_equal(bed[:36*sr],original[:36*sr])
+    assert np.array_equal(bed[39*sr:],original[39*sr:])
+    assert report['card_bed']['at_s'] == 26.
