@@ -192,6 +192,8 @@ _locator = routing.Locator()
 # P0 23 Nov 2026): the health probe builds under the same one.
 _next_lock = routing.CLIENT_BUILD_LOCK
 routing.warm_boto3()
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=lambda: _next_cached.clear())
 _next_cached = {}
 
 

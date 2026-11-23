@@ -62,3 +62,31 @@ def test_concurrent_first_builds_finish_in_a_fresh_process():
     out = subprocess.run([sys.executable, "-c", code], cwd=BACKEND,
                          capture_output=True, text=True, timeout=90)
     assert out.stdout.strip() == "ok", out.stderr
+
+
+def test_a_lock_held_at_fork_is_free_in_the_child():
+    """gunicorn preloads the app and forks: a master thread holding the
+    build lock at the fork must not leave every worker waiting forever."""
+    import os
+    import threading
+    if not hasattr(os, "fork"):
+        pytest.skip("no fork")
+    import storage_routing
+    held, done = threading.Event(), threading.Event()
+
+    def holder():
+        with storage_routing.CLIENT_BUILD_LOCK:
+            held.set()
+            done.wait(10)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    held.wait(5)
+    pid = os.fork()
+    if pid == 0:
+        ok = storage_routing.CLIENT_BUILD_LOCK.acquire(timeout=5)
+        os._exit(0 if ok else 1)
+    _, status = os.waitpid(pid, 0)
+    done.set()
+    t.join(5)
+    assert os.WEXITSTATUS(status) == 0

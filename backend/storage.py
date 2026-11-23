@@ -208,6 +208,10 @@ _clients = {}
 # health probe builds under the same one, so no two builds overlap.
 _clients_lock = routing.CLIENT_BUILD_LOCK
 routing.warm_boto3()
+# A forked worker never reuses clients (and their sockets) built in the
+# preloading master.
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_clients.clear)
 
 
 def client(public=False, fast=False, assemble=False):

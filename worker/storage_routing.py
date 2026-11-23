@@ -195,7 +195,41 @@ def store_config(name, env=None):
 # that worker hung until Render killed the instance. One lock means two
 # builds never overlap; warm_boto3() runs the lazy imports once, on the
 # importing thread, before any request or probe thread exists.
-CLIENT_BUILD_LOCK = threading.RLock()
+#
+# Fork-safe (same day, second finding): gunicorn preloads the app in its
+# master and forks the workers. A master thread holding this lock at the
+# moment of a fork hands every child a lock held by a thread that does not
+# exist there, and the whole worker's storage waits on it forever (the
+# first incident was the same thing with an import lock). The child gets a
+# fresh lock right after the fork; everyone holds this one object.
+class _ForkSafeRLock:
+    def __init__(self):
+        self._lock = threading.RLock()
+        if hasattr(os, "register_at_fork"):
+            import weakref
+            ref = weakref.ref(self)
+            os.register_at_fork(
+                after_in_child=lambda: ref() is not None and ref()._reset())
+
+    def _reset(self):
+        self._lock = threading.RLock()
+
+    def acquire(self, blocking=True, timeout=-1):
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self):
+        self._lock.release()
+
+    def __enter__(self):
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self._lock.release()
+        return False
+
+
+CLIENT_BUILD_LOCK = _ForkSafeRLock()
 _warmed = []
 
 
