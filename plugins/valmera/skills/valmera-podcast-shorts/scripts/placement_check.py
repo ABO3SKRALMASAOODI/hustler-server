@@ -18,6 +18,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 MODEL = "gpt-6-sol"
 CONTRACT = 16       # The excerpt and its source must support the role attributed in this clause.
@@ -390,6 +392,11 @@ SYSTEM = (
     "For a matching source, set full_source=true when the full frame establishes the action but the phone slice "
     "cuts its visible result, source interface, file label, or diagram. If even the full frames cannot illustrate "
     "the clause, mark the candidate false and give the missing evidence. "
+    "For a readable demonstration give action_box=[left,top,right,bottom] in full-source fractions around "
+    "the changing control or result rows, tight enough for their text to be read on a phone. Exclude unrelated task history and editor chrome. Give action_caption as a short plain description of that visible change. Leave the box null for a broad physical scene. "
+    "If the publisher's own moving title is partially occluded inside the full original, identify "
+    "the unobstructed scene in action_box and transcribe only the verified readable label in attribution_text. "
+    "This lets the editor show the actual scene with a clear source label. "
     "Also inspect change BETWEEN the ordered frames: motion_ok is true only for visible action in "
     "the depicted subject, actual camera translation through a three-dimensional filmed scene with "
     "visible depth/parallax or newly revealed geometry, a genuinely changing scientific simulation, "
@@ -469,8 +476,10 @@ def _decision(decision, review, menu=None):
         fault = "none"
     elif fault not in FAULTS[1:]:
         fault = "reframe"
+    from wf1_documents import valid_detail
+    action = decision.get("action_box")
     foreign = decision.get("foreign_text") is True
-    return dict(full_source=decision.get("full_source") is True, ok=ok, fit=min(max(fit, 0), 10), subject_x=sx, fault=fault, reason=decision.get("reason", ""), model=MODEL,
+    return dict(action_box=action if valid_detail(action) else None, action_caption=str(decision.get("action_caption") or "").strip()[:100], full_source=decision.get("full_source") is True, ok=ok, fit=min(max(fit, 0), 10), subject_x=sx, fault=fault, reason=decision.get("reason", ""), model=MODEL,
                 motion_ok=decision.get("motion_ok") is True, motion_reason=decision.get("motion_reason", ""),
                 attribution_text=str(decision.get("attribution_text") or "")[:120],
                 name_super=" ".join(str(decision.get("name_super") or "").split())[:60],
@@ -485,7 +494,7 @@ def _foley(answer, menu):
     return fam if menu and fam in menu else None
 
 
-KEPT = ("ok", "full_source", "fit", "subject_x", "fault", "reason", "model", "motion_ok", "motion_reason", "attribution_text", "name_super",
+KEPT = ("action_box", "action_caption", "ok", "full_source", "fit", "subject_x", "fault", "reason", "model", "motion_ok", "motion_reason", "attribution_text", "name_super",
         "foreign_text", "text_box", "text_reason", "foley")
 
 
@@ -533,6 +542,49 @@ def media_key(row, frames):
 def _review_key(review, media, said):
     return hashlib.sha256(json.dumps([CONTRACT,MODEL,review,media,said],
                                      ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+
+
+def legacy_detail(row, work, ffmpeg, action):
+    """Read only missing framing information on a previously verified source slice."""
+    from wf1_documents import valid_detail
+    from wf1_short import _llm
+    rec = row[4]
+    if rec.get("detail_read") or rec.get("action_box") or not rec.get("attribution") or not os.path.isfile(rec["path"]):
+        return {}
+    purpose = ("Locate the changing result in the final frame. Include the complete result row and return a short "
+               "action_caption naming the tool and the change it makes." if action else
+               "If native letters are partly covered, frame the largest clear rectangular area of the physical scene that excludes the letters. Include the setting and surrounding equipment at a useful scale. "
+               "For a clear original scene return a null box.")
+    prompt = ("The source and literal are already verified. " + purpose +
+              " Return JSON with action_box=[left,top,right,bottom] in normalized full-frame coordinates or null.")
+    key = _review_key("framing", media_key(row, []), [prompt,rec["attribution"],rec.get("source")])
+    dest = Path(work)/"source-framing"/(key+".json")
+    try:
+        return json.loads(dest.read_text())
+    except (OSError, ValueError):
+        pass
+    end = rec["src"][1]
+    t = max(rec["src"][0], end-1/(rec.get("fps") or 30))
+    shot = subprocess.run([ffmpeg,"-v","error","-ss",str(t),"-i",rec["path"],"-frames:v","1",
+                           "-f","image2pipe","-vcodec","mjpeg","-"],capture_output=True)
+    if not shot.stdout:
+        return {}
+    llm = _llm()
+    content = [dict(type="text",text=json.dumps(dict(literal=rec["attribution"],source=rec.get("source")))),dict(type="image",source=dict(
+        type="base64",media_type="image/jpeg",data=base64.b64encode(shot.stdout).decode()))]
+    try:
+        reply, use = llm.ask(prompt,content,effort="low",max_tokens=500)
+        answer = llm.json_block(reply)
+        result = dict(detail_read=True)
+        if valid_detail(answer.get("action_box")):
+            result.update(action_box=answer["action_box"],action_caption=answer.get("action_caption") if action else "")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w",dir=dest.parent,delete=False) as tmp:
+            json.dump(result,tmp)
+        os.replace(tmp.name,dest)
+        return dict(result, framing_spend=use)
+    except Exception:  # A missing geometry reading leaves the verified original available.
+        return {}
 
 
 def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repair=True):
@@ -689,6 +741,10 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         rec = row[4]
         rec['verified_motion'] = row[2] == 'clip' and decision.get('motion_ok') is True
         if review == "placement":
+            rec["detail_read"] = "action_box" in decision
+            if decision.get("action_box"):
+                rec["action_box"] = decision["action_box"]
+                rec["action_caption"] = decision.get("action_caption") or ""
             rec["full_source"] = decision.get("full_source") is True
             rec["attribution"] = decision.get("attribution_text") or ""
             rec["name_super"] = decision.get("name_super") or ""      # drawn under the picture (wf1_film labels): identity reaches the viewer

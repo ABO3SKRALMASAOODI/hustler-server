@@ -500,3 +500,14 @@ def test_source_strip_has_a_reading_seat_and_close_follows_the_reaction(tmp_path
     closing_word = round(words[17]["start"] * 30) + film.LEAD_F
     assert any(i.get("speaker_panel") and i["crop"] != [0,0,1,1] and i["f"][0] <= closing_word < i["f"][1]
                for i in scene["items"])
+
+
+def test_close_landscape_speaker_keeps_the_sides_of_the_head(tmp_path, quiet_engines, monkeypatch):
+    import wf1_coverage
+    monkeypatch.setattr(wf1_coverage,"speaker_moves",lambda *a: ([],[]))
+    face = dict(box=[.27,.12,.61,.83], eyes=[[.36,.4],[.49,.4]], score=1.)
+    pack = _sup(tmp_path,[dict(t0=0,t1=7,faces=[face])])
+    script = dict(segments=[dict(say="speaker",pictures=[]) for _ in range(2)])
+    scene,_ = film.build(script,pack,"archive-reel",dict(coverage_final=True))
+    assert any(it.get("source_frame") and it.get("crop") and it["crop"][0] < .27 and it["crop"][2] > .61
+               and it.get("src") and it["f"][0]<=44<it["f"][1] for it in scene["items"])

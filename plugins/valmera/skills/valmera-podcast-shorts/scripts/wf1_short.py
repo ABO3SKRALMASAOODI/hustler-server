@@ -108,7 +108,12 @@ def script(ctx, ideas_out):
     reg = next((s for s in shell.registry()["wf1"]["styles"] if s["id"] == want and s["id"] in wf1_film.STYLES), None)
     if reg is None:
         raise RuntimeError(f"style {want} is not one of the engine styles {list(wf1_film.STYLES)}")
-    near = _near(ctx, float(idea["t0"]), float(idea["t1"]))
+    start, end = float(idea["t0"]), float(idea["t1"])
+    context = _near(ctx, start, end, pad=150.)
+    near = [(t, w) for t, w in context if start - 2 <= t <= end + 2]
+    from podcast import sentence_lines
+    surrounding = sentence_lines([(t,w) for t,w in context if t < start-2]) + sentence_lines(
+        [(t,w) for t,w in context if t > end+2])
     system = ("You are the script stage of Valmera's podcast shorts workflow. You turn one chosen moment of a conversation "
               "into the exact clip for a vertical short. You cut on word edges, start on the first word of the thought (no "
               "throat-clearing, no 'and', 'so', 'yeah' when the next word can open), and end on the payoff with a breath "
@@ -130,10 +135,21 @@ def script(ctx, ideas_out):
                "let the byline identify its author. Describe both the stakes and how the "
                "delivery shifts into the payoff in the music brief. Include speaking_turns:[{start,end,speaker}] on the same episode clock "
                "for quoting the interview itself. Distinguish the host from the guest using the identity and dialogue.")
+    system += (" Read the surrounding interview to resolve jargon, enumeration and the role of each example. "
+               "Use it as evidence for meaning, cut only the chosen moment. If a list is announced anywhere, "
+               "distinguish its actual members from examples of one. When the full list falls outside the cut, "
+               "frame this short around the particular requirement it explains. Where its voice still announces "
+               "the larger list, write a claim with stance=framework and report identifying the subset, ordinal "
+               "if supported, and what it means. Time it across the announcement and the start of the explanation. "
+               "Explain unfamiliar shorthand at first use with stance=definition and the source's expansion and "
+               "plain meaning. Give this cue its own readable interval adjacent to any estimate; or incorporate "
+               "the full expansion and meaning in the estimate's report. Budget about three spoken seconds for an eight-word definition; adjacent words can carry its reading. Keep a repeated numerical challenge together. Use nonoverlapping claim intervals. "
+               "Attribute hypothetical quantities, keeping the demo's actual action distinct from the estimate.")
     anchors = (f"# The moment's anchors, measured on the words\nThe hook opens at {float(idea['t0']):.2f} s: {idea.get('hook') or ''}\n"
                f"The payoff closes at {float(idea['t1']):.2f} s: {idea.get('payoff') or ''}\n"
                f"Measured length: {float(idea['t1']) - float(idea['t0']):.1f} s\n\n")
     content = f"# The moment\n{json.dumps(idea, ensure_ascii=False)}\n\n{anchors}# Who is in it\n{str((ctx.args or {}).get('identity') or '')[:1500]}\n\n# Words near the moment: seconds word\n" + ' '.join((f'{t:.2f} {w}' for (t, w) in near))
+    content += "\n\n# Surrounding interview for meaning only, outside the edit\n" + "\n".join(surrounding)
     llm = _llm()
     spend, s, note = [], {}, ""
     for _ in range(2 if os.environ.get('CODEX_PROXY_LOCAL') == '1' else 3):
@@ -248,7 +264,7 @@ def supply(ctx, script):
     import wf1_primary_sources
     originals=wf1_primary_sources.retained(sup_dir)
     fscript = dict(title=footage_title(script.get('title'), who, coverage),
-                   segments=[dict(say=s['say'], pictures=[s['name']], visual=s['must_show']) for s in windows],
+                   segments=[wf1_coverage.footage_segment(i, w) for i, w in enumerate(windows)],
                    named=[dict(name=name,must_show=' '.join(requirements),
                                video_sources=originals.get(name,[]),
                                video_searches=list(dict.fromkeys(q for w in windows if w['name']==name for q in w.get('video_searches',[]))),
@@ -421,7 +437,7 @@ def merge_footage(ctx, pack, foot, name):
 def reopened_footage(ctx, script, pack, opened):
     """The reopened originals cut like any other source: the footage engine's source-only pass over exactly them (no
     new search), with its frame and motion checks, for the windows they were found for. Returns the clips added."""
-    import wf1_primary_sources
+    import wf1_primary_sources, wf1_coverage
     coverage = pack['coverage']
     windows = coverage['windows']
     urls = {r['url'] for r in opened}
@@ -436,7 +452,7 @@ def reopened_footage(ctx, script, pack, opened):
         named.append(dict(name=n, must_show=' '.join(dict.fromkeys(windows[i]['must_show'] for i in wanted if windows[i]['name'] == n)),
                           video_sources=kept.get(n) or every, video_searches=[], **{'is': 'thing'}))
     fscript = dict(title=footage_title(script.get('title'), str(coverage.get('context') or '')[:400], coverage),
-                   segments=[dict(i=i, say=w['say'], pictures=[w['name']], visual=w['must_show']) for i, w in enumerate(windows)],
+                   segments=[wf1_coverage.footage_segment(i, w) for i, w in enumerate(windows)],
                    named=named)
     name = (f"footage-v{coverage['contract']}-{FOOTAGE_PIXELS}-reopened-"
             + hashlib.sha256(json.dumps([sorted(urls), wanted], sort_keys=True).encode()).hexdigest()[:12])
@@ -891,8 +907,11 @@ def refill(ctx, script, pack, shortage):
     """Research missing coverage through the same engines, preserving all checked originals."""
     coverage = pack['coverage']
     windows = coverage['windows']
+    import wf1_coverage
     from wf1_coverage import camera_remainder
-    wanted = [i for i in (shortage['weak_windows'] or range(len(windows))) if not windows[i].get('on_take') and not camera_remainder(windows[i])]
+    candidates = shortage['weak_windows'] or shortage.get('missing_windows') or [
+        i for i,w in enumerate(windows) if not w.get("single_action")]
+    wanted = [i for i in candidates if not windows[i].get('on_take') and not camera_remainder(windows[i])]
     if not wanted:
         return
     if not pack.get('referent_research'):
@@ -902,7 +921,6 @@ def refill(ctx, script, pack, shortage):
         pack.setdefault('research_spend',[]).extend(found['spend'])
     coverage['research_context']=pack['referent_research']
     if pack.get('research_revision',0)<7:
-        import wf1_coverage
         # What was found, never why a check said no: rejection reasons handed to the director came back as exclusions in
         # the brief (19 Nov m04, m05), and every brief rewrite re-judged pictures already approved. The brief stays a
         # search brief; the picture check chooses among what the search finds.
@@ -920,7 +938,6 @@ def refill(ctx, script, pack, shortage):
         return
     if (not motion_ready and pack.get('coverage_repairs',0)>=1
             and not pack.get('coverage_context_checked')):
-        import wf1_coverage
         available=[dict(i=row['i'],clips=[dict(shows=c.get('shows'),source=c.get('source'),
                        motion_p90=c.get('motion_p90')) for c in row['clips'][:12]])
                    for row in pack['footage']]
@@ -1016,7 +1033,7 @@ def refill(ctx, script, pack, shortage):
              if n.startswith('footage') and os.path.isfile(os.path.join(ctx.supply,n,'footage.json'))]
     subjects = {windows[i]['name']:windows[i]['must_show'] for i in wanted}
     fscript = dict(title=footage_title(script['title'], coverage.get('context') or '', coverage)+' — supplementary documentary coverage. Prefer original institutional or company films with visible action; avoid influencer promotions and unrelated banners.',
-                   segments=[dict(i=i,say=w['say'],pictures=[w['name']],visual=w['must_show']) for i,w in enumerate(windows)],
+                   segments=[wf1_coverage.footage_segment(i, w) for i,w in enumerate(windows)],
                    named=[dict(name=n,must_show=show,video_sources=primary.get(n,[]),video_searches=list(dict.fromkeys(q for w in windows if w['name']==n for q in w.get('video_searches',[]))),**{'is':'thing'}) for n,show in subjects.items()])
     if rescout:name+='-'+hashlib.sha256(json.dumps(fscript,sort_keys=True).encode()).hexdigest()[:12]
     fw,fh = wf1_film.FOOTAGE_FRAME
@@ -1087,6 +1104,7 @@ def descend(ctx, script, pack, missing):
     the named person's or company's own archive, then the place or product, then related moving context), and footage
     and photographs are acquired on that rung at once, so the slot is filled before the final build rather than shipped
     empty. Returns True when a rung was taken."""
+    import wf1_coverage
     windows = pack['coverage']['windows']
     lower = [i for i in missing if isinstance(i, int) and 0 <= i < len(windows)
              and int(windows[i].get('rung') or 0) < len(windows[i].get('depictions') or [])]
@@ -1110,7 +1128,7 @@ def descend(ctx, script, pack, missing):
     for i in lower:
         subjects.setdefault(windows[i]['name'], []).append(windows[i]['must_show'])
     fscript = dict(title=footage_title(script.get('title'), str(pack['coverage'].get('context') or '')[:400], pack['coverage']),
-                   segments=[dict(i=i, say=w['say'], pictures=[w['name']], visual=w['must_show']) for i, w in enumerate(windows)],
+                   segments=[wf1_coverage.footage_segment(i, w) for i, w in enumerate(windows)],
                    named=[dict(name=n, must_show=' '.join(dict.fromkeys(shows)), video_sources=[],
                                video_searches=list(dict.fromkeys(q for i in lower if windows[i]['name'] == n for q in windows[i].get('video_searches', []))),
                                **{'is': 'thing'}) for n, shows in subjects.items()])
@@ -1323,7 +1341,9 @@ def _render_review(ctx, rd, sc):
         row["framing_key"] = hashlib.sha256(json.dumps(geometry,sort_keys=True).encode()).hexdigest()
         row["transition_audit"] = dict(ok=row.get("ok") is True, reason=row.get("reason", ""), review="composed")
     real=sum(p['f'][1]-p['f'][0] for p in report['placements'])/F.FPS
-    moving=sum(p['f'][1]-p['f'][0] for p in report['placements'] if p.get('motion_ok') is True)/F.FPS
+    ends = {tuple(p.get('visible_f') or p['f']):p['action_end'] for p in sc['beats'].get('pictures') or [] if 'action_end' in p}
+    moving=sum(max(0,min(ends.get(tuple(p['f']),p['f'][1]),p['f'][1])-p['f'][0])
+               for p in report['placements'] if p.get('motion_ok') is True)/F.FPS
     report.update(real_seconds=real,moving_seconds=moving,moving_share=moving/max(real,.001))
     return report
 
@@ -1601,6 +1621,8 @@ def hold_windows(measured, coverage, pictures, fps=None, lead=None):
             continue
         a, b = (round(w["t0"]*fps)+lead)/fps, (round(w["t1"]*fps)+lead)/fps
         placed = [p for p in pictures if p.get("window") == i]
+        if w.get("single_action") is True and any(p.get("kind") == "clip" for p in placed):
+            continue
         meaningful = min(1.4,b-a)
         if any(min(h1,b)-max(h0,a) >= meaningful for h0,h1 in measured.get("holds") or []):
             out.add(i)

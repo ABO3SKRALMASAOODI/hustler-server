@@ -348,3 +348,18 @@ def test_public_listing_phrase_ownership_and_interview_diagram():
             assert [w["t"] for w in plan.items if w["f"][0] <= frame < w["f"][1]] == [expected[i]]
         if i:
             assert plan.items[i-1]["f"][1] == it["f"][0]
+
+
+def test_interview_context_completes_a_spoken_list_promise():
+    import wf1_display
+    from film import LEAD_F, FPS
+    words = [dict(w=w, t0=i+LEAD_F/FPS, t1=i+.9+LEAD_F/FPS, seg=0)
+             for i,w in enumerate("RSI needs four conditions the next model trains faster".split())]
+    chain = dict(speaker="Guest",subject="Guest")
+    claims = [dict(chain,start=10,end=12,stance="definition",report="Recursive self-improvement"),
+              dict(chain,start=12,end=19,stance="framework",report="First of four: train the next model faster")]
+    edit = dict(episode_start=10, claims=claims, sources={"interview":{"url":"episode","publisher":"Interview"}})
+    score = dict(asks=[],display=[],arc=[],caption_ends=[1,8])
+    pages = wf1_display.bind(score,edit,words)["display_facts"]
+    assert [(p["first"],p["last"],p["facts"][0]["value"]) for p in pages] == [
+        (0,1,claims[0]["report"]), (2,8,claims[1]["report"])]

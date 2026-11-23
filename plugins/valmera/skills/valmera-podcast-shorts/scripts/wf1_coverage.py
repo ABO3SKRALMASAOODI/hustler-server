@@ -16,11 +16,19 @@ class CoverageError(RuntimeError):
         self.report = report
 
 
+def footage_segment(index, window):
+    segment = dict(i=index, say=window["say"], pictures=[window["name"]], visual=window["must_show"])
+    if window.get("single_action") is True:
+        segment["single_action"] = True
+    return segment
+
+
 def join_windows(windows):
     """Join adjacent windows only when they ask for the same subject in the same role."""
     out = []
     for row in windows:
         if (out and row['name'] == out[-1]['name'] and row['must_show'] == out[-1]['must_show']
+                and row.get('single_action') == out[-1].get('single_action')
                 and row['first'] <= out[-1]['last'] + 1):
             prev = out[-1]
             prev.update(last=row['last'], t1=row['t1'], say=prev['say']+' '+row['say'])
@@ -104,6 +112,10 @@ is part of that same thought. Mark the particular concern or loaded verdict that
 claim when set in type. Give one short indirect report for the whole judgment, keeping the speaker's
 qualifications and the named products. Leave ordinary connective commentary and restatements in
 the running interview. Estimates already identified in story.claims keep their own treatment.
+Where an estimate quantifies a real observable capability, put one single_action external window on
+the act itself, even if no vendor is named. An illustrative primary demo can show a tool writing code;
+the hypothetical percentage stays with the speaker. Limit the demo to the actual action and visible result.
+The operator, hardware scale and network installation can each supply different evidence on their own words.
 Let a product demo play across the factual release example, including an estimated cadence.
 A later opinion about the same products needs no further archive search. If a documented policy
 or partnership materially qualifies it, give the precise scope_question for a text citation.
@@ -115,7 +127,9 @@ not an isolated numeral needing an unrelated picture. A date belongs to the even
 Plan nonoverlapping EXTERNAL picture windows using inclusive word IDs. Each window has one subject doing one attributed action. End the window when its role changes, even if its name stays the same.
 Open an institutional archive on the words naming or describing the institution itself. Keep a first-person lead-in, recalled consensus or private deliberation on the synchronous speaker until that referent is spoken.
 Use complete explanatory clauses, typically 2-5 seconds, not a separate window for each word.
-The acquisition engine chooses several distinct shots within each window. Do not split one clause
+Where several publishers would only illustrate the same capability, give the window single_action=true
+and identify the visible action and its result. Hold the best readable demonstration on that action.
+Keep separate physical examples or process steps wherever each adds evidence. Do not split one clause
 into fragments such as 'There are scale' and 'effects, like Google'. Give it the complete thought.
 The original synchronous interview is the visual fallback. Plan an external window only when a
 real picture can show its specific referent. Use other recordings of the speaker only for an event
@@ -530,6 +544,7 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
         a, b = round(window['t0']*fps)+lead, round(window['t1']*fps)+lead
         candidates = [('clip', c.get('subject', window['name']), c) for c in sorted(footage.get(i, []),
             key=lambda c:(-fits.get((i,c['path']),5),
+                          -float(c.get('grade') or 0) if window.get('single_action') else 0,
                           0 if c.get('subject_motion') is True else 2 if c.get('subject_motion') is False else 1,
                           -c.get('motion_p90',0)))]
         if i in coverage.get("motion_windows",[]):
@@ -553,7 +568,11 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
               and ((row[2].get('source') or {}).get('url') or row[2].get('page')) not in blocked]
         by_path = {row[2]["path"]: row for row in pool}
         pins = []
-        for prior in sorted(priorities, key=lambda item: (item.get("motion_ok") is not True,item["f"])):
+        for prior in sorted(priorities, key=lambda item: (item.get("motion_ok") is not True,
+                                                          -item.get("fit", 0) if window.get("single_action") else 0,
+                                                          item["f"])):
+            if pins and window.get("single_action"):
+                break
             if prior.get("motion_ok") is False and i in coverage.get("motion_windows",[]):
                 continue
             path = prior["path"]
@@ -592,6 +611,8 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
             out.append([lo,hi,kind,name,dict(rec,window=i,illustration=window["must_show"],clause=window.get("say"),
                                             clause_t=[window["t0"], window["t1"]],
                                             **({"association":window["must_show"]} if window.get("association") else {}))])
+        if pins and window.get("single_action"):
+            continue
         if camera_remainder(window):
             known = window["camera_remainder"].get("sources", [])
             # Keep the speaker through this gap until a source actually depicts
@@ -611,11 +632,14 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
             candidates=[r for r in distinct if not any(same_picture(r[2], old) for old in used)] or fresh_interval(pool,taken,originals,cut_dir,max(.5,min(1.4,(b-a)/fps))+2/fps,ffmpeg,
                                                   skip={p for j,p in rejected if j==i})
             wanted = max(1, math.ceil((b-a)/fps*.8))
-            candidates = candidates[:wanted]
+            if window.get("single_action"):
+                candidates = candidates[:1]
+            else:
+                candidates = candidates[:wanted]
             # Enough pictures: a new one about every 1.4 s. Fewer: the chosen pictures share the whole clause, a clip up to
             # its own seconds, so the clause is never handed back to the speaker while a chosen picture can cover it (round
             # 1, 19 Nov: windows with one or two survivors showed 1.4 s of picture and then 15-34 s of the speaker).
-            lengths = clause_shares((b-a)/fps, [min(1.4 if len(candidates) >= wanted else float('inf'),
+            lengths = clause_shares((b-a)/fps, [min(1.4 if not window.get("single_action") and len(candidates) >= wanted else float('inf'),
                                                      float(rec['seconds'])-1/fps if kind == 'clip' else float('inf'))
                                                  for kind, _, rec in candidates])
             pos = a
@@ -636,6 +660,43 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
                 used.append(rec); pos=end
     out.sort(key=lambda row: row[0])
     return out
+
+
+def action_holds(rows, coverage, fps=30, lead=3, detail=None):
+    """Carry a verified result to the end of its clause. A held result keeps its actual clock."""
+    windows = coverage["windows"]
+    actions = {}
+    for row in rows:
+        rec = row[4]
+        i = rec.get("window")
+        if (type(i) is int and 0 <= i < len(windows) and windows[i].get("single_action") is True
+                and row[2] == "clip"):
+            actions.setdefault(i, []).append(row)
+    out = list(rows)
+    for i, choices in actions.items():
+        best = max(choices, key=lambda r: (r[4].get("fit",0), r[4].get("verified_motion") is True,
+                                           bool(r[4].get("action_box")), r[4].get("grade",0)))
+        if detail:
+            best[4].update(detail(best, True))
+        a = min(r[0] for r in choices)
+        end = round(windows[i]["t1"]*fps)+lead
+        obstacles = [r for r in out if r not in choices and r[1] > a and r[0] < end]
+        end = min([end] + [max(a,r[0]) for r in obstacles])
+        if end <= a:
+            continue
+        motion_frames = max(1, min(best[1],best[4].get("action_end",best[1]))-best[0])
+        stop = min(end, a+motion_frames)
+        for r in choices:
+            out.remove(r)
+        end = min(end, stop + 3*fps) if best[4].get("action_box") else stop
+        rec = dict(best[4], action_end=stop)
+        if "audit_until" in rec:
+            rec["audit_until"] = end
+        if stop-a < motion_frames:
+            lo,hi = rec["src"]
+            rec["src"] = [lo,lo+(hi-lo)*(stop-a)/motion_frames]
+        out.append([a,end,best[2],best[3],rec])
+    return sorted(out, key=lambda r:r[0])
 
 
 def checked_proposals(coverage, footage, pictures, duration, checker, composed_stills=(), rejected=None,
@@ -756,18 +817,21 @@ def require_coverage(ins, coverage, duration, fps=30, final=False):
     record says exactly what was short. Owner, 16 Nov 2026: a fix reaches the outcome; a short is never lost to a
     coverage target (the 16 Nov Jensen run lost 3 of 10 moments this way after ~1,300 model calls each)."""
     real = sum(b-a for a,b,*_ in ins)/fps
-    def moving_picture(row):
-        return row[2]=='clip' and row[4].get('verified_motion') is True and row[4].get('placed_motion_p90',0)>=1.
-    moving = sum(r[1]-r[0] for r in ins if moving_picture(r))/fps
+    def moving_frames(row):
+        motion = row[2]=='clip' and row[4].get('verified_motion') is True and row[4].get('placed_motion_p90',0)>=1.
+        return max(0,min(row[1],row[4].get('action_end',row[1]))-row[0]) if motion else 0
+    moving = sum(moving_frames(r) for r in ins)/fps
     missing = [i for i,w in enumerate(coverage['windows']) if not w.get('on_take') and not camera_remainder(w) and not any(r[4].get('window')==i for r in ins)]
     named = sum(w['t1']-w['t0'] for w in coverage['windows'])
     unique=[]
     for row in ins:
         if not any(same_picture(row[4],old) for old in unique):unique.append(row[4])
     rate = len(unique)*10/max(named,.01)
+    held_actions = {r[4].get("window") for r in ins if r[2] == "clip"}
     weak = [i for i,w in enumerate(coverage['windows'])
+            if not (w.get("single_action") is True and i in held_actions)
             if not w.get('on_take') and not camera_remainder(w) and (sum(r[1]-r[0] for r in ins if r[4].get('window')==i)/fps < .8*(w['t1']-w['t0'])
-            or sum(r[1]-r[0] for r in ins if r[4].get('window')==i and moving_picture(r))/fps < .6*(w['t1']-w['t0']))]
+            or sum(moving_frames(r) for r in ins if r[4].get('window')==i)/fps < .6*(w['t1']-w['t0']))]
     report = dict(real_seconds=real,moving_seconds=moving,required_real_seconds=.45*duration,required_moving_seconds=.6*max(real,.45*duration),named_seconds=named,new_per_10s=rate,new_pictures=len(unique),repeated_pictures=len(ins)-len(unique),weak_windows=weak,missing_windows=missing)
     short = bool(real/max(duration,.01)<.45 or moving/max(real,.01)<.60 or rate<6 or missing)
     report['short'] = short

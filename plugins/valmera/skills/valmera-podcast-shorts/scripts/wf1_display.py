@@ -13,6 +13,9 @@ args.sequence=[{"at": first word number of a state, "label": compact explanatory
 args.speaker=the person explaining it. Show the alternatives, their distinct effects and the reaction that
 links them. The labels form one qualitative diagram. Word attributions and scenario framing keep it
 an illustration of the interview. Avoid invented measurements, issuer histories and extra acquisition.
+Use the script's definition and framework claims on their addressed words. A spoken count can introduce
+one requirement explored here; put the requirement and its place in the framework on screen. Resolve a
+short form on first use, with enough time to read it. Keep the estimate separate from what a demo shows.
 Use separate captions for the literal speech. A visual change to the camera or a paraphrased pull quote
 alone cannot explain a changing relationship.
 For each date, amount, target or estimate worth displaying, put facts in its type ask's args:
@@ -135,6 +138,7 @@ def claim_windows(editorial, words):
     return list(editorial.get("speaker_claims") or []) + spans
 
 
+CONTEXT_LABELS = {"framework": "Framework", "definition": "Definition"}
 OPINION_LABELS = {"concern": "Concern", "characterization": "Opinion"}
 ESTIMATE_LABELS = {"discussed_estimate": "Estimate under discussion", "personal_estimate": "Personal estimate"}
 
@@ -159,6 +163,8 @@ def claim_fact(claim, fact, sources, words):
             return dict(statement=statement, value=statement, source=source, supporting_sources=supporting,
                         perspective=dict(speaker=claim["speaker"], stance=claim["stance"],
                                          report=claim["report"], interview=interview.get("url")))
+        return dict(source=interview, attribution=claim["speaker"], value=claim["report"], chain=chain)
+    if claim.get("stance") in CONTEXT_LABELS:
         return dict(source=interview, attribution=claim["speaker"], value=claim["report"], chain=chain)
     selected = fact.get("quote")
     for q in (source or {}).get("quotations", []):
@@ -212,7 +218,8 @@ def bind(direction, editorial, words):
         facts = []
         first = ask["at"]["w"]
         last = (ask.get("until") or ask["at"])["w"]
-        claim = next((c for c in claims if c["first"] <= last and first <= c["last"]), None)
+        overlapping = [c for c in claims if c["first"] <= last and first <= c["last"]]
+        claim = max(overlapping, key=lambda c: min(last,c["last"])-max(first,c["first"]), default=None)
         sequence = []
         proposed = args.get("sequence")
         for step in proposed if isinstance(proposed, list) else ():
@@ -251,7 +258,7 @@ def bind(direction, editorial, words):
                 candidates = [f for f in args.get("facts") or [] if isinstance(f, dict)]
                 selected = next((f for f in candidates if f.get("quote")), candidates[0] if candidates else {})
                 item = claim_fact(claim, selected, sources, words)
-                exact = (claim.get("stance") in OPINION_LABELS or (item.get("chain") or {}).get("original")
+                exact = (claim.get("stance") in CONTEXT_LABELS or claim.get("stance") in OPINION_LABELS or (item.get("chain") or {}).get("original")
                          or (selected.get("quote") and item.get("relation")))
                 start = claim["first"] if exact else max(first, claim["first"])
                 end = claim["last"] if exact or "until" not in ask else min(last, claim["last"])
@@ -297,7 +304,7 @@ def bind(direction, editorial, words):
             asks.append(ask)
     # A qualification belongs on screen even when the Director uses a picture on that beat.
     for claim in claims:
-        if (claim.get("stance") in ESTIMATE_LABELS or claim.get("stance") in OPINION_LABELS) and (claim["first"], claim["last"]) not in displayed:
+        if (claim.get("stance") in CONTEXT_LABELS or claim.get("stance") in ESTIMATE_LABELS or claim.get("stance") in OPINION_LABELS) and (claim["first"], claim["last"]) not in displayed:
             pages.append(dict(first=claim["first"], last=claim["last"], facts=[claim_fact(claim, {}, sources, words)]))
     pages.sort(key=lambda page: page["first"])
     return dict(direction, asks=asks, display=display, caption_ends=ends, caption_accents=sorted(accents), claims=claims, display_facts=pages,
@@ -366,7 +373,7 @@ def reading_card(plan, span, body, byline, source, palette, *, centre=.64, max_h
     from film import W, H
     plan.voices["quote_body"] = dict(plan.voices["dsp"], px=65, track=0, shadow={"a": 0})
     plan.voices["quote_credit"] = dict(plan.voices["cap"], px=48, track=0, shadow={"a": 0})
-    left, width = .08, .76*W
+    left, width = .08, (.48 if group=="figure-credit" else .76)*W
     if steps:
         # The states share a fixed rail; the active node changes on its word
         # without rewrapping or recentering the surrounding labels.

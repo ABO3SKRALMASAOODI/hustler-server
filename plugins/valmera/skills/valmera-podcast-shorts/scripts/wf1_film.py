@@ -374,6 +374,8 @@ def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, str
     for i, window in enumerate(coverage["windows"]):
         if window.get('on_take') or camera_remainder(window):
             continue
+        if window.get("single_action") and any(r[2]=="clip" and r[4].get("window")==i for r in ins):
+            continue
         a = max(f_first, round(window["t0"] * FPS) + LEAD_F)
         b = min(f_last, round(window["t1"] * FPS) + LEAD_F)
         if b - a <= FILL_GAP_S * FPS:
@@ -890,7 +892,7 @@ def build(script, sup, style_id, direction=None):
         facts = page["facts"]
         # A speaker-led explanation already carries its report in voice and captions.
         # A quotation from an original or a qualified estimate has its own evidentiary work.
-        qualified = page.get("sequence") or any(f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
+        qualified = page.get("sequence") or any((f.get("chain") or {}).get("stance") in wf1_display.CONTEXT_LABELS or f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
                         (f.get("chain") or {}).get("stance") in wf1_display.ESTIMATE_LABELS or
                         (f.get("chain") or {}).get("original") for f in facts)
         narrated = all(f.get("chain") and not f.get("relation") for f in facts)
@@ -1004,6 +1006,18 @@ def build(script, sup, style_id, direction=None):
                                ffmpeg=sup["ffmpeg"])
         placement_report["gap_fill"] = {k: v for k, v in fill.items() if k != "spend"}
         placement_report["spend"].extend(fill["spend"])
+    from wf1_coverage import action_holds
+    from placement_check import legacy_detail
+    def detail(row, action):
+        geometry = legacy_detail(row, sup["work"], sup["ffmpeg"], action)
+        cost = geometry.pop("framing_spend", None)
+        if cost:
+            placement_report["spend"].append(cost)
+        return geometry
+    ins = action_holds(ins, coverage, FPS, LEAD_F, detail)
+    for row in ins:
+        if row[2] == "clip" and row[4].get("reframe") and "action_end" not in row[4]:
+            row[4].update(detail(row, False))
     if source_rows:
         ins, _ = _director().hold_take(ins,source_spans,min_f=1,fps=FPS)
         ins = sorted(ins+source_rows,key=lambda row:row[0])
@@ -1214,6 +1228,23 @@ def build(script, sup, style_id, direction=None):
             stack = next((span for span in stacks if span[0] <= fa < span[1]), None)
             active_panel = stack or (panel if panel and panel[0] <= fa < panel[1] else None)
             info = meta[pieces[k]["key"]]
+            # A landscape single already in close-up cannot fit shoulders and gestures in
+            # the portrait cover. Keep the camera's own composition in a fitted live panel.
+            cover = min(1., (W/H) / (info["pw"]/info["ph"]))
+            if (cover < .65 and not active_panel and not reading.get("inserts") and pieces[k]["who"] == "speaker" and
+                    any(face[2] > .82*cover for face in info["faces"])):
+                from scene.motion import fit_panel
+                face = max(info["faces"], key=lambda f:f[2]*f[3])
+                width = min(1., max(cover, 2*face[2]))
+                left = max(0., min(1.-width, face[0]+face[2]/2-width/2))
+                full = [left, 0., left+width, 1.]
+                box = fit_panel(full, (info["pw"],info["ph"]), (W,H), [0,.10,1,.56 if on_report else .80])
+                P.page([fa,fb], "#171B23", "#0D1015", grain=.018)
+                P.card([fa,fb], pieces[k]["key"], box, src=[t0,t1], crop=full, source_frame=True,
+                       caption_baseline=.87)
+                coverage_report.setdefault("speaker_framing",[]).append(dict(f=[fa,fb], source_crop=full))
+                cut_pts.append(fa)
+                continue
             if active_panel and info.get("faces") and pieces[k]["who"] == "speaker":
                 face=max(info["faces"],key=lambda box:box[2]*box[3])
                 box = [0.,0.,1.,.73] if stack else [0.,.055,1.,.915]
@@ -1281,6 +1312,7 @@ def build(script, sup, style_id, direction=None):
                                shows=rec.get("shows"), mode=mode, pic=keys[rec["path"]], source_slice=rec.get("src"),
                                window=rec.get("window"), clause=rec.get("clause"), clause_t=rec.get("clause_t"), fit=rec.get("fit"),
                                reframed=bool(rec.get("reframe")), attribution=rec.get("attribution"), name_super=rec.get("name_super"),
+                               **{k:rec[k] for k in ("action_box","action_end","action_caption") if k in rec},
                                w=rec.get("w"), h=rec.get("h"), upscaled_from=rec.get("upscaled_from"), rung=rec.get("rung"),
                                how=rec.get("how"), source_size=rec.get("source_size"),
                                illustration=rec.get('illustration'), source_evidence=rec.get('source') or dict(url=rec.get('page'),title=rec.get('title'),channel=rec.get('credit')),
@@ -1328,7 +1360,7 @@ def build(script, sup, style_id, direction=None):
     def window(f0, f1, kind, name, rec, key, source_ink=()):
         n = f1 - f0
         mono = is_mono(f0)
-        evidence = bool(source_ink or rec.get("attribution") or rec.get("reframe") or rec.get("full_source") or archive_event(rec)) or rec.get("provider") == "primary-document"
+        evidence = bool(source_ink or rec.get("action_box") or rec.get("attribution") or rec.get("reframe") or rec.get("full_source") or archive_event(rec)) or rec.get("provider") == "primary-document"
         if evidence:
             P.page([f0, f1], "#171B23", "#0D1015", grain=.018)
         else:
@@ -1349,7 +1381,28 @@ def build(script, sup, style_id, direction=None):
             kw["src"] = list(rec["src"])
         if mono:
             kw["look"] = "mono_silver"
-        P.card([f0, f1], key, [x0, y0, x1, y1], **kw)
+        from wf1_documents import valid_detail
+        detail = rec.get("action_box")
+        if valid_detail(detail):
+            from scene.motion import fit_panel
+            # The frame reader located the action on these same moving source pixels.
+            crop = list(detail)
+            if rec.get("action_caption"):
+                # Include the adjacent changing rows when the result is a single line of UI.
+                pad = .04*(crop[2]-crop[0])
+                crop[0], crop[2] = max(0.,crop[0]-pad), min(1.,crop[2]+pad)
+                height = min(1., max(crop[3]-crop[1], (crop[2]-crop[0])*aspect/1.6))
+                top = max(0., min(1.-height, (crop[1]+crop[3]-height)/2))
+                crop[1], crop[3] = top, top+height
+            x0,y0,x1,y1 = fit_panel(crop,(rec["w"],rec["h"]),(W,H),WINDOW_BOX)
+            kw.update(crop=crop, source_ink=[[x0,y0,x1,y1]])
+        action_end = min(f1,max(f0+1,rec.get("action_end",f1)))
+        kw["op"] = kw["op"][:action_end-f0]
+        P.card([f0, action_end], key, [x0, y0, x1, y1], **kw)
+        if action_end < f1:
+            lo, hi = rec["src"]
+            held = max(lo,hi-1/(rec.get("fps") or FPS))
+            P.card([action_end,f1], key, [x0,y0,x1,y1], **dict(kw,src=[held,hi],op=1.))
         note(f0, f1, kind, name, rec, "window")
         P.pictures[-1]["source_crop"] = kw["crop"]
 
@@ -1395,7 +1448,7 @@ def build(script, sup, style_id, direction=None):
 
     def bleed(f0, f1, kind, name, rec, key):
         source_ink = clipped_source_ink(rec) if kind == "clip" else []
-        if rec.get("reframe") or rec.get("full_source") or rec.get("provider") == "primary-document" or source_ink or archive_event(rec) or (rec.get("attribution") and rec.get("verified_motion") is False):
+        if rec.get("action_box") or rec.get("reframe") or rec.get("full_source") or rec.get("provider") == "primary-document" or source_ink or archive_event(rec) or (rec.get("attribution") and rec.get("verified_motion") is False):
             return window(f0, f1, kind, name, rec, key, source_ink)             # the approved document crop is already the editorial rectangle
         bal = None if is_mono(f0) else clip_balance(take.get("still"), rec.get("still") if kind == "clip" else rec.get("path"))
         gk = dict(grade=bal) if bal else {}               # matched to the take it cuts against, part of the way (round1 colour)
@@ -1499,10 +1552,16 @@ def build(script, sup, style_id, direction=None):
                 labels.append((f0,f1,label,keys[rec["path"]]))
                 continue
             source_url = (rec.get("source") or {}).get("url") or rec.get("page")
+            if (rec.get("attribution") or rec.get("action_caption")) and (rec.get("reframe") or rec.get("action_box")) and not label:
+                publisher = (rec.get("source") or {}).get("channel")
+                label = " · ".join(filter(None,(rec.get("action_caption") or rec.get("attribution"),publisher)))
             if source_url and not label and rec.get("provider") != "interview-frame":
                 publisher = (rec.get("source") or {}).get("channel") or rec.get("credit")
                 if publisher:
                     label = f"Source · {publisher}"
+            if rec.get("action_box") and label:
+                wf1_display.reading_card(P, [f0,f1], "", "", label, pal, centre=.12, group="figure-credit")
+                continue
             if source_url and label and label not in labelled and f1 - f0 >= 16:
                 labelled.add(label)
                 labels.append((f0 + 2, min(f1, f0 + int(2.4 * FPS)), label, keys[rec["path"]]))
@@ -1598,7 +1657,7 @@ def build(script, sup, style_id, direction=None):
         if (a, b) in report_spans:
             for i, fact in enumerate(facts):
                 claim = fact.get("chain") or {}
-                label = wf1_display.ESTIMATE_LABELS.get(claim.get("stance")) or wf1_display.OPINION_LABELS.get(claim.get("stance"))
+                label = wf1_display.CONTEXT_LABELS.get(claim.get("stance")) or wf1_display.ESTIMATE_LABELS.get(claim.get("stance")) or wf1_display.OPINION_LABELS.get(claim.get("stance"))
                 speaker = fact.get("attribution") or ""
                 source = fact["source"].get("publisher") or fact["source"].get("url") or ""
                 body = str(fact["value"])
