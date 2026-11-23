@@ -816,6 +816,8 @@ def build(script, sup, style_id, direction=None):
     def on_evidence(a,b):
         return a is not None and b is not None and any(a < end and start < b for start,end in source_spans)
 
+    import wf1_display
+    reading_spans = []
     timed_facts = []
     for page in d.get("display_facts") or []:
         a = word_frame(page["first"])
@@ -825,7 +827,17 @@ def build(script, sup, style_id, direction=None):
             b = min(b, next_word)
         if b > a and not on_evidence(a,b):
             timed_facts.append((a,b,page))
-    report_spans = [(a,b) for a,b,page in timed_facts if any(f.get("chain") for f in page["facts"])]
+    # Retained directions can predate the claims chain. A dense attributed block
+    # still gets a reading interval, with all its authored copy and provenance.
+    def needs_reading_page(facts):
+        if any(f.get("chain") for f in facts):
+            return True
+        if not any(f.get("attribution") for f in facts):
+            return False
+        rows = wf1_display.typeset(facts, P.R, DISPLAY_W * W, str.upper if st["upper"] else str)
+        return len(rows) > 4
+
+    report_spans = [(a, b) for a, b, page in timed_facts if needs_reading_page(page["facts"])]
 
     # A retained Director can predate the source reading. The original takes its word's
     # visual slot, while continuous rhythm direction still spans the film.
@@ -974,7 +986,7 @@ def build(script, sup, style_id, direction=None):
 
     def quote_panel(fa, fb, clock_start):
         # The original camera can cut to a listener halfway through one speaker's account.
-        # Cite the preceding complete spoken sentence on a source card; the active captions continue below.
+        # The preceding complete sentence takes its own cited reading interval.
         complete = [i for i,(_,end) in enumerate(clock.segs) if end <= clock_start+.12]
         if not complete or not script.get("source_credit"):
             return False
@@ -987,37 +999,19 @@ def build(script, sup, style_id, direction=None):
         if not line:
             return False
         P.page([fa,fb],"#171B23","#0D1015",grain=.018)
-        tokens = (line if claim else "“"+line+"”").split()
-        face = dict(voices["dsp"],px=89,track=0)
-        while True:
-            voice = f"quotation{face['px']}"
-            ruler = F.Ruler({voice:face})
-            rows = []
-            for token in tokens:
-                if rows and ruler.width(voice,rows[-1]+" "+token) < W*.85:
-                    rows[-1] += " "+token
-                else:
-                    rows.append(token)
-            if (len(rows)<=5 and max(ruler.width(voice,r) for r in rows) <= W*.86) or face["px"]<=32:
-                break
-            face = dict(face,px=face["px"]-5)
-        P.voices[voice] = face
-        line_h=face["px"]*1.20/H
-        y=.40-(len(rows)-1)*line_h/2
-        for n,row in enumerate(rows):
-            P.word([fa,fb],row,voice,.075,y+n*line_h,ink=pal["ink"],role="graphic",note=False)
         source_time = script.get("source_start", 0) + clock.segs[segment][0] - LEAD_F/FPS
         stamp = int(source_time)
-        credit=f'{script["source_credit"]}  ·  {stamp//60}:{stamp%60:02d}'
+        citation = f'{script["source_credit"]}  ·  {stamp//60}:{stamp%60:02d}'
         if claim:
-            credit = f'{claim["speaker"]} reports  ·  {credit}'
+            label = wf1_display.ESTIMATE_LABELS.get(claim.get("stance"))
+            byline = f'{claim["speaker"]} · {label}' if label else f'{claim["speaker"]} reports'
         else:
-            speaker = next((s.get("speaker") for s in script.get("speaking_turns", [])
-                            if all(type(s.get(k)) in (int,float) for k in ("start","end"))
-                            and s["start"] <= source_time < s["end"]), None)
-            if speaker:
-                credit = f'{speaker}  ·  {credit}'
-        P.word([fa,fb],credit,"lab",.075,y+len(rows)*line_h+.026,ink=pal["accent"],role="graphic",note=False)
+            byline = next((s.get("speaker") for s in script.get("speaking_turns", [])
+                           if all(type(s.get(k)) in (int,float) for k in ("start","end"))
+                           and s["start"] <= source_time < s["end"]), "") or ""
+        credit = "  ·  ".join(filter(None,(byline,citation)))
+        wf1_display.reading_card(P,(fa,fb),line if claim else "“"+line+"”",byline,citation,pal,centre=.46)
+        reading_spans.append((fa,fb))
         record = dict(report=line, chain=claim) if claim else dict(quote=line)
         coverage_report.setdefault("quoted_source", []).append(dict(record, f=[fa,fb], credit=credit,
                                                                       url=script.get("source_url")))
@@ -1367,12 +1361,31 @@ def build(script, sup, style_id, direction=None):
     # never loses its display words to timing. A long phrase is stacked (display_rows), never skipped for its length.
     omit = []
     devices = []                                         # the palette's asks: rows whose type performs (laid at the render, chain.alien_bank)
-    # Authored facts stand for the selected clause. The interview's captions keep their own word clock.
-    import wf1_display
+    # An attributed claim carries the reading on the ground below its source picture.
     fact_pages = []
     for a, b, page in timed_facts:
+        if (a, b) in report_spans:
+            facts = page["facts"]
+            for i, fact in enumerate(facts):
+                claim = fact.get("chain") or {}
+                label = wf1_display.ESTIMATE_LABELS.get(claim.get("stance"))
+                speaker = fact.get("attribution") or ""
+                source = fact["source"].get("publisher") or fact["source"].get("url") or ""
+                body = str(fact["value"])
+                if claim:
+                    citation = " · ".join(filter(None, (speaker if label else None, source, fact.get("relation"))))
+                else:
+                    body = " ".join(filter(None, (fact.get("qualifier"), body, fact.get("relation"))))
+                    citation = source
+                span = [a + round((b - a) * k / len(facts)) for k in (i, i + 1)]
+                wf1_display.reading_card(P, span, body, label or speaker, citation, pal)
+            reading_spans.append((a, b))
+            omit.extend(clock.words[page["first"]:page["last"] + 1])
+            fact_pages.append(dict(page, f=[a, b]))
+            P.events.append(a)
+            continue
         rows = wf1_display.typeset(page["facts"], P.R, DISPLAY_W * W, cased)
-        y = .73 if (a,b) in report_spans else cap_y - .075
+        y = cap_y - .075
         seats = []
         for k in reversed(range(len(rows))):
             line, px, emphasis = rows[k]
@@ -1417,11 +1430,22 @@ def build(script, sup, style_id, direction=None):
         if role == "name" and not row.get("perform"):
             # Captions retain the spoken name. The identifying super belongs to its picture.
             continue
+        import palette_menu
+        # A Director can name the same phrase in both its display list and its timed type ask.
+        # Let that performance carry the display. The palette hands off the ordinary captions
+        # on the frames where the performed words actually appear, including after a fallback.
+        performed = next((ask for ask in pre if ask["dev"] in palette_menu.REPLACES
+                          and ask["dev"] not in palette_menu.FIGURES and isinstance(ask.get("f"), list)
+                          and ask["f"][:1] == [a]
+                          and all(palette_menu.drawn(dict(dev=ask["dev"], args=ask), text))), None)
+        if performed:
+            shown.append((a, b, text))
+            P.events.append(a)
+            continue
         perf = row.get("perform") if isinstance(row.get("perform"), dict) else None
         if perf and perf.get("dev"):
             # the model chose the device that makes this row's type perform (palette_menu): the palette draws it on the
             # scene's word clock, ending by the row's window (b) or its sentence, never past the next subject
-            import palette_menu
             limit = min([Clock.f(clock.segs[seg][1]) + 10] + next_subject)
             ask = palette_menu.ask_for(row, seg, text, a, b, len(devices), limit=limit)
             devices.append(ask)
@@ -1486,7 +1510,7 @@ def build(script, sup, style_id, direction=None):
         for n, r_ in enumerate(rows):
             P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat", name_picture=pic)
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
-                            omit=omit)
+                            hold=reading_spans, omit=omit)
     for word in P.items:
         if word.get("role") == "cap":
             word["chunk"] = f'caption-{word["f"][1]}'

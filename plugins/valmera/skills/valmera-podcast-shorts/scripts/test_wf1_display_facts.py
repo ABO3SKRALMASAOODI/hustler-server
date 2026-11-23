@@ -164,3 +164,64 @@ def test_reported_forecast_and_verified_original(tmp_path, monkeypatch):
     cited, = bound["display_facts"][0]["facts"]
     assert cited["value"] == "“"+closing+"”" and cited["attribution"] == "Jason Calacanis"
     assert cited["source"]["url"] == INTERVIEW and cited["relation"] == "54:50"
+
+
+def test_estimate_cards_own_a_phone_reading_interval(tmp_path, monkeypatch, quiet_engines):
+    import wf1_display
+    from wf1_layout import _bounds, intersects
+
+    ctx, script, pack = material(tmp_path)
+    passages = ["The idea that there's a 10% chance that 7 billion people die because of AI seems so farcical and out there",
+                "when you pick a number it makes you seem credible", "But for me that risk is close to zero"]
+    words, timed = [], [(0, 6), (6, 10), (10, 13)]
+    for seg, (line, (a, b)) in enumerate(zip(passages, timed)):
+        tokens = line.split()
+        for i, token in enumerate(tokens):
+            words.append(dict(seg=seg,w=token,start=a+i*(b-a)/len(tokens),end=a+(i+1)*(b-a)/len(tokens)))
+    script.update(segments=[dict(say=t,pictures=[]) for t in passages], source_url=INTERVIEW,source_start=0)
+    pack["words"] = dict(words=words,duration=13.)
+    pack["coverage"]["words"] = words
+    pack["take"]["dur"] = 13.
+    direction = dict(claims=[], display_facts=[])
+    for seg, speaker, stance in [(0,"Jason Calacanis","discussed_estimate"),(2,"Ali Ghodsi","personal_estimate")]:
+        ids=[i for i,w in enumerate(words) if w["seg"]==seg]
+        claim=dict(first=ids[0],last=ids[-1],start=timed[seg][0],speaker=speaker,subject=speaker,
+                   report=passages[seg],stance=stance)
+        fact=wf1_display.claim_fact(claim,dict(quote=passages[seg]),{"interview":dict(url=INTERVIEW,publisher="All-In Podcast")},words)
+        direction["display_facts"].append(dict(first=ids[0],last=ids[-1],facts=[fact]))
+    monkeypatch.setattr(wf1_coverage,"speaker_moves",lambda *a:([],[]))
+    scene,beats=wf.wf1_film.build(script,pack,"prints",direction)
+    ruler=wf.wf1_film.F.Ruler(scene["voices"])
+    caps=[it for it in scene["items"] if it.get("role")=="cap"]
+    assert [it["t"].lower() for it in caps] == passages[1].lower().split()
+    for page, speaker in zip(beats["display_facts"], ["Jason Calacanis","Ali Ghodsi"]):
+        a,b=page["f"]
+        lettering=[it for it in scene["items"] if it.get("fact_type") and a<=it["f"][0]<b]
+        assert page["facts"][0]["source"]["url"]==INTERVIEW
+        copy=" ".join(it["t"] for it in lettering).casefold()
+        assert speaker.lower() in copy and 'estimate' in copy and 'all-in podcast' in copy
+        assert min(scene["voices"][it["v"]]["px"]/3 for it in lettering)>=16
+        for f in range(a,b):
+            visible=[it for it in lettering if it["f"][0]<=f<it["f"][1]]
+            boxes=[box for it in visible for _,box,_ in _bounds(scene,[dict(it,f=[f,f+1])],ruler)]
+            assert boxes and all(.05<=x0<x1<=.86 and .46<=y0<y1<=.81 for x0,y0,x1,y1 in boxes)
+            assert not any(intersects(box,other,pad=0) for i,box in enumerate(boxes) for other in boxes[i+1:])
+        body=" ".join(it["t"] for it in lettering if it.get("ink")==wf.wf1_film.STYLES["prints"]["ink"])
+        assert body.strip("“”") == page["facts"][0]["value"].strip("“”")
+
+
+def test_retained_multi_fact_estimate_pages_keep_the_qualifications(tmp_path, monkeypatch, quiet_engines):
+    _, script, pack = material(tmp_path)
+    source = dict(url=INTERVIEW, publisher="All-In Podcast")
+    base = dict(source=source, attribution="Jason Calacanis")
+    facts = [dict(base, qualifier="The idea that there's", value="10% chance", relation="of mass deaths because of AI"),
+             dict(base, qualifier="10% chance", value="7 billion people", relation="die in the scenario")]
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *args: ([], []))
+    scene, beats = wf.wf1_film.build(script, pack, "prints", dict(display_facts=[dict(first=0, last=15, facts=facts)]))
+    start, end = beats["display_facts"][0]["f"]
+    rows = [it for it in scene["items"] if it.get("fact_type")]
+    assert all(it["f"] != [start, end] for it in rows)
+    for frame, fact in ((start, facts[0]), (end-1, facts[1])):
+        copy = " ".join(it["t"] for it in rows if it["f"][0] <= frame < it["f"][1])
+        assert all(part in copy for part in (fact["qualifier"], fact["value"], fact["attribution"], source["publisher"]))
+        assert not any(it.get("role") == "cap" and it["f"][0] <= frame < it["f"][1] for it in scene["items"])

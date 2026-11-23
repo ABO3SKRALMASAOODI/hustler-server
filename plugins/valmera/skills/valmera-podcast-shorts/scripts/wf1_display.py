@@ -13,6 +13,13 @@ the subject may be someone else. Put a facts ask on the claim. If the brief lack
 args.claim={speaker,subject,event,report} from this passage, with a short qualified indirect sentence.
 To quote an original, use fact.quote copied whole from that source’s quotations record. A research
 summary or an event link alone supports no direct quotation. Otherwise show the speaker’s report.
+A discussed estimate and a personal estimate each get one readable statement in their own interval.
+Use claim.stance (discussed_estimate or personal_estimate), a short indirect report and the actual speaker.
+For a long exact quotation required as evidence, use its whole word span. Let this card carry the reading;
+resume ordinary captioning around it. Choose the shortest complete sourced statement that serves the point.
+For a picture effect or large word, identify the contrast that changes the listener's understanding. Anchor
+it on the phrase that completes that contrast and release it when the thought moves on. A stressed generic
+noun alone can miss the argument. Reserve type performances and picture effects for the other intervals.
 Give at and until as the first and last word of the full clause that can carry the copy.
 Check the event dated by the source. When recollection compresses distinct events, label each
 event and date separately on the date beat. Attribute estimates to the person speaking in this
@@ -72,6 +79,9 @@ def claim_windows(editorial, words):
     return spans
 
 
+ESTIMATE_LABELS = {"discussed_estimate": "Estimate under discussion", "personal_estimate": "Personal estimate"}
+
+
 def claim_fact(claim, fact, sources, words):
     """Use the original witness's exact statement or the reporting speaker's qualified account."""
     interview = sources["interview"]
@@ -92,7 +102,7 @@ def claim_fact(claim, fact, sources, words):
             stamp = int(claim.get("start", 0))
             return dict(source=interview, attribution=speaker, value="“"+heard+"”",
                         relation=f"{stamp//60}:{stamp%60:02d}", chain=chain)
-    return dict(source=interview, attribution=speaker+" reports", value=claim["report"], chain=chain)
+    return dict(source=interview, attribution=speaker if claim.get("stance") in ESTIMATE_LABELS else speaker+" reports", value=claim["report"], chain=chain)
 
 
 def bind(direction, editorial, words):
@@ -118,8 +128,12 @@ def bind(direction, editorial, words):
             if span not in displayed:
                 candidates = [f for f in args.get("facts") or [] if isinstance(f, dict)]
                 selected = next((f for f in candidates if f.get("quote")), candidates[0] if candidates else {})
-                pages.append(dict(first=max(first, claim["first"]), last=min(last, claim["last"]) if "until" in ask else claim["last"],
-                                  facts=[claim_fact(claim, selected, sources, words)]))
+                item = claim_fact(claim, selected, sources, words)
+                # Exact evidence takes its whole sourced clause, including the speaker's qualification.
+                exact = item["chain"].get("original") or (selected.get("quote") and item.get("relation"))
+                start = claim["first"] if exact else max(first, claim["first"])
+                end = claim["last"] if exact or "until" not in ask else min(last, claim["last"])
+                pages.append(dict(first=start, last=end, facts=[item]))
                 displayed.add(span)
             continue
         for fact in args.get("facts") or []:
@@ -156,6 +170,11 @@ def bind(direction, editorial, words):
             pages.append(dict(first=first, last=last, facts=facts))
         else:
             asks.append(ask)
+    # A qualification belongs on screen even when the Director uses a picture on that beat.
+    for claim in claims:
+        if claim.get("stance") in ESTIMATE_LABELS and (claim["first"], claim["last"]) not in displayed:
+            pages.append(dict(first=claim["first"], last=claim["last"], facts=[claim_fact(claim, {}, sources, words)]))
+    pages.sort(key=lambda page: page["first"])
     return dict(direction, asks=asks, claims=claims, display_facts=pages,
                 arc=[m for m in direction["arc"] if not any(p["first"] <= m["w"] <= p["last"] for p in pages)])
 
@@ -200,3 +219,69 @@ def typeset(facts, ruler, max_width, case):
         px = min(ruler.fit_px("dsp", part, max_width, cap) for part in parts)
         rows.extend((part, px, emphasis) for part in parts)
     return rows
+
+
+def reading_card(plan, span, body, byline, source, palette, *, centre=.64):
+    """One stable reading surface. Page the body at its reading size, with its credit on every page."""
+    from film import W, H
+    plan.voices["quote_body"] = dict(plan.voices["dsp"], px=65, track=0, shadow={"a": 0})
+    plan.voices["quote_credit"] = dict(plan.voices["cap"], px=48, track=0, shadow={"a": 0})
+    left, width = .08, .76*W
+
+    def wrap(text, voice):
+        rows = []
+        for word in text.split():
+            if rows and plan.R.width(voice, rows[-1]+" "+word) <= width:
+                rows[-1] += " "+word
+            elif plan.R.width(voice, word) <= width:
+                rows.append(word)
+            else:
+                # Long identifiers and unspaced text still wrap at the same reading size.
+                part = ""
+                for char in word:
+                    if part and plan.R.width(voice, part+char) > width:
+                        rows.append(part)
+                        part = ""
+                    part += char
+                rows.append(part)
+        return rows
+
+    header = wrap(byline, "quote_credit")
+    footer = wrap(source, "quote_credit")
+    body_rows = wrap(body, "quote_body")
+    def measure(text, voice, colour):
+        style = plan.voices[voice]
+        quads = plan.R.T.Face.of(style).quads(text,style["px"],style["track"])
+        top = min((q[2] for q in quads),default=0)
+        bottom = max((q[4] for q in quads),default=0)
+        return text,voice,colour,top,bottom
+
+    credit = "quote_credit"
+    head = [measure(row,credit,palette["accent"]) for row in header]
+    foot = [measure(row,credit,palette["accent"]) for row in footer]
+    body = [measure(row,"quote_body",palette["ink"]) for row in body_rows]
+    # Seat the shaped ink, including descenders. Each page repeats the evidence
+    # credit; its share of the interval follows the number of words on that page.
+    gap = 26
+    def height(rows):
+        return sum(bottom-top for _,_,_,top,bottom in rows) + gap*(len(rows)-1)
+
+    pages = []
+    for row in body:
+        if not pages or height(head+pages[-1]+[row]+foot) > .303*H:
+            pages.append([])
+        pages[-1].append(row)
+    weights = [sum(len(row[0].split()) for row in page) for page in pages]
+    total = sum(weights)
+    start,end = span
+    elapsed = 0
+    for page,weight in zip(pages,weights):
+        a = start+round((end-start)*elapsed/total)
+        elapsed += weight
+        b = start+round((end-start)*elapsed/total)
+        rows = head+page+foot
+        y = centre*H-height(rows)/2
+        for row,voice,colour,top,bottom in rows:
+            plan.word([a,b],row,voice,left,(y-top)/H,colour,role="graphic",z=8,fact_type=True,
+                      text_group=f"quote-{a}",note=False)
+            y += bottom-top+gap

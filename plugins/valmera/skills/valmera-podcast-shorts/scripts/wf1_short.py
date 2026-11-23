@@ -122,7 +122,12 @@ def script(ctx, ideas_out):
                "(the same person for a firsthand forecast). event names the original occasion if known. "
                "report is a short card line (aim for 6–12 words). A separate byline names the reporter: omit that "
                "name from the line. Name the subject, use conditional language for a personal forecast, and preserve "
-               "uncertainty, timing and scope. Include speaking_turns:[{start,end,speaker}] on the same episode clock "
+               "uncertainty, timing and scope. For estimates, include stance (discussed_estimate when a speaker questions or cites an estimate, "
+               "personal_estimate for their own assessment). A hypothetical with two linked figures is one thought: keep the "
+               "quantity, consequence and uncertainty together in one concise report. A challenge to an estimate can be a "
+               "plain question on the card. Distinguish apparent precision from evidence. In a first-person assessment "
+               "let the byline identify its author. Describe both the stakes and how the "
+               "delivery shifts into the payoff in the music brief. Include speaking_turns:[{start,end,speaker}] on the same episode clock "
                "for quoting the interview itself. Distinguish the host from the guest using the identity and dialogue.")
     anchors = (f"# The moment's anchors, measured on the words\nThe hook opens at {float(idea['t0']):.2f} s: {idea.get('hook') or ''}\n"
                f"The payoff closes at {float(idea['t1']):.2f} s: {idea.get('payoff') or ''}\n"

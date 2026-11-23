@@ -192,12 +192,14 @@ def main(argv=None):
     mood = om.get("mood") or ""
     turn_s, payoff_s = om.get("turn_s"), om.get("payoff_s")
     arc = None
+    tone = om.get("tone")
     if call is not None:
         # the story's arc (how far under the voice each part sits) and where its close starts are read every time a
-        # model is at hand, as a workflow film's are (music_film.score); the turn, payoff and mood the delivered film
-        # recorded stand, the reading fills what it lacks
+        # model is at hand, as a workflow film's are (music_film.score); the turn and payoff the delivered film
+        # recorded stand, the new reading supplies the tone
         got = MF.story_marks(lines, dur, call, brief=brief) or {}
         mood = mood or got.get("mood") or ""
+        tone = got.get("tone") or tone
         if payoff_s is None:
             turn_s, payoff_s = got.get("turn_s"), got.get("payoff_s")
         if got.get("arc"):
@@ -207,6 +209,8 @@ def main(argv=None):
             arc = dict(got["arc"], close_s=close_s)
     marks = {"dur_s": dur, "words": [w for w in words if w[0] < dur], "cuts": picture_cuts(doc, dur), "landings": [], "accents": [],
              "turn_s": turn_s, "payoff_s": payoff_s, "end_hit_s": None, "quiet": []}
+    if tone:
+        marks["tone"] = tone
     if kind == "podcast" and payoff_s is not None:
         marks["turn_drop"] = True                         # the podcast workflow's own opt-in (chain.music_version)
     if arc:
@@ -225,7 +229,7 @@ def main(argv=None):
     choice, song, tried = MF.choose(film, marks, os.path.join(dst, ".music_cache"), used=used, call=None if call is None else seen, profile=prof)
     rep = {"from": src, "made": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), "kind": kind, "film": film,
            "marks": {"given": {k: om.get(k) for k in ("turn_s", "payoff_s", "mood")}, "dur_s": dur, "turn_s": turn_s, "payoff_s": payoff_s,
-                     "mood": mood, "lines": len(lines), "turn_drop": bool(marks.get("turn_drop")), "arc": arc},
+                     "mood": mood, "tone": tone, "lines": len(lines), "turn_drop": bool(marks.get("turn_drop")), "arc": arc},
            "mood": mood, "tried": tried,
            "previous": {k: old.get(k) for k in ("title", "author", "cid", "why", "chosen_by")}, "shown": shown, "spend_usd": MF.spend(call)}
     if not choice:
