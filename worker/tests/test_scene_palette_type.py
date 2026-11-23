@@ -700,3 +700,21 @@ def test_wang_title_follows_the_identified_picture_and_interview_uses_spoken_wor
     identified = [it for it in mine(out, "archive") if it.get("t") == "ALEXANDR WANG"]
     assert identified and all(185 <= it["f"][0] < it["f"][1] <= 200 for it in identified)
     assert next(r for r in log if r["id"] == "archive")["log"]["source"] == source
+
+
+def test_conversation_strike_stays_with_its_word_and_spoken_dip_keeps_picture(tmp_path):
+    from scene.palette import punct
+    from scene.palette.sense import Sense
+
+    scene = film(tmp_path)
+    out, _ = laid(scene, tmp_path, [dict(dev="redact", id="share", f=[15,45], t="SHARE", mode="strike", c="#FF6622")])
+    title, = [it for it in mine(out, "share") if it.get("t") == "SHARE"]
+    assert title["f"][1] > title["f"][0]+8
+    assert title["strike"]["at"] < title["f"][1]
+    assert not any(it.get("id","").startswith("share.bar") for it in out["items"])
+    take = dict(id="live",k="shot",f=[0,90],pic="main",src=[0,3])
+    scene = dict(scene,workflow_text_layout=True,items=[take],said=[["realized",35,42,1],["wow",43,49,1]])
+    sense = Sense(scene, str(tmp_path))
+    dip = lambda f: punct.black(scene, str(tmp_path), dict(id="turn",f=f), sense)["items"][0]
+    assert 0 < dip(40)["a"] < .6
+    assert dip(74)["a"] == 1

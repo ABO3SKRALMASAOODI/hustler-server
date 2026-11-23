@@ -443,3 +443,38 @@ def test_m09_real_picture_substitution_keeps_accent_at_composed_frame(tmp_path, 
     assert hit["event_f"] == 349 and hit["picture_event"] == partner
     assert abs(hit["start_s"] + hit["peak_s"] - 349/30) < .0002
     assert report["placed"][0]["picture_event"] == partner
+
+
+def test_fast_speaker_changes_share_one_bed_ride():
+    from pathlib import Path
+    from score import music
+
+    sr = music.SR
+    folder = Path(__file__).resolve().parents[2] / "plugins/valmera/skills/_shell/narrate/voices"
+    samples = [music._decode(str(folder / name), sr, 2) for name in ("iris.flac", "atlas.flac")]
+    # Adjacent short clauses from two recorded voices, with a quiet reply.
+    words = [(n*.30, n*.30+.26) for n in range(12)]
+    voice = np.zeros((sr*4, 2), np.float32)
+    for n, (a,b) in enumerate(words):
+        start, end = round(a*sr), round(b*sr)
+        source = samples[n%2][sr+n*sr//8:][:end-start]
+        target = .024 if n%3 == 1 else .12
+        voice[start:end] = source * target / np.sqrt(np.mean(source**2))
+    t = np.arange(len(voice)) / sr
+    dry = (.08*np.sin(2*np.pi*220*t) + .03*np.sin(2*np.pi*329.6*t)).astype(np.float32)
+    bed = np.column_stack((dry,dry))
+    # A short stamp on room tone precedes the next onset. It should not pull
+    # down the preceding musical phrase to the noise floor.
+    breath = (.26,.30)
+    voice[round(breath[0]*sr):round(breath[1]*sr)] = .004
+    stamped = bed.copy()
+    music.duck_spoken_words(stamped, voice, sorted(words+[breath]))
+    music.duck_spoken_words(bed,voice,words)
+    assert np.array_equal(stamped, bed)
+    ticks = np.arange(sr//200, len(bed), sr//100)
+    gain_db = 20*np.log10(bed[ticks,0]/dry[ticks])
+    assert np.max(np.abs(np.diff(gain_db))) < .041
+    for a,b in words:
+        window = slice(round(a*sr),round(b*sr))
+        assert 10*np.log10(np.mean(voice[window]**2)/np.mean(bed[window]**2)) >= 1.99
+    assert np.min(gain_db) > -18

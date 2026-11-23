@@ -210,7 +210,16 @@ def black(l1, work, ask, sense):
         return {"items": [flash(f"{ask['id']}k{q}", f, min(f + n + 2, int(l1["dur_f"])), "fill", 1.0, c="#000000", rect=r)
                           for q, r in enumerate(([0.0, 0.0, 1.0, 0.3], [0.0, 0.7, 1.0, 1.0]))],
                 "events": [{"f": f, "kind": "black_bars", "strength": 0.4}], "log": {"f": f, "bars": True}}
-    return {"items": [flash(f"{ask['id']}k", g, min(g + n, int(l1["dur_f"])), "fill", 1.0, c="#000000")], "lum": [g],
+    # In continuous dialogue a dip can mark the turn with the face still in view.
+    # A pause or a transition to another picture can carry the full blackout.
+    alpha = 1.0
+    if l1.get("workflow_text_layout") and sense.is_take(sense.shot_at(g)) and sense.is_take(sense.shot_at(g-1)):
+        said = l1.get("said") or []
+        margin = round(.10 * float(l1.get("fps", 30)))
+        speaking = any(row[1] - margin <= g < row[2] + margin for row in said)
+        if speaking and not (sense.cards_at(g) or sense.cards_at(g-1)):
+            alpha = .35
+    return {"items": [flash(f"{ask['id']}k", g, min(g + n, int(l1["dur_f"])), "fill", alpha, c="#000000")], "lum": [g],
             "events": [{"f": g, "kind": "black", "strength": 0.6}], "log": {"f": g}}
 
 

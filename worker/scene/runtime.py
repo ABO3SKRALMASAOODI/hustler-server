@@ -1039,6 +1039,13 @@ class Runtime:
         else:
             self.U(p, uHomOn=0)
         self.word_quad(p, vao, spr, bsig, f, blend)
+        strike = it.get("strike")
+        if strike and f >= strike["at"]:
+            from .palette.kit import item_box
+            left, top, right, bottom = item_box(it, self.plan.voices, W, H, f)
+            width = (right-left) * min(1., (f-strike["at"]+1)/3)
+            self.draw_card(dict(id=it["id"], pic="plate", f=it["f"], plate={"c0": strike["ink"]},
+                                x=left+width/2, y=(top+bottom)/2, w=width, h=(bottom-top)*.13, op=op), f)
         rf = float(it.get("reflect", 0) or 0)
         if rf > 0 and not blend and not (tx or ty):         # the word stands on a wet floor: mirrored below its own baseline, softer and fading away
             floor = Y + 0.05 * float(v.get("px", 58))

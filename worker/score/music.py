@@ -1403,7 +1403,7 @@ def phrase_ride(music_db, gain, spoken, hop_s, seconds, hit_frame, voice_db, wor
 
     # The dialogue sets the resting level over several seconds. Only the
     # recording drives the shorter compensating move, independent of syllables.
-    source = mean_level(music_db[:stop], 0.48)
+    source = mean_level(music_db[:stop], 1.6)
     resting = mean_level(music_db[:stop] + gain[:stop], seconds)
     target = resting - source
     adjustment = np.clip(target - gain[:stop], -12., 8.)
@@ -1782,13 +1782,22 @@ def duck_spoken_words(music, voice, words):
     length = min(len(music), len(voice))
     hop = SR // 100
     gain_db = np.zeros(math.ceil(length / hop) + 1)
+    if not length or not words:
+        return
+    # Word stamps can begin in room tone before the first voiced sample.
+    # Measure that distinction against the local conversation, so a sustained
+    # quieter speaker establishes their own reference.
+    energy = np.mean(voice[:length].reshape(length, -1)**2, axis=1)
+    cumulative = np.concatenate(([0.], np.cumsum(energy, dtype=np.float64)))
     for start, end in words:
         a, b = max(0, round(start * SR)), min(length, round(end * SR))
         if b <= a:
             continue
-        speech = np.mean(voice[a:b] ** 2)
+        speech = (cumulative[b] - cumulative[a]) / (b-a)
+        left, right = max(0, a-SR), min(length, b+SR)
+        local = (cumulative[right] - cumulative[left]) / (right-left)
         bed = np.mean(music[a:b] ** 2)
-        if speech <= .003 ** 2 or bed <= 0:
+        if speech <= max(.003 ** 2, local * 10**(-17/10)) or bed <= 0:
             continue
         # Keep the existing song ride wherever the word already clears it.
         change = 10 * math.log10(speech / bed) - HOLD["hold_floor_db"]
@@ -1797,14 +1806,17 @@ def duck_spoken_words(music, voice, words):
         lo, hi = a // hop, math.ceil(b / hop)
         # Reach the depth at the first sample and hold through the last.
         # Overlapping words share the deeper ramp, without compounding dips.
-        left, right = max(0, lo-12), min(len(gain_db)-1, hi+35)
-        ticks = np.arange(left, right+1)
-        ramp = np.interp(ticks, [lo-12, lo, hi, hi+35], [0., change, change, 0.])
-        np.minimum(gain_db[left:right+1], ramp, out=gain_db[left:right+1])
-    if gain_db.min() < 0:
-        gain = 10 ** (gain_db / 20)
-        curve = np.interp(np.arange(length), np.arange(len(gain)) * hop, gain)
-        music[:length] *= curve.reshape((length,) + (1,) * (music.ndim-1))
+        gain_db[lo:hi+1] = np.minimum(gain_db[lo:hi+1], change)
+    if not np.any(gain_db < 0):
+        return
+    # Reach the required depth before a soft voice enters. Adjacent words
+    # share a ride and the return takes as long as the level change needs.
+    for i in range(len(gain_db)-2, -1, -1):
+        gain_db[i] = min(gain_db[i], gain_db[i+1] + .04)
+    for i in range(1, len(gain_db)):
+        gain_db[i] = min(gain_db[i], gain_db[i-1] + .03)
+    curve = 10 ** (np.interp(np.arange(length), np.arange(len(gain_db))*hop, gain_db) / 20)
+    music[:length] *= curve.reshape((length,) + (1,) * (music.ndim-1))
 
 
 def podcast_bed(music, voice, marks, song, plan, song_path, report):
@@ -1816,7 +1828,11 @@ def podcast_bed(music, voice, marks, song, plan, song_path, report):
             speech_rms = float(np.sqrt(np.mean(voice[:first]**2)))
             if speech_rms > .003 and bed_rms > .0001:
                 gain = min(1., speech_rms * 10**(-10/20) / bed_rms, .05 / bed_rms)
-                music *= np.interp(np.arange(len(music)), [first, first+SR], [gain, 1.])[:,None]
+                opening_db = 20 * math.log10(gain)
+                # On a short cue, reach its existing tail before the final second.
+                recovery_s = min(max(1., -opening_db / 3.), max(1., len(music)/SR - 2.))
+                ride = np.interp(np.arange(len(music)), [first, first+recovery_s*SR], [opening_db, 0.])
+                music *= (10 ** (ride / 20))[:, None]
             report["opening_bed_dbfs"] = round(float(10*np.log10(max(1e-12,np.mean(music[:first]**2)))), 2)
     duck_spoken_words(music, voice, marks.get("words", []))
     tempo = plan["segments"][-1].get("tempo") or plan["tempo"]

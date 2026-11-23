@@ -771,13 +771,12 @@ def redact(l1, work, ask, sense=None):
                 items.append(K.rect(f"{ask['id']}.bar{wi:02d}", (a, a + max(n, 1)), rr, bar))
             else:
                 hit_w = not struck or K.norm(w) in struck
-                gone = min(f_w + int(o.get("after", 8)), z - 1) if hit_w else z
-                items.append(K.word(f"{ask['id']}.w{wi:02d}", (f_w, gone), w, vn, round(x0 + adv, 6), y, ink, z=8, role="big", on=f_w))
-                if hit_w and gone < z:
-                    n = z - gone
-                    grow = K.ease_out(n, 0.0, 1.0, frames=3)
-                    items.append(K.rect(f"{ask['id']}.bar{wi:02d}", (gone, z), [[round(wx0, 5), round(wy0, 5), round(wx0 + (wx1 - wx0) * g, 5), round(wy1, 5)] for g in grow], bar))
-                    marks += _marks(gone, "struck", 0.5)
+                word = K.word(f"{ask['id']}.w{wi:02d}", (f_w, z), w, vn, round(x0 + adv, 6), y, ink, z=8, role="big", on=f_w)
+                if hit_w:
+                    at = min(f_w + int(o.get("after", 8)), z - 1)
+                    word["strike"] = {"at": at, "ink": bar}
+                    marks += _marks(at, "struck", 0.5)
+                items.append(word)
             wi += 1
     return {"items": items, "voices": {vn: v}, "marks": marks or _marks(a, "redaction", 0.4),
             "seat": {"x": x0, "y": base, "w": bw, "h": bh, "f": [a, z]}, "log": {"mode": mode, "lines": lines}}
