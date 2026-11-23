@@ -119,6 +119,24 @@ def grid(l1, work, ask, sense_=None, pool=None):
         pics = K.pictures(l1, work, args, pool, sense_=sense_, need=want, length_s=(z - a) / fps * 0.5, distinct=True)
     if not pics:
         return {"skip": "no pictures for a grid"}
+    if args.get("resolve"):
+        # A cited figure already has an authored crop and reading interval. Resolve
+        # it in that seat instead of tiling the uncropped page across nearby shots.
+        figures = [it for it in l1["items"] if it.get("document_excerpt") and it.get("pic") == pics[0].aid
+                   and it["f"][0] < z and a < it["f"][1]]
+        if figures:
+            from ..plan import A
+            items, events = [], []
+            for figure in figures:
+                lo, hi = figure["f"]
+                start = max(lo, a)
+                arrival = K.decel(min(8, min(hi, z) - start))
+                scale = [A(figure.get("s", 1), f, lo) for f in range(lo, hi)]
+                for i, progress in enumerate(arrival, start-lo):
+                    scale[i] *= .96 + .04 * progress
+                items.append(dict(figure, s=scale))
+                events.append({"f":start, "what":"figure resolves", "kind":"tile", "strength":.4})
+            return {"items":items, "events":events, "log":{"resolve":True, "figures":len(figures)}}
     n_want = int(args.get("tiles") or (len(given) if given else 0) or (len(pics) if not args.get("resolve") else 6))
     n_want = min(max(n_want, 2), 12)
     rows, cols = int(args.get("rows") or 0), int(args.get("cols") or 0)

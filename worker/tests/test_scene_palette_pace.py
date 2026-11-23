@@ -322,6 +322,19 @@ def test_a_grid_can_resolve_one_picture_through_its_tiles(film):
     assert len({tuple(t["crop"]) for t in tiles}) == 6
 
 
+def test_grid_resolves_a_checked_figure_in_its_cited_seat(film):
+    l1, work = film
+    figure = dict(id="detail",k="card",pic="p2",f=[65,94],x=.5,y=.48,w=.88,h=.53,
+                  crop=[.13,.21,.95,.78],s=1,z=1,document_excerpt=True)
+    l1["items"].append(figure)
+    out, patch = lay(l1, work, {"dev":"grid","id":"gr","f":[40,110],"resolve":"p2","rows":2,"cols":1})
+    cards = [item for item in out["items"] if item["k"]=="card" and item.get("pic")=="p2"
+             and item["f"][0] < 110 and item["f"][1] > 40]
+    assert len(cards) == 1
+    assert all(cards[0][k] == figure[k] for k in ("id","f","crop","x","y","w","h"))
+    assert cards[0]["s"][0] < cards[0]["s"][-1] == 1
+
+
 @needs_ffmpeg                      # the take is a video: without ffmpeg the fixture has none
 def test_a_split_keeps_the_speaker_on_his_own_clock(film):
     l1, work = film
