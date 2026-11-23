@@ -404,6 +404,38 @@ def shrink(l1, work, ask, sense_=None, pool=None):
             "log": {"join": c, "frames": n, "held": new_q[0]["f"][1] - new_q[0]["f"][0] if new_q[0]["id"] != q["id"] else 0}}
 
 
+def _page_inset(l1, page, words, frames, xy, ident):
+    """A designed page arrives on its spoken cut, with its lettering inside its frame."""
+    from ..plan import A
+    from .kit import item_box
+    start, end = page["f"]
+    n = min(frames, end-start)
+    scale = [.46+.54*u for u in K.decel(n, .2)]
+    dx = [(xy[0]-.5)*(1-v)/.54 for v in scale]
+    dy = [(xy[1]-.5)*(1-v)/.54 for v in scale]
+    tile = dict(id=f"{ident}.in", k="card", pic="plate", plate=page["plate"],
+                f=[start,start+n], w=1., h=1., s=scale, x=[.5+x for x in dx], y=[.5+y for y in dy],
+                z=4, border={"w":.008,"c":"#F7F4EC"})
+    items = [tile]
+    for word in words:
+        placed = dict(word)
+        values = {key:[] for key in ("x","y","s")}
+        for f in range(*word["f"]):
+            i = f-start
+            x,y,size = (A(word.get(k,default), f, start) for k,default in (("x",0),("y",0),("s",1)))
+            if i < n:
+                left,top,right,bottom = item_box(word,l1["voices"],*l1["frame"],f)
+                x += dx[i]+(.5-(left+right)/2)*(1-scale[i])
+                y += dy[i]+(.5-(top+bottom)/2)*(1-scale[i])
+                size *= scale[i]
+            for key, value in zip(values,(x,y,size)):
+                values[key].append(round(value,6))
+        items.append(dict(placed,**values))
+    return dict(items=items, drop=[w["id"] for w in words], assets={},
+                events=[dict(f=start, what="printed page opens",kind="cut",strength=.4)],
+                log=dict(join=start,frames=n,subject="authored page"))
+
+
 def pip(l1, work, ask, sense_=None, pool=None):
     """Photo-in-photo: the next picture arrives as a framed window inside the current one, holds, then grows to take the
     frame on the join. With no join near, a picture of the pool comes in as an inset and leaves. ask: at, frames
@@ -418,14 +450,20 @@ def pip(l1, work, ask, sense_=None, pool=None):
     q = K.shot_at(l1, c) if c is not None else None
     if c is not None and p is not None and q is not None and c - p["f"][0] >= n + 2:
         f0 = c - n
+        if q.get("plate"):
+            words = [it for it in l1["items"] if it["k"]=="word" and it.get("role")=="graphic"
+                     and it["f"]==q["f"] and it.get("t") and it.get("v") in l1["voices"]]
+            if words:
+                return _page_inset(l1, q, words, n, (wx,wy), args.get("id","pip"))
         card, _ = _full_card(q, l1, work, c, c + 1, "tmp")
         # A documentary window sits over a cropped background of the same source.
         # Reveal the evidence itself, including its checked lettering and destination seat.
         window = next((item for item in l1["items"] if item.get("k")=="card" and item.get("source_ink")
-                       and item.get("pic")==q.get("pic") and item["f"][0]==c), None)
+                       and (item.get("pic")==q.get("pic") or q.get("plate")) and item["f"][0]==c), None)
         cs = K.crops(l1, work, q)
         if window:
-            card.update(w=window["w"], h=window["h"])
+            q = window
+            card.update(pic=window["pic"], w=window["w"], h=window["h"])
             cs = [window["crop"][0] if isinstance(window["crop"][0],list) else window["crop"]]
         tx,ty = (window["x"],window["y"]) if window else (.5,.5)
         card = dict(card, id=f"{args.get('id', 'pip')}.in", f=[f0, c], crop=[cs[0]] * n)

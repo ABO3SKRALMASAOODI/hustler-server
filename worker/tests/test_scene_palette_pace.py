@@ -683,3 +683,17 @@ def test_whip_leaves_the_live_interview_panel_at_a_real_cut(film):
     patch=RH.whip(l1,work,{"at":101,"frames":5})
     outgoing=next(i for i in patch["items"] if i["id"]=="interview")
     assert outgoing["crop"][0]!=outgoing["crop"][-1] and outgoing["shutter"]==.85
+
+
+def test_pip_into_a_date_page_animates_the_date_on_its_cut(film):
+    l1, work = film
+    next_shot = K.shot_at(l1, 120)
+    next_shot.update(pic="plate", plate={"c0":"#141414","c1":"#141414"})
+    next_shot.pop("src", None)
+    date = dict(id="year",k="word",f=next_shot["f"],t="2009",v="cap",x=.4,y=.55,z=8,role="graphic")
+    l1["items"].append(date)
+    out, patch = lay(l1,work,dict(dev="pip",id="date",at=112,frames=16))
+    card = next(it for it in out["items"] if it["id"]=="date.in")
+    year = next(it for it in out["items"] if it["id"]=="year")
+    assert card["f"] == [120,136] and card["plate"] == next_shot["plate"]
+    assert year["s"][0] == pytest.approx(card["s"][0]) and year["s"][15] == pytest.approx(1)
