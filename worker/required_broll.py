@@ -66,9 +66,14 @@ def record(ctx, ledger, request):
     if history:
         scope['conversation'] = [{'role': row['role'], 'content': str(row.get('content') or '')[:1000]}
                                  for row in history[-12:] if row.get('role') in ('user', 'assistant')]
+    if ledger.get('soundtrack_options'):
+        scope['available_soundtrack_titles'] = ledger['soundtrack_options']
+        scope['resolved_asks'] = [ask['want'] for ask in ledger.get('asks', []) if ask.get('want')]
     authorized, _ = asks._call(ctx, 'identify_picture_subjects', subject_schema,
         "Resolve references in the current request using the earlier conversation. A name may "
-        "select an option already under discussion. Earlier messages provide context only. "
+        "select an available soundtrack title. Use the resolved asks and the conversation to "
+        "distinguish an audio selection from a visual request or a request for both. "
+        "Earlier messages provide context only. "
         "List every explicitly requested illustrative picture "
         "subject separately. For each give its subject name, concise archive query, and minimum "
         "recognizable visible requirement; do not invent extra actions or settings. Allow ordinary "
