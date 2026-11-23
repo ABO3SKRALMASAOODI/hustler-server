@@ -185,10 +185,7 @@ def supply(ctx, script):
     sents = idx.get("sentences") or []
     if not sents:
         raise RuntimeError("nothing was heard in the window")
-    words = []
-    for si, s in enumerate(sents):
-        for w in idx["words"][s["wi0"]:s["wi1"] + 1]:
-            words.append(dict(w=w["w"], start=round(float(w["t0"]), 3), end=round(float(w["t1"]), 3), seg=si))
+    words = wf1_alignment.caption_words(idx)
     dur = float(idx["video"]["duration"])
     wj = os.path.join(sup_dir, "words.json")
     # the voice runs the whole take: the breath the clip keeps after its last word is heard, not cut at the word

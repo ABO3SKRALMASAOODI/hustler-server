@@ -119,3 +119,53 @@ def test_run_tokens_join_a_split_token_on_the_run_transcripts_boundary():
                                                              dict(id='s3',wi0=3,wi1=3,t0=1.0,t1=1.2,text='c')])
     out3,_=A.run_tokens(idx3,[(100.0,'very'),(100.3,'self-critical.'),(101.0,'Then')],100.0)
     assert [(s['id'],s['wi0'],s['wi1']) for s in out3['sentences']]==[('s1',0,1),('s3',2,2)] and out3['sentences'][0]['t1']==.9
+
+
+def test_m04_verified_term_reaches_the_visible_caption_on_its_original_frames(tmp_path):
+    from wf1_film import F
+
+    tokens = 'If it can solve Navy or Stokes, very difficult math problems, maybe'.split()
+    # The staged film's caption placements ink Navy/or/Stokes at frames 29/39/43.
+    starts = [0, .06, .14, .28, .90, 1.12, 1.26, 1.76, 2.22, 2.54, 2.76, 9.]
+    ends = [.06, .14, .28, .90, 1.12, 1.26, 1.60, 2.22, 2.54, 2.76, 3.10, 9.5]
+    words = [dict(w=w, t0=a, t1=b) for w, a, b in zip(tokens, starts, ends)]
+    idx = dict(video=dict(duration=10.5), words=words,
+               sentences=[dict(wi0=0, wi1=6), dict(wi0=7, wi1=11)], shots=[])
+    script = dict(source='interview', window=[824.19, 834.69],
+                  hook_line='If it can solve Navier-Stokes very difficult math problems,',
+                  close_line='maybe', names=['Navier–Stokes equations', 'Terence Tao'])
+    decision = dict(first=0, last=11, terms=[dict(first=4, last=6, text='Navier-Stokes'),
+                                             dict(first=11, last=11, text='definitely')])
+    src = tmp_path/'source.mp4'
+    src.write_bytes(b'original spoken interview')
+    llm = SimpleNamespace(ask=lambda *a, **kw: (json.dumps(decision), {}), json_block=json.loads)
+    chain = SimpleNamespace(brand=SimpleNamespace(probe=lambda _:dict(dur=10.5)), shots_of=lambda *a:[])
+    ctx = SimpleNamespace(supply=str(tmp_path), run_dir=str(tmp_path))
+    out, _ = A.reconcile(ctx, script, idx, [(825.099,'Navier-Stokes')], llm, chain)
+
+    expected = tokens[:4] + ['Navier-Stokes,'] + tokens[7:]
+    assert [w['w'] for w in out['words']] == expected
+    assert out['words'][4] == dict(w='Navier-Stokes,', t0=.9, t1=1.6)
+    assert out['words'][5:] == words[7:]
+    assert [(s['wi0'], s['wi1']) for s in out['sentences']] == [(0,4),(5,9)]
+    segments = [dict(say=s['text']) for s in out['sentences']]
+    clock = F.Clock(dict(duration=10.5, words=A.caption_words(out)), dict(segments=segments))
+    plan = F.Plan({'cap':dict(font='InterDisplay-Bold.ttf',px=58,track=0)}, {})
+    F.caption_build(plan, clock, 'cap', .65)
+    caps = [it for it in plan.items if it['k']=='word']
+    assert [it['t'] for it in caps] == expected
+    term = caps[4]
+    assert term['f'][0] == 29 and term['f'][1] > 45
+
+
+def test_spelling_across_sentence_break_and_fused_name_preserve_heard_edges():
+    words = [dict(w=w,t0=a,t1=b) for w,a,b in [
+        ('dot',0,.16), ('net',.16,.31), ('and',.40,.52), ('TerryTao,',.60,1.), ('maybe',8.8,9.)]]
+    idx = dict(video=dict(duration=10),words=words,sentences=[dict(wi0=0,wi1=0),dict(wi0=1,wi1=4)])
+    decision = dict(first=0,last=4,terms=[dict(first=0,last=1,text='.NET'),dict(first=3,last=3,text='Terry Tao')])
+    facts = dict(names=['.NET','Terence Tao'],hook='',close='',source_captions=[(100.6,'Terry'),(100.84,'Tao')])
+    spans = A.term_spellings(decision,facts,words,100.)
+    out,_ = A.transform(idx,decision,spans,keep_window=True)
+    assert [(w['w'],w['t0'],w['t1']) for w in out['words']] == [
+        ('.NET',0,.31), ('and',.40,.52), ('Terry',.60,.80), ('Tao,',.80,1.), ('maybe',8.8,9.)]
+    assert [s['text'] for s in out['sentences']] == ['.NET','and Terry Tao, maybe']
