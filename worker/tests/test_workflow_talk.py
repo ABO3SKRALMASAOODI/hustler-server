@@ -370,3 +370,16 @@ def test_exchange_keeps_one_baseline_through_reframing_and_word_entrances():
     seats = {A(i["y"],f,i["f"][0]) for i in caps for f in range(*i["f"])}
     assert len(seats)==1 and .70 < seats.pop() < .94
     assert [i["f"][0] for i in caps]==[569,577,582,585,597,603]
+
+
+def test_source_chart_keeps_whole_caption_page_below_both_axes():
+    from scene.plan import A
+    voices = {"v": dict(font="ArchivoBlack-Regular.ttf",px=58)}
+    card = dict(k="card",id="plot",f=[6,24],source_ink=[[0,.48,1,.79]],caption_baseline=.87)
+    first = word("one","cost","v",.25,.665,[0,20],"cap")
+    second = word("two","per","v",.55,.665,[10,20],"cap")
+    for token in (first,second):
+        token["chunk"] = "same sentence"
+    resolve(dict(frame=[1080,1920],fps=30,voices=voices,items=[card,first,second]))
+    for layer in (first,second):
+        assert all(abs(A(layer["y"],f,layer["f"][0])-.87)<.001 for f in range(*layer["f"]))

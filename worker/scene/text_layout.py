@@ -110,12 +110,15 @@ def resolve(scene, speaker_layout=None):
             })
     overflow = set()
     active = defaultdict(list)
+    document_baselines = {}
     for layer in scene["items"]:
         if layer.get("source_ink") or layer.get("proof_line"):
             lo, hi = layer["f"]
             for f in range(lo, hi):
                 if A(layer.get("op", 1), f, lo) > .01:
                     occupied[f].extend(layer.get("source_ink", []))
+                    if "caption_baseline" in layer:
+                        document_baselines[f] = layer["caption_baseline"]
                     if layer.get("proof_line"):
                         occupied[f].append(proof_bounds(layer, f, width, height))
     fixed = {f: list(boxes) for f,boxes in occupied.items()}
@@ -126,6 +129,17 @@ def resolve(scene, speaker_layout=None):
         frames = [frame for _,frame in run]
         baseline = min(.91, max(.79, max(faces[f][3] for f in frames)+.045))
         reading_seat.update(dict.fromkeys(frames, baseline))
+
+    # A caption may start on the face and finish on the source document. Carry
+    # the whole page to the document's reading seat, including its earlier words.
+    document_pages = {}
+    if document_baselines:
+        for token in scene["items"]:
+            if token.get("role") == "cap" and "chunk" in token:
+                seats = [document_baselines[f] for f in range(*token["f"]) if f in document_baselines]
+                if seats:
+                    chunk = token["chunk"]
+                    document_pages[chunk] = max(document_pages.get(chunk, 0), max(seats))
 
     def ink_box(layer, f):
         measure = backplate_box if layer.get("backplate") else item_box
@@ -142,7 +156,9 @@ def resolve(scene, speaker_layout=None):
             layer["contrast_shadow"] = True
         if caption and "chunk" in layer:
             lo, hi = layer["f"]
-            if lo in reading_seat:
+            if layer["chunk"] in document_pages:
+                layer["y"] = document_pages[layer["chunk"]]
+            elif lo in reading_seat:
                 layer["y"] = reading_seat[lo]
             group = ("caption", layer["chunk"])
         if caption and group is None:
@@ -157,7 +173,7 @@ def resolve(scene, speaker_layout=None):
             key, {"id": str(key), "role": "cap" if caption else "registered", "layers": [], "boxes": {}}
         )
         g["layers"].append(layer)
-        if caption and "chunk" in layer and layer["f"][0] in reading_seat:
+        if caption and "chunk" in layer and (layer["chunk"] in document_pages or layer["f"][0] in reading_seat):
             g["reading"] = True
         lo, hi = layer["f"]
         measure = (
