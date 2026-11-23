@@ -87,7 +87,7 @@ def _rvm(path, ranges, n_total, fps, out_path, size):
     os.replace(out_path + ".part.mp4", out_path)
 
 
-def ensure_matte(l1, work, a, z):
+def ensure_matte(l1, work, a, z, windows=None):
     """(assets patch, log): the scene's ``matte`` for the take's frames under [a, z), made now when the scene has
     none or has one that does not cover them. The matte lies on the take: same file, clock and geometry."""
     assets = l1.get("assets") or {}
@@ -100,18 +100,25 @@ def ensure_matte(l1, work, a, z):
     fps = float(info.get("fps") or l1.get("fps") or 30)
     n_total = int(round(float(info.get("dur") or 0) * fps))
     ranges = []
-    for sh in take_shots(l1, a, z):
-        lo, hi = max(sh["f"][0], a), min(sh["f"][1], z)
-        t0, t1 = asense.src_time(sh, lo, l1.get("fps") or 30), asense.src_time(sh, hi, l1.get("fps") or 30)
-        ranges.append((int(t0 * fps) - 2, int(t1 * fps) + 3))
+    for lo,hi in windows or [(a,z)]:
+        for sh in take_shots(l1,lo,hi):
+            start,end = max(sh["f"][0],lo),min(sh["f"][1],hi)
+            t0,t1 = (asense.src_time(sh,f,l1.get("fps") or 30) for f in (start,end))
+            ranges.append((int(min(t0,t1)*fps)-2,int(max(t0,t1)*fps)+3))
     if not ranges:
         return None, "no take under the word"
     out = os.path.join(work, MATTE)
     side = out + ".json"
+    from ..plan import fingerprint
+    model = K.model_path("rvm_mobilenetv3_fp32.onnx","MATTE_RVM_MODEL")
+    dependencies = [fingerprint(main),fingerprint(model) if model else None,fps,n_total,RVM_IN[0],RVM_DS]
     have = []
     if os.path.exists(out) and os.path.exists(side):
         try:
-            have = [tuple(r) for r in json.load(open(side))["ranges"]]
+            with open(side) as f:
+                saved = json.load(f)
+            if saved.get("dependencies") == dependencies:
+                have = [tuple(r) for r in saved["ranges"]]
         except (OSError, ValueError, KeyError):
             have = []
     covered = all(any(h0 <= r0 and r1 <= h1 for h0, h1 in have) for r0, r1 in ranges)
@@ -120,7 +127,7 @@ def ensure_matte(l1, work, a, z):
         w = RVM_IN[0]
         h = int(round(w * info["h"] / max(info["w"], 1) / 2)) * 2
         _rvm(main, want, n_total, fps, out, (w, h))
-        json.dump({"ranges": [list(r) for r in want], "fps": fps}, open(side, "w"))
+        json.dump({"ranges": [list(r) for r in want], "fps": fps, "dependencies":dependencies}, open(side, "w"))
     return {"matte": {"kind": "video", "path": MATTE}}, f"matte on {len(ranges)} stretch(es)"
 
 

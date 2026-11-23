@@ -5,7 +5,8 @@ import math
 
 import numpy as np
 
-from .palette.kit import item_box
+from .palette.kit import MARK, item_box
+from .motion import Cam
 from .plan import A
 from .runtime import plane_hom
 
@@ -26,10 +27,69 @@ def proof_bounds(card, frame, width, height):
     return project(card["proof_line"]) if page[3] - page[1] > .74 else page
 
 
-def resolve(scene):
+def speaker_seats(scene, metadata):
+    """Keep the active tracked face inside the final animated crop, including device moves."""
+    from bisect import bisect_left
+    seats = {}
+    width, height = scene["frame"]
+    for shot in scene["items"]:
+        meta = metadata.get(shot.get("pic"))
+        if shot["k"] != "shot" or not meta or not meta.get("faces"):
+            continue
+        lo, hi = shot["f"]
+        cam = Cam(meta["pw"], meta["ph"], width / height, width, meta.get("max_up", 3))
+        track = meta.get("track") or []
+        times = [row[0] for row in track]
+        fx, fy, fw, fh = max(meta["faces"], key=lambda r:r[2]*r[3])[:4]
+        crops = []
+        for f in range(lo, hi):
+            if track:
+                a, b = shot.get("src", [lo/scene["fps"], hi/scene["fps"]])
+                t = a + (b-a)*(f-lo)/(hi-lo)
+                j = min(bisect_left(times,t),len(track)-1)
+                prev = max(0,j-1)
+                u = min(1,max(0,(t-times[prev])/max(1e-6,times[j]-times[prev])))
+                x,y,r,bottom = [v+(w-v)*u for v,w in zip(track[prev][1:],track[j][1:])]
+            else:
+                x,y,r,bottom = fx,fy,fx+fw,fy+fh
+            crop = shot.get("crop") or [0,0,1,1]
+            l,top,right,bot = crop[f-lo] if isinstance(crop[0],list) else crop
+            # Anchor even when a palette pan has already taken the head's centre outside the crop.
+            cx,cy = (x+r)/2,(y+bottom)/2
+            if not (l<cx<right and top<cy<bot):
+                l,top,right,bot = cam.rect(cx,cy,right-l)
+            l,top,right,bot = cam.keep_whole([l,top,right,bot],[(x,y,r-x,bottom-y)])
+            crops.append([l,top,right,bot])
+            seats[f] = [(x-l)/(right-l),(y-top)/(bot-top),(r-l)/(right-l),(bottom-top)/(bot-top)]
+        shot["crop"] = crops
+    return seats
+
+
+def resolve(scene, speaker_layout=None):
     width, height = scene["frame"]
     voices = scene["voices"]
-    occupied = defaultdict(list)
+    occupied = defaultdict(lambda: [MARK])
+    faces = speaker_seats(scene, speaker_layout or {})
+    for frame, face in faces.items():
+        occupied[frame].append(face)
+    for card in scene["items"]:
+        if not card.get("inset_seat"):
+            continue
+        lo, hi = card["f"]
+        if not any(f in faces for f in range(lo, hi)):
+            continue
+        # Keep the incoming tile in its own band until the cut hands it the screen.
+        bottom = max(face[3] for f, face in faces.items() if lo <= f < hi)
+        top = min(face[1] for f, face in faces.items() if lo <= f < hi)
+        lower = .96-bottom > top-MARK[3]
+        edge = bottom+.015 if lower else top-.015
+        room = max(.01, .98-edge if lower else edge-MARK[3]-.01)
+        scales = [min(A(card.get("s",1),f,lo),room/card["h"]) for f in range(lo,hi)]
+        card.update(s=scales, y=[edge + (1 if lower else -1)*card["h"]*s/2 for s in scales])
+        for f, scale in zip(range(lo,hi),scales):
+            x,y = A(card["x"],f,lo), A(card["y"],f,lo)
+            w,h = card["w"]*scale/2,card["h"]*scale/2
+            occupied[f].append((x-w,y-h,x+w,y+h))
     overflow = set()
     active = defaultdict(list)
     for layer in scene["items"]:
@@ -40,6 +100,7 @@ def resolve(scene):
                     occupied[f].extend(layer.get("source_ink", []))
                     if layer.get("proof_line"):
                         occupied[f].append(proof_bounds(layer, f, width, height))
+    fixed = {f: list(boxes) for f,boxes in occupied.items()}
     words, groups = [], {}
     for layer in scene["items"]:
         glyph = layer["k"] == "join" and layer.get("mode") == "glyph"
@@ -122,7 +183,7 @@ def resolve(scene):
                 for left, top, right, bottom in occupied[f]:
                     if x0 < right and left < x1:
                         intervals.append((top - y1 - 0.006, bottom - y0 + 0.006))
-            if not any(a < 0 < b for a, b in intervals):
+            if low <= 0 <= high and not any(a < 0 < b for a, b in intervals):
                 return 0.0
             candidates = {low, high}
             for a, b in intervals:
@@ -180,7 +241,17 @@ def resolve(scene):
     # Preserve each word's motion at all other frames.
     for f in sorted(overflow):
         stack = active[f]
-        slot = 0.86 / len(stack)
+        # Make a column in the largest vertical band left by fixed faces, evidence and the mark.
+        free = []
+        top = .05
+        for _, y0, _, y1 in sorted(fixed.get(f, [MARK]), key=lambda box: box[1]):
+            if y0 > top:
+                free.append((top, min(.94,y0-.006)))
+            top = max(top,y1+.006)
+        if top < .94:
+            free.append((top,.94))
+        begin,end = max(free, key=lambda r:r[1]-r[0], default=(.05,.94))
+        slot = (end-begin) / len(stack)
         for row, it in enumerate(stack):
             x0, y0, x1, y1 = frame_box(it, f)
             scale = min(
@@ -193,7 +264,7 @@ def resolve(scene):
                 (
                     "y",
                     A(it.get("y", 0), f, lo)
-                    + 0.05
+                    + begin
                     + (row + 0.5) * slot
                     - (y0 + y1) / 2,
                 ),

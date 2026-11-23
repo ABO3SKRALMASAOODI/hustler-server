@@ -152,7 +152,7 @@ def neg_world(l1, work, ask, sense):
         # a world negative round a speaker seen for a few frames is not seen at all: the fallback lands instead, and the
         # log says how many frames he was on screen
         return {"skip": f"the speaker is on screen {on_him} of the span's {b - a} frames (needs {SEEN_F})"}
-    got = sense.matte()
+    got = sense.matte_windows([(a,b)]) if hasattr(sense,"matte_windows") else sense.matte()
     if not got:
         return {"skip": "no matte of the take"}
     items = []

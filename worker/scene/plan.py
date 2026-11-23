@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import zlib
+from functools import lru_cache
 
 import numpy as np
 
@@ -200,20 +201,19 @@ def eligible(doc):
     return not why, why[:40]
 
 
+@lru_cache(maxsize=2048)
+def _source_digest(path, stat_key):
+    with open(path,"rb") as stream:
+        return hashlib.file_digest(stream,"sha256").hexdigest()
+
+
 def fingerprint(path):
-    """A cheap identity for a source: size, head and tail. Enough to notice a replaced file."""
-    h = hashlib.sha256()
+    """Frames in the middle of a replaced source also change its rendered segments."""
     try:
-        n = os.path.getsize(path)
-        h.update(str(n).encode())
-        with open(path, "rb") as f:
-            h.update(f.read(262144))
-            if n > 524288:
-                f.seek(n - 262144)
-                h.update(f.read(262144))
+        st = os.stat(path)
+        return _source_digest(path, (st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns,st.st_ctime_ns))
     except OSError:
-        h.update(b"missing")
-    return h.hexdigest()[:16]
+        return "missing"
 
 
 def canon(x):

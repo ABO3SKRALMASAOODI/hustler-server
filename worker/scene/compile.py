@@ -350,7 +350,7 @@ def compile(doc, work, budget_s=None, tier="mac", segment=True, strict=False, ti
             warn.append(f"asset missing for {it['id']}: {it['pic']}")
     if l1.get("workflow_text_layout"):
         from .text_layout import resolve
-        resolve(d)
+        resolve(d, l1.get("speaker_layout"))
     _need(d)
     pages, masks = _type(d, warn, tick)
     steps = []

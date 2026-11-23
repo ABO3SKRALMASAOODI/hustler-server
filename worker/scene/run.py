@@ -31,6 +31,7 @@ from . import audio as AU
 from . import compile as C
 from . import reader as R
 from . import segments as S
+from .plan import fingerprint
 from .faults import SceneFault
 from .plan import AR, Plan
 from .runtime import Runtime
@@ -279,6 +280,7 @@ def render_plan(plan, out, tier="final", frames=None, audio=True, cache=None, pr
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     tmp = tempfile.mkdtemp(prefix="scene_", dir=os.path.dirname(os.path.abspath(out)))
     segs_log, rep = [], {}
+    segment_digests = []
     flog = open(out + ".frames.jsonl", "w") if frames_log else None
     sound = None
     try:
@@ -323,6 +325,7 @@ def render_plan(plan, out, tier="final", frames=None, audio=True, cache=None, pr
             n_frames, _ = S.count(video)
             if n_frames != plan.dur:
                 raise SceneFault("segment", f"joined film has {n_frames} frames, planned {plan.dur}")
+            segment_digests = [[*s["f"], fingerprint(paths[s["i"]])] for s in plan.segments]
             S.sweep(cache)
         t_pic = time.time() - t0
         if audio and not partial:
@@ -350,6 +353,9 @@ def render_plan(plan, out, tier="final", frames=None, audio=True, cache=None, pr
                decoded=rd.decoded if rd else 0, seeks=rd.seeks if rd else 0, seek_s=round(rd.seek_s, 2) if rd else 0, sprites=len(plan.sprites),
                segments=len(plan.segments), segments_drawn=len(segs_log), segment_log=segs_log, audio=rep,
                degraded=plan.doc.get("degraded") or [], cost_s=plan.doc.get("cost_s"), warnings=plan.warn)
+    if segment_digests:
+        log["encoded_segments"] = segment_digests
+        log["encoded_sha256"] = fingerprint(out)
     with open(out + ".log.json", "w") as f:
         json.dump(log, f, indent=1)
     prog.say("done", n_frames, force=True)

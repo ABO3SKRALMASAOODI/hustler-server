@@ -419,7 +419,15 @@ def pip(l1, work, ask, sense_=None, pool=None):
     if c is not None and p is not None and q is not None and c - p["f"][0] >= n + 2:
         f0 = c - n
         card, _ = _full_card(q, l1, work, c, c + 1, "tmp")
+        # A documentary window sits over a cropped background of the same source.
+        # Reveal the evidence itself, including its checked lettering and destination seat.
+        window = next((item for item in l1["items"] if item.get("k")=="card" and item.get("source_ink")
+                       and item.get("pic")==q.get("pic") and item["f"][0]==c), None)
         cs = K.crops(l1, work, q)
+        if window:
+            card.update(w=window["w"], h=window["h"])
+            cs = [window["crop"][0] if isinstance(window["crop"][0],list) else window["crop"]]
+        tx,ty = (window["x"],window["y"]) if window else (.5,.5)
         card = dict(card, id=f"{args.get('id', 'pip')}.in", f=[f0, c], crop=[cs[0]] * n)
         still = 0
         if q.get("src"):
@@ -429,9 +437,9 @@ def pip(l1, work, ask, sense_=None, pool=None):
         kk = K.decel(n - hold, 0.2)
         s = [0.42] * hold + [round(0.42 + 0.58 * kk[j], 5) for j in range(n - hold)]
         card["s"] = [round(s_ * (1.06 - 0.06 * min(j / 4, 1)) if j < 5 else s_, 5) for j, s_ in enumerate(s)]
-        card["x"] = [round(wx + (0.5 - wx) * (0 if j < hold else kk[j - hold]), 5) for j in range(n)]
-        card["y"] = [round(wy + (0.5 - wy) * (0 if j < hold else kk[j - hold]), 5) for j in range(n)]
-        card.update(border={"w": 0.008, "c": "#F7F4EC"}, shadow={"a": 0.6, "blur": 0.03, "dx": 0.0, "dy": 0.014}, z=4)
+        card["x"] = [round(wx + (tx - wx) * (0 if j < hold else kk[j - hold]), 5) for j in range(n)]
+        card["y"] = [round(wy + (ty - wy) * (0 if j < hold else kk[j - hold]), 5) for j in range(n)]
+        card.update(inset_seat=True, border={"w": 0.008, "c": "#F7F4EC"}, shadow={"a": 0.6, "blur": 0.03, "dx": 0.0, "dy": 0.014}, z=4)
         head, tail = split_at(card, still, f"{card['id']}~run")
         if head is not None:
             head["src"] = [card["src"][0], card["src"][0]]
@@ -452,7 +460,7 @@ def pip(l1, work, ask, sense_=None, pool=None):
     for j in range(max(m - 5, 0), m):
         s[j] = round(s[j] * (1 - ((j - (m - 5)) / 5) ** 1.5), 5)
     card = dict(id=f"{args.get('id', 'pip')}.in", k="card", f=[a, z], pic=pic.aid, x=wx, y=wy, w=w_, h=round(min(h_, 0.4), 5), s=s, rot=0, op=1,
-                z=4, crop=_cover_for(pic, w_ * W / (min(h_, 0.4) * H)), border={"w": 0.008, "c": "#F7F4EC"},
+                inset_seat=True, z=4, crop=_cover_for(pic, w_ * W / (min(h_, 0.4) * H)), border={"w": 0.008, "c": "#F7F4EC"},
                 shadow={"a": 0.6, "blur": 0.03, "dx": 0.0, "dy": 0.014})
     return {"items": K.clocked(card, pic, fps, rng), "drop": [], "assets": K.new_assets([pic]), "events": [{"f": a, "what": "inset", "kind": "pop", "strength": 0.45}],
             "log": {"inset": pic.aid}}

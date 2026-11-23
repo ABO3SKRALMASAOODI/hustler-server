@@ -694,13 +694,20 @@ def whip(l1, work, ask, sense_=None, pool=None):
     W, H, fps = K.geometry(l1)
     args = K.args_of(ask)
     f, _ = K.span(l1, args, default_s=0.1, least=1)
-    c = _cut_near(l1, f)
-    if c is None:
-        return {"skip": "no join near to whip through"}
-    p, q = K.shot_at(l1, c - 1), K.shot_at(l1, c)
     fr = int(args.get("frames", 4))
-    if p is None or q is None or min(c - p["f"][0], q["f"][1] - c) < fr + 1:
-        return {"skip": "a shot either side is shorter than the whip"}
+    def picture_at(frame):
+        shot = K.shot_at(l1,frame)
+        if shot and shot.get("pic")=="plate":
+            return next((it for it in l1["items"] if it.get("k")=="card" and K.is_take(it.get("pic"))
+                         and it["f"][0]<=frame<it["f"][1]),None)
+        return shot
+    joins = [c for c in K.cuts(l1) if abs(c - f) <= max(15, round(.75 * fps))
+             and (before := picture_at(c-1)) and (after := picture_at(c))
+             and min(c-before["f"][0],after["f"][1]-c)>=fr+1]
+    if not joins:
+        return {"skip": "no join near to whip through"}
+    c = min(joins, key=lambda cut: abs(cut - f))
+    p,q = picture_at(c-1),picture_at(c)
     tr = float(args.get("travel", 0.27))
     cp, cq = K.crops(l1, work, p), K.crops(l1, work, q)
     ang = args.get("ang")

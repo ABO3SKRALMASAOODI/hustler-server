@@ -650,3 +650,36 @@ def test_no_burst_shot_plays_a_clip_past_its_verified_range(film):
                 assert lo - 1e-6 <= it["src"][0] <= it["src"][1] <= hi + 1e-6, (ask, it["id"], it["src"])
         if ask.get("pics"):
             assert patch["log"]["lands_on"] == "v1"
+
+
+def test_whip_accepts_real_join_nineteen_frames_after_the_spoken_cue(film):
+    l1, work = film
+    out, patch = lay(l1, work, {"dev":"whip","id":"wh","at":101,"frames":5})
+    outgoing=next(s for s in shots(out) if s["f"][1]==120)
+    incoming=next(s for s in shots(out) if s["f"][0]==120)
+    assert outgoing["shutter"] == incoming["shutter"] == .85
+
+
+def test_pip_brings_the_checked_document_into_its_destination_seat(film):
+    l1,work=film
+    doc=dict(id="source-card",k="card",f=[120,180],pic="v1",w=.92,h=.3,x=.5,y=.42,
+             crop=[0,0,1,1],src=[.5,2.5],source_ink=[[.04,.27,.96,.57]])
+    l1=dict(l1,items=[*l1["items"],doc])
+    out,patch=lay(l1,work,{"dev":"pip","id":"doc","at":112,"frames":24})
+    inset=next(it for it in out["items"] if it.get("id")=="doc.in")
+    assert inset["w"]==doc["w"] and inset["h"]==doc["h"]
+    assert all(c==doc["crop"] for c in inset["crop"])
+    assert inset["y"][-1]==pytest.approx(doc["y"])
+
+
+def test_whip_leaves_the_live_interview_panel_at_a_real_cut(film):
+    l1,work=film
+    original=K.shot_at(l1,119)
+    panel=dict(id="interview",k="card",pic="main",f=original["f"],x=.5,y=.42,w=.94,h=.52,
+               crop=[.15,0,.85,1],src=[0,4])
+    page=dict(original,pic="plate",plate={"c0":"#171B23"})
+    page.pop("src",None)
+    l1=dict(l1,items=[page if i is original else i for i in l1["items"]]+[panel])
+    patch=RH.whip(l1,work,{"at":101,"frames":5})
+    outgoing=next(i for i in patch["items"] if i["id"]=="interview")
+    assert outgoing["crop"][0]!=outgoing["crop"][-1] and outgoing["shutter"]==.85

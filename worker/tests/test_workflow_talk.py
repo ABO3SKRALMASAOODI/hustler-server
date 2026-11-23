@@ -183,3 +183,87 @@ def test_wang_llama_page_animates_once_and_its_caption_clears_the_source():
         ink = item_box(cap, voice, 1080, 1920, f)
         assert ink[1] >= source[3] or ink[3] <= source[1]
     assert next(i for i in scene["items"] if i["id"] == "cd0012")["f"] == [293, 309]
+
+
+def test_ghodsi_reveal_has_separate_seats_for_face_tile_word_and_mark():
+    from scene.palette.kit import MARK
+    from scene.plan import A
+    voice = {"v": {"font": "ArchivoBlack-Regular.ttf", "px": 92}}
+    headline = word("w0026","TRANSFORM","v",.23,.17,[0,12],"big")
+    shot = dict(k="shot",id="s",pic="main",f=[0,12],src=[24.,24.4],crop=[.02,.13,.28,.95])
+    tile = dict(k="card",id="pip.in",pic="orbit",inset_seat=True,f=[0,12],w=1.,h=1.,
+                x=.5,y=.40,s=[.42]*7+[.50,.62,.75,.88,1.])
+    meta = dict(pw=1920,ph=1080,faces=[[.35,.25,.11,.24]],track=[[24.,.35,.25,.46,.49],[24.4,.40,.25,.51,.49]])
+    scene = dict(frame=[1080,1920],fps=30,voices=voice,items=[shot,tile,headline])
+    resolve(scene, {"main":meta})
+    def apart(a,b):
+        return a[0]>=b[2] or a[2]<=b[0] or a[3]<=b[1] or a[1]>=b[3]
+    for f,(l,t,r,b) in enumerate(shot["crop"]):
+        x=.35+.05*f/12
+        face=((x-l)/(r-l),(.25-t)/(b-t),(x+.11-l)/(r-l),(.49-t)/(b-t))
+        assert min(face)>=0 and max(face)<=1
+        y, size = A(tile["y"],f,0),A(tile["s"],f,0)
+        card=(.5-size/2,y-size/2,.5+size/2,y+size/2)
+        text=item_box(headline,voice,1080,1920,f)
+        assert apart(face,card) and apart(face,text) and apart(MARK,text) and apart(card,text)
+
+
+def test_performed_word_owns_only_its_visible_frames():
+    from scene.palette import share_word_time
+    base=word("cap","intelligence.","v",.3,.7,[102,134],"cap")
+    device=word("behind","INTELLIGENCE","v",.2,.5,[105,129],"graphic")
+    kept=word("next","already","v",.5,.7,[108,134],"cap")
+    scene=share_word_time(dict(items=[base,device,kept]),dict(items=[device]),{"behind"})
+    assert [it["f"] for it in scene["items"] if it["t"]==base["t"]]==[[102,105],[129,134]]
+    assert kept in scene["items"] and device in scene["items"]
+
+
+def test_replaced_middle_of_source_changes_segment_dependency(tmp_path):
+    from scene.plan import fingerprint
+    source=tmp_path/"clip"
+    source.write_bytes(b"a"*600000)
+    before=fingerprint(source)
+    with source.open("r+b") as stream:
+        stream.seek(300000)
+        stream.write(b"b")
+    assert fingerprint(source)!=before
+
+
+def test_podcast_opening_yields_to_active_voice_and_keeps_musical_clock(tmp_path):
+    from score import music
+    import numpy as np
+    song=dict(bars=[{"t0":17.}])
+    plan=dict(tempo=1.1,end_hit_s=39.5,end_hit_bar=0,segments=[dict(tempo=1.2)])
+    voice=np.ones((3*music.SR,2),np.float32)*.1
+    bed=np.full_like(voice,.12)
+    measured={}
+    music.podcast_bed(bed,voice,dict(words=[(.05,.9)],dur_s=40.333),song,plan,tmp_path/"music.mp3",measured)
+    assert np.mean(bed[:music.SR]**2) <= np.mean(voice[:music.SR]**2)*.1001
+    assert np.allclose(bed[-music.SR:],.12)
+    assert abs(measured["card_bed"]["at_s"]-(17.+.833*1.2)) < .0001
+
+
+def test_orbital_reveal_mattes_only_the_visible_take_interval(tmp_path,monkeypatch):
+    from scene.palette import matte, sense, behind
+    clip=tmp_path/"take.mp4"
+    clip.write_bytes(b"test source")
+    shot=dict(k="shot",id="speaker",pic="main",f=[0,1210],src=[0.,1210/30])
+    doc=dict(frame=[1080,1920],fps=30,dur_f=1210,assets={"main":{"kind":"video","path":str(clip)}},
+             speaker_layout={"main":{"faces":[[.3,.3,.2,.2]]}},items=[shot])
+    seen=[]
+    def infer(path,ranges,total,fps,out,size):
+        seen.extend(ranges)
+        from pathlib import Path
+        Path(out).parent.mkdir(exist_ok=True)
+        Path(out).write_bytes(b"mask")
+    monkeypatch.setattr(behind.asense,"probe",lambda _:dict(fps=30.,dur=40.34,w=1920,h=1080))
+    monkeypatch.setattr(behind,"_rvm",infer)
+    sensor=sense.Sense(doc,str(tmp_path))
+    wins,patch=matte._ready(doc,sensor,dict(f=[1132,1154]))
+    assert len(wins)==1 and "matte" in patch["assets"]
+    assert seen==[(1130,1157)]
+    matte._ready(doc,sensor,dict(f=[1132,1154]))
+    assert len(seen)==1
+    clip.write_bytes(b"new source!")
+    matte._ready(doc,sensor,dict(f=[1132,1154]))
+    assert len(seen)==2

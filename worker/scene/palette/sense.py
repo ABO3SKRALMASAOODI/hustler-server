@@ -173,12 +173,28 @@ class Sense:
 
     # the take's matte -------------------------------------------
 
+    def matte_windows(self, windows):
+        """Make the mask on the take frames actually exposed by these devices."""
+        from .behind import MATTE, ensure_matte
+        if not self.l1.get("speaker_layout"):
+            return self.matte()
+        provided = (self.l1.get("assets") or {}).get("matte")
+        if provided and provided.get("path") != MATTE:
+            return {"matte":provided}
+        if not windows:
+            return {}
+        patch,_ = ensure_matte(self.l1,self.work,windows[0][0],windows[-1][1],windows=windows)
+        return patch or {}
+
     def matte(self):
         """{"matte": asset} once the take's person matte exists (made here with RVM when the scene has none), else {}.
         Written next to the work as a grey video on the take's own clock and shape: the runtime draws the depth
         sandwich through it (a card or word with ``behind``)."""
         assets = self.l1.get("assets") or {}
         if "matte" in assets:
+            from .behind import MATTE
+            if assets["matte"].get("path") == MATTE and self.l1.get("speaker_layout"):
+                return self.matte_windows([tuple(sh["f"]) for sh in self.take_shots()])
             return {"matte": assets["matte"]}
         if "matte" in self._cache:
             return self._cache["matte"]
@@ -192,7 +208,7 @@ class Sense:
                 srcs = [s["src"] for s in self.take_shots() if s.get("src") and is_take(self.l1, s)]
                 t0 = max(min((float(x[0]) for x in srcs), default=0.0) - 0.5, 0.0)
                 t1 = max((float(x[1]) for x in srcs), default=0.0) + 0.5
-                p = make_matte(take, os.path.join(self._dir(), f"matte_{self._key(take, os.path.getsize(take), round(t0, 2), round(t1, 2))}.mp4"),
+                p = make_matte(take, os.path.join(self._dir(), f"matte_{self._key(fingerprint(take), fingerprint(rvm_path()), t0, t1)}.mp4"),
                                t0, t1 if srcs else None)
                 out = {"matte": {"kind": "video", "path": p}}
             except Exception as e:      # noqa: BLE001 - a film without a matte keeps its devices that need none

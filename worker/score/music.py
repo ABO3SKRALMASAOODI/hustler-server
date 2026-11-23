@@ -1777,6 +1777,23 @@ def voice_spans_of(l1, work):
         return []
 
 
+def podcast_bed(music, voice, marks, song, plan, song_path, report):
+    """Set the opening against the programme voice and locate the continuation on the final song edit."""
+    if any(start < 1 for start,end in marks.get("words", [])):
+        first = min(SR, len(music), len(voice))
+        if first:
+            bed_rms = float(np.sqrt(np.mean(music[:first]**2)))
+            speech_rms = float(np.sqrt(np.mean(voice[:first]**2)))
+            if speech_rms > .003 and bed_rms > .0001:
+                gain = min(1., speech_rms * 10**(-10/20) / bed_rms, .05 / bed_rms)
+                music *= np.interp(np.arange(len(music)), [first, first+SR], [gain, 1.])[:,None]
+            report["opening_bed_dbfs"] = round(float(10*np.log10(max(1e-12,np.mean(music[:first]**2)))), 2)
+    tempo = plan["segments"][-1].get("tempo") or plan["tempo"]
+    report["card_bed"] = dict(path=os.path.abspath(song_path), tempo=tempo,
+                              at_s=song["bars"][plan["end_hit_bar"]]["t0"] +
+                                   (marks["dur_s"]-plan["end_hit_s"])*tempo)
+
+
 def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind="stories", index=None, prog_end_f=None, payoff_s=None, supplied=True,
         sung=None, open_s=None, turn_drop=False, arc=False, story_arc=None):
     """A compiled film's sound with a song under it: the voice and the designed sounds as the engine mixes them
@@ -1819,6 +1836,8 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
     with tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(out)) if out else None) as tmp:
         lv, _ = AU.level_voice(voice, tmp) if float(np.abs(voice).max()) > 1e-5 else (voice, {})
         music, mrep = track(song_path, song, plan, marks, voice=lv[:int(marks["dur_s"] * SR)], profile=prof)
+        if kind == "podcast":
+            podcast_bed(music, lv, marks, song, plan, song_path, rep)
         # with the bed known, each placed sound is made to be there over the voice and the song together
         if kind == 'podcast':
             from . import audibility
@@ -1936,6 +1955,8 @@ def mix_film(film, song_path, marks, out=None, kind="stories", vocals=None, sung
     with tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(out)) if out else None) as tmp:
         if mrep is None or "chapters" not in mrep:
             music, mrep = track(song_path, song, plan, marks, voice=prog[:n_prog], profile=prof)
+            if kind == "podcast":
+                podcast_bed(music,prog,marks,song,plan,song_path,rep)
         if not marks["words"]:                              # nobody speaks: the music is set against the film's own level, not a voice's
             i, _tp, _ = AU.loudness_of(prog, tmp) if float(np.abs(prog).max()) > 1e-5 else (None, None, None)
             if i is not None and i > -70:

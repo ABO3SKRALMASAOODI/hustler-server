@@ -575,6 +575,42 @@ def type_boxes(patch, scene):
     return out
 
 
+def share_word_time(scene, patch, made):
+    """A performed word owns only the frames where its own ink carries that exact text."""
+    from .kit import cut
+    from itertools import groupby
+    from ..plan import A
+    drawn = []
+    for word in patch.get("items", []):
+        if word["k"] != "word" or not word.get("t"):
+            continue
+        start,end = word["f"]
+        pixels = lambda f: A(word.get("op",1.),f,start) > .01
+        for visible, span in groupby(range(start,end),key=pixels):
+            if visible:
+                frames = list(span)
+                drawn.append((_words(word["t"]),frames[0],frames[-1]+1))
+    items = []
+    for it in scene["items"]:
+        if it["k"] != "word" or it["id"] in made:
+            items.append(it)
+            continue
+        lo, hi = it["f"]
+        spans = sorted((max(lo,a), min(hi,b)) for text,a,b in drawn
+                       if text == _words(it["t"]) and lo < b and a < hi)
+        if not spans:
+            items.append(it)
+            continue
+        pos = lo
+        for a,b in spans:
+            if a > pos:
+                items.append(cut(it,pos,a,f"{it['id']}~{pos}"))
+            pos = max(pos,b)
+        if pos < hi:
+            items.append(cut(it,pos,hi,f"{it['id']}~{pos}"))
+    return dict(scene, items=items)
+
+
 def drop_echoes(cur, texts, f0, f1, made):
     """Ids of the builder's own display type that says one of ``texts`` while [f0, f1) stands (a word device sets that
     word now, so the builder's copy of it leaves): the display block's lines and its bar go together."""
@@ -687,7 +723,10 @@ def apply(l1, work, asks=None, pool=None):
                 seats.append(box)
             elif dev not in WORD_DEVICES:           # the type family's own words: a later word device seats itself off them
                 seats += type_boxes(patch, nxt)
-            echoes = set() if cur.get("workflow_text_layout") else drop_echoes(nxt, texts, box[4], box[5], made)
+            if cur.get("workflow_text_layout"):
+                nxt = share_word_time(nxt, patch, made)
+            else:
+                echoes = drop_echoes(nxt, texts, box[4], box[5], made)
             if echoes:
                 nxt = dict(nxt, items=[i for i in nxt["items"] if i["id"] not in echoes])
         cur = nxt
