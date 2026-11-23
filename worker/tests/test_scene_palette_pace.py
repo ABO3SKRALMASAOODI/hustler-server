@@ -697,3 +697,53 @@ def test_pip_into_a_date_page_animates_the_date_on_its_cut(film):
     year = next(it for it in out["items"] if it["id"]=="year")
     assert card["f"] == [120,136] and card["plate"] == next_shot["plate"]
     assert year["s"][0] == pytest.approx(card["s"][0]) and year["s"][15] == pytest.approx(1)
+
+
+def test_archive_burst_across_a_checked_cut_keeps_its_timing_and_camera(film):
+    from scene.palette import rhythm
+    from scene.palette.__init__ import merge
+    l1, work = film
+    base = dict(l1["items"][0], f=[0, 30], src=[0., 1.])
+    archive = dict(base, id="campus", pic="p1", f=[30, 60])
+    archive.pop("src")
+    l1 = dict(l1, items=[base, archive], documentary_cuts=[dict(pic="p1", f=[30,60], path=l1["assets"]["p1"]["path"])])
+    patch = rhythm.burst(l1, work, dict(id="dr6", f=[25,55], mono=True))
+    out = merge(l1, patch)
+    assert [K.shot_at(out,f)["pic"] for f in (25,30,54)] == ["main","p1","p1"]
+    assert K.shot_at(out,25)["src"][-1] == 1.
+
+
+def test_payoff_answer_keeps_the_speaker_when_the_demo_belongs_to_an_earlier_clause(film):
+    from scene.alien import answer
+    l1, work = film
+    l1["documentary_cuts"] = [dict(pic="p1", f=[30,60])]
+    got = answer.plan(l1,work,dict(id="pay",at=[100,129],picks=[dict(f=100,pic="p1",word="doing that")]))
+    assert any(it["k"] == "word" and it["t"].casefold() == "doing that" for it in got["items"])
+    assert all(it.get("pic") != "p1" for it in got["items"])
+
+
+def test_legacy_device_mark_binds_to_its_visible_event():
+    from score.sound import story_partners
+    l1 = dict(items=[],fps=30,dur_f=120,story_cues=[dict(f=97,beat=1,sound="impact",partner=dict(device="diecut"))],
+              composed_events=[dict(f=97,what="diecut lift",items=["dr7.hole"],beat=1,id="dr7",dev="diecut",asked="diecut")])
+    assert story_partners(l1)[0]["kind"] == "device"
+
+
+def test_reviewed_archive_keeps_its_encoded_interval_after_a_neighbour_changes():
+    cuts = [dict(f=[64,87]),dict(f=[87,110]),dict(f=[181,209]),dict(f=[209,238])]
+    def intervals(starts):
+        doc = dict(fps=30,dur_f=271,items=[dict(id=f"take-{a}",k="shot",f=[a,b])
+                                          for a,b in zip(starts,starts[1:]+[271])])
+        return [s["f"] for s in SEG.cut(doc,cuts)]
+    for starts in ([0,64,87,110,181,209,238],[0,42,63,181,209,238]):
+        assert all(row["f"] in intervals(starts) for row in cuts)
+
+
+def test_mark_moves_the_stencil_and_its_footage_together(monkeypatch):
+    from scene.palette import kit
+    monkeypatch.setattr(kit, "item_box", lambda *a: (.56,.12,.85,.19))
+    items = [dict(id="dr7.hole", k="word", f=[97,116], y=.13),
+             dict(id="dr7.l003", k="join", mode="glyph", f=[100,101], y0=.12)]
+    shift = kit.clear_of_mark(items, {}, 1080, 1920, "dr7.")
+    assert shift > 0
+    assert items[0]["y"] - items[1]["y0"] == pytest.approx(.01)

@@ -108,6 +108,10 @@ def plan(l1, work, ask, sense_=None, pool=None, by="any"):
     W, H, fps = K.geometry(l1)
     args = K.args_of(ask)
     a, z = K.span(l1, args, default_s=1.6, least=6)
+    from .rhythm import scored_run
+    scored = scored_run(l1, args, a, z)
+    if scored is not None:
+        return scored
     cuts = sorted(int(f) for f in (args.get("cuts") or []) if a < int(f) < z)
     pics = K.pictures(l1, work, args, pool, sense_=sense_, least=max(len(cuts) + 1, 3))
     if not cuts:

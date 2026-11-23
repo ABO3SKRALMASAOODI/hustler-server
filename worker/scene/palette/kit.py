@@ -423,7 +423,7 @@ def others(l1, a, z, skip=()):
 def clear_of_mark(items, voices, W, H, own):
     """A device's own type (items whose id starts with ``own``) moved down, as one block, until no word of it meets
     the watermark's keep-out on any frame: a repair, never a refusal. Returns how far it moved (frame fraction)."""
-    mine = [it for it in items if str(it.get("id", "")).startswith(own) and it.get("k") in ("word", "flash")]
+    mine = [it for it in items if str(it.get("id", "")).startswith(own) and (it.get("k") in ("word", "flash") or (it.get("k") == "join" and it.get("mode") == "glyph"))]
     need = 0.0
     for it in mine:
         if it.get("k") != "word" or it.get("role") == "cap":
@@ -439,9 +439,10 @@ def clear_of_mark(items, voices, W, H, own):
     if need <= 0:
         return 0.0
     for it in mine:
-        if it.get("k") == "word":
-            y = it.get("y", 0)
-            it["y"] = [round(float(q) + need, 6) for q in y] if isinstance(y, list) else round(float(y) + need, 6)
+        if it.get("k") in ("word", "join"):
+            coord = "y0" if it["k"] == "join" else "y"
+            y = it.get(coord, 0)
+            it[coord] = [round(float(q) + need, 6) for q in y] if isinstance(y, list) else round(float(y) + need, 6)
         elif it.get("mode") in ("fill", "neg") and it.get("rect") is not None:
             r = it["rect"]
             sh = (lambda q: [q[0], round(q[1] + need, 5), q[2], round(q[3] + need, 5)])
@@ -665,6 +666,8 @@ def cut(it, a, b, new_id=None):
     out = dict(it, f=[a, b], id=new_id or it["id"])
     for k, v in it.items():
         if isinstance(v, list) and len(v) == hi - lo and k not in ("f", "src"):
+            if k == "crop" and not isinstance(v[0], (list, tuple)):
+                continue
             out[k] = v[a - lo:b - lo]
     if it.get("src"):
         s0, s1 = float(it["src"][0]), float(it["src"][1])

@@ -311,6 +311,35 @@ def _brisk_seq(pics, lens, start, avoid_last, W, H, fps, rng, used, before=None,
     return seq, k
 
 
+def scored_run(l1, args, a, z):
+    """Cut a documentary rhythm on its selected timeline when the ask spans different evidence.
+    Keep each camera's tracking, source clock and the foreground of a fitted document.
+    """
+    if "documentary_cuts" not in l1 or any(r["f"][0] <= a and z <= r["f"][1]
+                                            for r in l1["documentary_cuts"]):
+        return None
+    from .kit import cut
+    layers = [it for it in l1["items"] if it["k"] in ("shot", "card") and
+              it.get("pic") != "plate" and it["f"][0] < z and a < it["f"][1]]
+    marks = sorted({it["f"][0] for it in layers if it["k"] == "shot" and a < it["f"][0] < z})
+    items, drop = [], []
+    if args.get("mono"):
+        for it in layers:
+            if it.get("look") or it.get("treat"):
+                continue
+            lo, hi = it["f"]
+            edges = sorted({lo, max(a, lo), min(z, hi), hi})
+            drop.append(it["id"])
+            for start, end in zip(edges, edges[1:]):
+                part = cut(it, start, end, f"{it['id']}~{start}")
+                if a <= start < z:
+                    part["treat"] = {"mode": "mono"}
+                items.append(part)
+    return dict(items=items, drop=drop, events=[dict(f=f, what="scored cut", kind="cut", strength=.35)
+                                                for f in marks],
+                log=dict(scored_run=[a,z], cuts=marks, pictures=list(dict.fromkeys(it["pic"] for it in layers))))
+
+
 def burst(l1, work, ask, sense_=None, pool=None):
     """A list burst: 8-45 related pictures at 3-6 frames each over [a, z), ending on a landing.
     A burst up to about two seconds strobes and lands on its last picture (the caller's last chosen one when it chose).
@@ -321,6 +350,9 @@ def burst(l1, work, ask, sense_=None, pool=None):
     W, H, fps = K.geometry(l1)
     args = K.args_of(ask)
     a, z = K.span(l1, args, default_s=1.2, least=6)
+    scored = scored_run(l1, args, a, z)
+    if scored is not None:
+        return scored
     rng = K.rng_of(l1, args)
     total = z - a
     run = int(round(BURST_RUN_S * fps))

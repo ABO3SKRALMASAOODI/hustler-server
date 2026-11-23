@@ -2278,7 +2278,7 @@ def story_partners(l1):
                     if not (before or after or text) and event.get("strength", .5) < DEVICE_MIN:
                         continue
                     candidates.append(dict(f=event["f"], id=event["id"], device=event["dev"], items=event["items"],
-                                           kind="display" if event["kind"] == "type" else "device"))
+                                           kind="display" if event.get("kind") == "type" else "device"))
         words = [(max(it["f"][0], it.get("on", it["f"][0])), it["id"]) for it in items
                  if text and it["k"] == "word" and it.get("role") != "cap"
                  and str(it.get("t", "")).casefold() == text.casefold()]

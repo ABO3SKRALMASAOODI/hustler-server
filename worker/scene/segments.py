@@ -30,7 +30,7 @@ def _h(s):
     return hashlib.sha256(str(s).encode()).hexdigest()
 
 
-def cut(d):
+def cut(d, placements=()):
     """[{i, f:[a,b], key}] covering 0..dur_f. ``key`` names the boundary by what starts there: a shot
     id, or a shot id and an offset when a long shot has to be cut inside."""
     fps, dur = float(d["fps"]), int(d["dur_f"])
@@ -51,16 +51,20 @@ def cut(d):
         return f"{s['id']}+{f - s['f'][0]}" if s else f"@{f}"
 
     bounds = [0]
-    at = 0
-    while dur - at > hi:
-        window = [c for c in start_of if at + lo <= c <= at + hi and dur - c >= lo]
-        if window:
-            pick = min(window, key=lambda c: (_h(start_of[c]), c))
-        else:
-            pick = at + hi if dur - (at + hi) >= lo else at + (dur - at) // 2
-        bounds.append(pick)
-        at = pick
-    bounds.append(dur)
+    # A checked archive placement owns its encoded interval. A changed GOP
+    # before its entry must not change the frames audited inside it.
+    anchors = {dur, *(f for row in placements for f in row["f"] if 0 < f < dur)}
+    for end in sorted(anchors):
+        at = bounds[-1]
+        while end - at > hi:
+            window = [c for c in start_of if at + lo <= c <= at + hi and end - c >= lo]
+            if window:
+                pick = min(window, key=lambda c: (_h(start_of[c]), c))
+            else:
+                pick = at + hi if end - (at + hi) >= lo else at + (end - at) // 2
+            bounds.append(pick)
+            at = pick
+        bounds.append(end)
     return [{"i": i, "f": [a, b], "key": key_at(a)} for i, (a, b) in enumerate(zip(bounds, bounds[1:]))]
 
 

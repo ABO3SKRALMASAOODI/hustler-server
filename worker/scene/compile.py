@@ -359,7 +359,7 @@ def compile(doc, work, budget_s=None, tier="mac", segment=True, strict=False, ti
         if step:
             degrade(d, step)
             steps.append(step)
-        d["segments"] = segments.cut(d) if segment else []
+        d["segments"] = segments.cut(d, l1.get("documentary_cuts") or []) if segment else []
         plan = Plan(copy.deepcopy(d), work, pages, masks)
         d["cost_s"] = estimate(plan, tier)
         if budget_s is None or d["cost_s"] <= budget_s:

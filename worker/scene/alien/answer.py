@@ -77,6 +77,24 @@ def plan(l1, work, ask):
     W, H = [int(v) for v in (l1.get("frame") or [1080, 1920])]
     a, z = [int(v) for v in ask["at"]]
     assets = l1.get("assets") or {}
+    if "documentary_cuts" in l1:
+        # Land a personal conclusion on the speaking take. A Director pool ID left
+        # over from the opening is not evidence for an answer thirty seconds later.
+        picks = []
+        for pick in ask.get("picks") or []:
+            if pick.get("f") is None:
+                continue
+            f = int(pick["f"])
+            row = next((r for r in l1["documentary_cuts"] if r.get("pic") == pick.get("pic")
+                        and r["f"][0] <= f and z <= r["f"][1]), None)
+            pick = dict(pick)
+            if row is None:
+                pick.pop("pic", None)
+            elif row.get("source_slice"):
+                start, end = row["source_slice"]
+                pick["t"] = start + (end-start)*(f-row["f"][0])/(row["f"][1]-row["f"][0])
+            picks.append(pick)
+        ask = dict(ask, picks=picks)
     picks = sorted((p for p in ask.get("picks") or [] if p.get("pic") in assets and a <= int(p["f"]) < z - 3), key=lambda p: int(p["f"]))
     # a named word with no picture to be born in it is still a word that lands: it shouts on its own frame
     bare = sorted((p for p in ask.get("picks") or [] if p not in picks and str(p.get("word") or "").strip() and p.get("f") is not None),
