@@ -5,6 +5,7 @@ import os
 import hashlib
 import importlib.util
 import subprocess
+from pathlib import Path
 
 CONTRACT = 6
 
@@ -48,10 +49,12 @@ def ladder(rows, limit=3):
     return out[:limit]
 
 
-def plan(words, title, work, llm, named=None, off_camera=None):
+def plan(words, title, work, llm, named=None, off_camera=None, frames=None):
     """named: the script stage's resolved referents (script.named), the director's subjects from the start.
     off_camera: [{first, last, t0, t1}] word spans the show's own camera holds a listener while the voice speaks
     (wf1_speaker): the director plans pictures over them like any other words, so no line plays on a listener."""
+    import wf1_source_frame as source_frame
+    source_key = source_frame.signature(frames) if frames else None
     path = os.path.join(work, 'coverage.json')
     named = resolved(named)
     off_camera = [dict(first=int(r['first']), last=int(r['last'])) for r in off_camera or []]
@@ -59,6 +62,15 @@ def plan(words, title, work, llm, named=None, off_camera=None):
         old = json.load(open(path))
         if (old.get('contract') == CONTRACT and old.get('words') == words and (old.get('named') or []) == named
                 and (old.get('off_camera') or []) == off_camera):
+            if frames and old.get('source_key') != source_key:
+                old['source_reading'] = source_frame.read(old,frames,llm,work)
+                old['source_key'] = source_key
+                source_frame.write_cache(Path(path), json.dumps(old,indent=1).encode())
+            elif frames:
+                # A copied run has the same source pixels under a different directory.
+                paths = {frame['t']: frame['path'] for frame in frames}
+                for insert in old['source_reading']['inserts']:
+                    insert['path'] = paths[insert['t']]
             return old
     prompt = '''Direct documentary pictures for a spoken podcast clip. Return JSON:
 {"entities":[{"name":str,"is":"person|company|place|product|event|thing","must_show":str,"word_ids":[int]}],
@@ -135,9 +147,13 @@ an honest subject; never invent one.'''
     if off_camera:
         payload['off_camera'] = off_camera
     content = json.dumps(payload)
+    pictures = source_frame.frame_parts(frames) if frames else []
+    if pictures:
+        prompt += '\n' + source_frame.PROMPT
     spend = []
     for attempt in range(3):
-        text, use = llm.ask(prompt, content, effort='medium', max_tokens=8000)
+        request = [dict(type='text',text=content),*pictures] if pictures else content
+        text, use = llm.ask(prompt, request, effort='medium', max_tokens=8000)
         spend.append(use)
         out = llm.json_block(text)
         windows = sorted(out.get('windows') or [], key=lambda w: int(w['first']))
@@ -164,6 +180,9 @@ an honest subject; never invent one.'''
         row['depictions'] = ladder(row.get('depictions'))
         row['rung'] = 0
     out.update(contract=CONTRACT, words=words, named=named, windows=join_windows(windows), spend=spend, off_camera=off_camera)
+    if frames:
+        out['source_reading'] = source_frame.bind(out,frames,dict(out,spend={}))
+        out['source_key'] = source_key
     with open(path, 'w') as f: json.dump(out, f, indent=1)
     return out
 
@@ -393,6 +412,8 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
                 taken.setdefault(url,[]).append(tuple(c['time_range']))
     used, out = [], []
     for i, window in enumerate(coverage['windows']):
+        if window.get('on_take'):
+            continue
         a, b = round(window['t0']*fps)+lead, round(window['t1']*fps)+lead
         candidates = [('clip', c.get('subject', window['name']), c) for c in sorted(footage.get(i, []),
             key=lambda c:(-fits.get((i,c['path']),5),
@@ -601,15 +622,15 @@ def require_coverage(ins, coverage, duration, fps=30, final=False):
     def moving_picture(row):
         return row[2]=='clip' and row[4].get('verified_motion') is True and row[4].get('placed_motion_p90',0)>=1.
     moving = sum(r[1]-r[0] for r in ins if moving_picture(r))/fps
-    missing = [i for i in range(len(coverage['windows'])) if not any(r[4].get('window')==i for r in ins)]
+    missing = [i for i,w in enumerate(coverage['windows']) if not w.get('on_take') and not any(r[4].get('window')==i for r in ins)]
     named = sum(w['t1']-w['t0'] for w in coverage['windows'])
     unique=[]
     for row in ins:
         if not any(same_picture(row[4],old) for old in unique):unique.append(row[4])
     rate = len(unique)*10/max(named,.01)
     weak = [i for i,w in enumerate(coverage['windows'])
-            if sum(r[1]-r[0] for r in ins if r[4].get('window')==i)/fps < .8*(w['t1']-w['t0'])
-            or sum(r[1]-r[0] for r in ins if r[4].get('window')==i and moving_picture(r))/fps < .6*(w['t1']-w['t0'])]
+            if not w.get('on_take') and (sum(r[1]-r[0] for r in ins if r[4].get('window')==i)/fps < .8*(w['t1']-w['t0'])
+            or sum(r[1]-r[0] for r in ins if r[4].get('window')==i and moving_picture(r))/fps < .6*(w['t1']-w['t0']))]
     report = dict(real_seconds=real,moving_seconds=moving,required_real_seconds=.45*duration,required_moving_seconds=.6*max(real,.45*duration),named_seconds=named,new_per_10s=rate,new_pictures=len(unique),repeated_pictures=len(ins)-len(unique),weak_windows=weak,missing_windows=missing)
     short = bool(real/max(duration,.01)<.45 or moving/max(real,.01)<.60 or rate<6 or missing)
     report['short'] = short

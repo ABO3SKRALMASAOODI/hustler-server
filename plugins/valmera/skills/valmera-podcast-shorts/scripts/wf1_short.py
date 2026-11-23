@@ -201,8 +201,16 @@ def supply(ctx, script):
     # The script stage read the whole moment and resolved what it names, each with the event-level picture it needs
     # (script.named: "Alexandr Wang", "Mark Zuckerberg eating watermelon on a Meta livestream"). They are the
     # director's subjects from the start, for the plan and for the referent research alike.
+    import wf1_source_frame
+    frames = wf1_source_frame.samples(src, idx.get("shots"), dur, sup_dir, PX.FF)
     coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm(), named=script.get('named'),
-                                 off_camera=off_camera(cuts, words))
+                                 off_camera=off_camera(cuts, words), frames=frames)
+    original = coverage.get('source_reading') or {}
+    coverage['windows'] = [w for i,w in enumerate(coverage['windows']) if i not in original.get('replaces',[])]
+    if original:
+        coverage['source_reading'] = dict(original,replaces=[])  # the pack now numbers external windows only
+    if original.get('spend'):
+        spend.append(dict(stage="supply",what="interview source composition",**original['spend']))
     coverage['context']=who
     import wf1_context
     primary_direction = (wf1_context.direct(coverage, os.path.join(sup_dir, 'referent-research'), _llm())
@@ -840,7 +848,9 @@ def refill(ctx, script, pack, shortage):
     """Research missing coverage through the same engines, preserving all checked originals."""
     coverage = pack['coverage']
     windows = coverage['windows']
-    wanted = shortage['weak_windows'] or list(range(len(windows)))
+    wanted = [i for i in (shortage['weak_windows'] or range(len(windows))) if not windows[i].get('on_take')]
+    if not wanted:
+        return
     if not pack.get('referent_research'):
         import wf1_context
         found=wf1_context.research(coverage,os.path.join(ctx.supply,'referent-research'),_llm())
@@ -1111,6 +1121,19 @@ def score(ctx, script):
         pack = wf3.load_pack(ctx)
     pack["work"] = ctx.supply
     refresh=False
+    coverage = pack['coverage']
+    # A resumed supply already has its word plan and candidates. Keep their window
+    # indices and read only the original take when the pack predates source framing.
+    if 'source_reading' not in coverage and os.path.isfile(os.path.join(ctx.supply,'index.json')):
+        import wf1_source_frame
+        idx = json.load(open(os.path.join(ctx.supply,'index.json')))
+        take = pack['take']
+        frames = wf1_source_frame.samples(take['path'],idx['shots'],take['dur'],ctx.supply,pack['ffmpeg'])
+        reading = wf1_source_frame.read(coverage,frames,_llm(),ctx.supply)
+        coverage['source_reading'] = reading
+        for i in reading['replaces']:
+            coverage['windows'][i]['on_take'] = True
+        refresh = True
     if pack.get('blank_frame_contract')!=1:
         for row in pack.get('footage',[]):
             for clip in row['clips']:dull(clip)
@@ -1384,7 +1407,8 @@ def _rebuild_motion(ctx, script, sc, report, defer=False):
     record keeps its measured moving share. Returns True when the film was rebuilt."""
     pack=wf3.load_pack(ctx)
     pics=sc['beats'].get('pictures') or []
-    stills={pics[row['id']]['path'] for row in report['placements'] if row.get('motion_ok') is not True}
+    stills={pics[row['id']]['path'] for row in report['placements'] if row.get('motion_ok') is not True
+            and pics[row['id']].get('mode') != 'source-insert'}
     previous=set(pack.get('composed_stills') or [])
     weak = sorted({pics[row['id']].get('window') for row in report['placements']
                    if row.get('ok') and row.get('motion_ok') is False and isinstance(pics[row['id']].get('window'),int)})
@@ -1449,6 +1473,8 @@ def hold_windows(measured, coverage, pictures, fps=None, lead=None):
     lead = F.LEAD_F if lead is None else lead
     out = set()
     for i, w in enumerate(coverage.get("windows") or []):
+        if w.get('on_take'):
+            continue
         a, b = (round(w["t0"]*fps)+lead)/fps, (round(w["t1"]*fps)+lead)/fps
         placed = [p for p in pictures if p.get("window") == i]
         meaningful = min(1.4,b-a)

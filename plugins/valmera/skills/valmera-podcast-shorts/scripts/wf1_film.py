@@ -373,6 +373,8 @@ def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, str
             if url and clip.get("time_range"):
                 taken.setdefault(url, []).append(tuple(clip["time_range"]))
     for i, window in enumerate(coverage["windows"]):
+        if window.get('on_take'):
+            continue
         a = max(f_first, round(window["t0"] * FPS) + LEAD_F)
         b = min(f_last, round(window["t1"] * FPS) + LEAD_F)
         if b - a <= FILL_GAP_S * FPS:
@@ -790,6 +792,36 @@ def build(script, sup, style_id, direction=None):
             return None
         return 0 if int(w) == 0 else max(Clock.f(clock.words[int(w)]["t0"]) - 1, 0)
 
+    # Bind source pictures to the very same spread word clock used by captions.
+    reading = coverage.get('source_reading') or {}
+    source_rows = []
+    for rec in reading.get('inserts', []):
+        a = word_frame(rec['first'])
+        b = min(f_end, Clock.f(clock.words[rec['last']]['t1']))
+        if source_rows:
+            a = max(a, source_rows[-1][1])
+        if b <= a or (None,rec['path']) in rejected_pairs:
+            continue
+        if (None,rec['path']) in reframes:
+            left,top,right,bottom = rec['box']
+            dx,dy = (right-left)*.07,(bottom-top)*.07
+            rec = dict(rec,box=[max(0.,left-dx),max(0.,top-dy),min(1.,right+dx),min(1.,bottom+dy)],reframe=True)
+        name = rec['shows'] or 'Interview screen share'
+        source = dict(url=script.get('source_url'),title=name,channel=script.get('source_credit'),
+                      time_s=round(script.get('source_start',0)+rec['t'],3),box=rec['box'])
+        source_rows.append([a,b,'photo',name,dict(rec,provider='interview-frame',source=source,page=source['url'],
+                            clause=' '.join(w['w'] for w in clock.words[rec['first']:rec['last']+1]),
+                            clause_t=[coverage['words'][rec['first']]['start'],coverage['words'][rec['last']]['end']])])
+    source_spans = [r[:2] for r in source_rows]
+    def on_evidence(a,b):
+        return a is not None and b is not None and any(a < end and start < b for start,end in source_spans)
+
+    # A retained Director can predate the source reading. The original takes its word's
+    # visual slot, while continuous rhythm direction still spans the film.
+    if source_rows and dr:
+        dr = dict(dr,asks=[ask for ask in dr.get('asks',[]) if ask['dev']=='contour' or not
+                      on_evidence(word_frame(ask['at']['w']), (word_frame((ask.get('until') or ask['at'])['w']) or 0)+1)])
+
     def seg_span(i):
         return (seg_f[i], min(Clock.f(clock.segs[i][1]) + 6, f_end)) if 0 <= i < nseg else (None, None)
     secs = []                                            # the Director's sections as frame ranges: (f0, f1, section)
@@ -862,6 +894,9 @@ def build(script, sup, style_id, direction=None):
                                ffmpeg=sup["ffmpeg"])
         placement_report["gap_fill"] = {k: v for k, v in fill.items() if k != "spend"}
         placement_report["spend"].extend(fill["spend"])
+    if source_rows:
+        ins, _ = _director().hold_take(ins,source_spans,min_f=1,fps=FPS)
+        ins = sorted(ins+source_rows,key=lambda row:row[0])
     for row in ins:
         rec = row[4]
         origin = (rec.get("text_cleared") or {}).get("from_path") or rec["path"]
@@ -899,7 +934,9 @@ def build(script, sup, style_id, direction=None):
     if pre and take.get("on_camera") is not False:
         held = DR.take_spans(pre, f_end)
         if held:
-            ins, cleared = DR.hold_take(ins, held, fps=FPS)
+            other = [row for row in ins if row[4].get('provider') != 'interview-frame']
+            other, cleared = DR.hold_take(other, held, fps=FPS)
+            ins = sorted(other+source_rows,key=lambda row:row[0])
             coverage_report['take_held'] = dict(spans=held, cleared_f=cleared)
 
     # Full-page authored type takes the screen. A documentary insert underneath would
@@ -907,7 +944,8 @@ def build(script, sup, style_id, direction=None):
     pages=[ask["f"] for ask in pre if ask.get("dev")=="type_run" and ask.get("words")
            and isinstance(ask.get("f"),list) and len(ask["f"])==2]
     if pages:
-        ins,cleared=DR.hold_take(ins,pages,min_f=1,fps=FPS)
+        other,cleared=DR.hold_take([row for row in ins if row[4].get('provider') != 'interview-frame'],pages,min_f=1,fps=FPS)
+        ins=sorted(other+source_rows,key=lambda row:row[0])
         coverage_report["authored_pages"]=dict(spans=pages,cleared_f=cleared)
     # Reserve picture space for actual multi-line performances on the speaker.
     # Read the same hold and word clock as the palette, including its implicit exit.
@@ -928,6 +966,8 @@ def build(script, sup, style_id, direction=None):
         # Cite the preceding complete spoken sentence on a source card; the active captions continue below.
         complete = [i for i,(_,end) in enumerate(clock.segs) if end <= clock_start+.12]
         if not complete or not script.get("source_credit"):
+            return False
+        if 'quote_segments' in reading and complete[-1] not in reading['quote_segments']:
             return False
         line = str(script["segments"][complete[-1]]["say"]).strip()
         if not line:
@@ -1020,6 +1060,18 @@ def build(script, sup, style_id, direction=None):
                 coverage_report.setdefault("speaker_panels",[]).append(dict(f=[fa,fb],word_frame=first))
                 cut_pts.append(fa)
                 continue
+            if reading.get('inserts') and pieces[k]['who'] == 'speaker':
+                from wf1_source_frame import presenter_card, presenter_crop
+                height = .76
+                framing = presenter_crop(reading['inserts'],pieces[k]['faces'],[t0,t1],W/(H*height))
+                if framing:
+                    tile,crop = framing
+                    # Use the verified webcam tile on the explanation, then cut back to the document.
+                    P.page([fa,fb],"#151A20",grain=0)
+                    presenter_card(P,[fa,fb],pieces[k]['key'],[0,0,1,height],tile,crop,[t0,t1],
+                                   sup['work'],sup['ffmpeg'],source_ink=[[0,0,1,height]],caption_baseline=.87)
+                    cut_pts.append(fa)
+                    continue
             kw = dict(grade=dict(TAKE_PAST)) if any(s0 <= fa < s1 for s0, s1 in take_past) else {}
             it = P.shot([fa,fb], pieces[k]["key"], None, src=[round(t0,4),round(max(t1,t0+1/FPS),4)], **kw)
             it.pop("crop")
@@ -1186,7 +1238,14 @@ def build(script, sup, style_id, direction=None):
             prints(run)
         for k in run:
             f0, f1, kind, name, rec = ins[k]
-            if lay == "bleed" or kind == "clip":
+            if rec.get('provider') == 'interview-frame':
+                from wf1_source_frame import compose
+                key = keys[rec["path"]]
+                src = [max(0,(f-LEAD_F)/FPS) for f in (f0,f1)]
+                compose(P,[f0,f1],rec,key,pieces[0]["key"],src,W,H,sup["work"],sup["ffmpeg"])
+                note(f0,f1,kind,name,rec,"source-insert")
+                P.pictures[-1]["source_crop"] = rec["box"]
+            elif lay == "bleed" or kind == "clip":
                 bleed(f0, f1, kind, name, rec, keys[rec["path"]])
             elif lay == "window":
                 window(f0, f1, kind, name, rec, keys[rec["path"]])
@@ -1273,7 +1332,7 @@ def build(script, sup, style_id, direction=None):
         next_word = word_frame(page["last"] + 1)
         if next_word is not None:
             b = min(b, next_word)
-        if b <= a:
+        if b <= a or on_evidence(a,b):
             continue
         rows = wf1_display.typeset(page["facts"], P.R, DISPLAY_W * W, cased)
         y = cap_y - .075
@@ -1313,7 +1372,7 @@ def build(script, sup, style_id, direction=None):
         next_subject = [round(w['t0']*FPS)+LEAD_F for w in coverage['windows'] if round(w['t0']*FPS)+LEAD_F>a+1]
         if next_subject:
             b = min(b,min(next_subject))
-        if b - a < 14:
+        if b - a < 14 or on_evidence(a,b):
             continue
         if any(a < page["f"][1] and page["f"][0] < b for page in fact_pages):
             continue
@@ -1375,7 +1434,7 @@ def build(script, sup, style_id, direction=None):
         shown.append((a, b, text))
     shown.sort()
     for a, b, text, pic in labels:
-        if b - a < 14:
+        if b - a < 14 or on_evidence(a,b):
             continue
         t = text.upper()
         rows = [t]

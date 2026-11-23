@@ -207,6 +207,7 @@ def test_scarce_footage_keeps_live_argument_and_attributes_listener_cut(tmp_path
     lines=[" ".join(w["w"] for w in sup["words"]["words"] if w["seg"]==i) for i in (0,1)]
     script=dict(title="Coach",source_credit="Interview",source_start=120,source_url="https://example.org/interview",
                 segments=[dict(say=line,pictures=[]) for line in lines])
+    sup["coverage"]["source_reading"] = dict(inserts=[],quote_segments=[0])
     l1,beats=film.build(script,sup,"footage-cut",dict(coverage_final=True))
     evidence=beats["coverage"]
     quoted=evidence["quoted_source"][0]
@@ -261,3 +262,62 @@ def test_full_page_year_cards_and_archival_footage_own_distinct_frames(tmp_path,
     window = next(it for it in scene["items"] if it.get("source_ink") and it["f"] == [53,72])
     assert window["crop"] == [0,0,1,1]
     assert any(it["k"] == "shot" and it["pic"] == "plate" and it["f"] == window["f"] for it in scene["items"])
+
+
+def test_source_chart_precedes_face_fit_and_type(tmp_path, quiet_engines):
+    from PIL import Image
+    path = str(tmp_path / "screen.png")
+    Image.new("RGB", (1920,1080)).save(path)
+    pack = _sup(tmp_path, cuts_two_shot())
+    words = pack["coverage"]["words"]
+    source = dict(path=path,t=1.5,shot=[0,4],w=1920,h=1080,box=[.30,.19,.79,.66],
+                  tile=[.79,.21,1,.43],first=3,last=8,shows="Pull requests per week by rank")
+    pack["coverage"]["source_reading"] = dict(inserts=[source],quote_segments=[])
+    script = dict(source_credit="Interview",source_start=100,source_url="https://example.org/interview",
+                  segments=[dict(say=" ".join(w["w"] for w in words if w["seg"]==i),pictures=[]) for i in (0,1)])
+    director = dict(asks=[dict(dev="diecut",at=dict(w=4,seg=0,word=words[4]["w"]),args={})])
+    scene, beats = film.build(script,pack,"window",dict(coverage_final=True,director=director))
+    evidence, = [p for p in beats["pictures"] if p.get("mode")=="source-insert"]
+    card, = [i for i in scene["items"] if i.get("pic")==evidence["pic"] and i["k"]=="card"]
+    assert card["crop"]==source["box"] and card["f"]==evidence["f"]
+    assert evidence["source_evidence"]["time_s"]==101.5
+    assert abs(card["w"]*1080/(card["h"]*1920) - .49*1920/(.47*1080)) < .002
+    assert any(i.get("src") and i["f"]==card["f"] for i in scene["items"] if i["k"]=="card")
+    assert not any(d["dev"]=="diecut" for d in scene.get("devices",[]))
+    assert any(i["k"]=="shot" and i["f"][0]>=card["f"][1] and i["pic"]!="plate" for i in scene["items"])
+
+
+def test_same_source_frame_and_words_reuse_the_joint_reading(tmp_path):
+    import json
+    from types import SimpleNamespace
+    from PIL import Image
+    import wf1_coverage
+
+    path = tmp_path / "original.png"
+    Image.new("RGB",(160,90)).save(path)
+    frames = [dict(path=str(path),t=1,shot=[0,2])]
+    words = [dict(w="Here",seg=0,start=.1,end=.3),dict(w="look",seg=0,start=.3,end=1)]
+    calls = []
+    def ask(system,content,**kwargs):
+        assert content[-1]["type"]=="image"
+        calls.append(1)
+        return json.dumps(dict(entities=[],windows=[],moves=[],quote_segments=[],
+                          source_inserts=[dict(first=0,last=1,frame=0,box=[.1,.2,.7,.8],shows="source chart")])),{}
+    llm = SimpleNamespace(ask=ask,json_block=json.loads)
+    for name in ("original.png","copied.png"):
+        copied = tmp_path / name
+        copied.write_bytes(path.read_bytes())
+        frames[0]["path"] = str(copied)
+        plan = wf1_coverage.plan(words,"Chart",str(tmp_path),llm,frames=frames)
+        assert plan["source_reading"]["inserts"][0]["path"]==str(copied)
+        assert plan["windows"]==[] and plan["source_reading"]["quote_segments"]==[]
+    assert len(calls)==1
+
+def test_explanatory_closeup_stays_inside_the_verified_live_tile():
+    from wf1_source_frame import presenter_crop
+    share = dict(tile=[.79,.21,1,.43],t=1.5,shot=[0,8],w=1920,h=1080)
+    host = [dict(box=[.87,.25,.93,.39])]
+    tile,(l,t,r,b) = presenter_crop([share],host,[2,6],1080/(1920*.76))
+    assert .79 <= l <= .87 < .93 <= r <= 1 and (t,b)==(.21,.43)
+    assert presenter_crop([share],host,[9,12],.75) is None
+    assert presenter_crop([share],[dict(box=[.12,.15,.31,.60])],[2,6],.75) is None
