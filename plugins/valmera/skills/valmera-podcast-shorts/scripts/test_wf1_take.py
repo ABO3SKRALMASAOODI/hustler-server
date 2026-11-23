@@ -207,11 +207,12 @@ def test_scarce_footage_keeps_live_argument_and_attributes_listener_cut(tmp_path
     lines=[" ".join(w["w"] for w in sup["words"]["words"] if w["seg"]==i) for i in (0,1)]
     script=dict(title="Coach",source_credit="Interview",source_start=120,source_url="https://example.org/interview",
                 segments=[dict(say=line,pictures=[]) for line in lines])
+    script["speaking_turns"] = [dict(start=120,end=136,speaker="The coach")]
     sup["coverage"]["source_reading"] = dict(inserts=[],quote_segments=[0])
     l1,beats=film.build(script,sup,"footage-cut",dict(coverage_final=True))
     evidence=beats["coverage"]
     quoted=evidence["quoted_source"][0]
-    assert quoted["quote"]==lines[0] and quoted["credit"]=="Interview  ·  2:00" and quoted["url"]==script["source_url"]
+    assert quoted["quote"]==lines[0] and quoted["credit"]=="The coach  ·  Interview  ·  2:00" and quoted["url"]==script["source_url"]
     panel=evidence["speaker_panels"][0]
     live=next(i for i in l1["items"] if i["k"]=="card" and i["f"]==panel["f"])
     assert l1["assets"][live["pic"]]["path"]==sup["take"]["path"]
@@ -321,3 +322,22 @@ def test_explanatory_closeup_stays_inside_the_verified_live_tile():
     assert .79 <= l <= .87 < .93 <= r <= 1 and (t,b)==(.21,.43)
     assert presenter_crop([share],host,[9,12],.75) is None
     assert presenter_crop([share],[dict(box=[.12,.15,.31,.60])],[2,6],.75) is None
+
+
+def test_authored_interview_layout_preserves_source_corners(tmp_path, quiet_engines, monkeypatch):
+    import wf1_coverage
+    import wf1_source_frame
+    cuts = cuts_two_shot()
+    pack = _sup(tmp_path, cuts)
+    reading = wf1_source_frame.bind(pack["coverage"], [dict(t=2.,shot=[0,4])], dict(authored_frames=[0]))
+    pack["coverage"]["source_reading"] = reading
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *args: ([], []))
+    script = dict(title="Report", source_start=100., source_credit="Interview", source_url="interview-url",
+                  segments=[dict(say=" ".join(w["w"] for w in pack["words"]["words"] if w["seg"]==i),pictures=[]) for i in (0,1)])
+    scene, beats = film.build(script, pack, "archive-reel", dict(coverage_final=True))
+    cards = [it for it in scene["items"] if it.get("source_frame")]
+    assert cards and all(it["crop"] == [0,0,1,1] and it["w"]*1080/(it["h"]*1920)==pytest.approx(16/9,abs=.001)
+                         for it in cards)
+    assert sum(it["f"][1]-it["f"][0] for it in cards) == 4*30 + film.LEAD_F
+    assert all(r["url"]=="interview-url" for r in beats["coverage"]["authored_source"])
+    assert any(it.get("pic","").startswith("own:") and it["k"]=="shot" for it in scene["items"])

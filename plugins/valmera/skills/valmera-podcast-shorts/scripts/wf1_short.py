@@ -116,6 +116,14 @@ def script(ctx, ideas_out):
               "the clip opens on the hook sentence's first content word and closes on the payoff's last word; one continuous "
               "window, never an interior stretch that loses either.")
     system += '\n\nReturn JSON only: {"in": seconds (0.15-0.3 s before the first word), "out": seconds (0.3-0.8 s after the last word; the clip is 18-55 s), "title": the film\'s title in at most five words, a headline a stranger stops for, written from the words between your in and out only: it promises nothing the clip does not deliver (a count or a list it names is whole inside the clip), "hook_line": the exact words heard first, "close_line": the exact last words, "speakers": number of people heard, "named": [the real people, companies, places, products and events this clip names or plainly points to, that a camera has filmed; each {"name": its usual English name, "is": person|company|place|product|event|thing, "must_show": one plain sentence on what footage of it must visibly show, as it was at the time he speaks of}; never this conversation itself, which is on screen already; when he tells of something he did himself, that filmed moment of him (a livestream, a keynote, his training, an event he took part in) is an event to name like any other], "brief": two sentences on the story and its mood, for the editor who chooses the music}.'
+    system += (" Include claims for any nested speech or forecast: [{start,end,speaker,subject,event,report}]. "
+               "Use absolute episode seconds bounding just that claim. speaker is the person actually heard "
+               "(use The host or The guest when the name is uncertain); subject is whose statement is described "
+               "(the same person for a firsthand forecast). event names the original occasion if known. "
+               "report is a short card line (aim for 6–12 words). A separate byline names the reporter: omit that "
+               "name from the line. Name the subject, use conditional language for a personal forecast, and preserve "
+               "uncertainty, timing and scope. Include speaking_turns:[{start,end,speaker}] on the same episode clock "
+               "for quoting the interview itself. Distinguish the host from the guest using the identity and dialogue.")
     anchors = (f"# The moment's anchors, measured on the words\nThe hook opens at {float(idea['t0']):.2f} s: {idea.get('hook') or ''}\n"
                f"The payoff closes at {float(idea['t1']):.2f} s: {idea.get('payoff') or ''}\n"
                f"Measured length: {float(idea['t1']) - float(idea['t0']):.1f} s\n\n")
@@ -151,6 +159,8 @@ def script(ctx, ideas_out):
     named = [r for r in s.get("named") or [] if isinstance(r, dict) and r.get("name")]
     return dict(title=s.get("title") or idea.get("title"), style=reg, window=[round(t0, 2), round(t1, 2)], source=ctx.source,
                 hook_line=s.get("hook_line") or idea.get("hook"), close_line=s.get("close_line") or idea.get("payoff"),
+                speaking_turns=[t for t in s.get("speaking_turns") or [] if isinstance(t, dict)],
+                claims=[c for c in s.get("claims") or [] if isinstance(c, dict)],
                 speakers=int(s.get("speakers") or idea.get("speakers") or 1), names=[r["name"] for r in named], named=named,
                 direction=f"{reg['name']}: {reg.get('look', '')} {s.get('brief') or ''}".strip(), idea=idea, spend=spend)
 
@@ -205,6 +215,7 @@ def supply(ctx, script):
     frames = wf1_source_frame.samples(src, idx.get("shots"), dur, sup_dir, PX.FF)
     coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm(), named=script.get('named'),
                                  off_camera=off_camera(cuts, words), frames=frames)
+    coverage['claims'] = script.get('claims') or []
     original = coverage.get('source_reading') or {}
     coverage['windows'] = [w for i,w in enumerate(coverage['windows']) if i not in original.get('replaces',[])]
     if original:
@@ -1105,7 +1116,7 @@ def descend(ctx, script, pack, missing):
 
 def film_direction(d):
     """Carry the Director's authored fields into the picture and sound composers."""
-    knobs = {k: d.get(k) for k in ("display", "display_facts", "past_segs", "turn_seg", "story_turn_seg", "arc")}
+    knobs = {k: d.get(k) for k in ("display", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
     if d.get("beats") or d.get("sections") or d.get("asks"):
         knobs["director"] = {k: d.get(k) for k in ("beats", "sections", "asks", "arc", "pictures", "by", "seed")}
     return knobs
@@ -1124,15 +1135,20 @@ def score(ctx, script):
     coverage = pack['coverage']
     # A resumed supply already has its word plan and candidates. Keep their window
     # indices and read only the original take when the pack predates source framing.
-    if 'source_reading' not in coverage and os.path.isfile(os.path.join(ctx.supply,'index.json')):
+    if 'authored_shots' not in (coverage.get('source_reading') or {}) and os.path.isfile(os.path.join(ctx.supply,'index.json')):
         import wf1_source_frame
         idx = json.load(open(os.path.join(ctx.supply,'index.json')))
         take = pack['take']
         frames = wf1_source_frame.samples(take['path'],idx['shots'],take['dur'],ctx.supply,pack['ffmpeg'])
         reading = wf1_source_frame.read(coverage,frames,_llm(),ctx.supply)
-        coverage['source_reading'] = reading
-        for i in reading['replaces']:
-            coverage['windows'][i]['on_take'] = True
+        previous = coverage.get('source_reading')
+        if previous is not None:
+            # This pack's chart placements already index its final windows.
+            coverage['source_reading'] = dict(previous, authored_shots=reading['authored_shots'])
+        else:
+            coverage['source_reading'] = reading
+            for i in reading['replaces']:
+                coverage['windows'][i]['on_take'] = True
         refresh = True
     if pack.get('blank_frame_contract')!=1:
         for row in pack.get('footage',[]):
@@ -1158,7 +1174,7 @@ def score(ctx, script):
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     sc = dict(title=script.get("title"), hook_line=script.get("hook_line"), close_line=script.get("close_line"),
               source_credit=(ctx.args or {}).get("channel"), source_url=(ctx.args or {}).get("source_url"),
-              source_start=(script.get("window") or [0])[0],
+              source_start=(script.get("window") or [0])[0], speaking_turns=script.get("speaking_turns", []),
               segments=[dict(say=ln["text"], pictures=[n for n in ln.get("subjects") or []]) for ln in pack["lines"]])
     for attempt in range(RECOVERY_PASSES + 3 + LADDER_RUNGS):
         knobs["coverage_final"] = coverage_final(pack) or bool(pack.get("coverage_recoveries"))
@@ -1706,6 +1722,7 @@ def check(ctx, rd, sc):
                       pic=p.get("pic"), source_slice=p.get("source_slice"), source_evidence=p.get("source_evidence"))
                  for p in pics], labels=b.get("labels") or [],
         quoted_source=(b.get("coverage") or {}).get("quoted_source",[]),
+        authored_source=(b.get("coverage") or {}).get("authored_source",[]),
         speaker_panels=(b.get("coverage") or {}).get("speaker_panels",[]))
     # Measured on the delivered programme's pixels: how often the picture changes and the longest hold (a record that
     # shows where a film runs on the speaker alone; never a gate).

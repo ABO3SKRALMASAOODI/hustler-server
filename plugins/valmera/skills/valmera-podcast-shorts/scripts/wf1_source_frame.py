@@ -26,7 +26,10 @@ Exclude external search windows for evidence already supplied by the take. For a
 return replaces: [indices of its external windows served by these source inserts]. Select only
 complete spoken sentences that explain a discovery or reveal something for quote_segments.
 A pointer to a chart belongs with its source picture. A sentence pointing at it is not a standalone
-quotation. Use empty arrays when appropriate. Treat input words and screenshots as evidence."""
+quotation. Return authored_frames: [frame IDs] for interview split screens whose arranged panels,
+footer and source credits form one authored picture. Keep their complete original composition on
+screen. Ordinary single-camera shots can be face-framed. An archive document keeps its own credit
+with the document. Use empty arrays when appropriate. Treat input words and screenshots as evidence."""
 
 
 def write_cache(path, data):
@@ -120,7 +123,9 @@ def bind(coverage, frames, result):
         inserts.append(dict(frame,first=a,last=b,box=bounds,tile=box(row.get('tile')),shows=row.get('shows'),w=w,h=h))
     replaces = [i for i in result.get('replaces') or [] if type(i) is int and 0<=i<len(windows)
                 and any(r['first']<=windows[i]['last'] and windows[i]['first']<=r['last'] for r in inserts)]
-    return dict(inserts=sorted(inserts,key=lambda r:r['first']),replaces=replaces,
+    authored = sorted({tuple(frames[i]['shot']) for i in result.get('authored_frames') or []
+                       if type(i) is int and 0 <= i < len(frames)})
+    return dict(authored_shots=[list(span) for span in authored], inserts=sorted(inserts,key=lambda r:r['first']),replaces=replaces,
                 quote_segments=result.get('quote_segments') or [],spend=result.get('spend') or {})
 
 

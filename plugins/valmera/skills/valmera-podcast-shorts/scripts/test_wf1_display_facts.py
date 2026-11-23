@@ -102,3 +102,65 @@ def test_counter_uses_the_sourced_change_and_keeps_a_fixed_quote_whole(tmp_path)
     scene = dict(frame=[1080,1920], fps=30, dur_f=120, items=[], assets={}, voices={})
     planned = type_devices.counter(scene,str(tmp_path),dict(bound["args"],id="team",at=[20,90]))
     assert planned["log"]["from"] == "3" and planned["log"]["to"] == "12" and planned["log"]["steps"] > 2
+
+
+def test_reported_forecast_and_verified_original(tmp_path, monkeypatch):
+    import net_fetch
+    import wf1_context
+    from pathlib import Path
+    import wf1_display as display
+    ctx, script, pack = material(tmp_path)
+    original = "https://example.org/roadshow"
+    claim = dict(start=3264.34, end=3270.5, speaker="Jason Calacanis", subject="Dario Amodei",
+                 event="IPO roadshow", report="Amodei thought cures might come within a decade")
+    script.update(window=[3264.34, 3292.66], claims=[claim])
+    src = dict(url=original, publisher="Anthropic", supports="The IPO site hosted the presentation.")
+    pack["referent_research"] = dict(references=[dict(sources=[src])])
+    words = [dict(w=w, seg=0, t0=i*.25, t1=(i+1)*.25)
+             for i,w in enumerate("Dario during the roadshow is saying cancer and Alzheimer's I believe will be gone in under 10 years".split())]
+    fact = dict(source=original, attribution="Dario Amodei", qualifier="I think", relation="Cancer and Alzheimer’s gone",
+                value="under 10 years")
+    direction = dict(arc=[], asks=[dict(dev="staircase", at=dict(w=6), until=dict(w=len(words)-1),
+                                       args=dict(facts=[fact]))])
+    def page():
+        material = display.editorial(ctx, script, pack)
+        bound, = display.bind(direction, material, words)["display_facts"]
+        item, = bound["facts"]
+        return item, [line for line,_ in display.lines([item])]
+    report, lines = page()
+    assert lines[:2] == ["Jason Calacanis reports", claim["report"]]
+    assert report["source"]["url"] == INTERVIEW and report["chain"]["event"] == "IPO roadshow"
+    # Synthetic primary transcript fixture, including the speaker's uncertainty.
+    quote = "I think the trial could finish in five years."
+    src["quotations"] = [dict(words=quote, speaker="Dario Amodei", event="IPO roadshow", locator="40:38")]
+    def transcript(url, dest, **kw):
+        Path(dest).write_text("<article>Dario Amodei · IPO roadshow · 40:38. "+quote+"</article>")
+        return Path(dest).stat().st_size, url
+    monkeypatch.setattr(net_fetch, "download", transcript)
+    wf1_context.read_quotations(pack["referent_research"]["references"], str(tmp_path))
+    fact["quote"] = quote
+    item, lines = page()
+    assert item["source"]["url"] == original and item["chain"]["speaker"] == "Jason Calacanis"
+    assert "“"+quote+"”" in lines and "Dario Amodei" in lines and any("40:38" in s and "IPO roadshow" in s for s in lines)
+    fact["quote"] = "The trial will finish in five years."
+    assert page()[1][0] == "Jason Calacanis reports"
+    # The launch URL now lands on an investor page with no wording from the event.
+    def redirected(url, dest, **kw):
+        Path(dest).write_text("<article>Investor relations</article>")
+        return 35, "https://example.org/investors"
+    monkeypatch.setattr(net_fetch, "download", redirected)
+    wf1_context.read_quotations(pack["referent_research"]["references"], str(tmp_path))
+    fact["quote"] = quote
+    assert page()[1][0] == "Jason Calacanis reports"
+
+    # Calacanis's actual closing words in the same source can be quoted directly.
+    closing = "I actually think he does."
+    heard = [dict(w=w, seg=6, t0=26+i*.2, t1=26.2+i*.2) for i,w in enumerate(closing.split())]
+    script["claims"] = [dict(start=3290., end=3292., speaker="Jason Calacanis", subject="Jason Calacanis",
+                             event="All-In Podcast", report=closing)]
+    fact.update(quote=closing, source="interview")
+    ask = dict(dev="typewriter", at=dict(w=0), until=dict(w=4), args=dict(facts=[fact]))
+    bound = display.bind(dict(arc=[], asks=[ask]), display.editorial(ctx,script,pack), heard)
+    cited, = bound["display_facts"][0]["facts"]
+    assert cited["value"] == "“"+closing+"”" and cited["attribution"] == "Jason Calacanis"
+    assert cited["source"]["url"] == INTERVIEW and cited["relation"] == "54:50"

@@ -816,6 +816,17 @@ def build(script, sup, style_id, direction=None):
     def on_evidence(a,b):
         return a is not None and b is not None and any(a < end and start < b for start,end in source_spans)
 
+    timed_facts = []
+    for page in d.get("display_facts") or []:
+        a = word_frame(page["first"])
+        b = min(f_end, Clock.f(clock.words[page["last"]]["t1"]))
+        next_word = word_frame(page["last"] + 1)
+        if next_word is not None:
+            b = min(b, next_word)
+        if b > a and not on_evidence(a,b):
+            timed_facts.append((a,b,page))
+    report_spans = [(a,b) for a,b,page in timed_facts if any(f.get("chain") for f in page["facts"])]
+
     # A retained Director can predate the source reading. The original takes its word's
     # visual slot, while continuous rhythm direction still spans the film.
     if source_rows and dr:
@@ -969,11 +980,14 @@ def build(script, sup, style_id, direction=None):
             return False
         if 'quote_segments' in reading and complete[-1] not in reading['quote_segments']:
             return False
-        line = str(script["segments"][complete[-1]]["say"]).strip()
+        segment = complete[-1]
+        claim = next((c for c in d.get("claims") or [] if clock.words[c["first"]]["seg"] <= segment
+                      <= clock.words[c["last"]]["seg"]), None)
+        line = claim["report"] if claim else str(script["segments"][segment]["say"]).strip()
         if not line:
             return False
         P.page([fa,fb],"#171B23","#0D1015",grain=.018)
-        tokens = ("“"+line.rstrip('.,')+"”").split()
+        tokens = (line if claim else "“"+line+"”").split()
         face = dict(voices["dsp"],px=89,track=0)
         while True:
             voice = f"quotation{face['px']}"
@@ -992,10 +1006,21 @@ def build(script, sup, style_id, direction=None):
         y=.40-(len(rows)-1)*line_h/2
         for n,row in enumerate(rows):
             P.word([fa,fb],row,voice,.075,y+n*line_h,ink=pal["ink"],role="graphic",note=False)
-        stamp=int(script.get("source_start",0)+clock.segs[complete[-1]][0])
+        source_time = script.get("source_start", 0) + clock.segs[segment][0] - LEAD_F/FPS
+        stamp = int(source_time)
         credit=f'{script["source_credit"]}  ·  {stamp//60}:{stamp%60:02d}'
+        if claim:
+            credit = f'{claim["speaker"]} reports  ·  {credit}'
+        else:
+            speaker = next((s.get("speaker") for s in script.get("speaking_turns", [])
+                            if all(type(s.get(k)) in (int,float) for k in ("start","end"))
+                            and s["start"] <= source_time < s["end"]), None)
+            if speaker:
+                credit = f'{speaker}  ·  {credit}'
         P.word([fa,fb],credit,"lab",.075,y+len(rows)*line_h+.026,ink=pal["accent"],role="graphic",note=False)
-        coverage_report.setdefault("quoted_source",[]).append(dict(f=[fa,fb],quote=line,credit=credit,url=script.get("source_url")))
+        record = dict(report=line, chain=claim) if claim else dict(quote=line)
+        coverage_report.setdefault("quoted_source", []).append(dict(record, f=[fa,fb], credit=credit,
+                                                                      url=script.get("source_url")))
         return True
 
     def take_shot(a, b):
@@ -1026,11 +1051,30 @@ def build(script, sup, style_id, direction=None):
         if eligible:
             _,cue,finish=max(eligible)
             panel=(cue,finish)
-        edges = sorted({a, b, *[c for c in tcuts + joins + list(panel) if a+3 <= c <= b-3],
+        authored = reading.get("authored_shots", [])
+        layout_edges = [round(t*FPS)+LEAD_F for shot in authored for t in shot]
+        layout_edges.extend(f for span in report_spans for f in span)
+        edges = sorted({a, b, *(f for f in layout_edges if a < f < b), *[c for c in tcuts + joins + list(panel) if a+3 <= c <= b-3],
                         *(f for span in stacks for f in span[:2] if a < f < b)})
         for fa, fb in zip(edges, edges[1:]):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
+            on_report = any(lo <= fa < hi for lo,hi in report_spans)
+            if on_report or any(start <= (t0+t1)/2 < end for start,end in authored):
+                # The source cut is already a composition. Fit all panels and both original
+                # credit corners together, with an independent ground for the caption.
+                aspect = take["w"]/take["h"]
+                max_height, centre = (.38, .29) if on_report else (.70, .46)
+                width = min(1., max_height * H / W * aspect)
+                height = width * W / H / aspect
+                box = [.5-width/2, centre-height/2, .5+width/2, centre+height/2]
+                P.page([fa,fb],"#14171B",grain=0)
+                P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],crop=[0,0,1,1],
+                       source_frame=True,caption_baseline=.88 if on_report else min(.91,box[3]+.10))
+                coverage_report.setdefault("authored_source",[]).append(dict(f=[fa,fb],url=script.get("source_url"),
+                    publisher=script.get("source_credit"),start=script.get("source_start",0)+t0,box=box))
+                cut_pts.append(fa)
+                continue
             if pieces[k]["who"] == "listener" and quote_panel(fa,fb,t0):
                 cut_pts.append(fa)
                 continue
@@ -1326,16 +1370,9 @@ def build(script, sup, style_id, direction=None):
     # Authored facts stand for the selected clause. The interview's captions keep their own word clock.
     import wf1_display
     fact_pages = []
-    for page in d.get("display_facts") or []:
-        a = word_frame(page["first"])
-        b = min(f_end, Clock.f(clock.words[page["last"]]["t1"]))
-        next_word = word_frame(page["last"] + 1)
-        if next_word is not None:
-            b = min(b, next_word)
-        if b <= a or on_evidence(a,b):
-            continue
+    for a, b, page in timed_facts:
         rows = wf1_display.typeset(page["facts"], P.R, DISPLAY_W * W, cased)
-        y = cap_y - .075
+        y = .73 if (a,b) in report_spans else cap_y - .075
         seats = []
         for k in reversed(range(len(rows))):
             line, px, emphasis = rows[k]
@@ -1506,6 +1543,20 @@ def build(script, sup, style_id, direction=None):
             rec = next((r for rows in list(pics.values()) + list(footage.values()) for r in rows if r["path"] == path), {})
             meta[key] = dict(faces=F.face_meta(rec))
     l1["speaker_layout"] = {pc["key"]: meta[pc["key"]] for pc in pieces if meta[pc["key"]]["faces"]}
+    # A name super on the interview follows both the audible turn and the visible
+    # camera asset. The palette resolves actual picture spans after its other cuts.
+    turns = script.get("speaking_turns") or d.get("claims") or []
+    credits = []
+    for turn in turns:
+        if not (turn.get("speaker") and all(type(turn.get(k)) in (int,float) for k in ("start","end"))):
+            continue
+        first, last = [round((turn[k]-script.get("source_start",0))*FPS)+LEAD_F for k in ("start","end")]
+        for pc in pieces:
+            a, b = max(first, pc["f"][0]), min(last, pc["f"][1])
+            if a < b and pc["who"] == "speaker":
+                credits.append(dict(f=[a,b], pic=pc["key"], name_super=turn["speaker"],
+                                    source_evidence=dict(url=script.get("source_url"), time_s=turn["start"])))
+    l1["interview_credits"] = credits
     title_layout = seat_display(l1, meta, P.R)
     caps = [i for i in l1["items"] if i["k"] == "word" and i.get("role") == "cap"]
     if caps:
