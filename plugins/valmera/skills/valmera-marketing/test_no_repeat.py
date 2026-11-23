@@ -18,13 +18,19 @@ os.environ.setdefault("MARKET_NO_REEXEC", "1")
 import delivered as DL  # noqa: E402
 
 
-def _driver(tmp_path, monkeypatch):
+def _load_market():
     spec = importlib.util.spec_from_file_location("market_driver_under_test", os.path.join(HERE, "market.py"))
     market = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(market)
+    return market
+
+
+def _driver(tmp_path, monkeypatch):
+    market = _load_market()
     state = tmp_path / "state"
     monkeypatch.setattr(market, "STATE_ROOT", str(state))
     monkeypatch.setattr(market, "environment", lambda: {})
+    monkeypatch.setattr(market, "start_proxy", lambda env: None)
     monkeypatch.setattr(market, "prepare_state", lambda: None)
     monkeypatch.setattr(market, "stopped_run", lambda topic: None)
     monkeypatch.setattr(market, "sources_md", lambda folder: None)
@@ -40,6 +46,46 @@ def _driver(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(dict(delivered=str(staged))) + "\n")
     monkeypatch.setattr(market.subprocess, "run", run)
     return market, calls
+
+
+def test_market_routes_an_inherited_api_key_to_the_subscription_wrapper(monkeypatch):
+    market = _load_market()
+    monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setattr(sys, "argv", ["market.py", "wide interview"])
+
+    def reexec(path, args):
+        assert path == "/bin/zsh"
+        assert args[1] == f"{market.CODEX_PROXY}/run.sh"
+        assert args[3:] == [os.path.join(HERE, "market.py"), "wide interview"]
+        raise SystemExit(0)
+
+    monkeypatch.setattr(market.os, "execv", reexec)
+    with pytest.raises(SystemExit) as exc:
+        market.environment()
+    assert exc.value.code == 0
+
+
+def test_market_keeps_proxy_credentials_and_stops_when_the_proxy_cannot_start(monkeypatch):
+    market = _load_market()
+    monkeypatch.setenv("CODEX_PROXY_PORT", "8788")
+    monkeypatch.setenv("CODEX_PROXY_LOCAL", "1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8788/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "local-codex-only")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    monkeypatch.setenv("CODEX_API_KEY", "test-codex-key")
+    env = market.environment()
+    assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:8788/v1"
+    assert env["OPENAI_API_KEY"] == "local-codex-only"
+    assert "ANTHROPIC_API_KEY" not in env and "CODEX_API_KEY" not in env
+
+    def failed(cmd, **kwargs):
+        assert kwargs["env"] == env
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="proxy startup failed")
+
+    monkeypatch.setattr(market.subprocess, "run", failed)
+    with pytest.raises(SystemExit, match="Local Codex subscription proxy could not start"):
+        market.start_proxy(env)
 
 
 def test_the_driver_records_only_a_delivery_folder_and_a_test_never_writes_into_one(tmp_path, monkeypatch, capsys):

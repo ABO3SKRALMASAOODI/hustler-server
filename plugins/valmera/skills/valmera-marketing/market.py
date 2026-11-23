@@ -21,8 +21,8 @@ same words to continue where it stopped:
   deliver   once, complete: <out>/<date>-wf2-<style>-<title>-<id>/ with film.mp4, film_clean.mp4, film.json (receipts,
             credits, measures) and SOURCES.md. The run's work folder, the recording and its stack are deleted.
 
-Never publishes. Model calls run on OpenAI (the key is read from the backend .env, never printed); nothing is spent on
-Anthropic. Exit 0 delivered, 2 stopped (run the same command again), 1 failed. The last line of stdout is one JSON object.
+Never publishes. Model calls use the Mac's local Codex subscription proxy. Exit 0 delivered, 2 stopped (run the same
+command again), 1 failed. The last line of stdout is one JSON object.
 """
 import datetime as dt
 import json
@@ -38,7 +38,7 @@ if os.path.exists(PY) and os.path.realpath(sys.executable) != os.path.realpath(P
     os.execv(PY, [PY, os.path.realpath(__file__)] + sys.argv[1:])
 
 HERE = os.path.dirname(os.path.realpath(__file__))      # through the Claude Code link (codex/) too
-ENV_FILE = f"{V}/hustler-server/backend/.env"
+CODEX_PROXY = f"{VV}/tools/codex-proxy"
 OUT_ROOT = os.environ.get("MARKET_OUT_ROOT", f"{V}/Marketing Films")
 STATE_ROOT = os.environ.get("MARKET_STATE_ROOT", f"{VV}/workflow/marketing")     # its own work root: a start sweeps only its own runs
 SHARED = f"{VV}/workflow"
@@ -74,20 +74,24 @@ def engines_worker():
 
 
 def environment():
-    """OpenAI for every model call, Anthropic off; the key read from the backend .env into this process, never printed."""
+    """Use the existing local subscription wrapper for every workflow subprocess."""
     env = dict(os.environ)
+    base = f"http://127.0.0.1:{env.get('CODEX_PROXY_PORT') or '8788'}/v1"
+    if (env.get("CODEX_PROXY_LOCAL"), env.get("OPENAI_BASE_URL"), env.get("OPENAI_API_KEY")) != (
+        "1", base, "local-codex-only"
+    ):
+        wrapper = f"{CODEX_PROXY}/run.sh"
+        if not os.path.isfile(wrapper):
+            raise SystemExit(json.dumps(dict(failed=f"Local Codex proxy wrapper missing: {wrapper}")))
+        # Restart so the wrapper's Python startup hook also covers modules imported by the launcher.
+        os.execv("/bin/zsh", ["/bin/zsh", wrapper, sys.executable, os.path.join(HERE, "market.py"), *sys.argv[1:]])
     w = engines_worker()
     env.setdefault("VALMERA_WORKER", w)
     env.setdefault("VALMERA_SCENE_WORKER", env["VALMERA_WORKER"])
     env.pop("ANTHROPIC_API_KEY", None)
     env.pop("ANTHROPIC_TRIAL_KEY", None)
+    env.pop("CODEX_API_KEY", None)
     env.update(WRITER_PROVIDER="openai", SHELL_LLM="openai", SHELL_STATE_ROOT=STATE_ROOT, PYTHONDONTWRITEBYTECODE="1", WF2_ENGINE="proof")
-    if not env.get("OPENAI_API_KEY") and os.path.exists(ENV_FILE):
-        for line in open(ENV_FILE):
-            if line.startswith("OPENAI_API_KEY="):
-                env["OPENAI_API_KEY"] = line.split("=", 1)[1].strip().strip('"').strip("'")
-    if not env.get("OPENAI_API_KEY"):
-        raise SystemExit(json.dumps(dict(failed="no OPENAI_API_KEY in the environment or the backend .env")))
     return env
 
 
@@ -126,6 +130,14 @@ def last_json(text):
             except ValueError:
                 continue
     return {}
+
+
+def start_proxy(env):
+    service = subprocess.run(
+        [PY, f"{CODEX_PROXY}/service.py", "start"], env=env, capture_output=True, text=True,
+    )
+    if service.returncode or not last_json(service.stdout).get("ok"):
+        raise SystemExit(json.dumps(dict(failed="Local Codex subscription proxy could not start", detail=service.stderr.strip())))
 
 
 def sources_md(folder):
@@ -170,6 +182,7 @@ def main():
     cli = DL.driver_cli(sys.argv[1:], "market.py", OUT_ROOT)
     out_root, test, topic = cli["out_root"], cli["test"], cli["topic"]
     env = environment()
+    start_proxy(env)
     if not test:                                     # the shell started here leaves the delivered ledger to this driver
         env[DL.DRIVER_ENV] = DL.driver_token("wf2")
     prepare_state()

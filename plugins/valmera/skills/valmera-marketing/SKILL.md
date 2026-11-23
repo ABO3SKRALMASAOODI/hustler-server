@@ -13,6 +13,9 @@ Never the same idea told the same way twice (owner, 14 Nov 2026): the ideas stag
 python3 /Users/masaoodi/Documents/Valmera/hustler-server/plugins/valmera/skills/valmera-marketing/market.py [a few words]
 ```
 
+The launcher starts the Mac's local Codex proxy and uses its ChatGPT subscription sign-in for model calls. The
+launcher and the local Studio replay use the proxy's local credentials. The Studio recording uses a synthetic account.
+
 Run it in the background; it takes 40 to 90 minutes (the recording 5-15, the footage 10-30, the render 10-30). Do not
 poll: wait for it to exit. Its last line is one JSON object: `delivered` (the folder), `title`, `style`, `typed` (the
 sentence Valmera was given), `pictures_fit`, `spend_usd`, `work_empty`. Exit 2 with `stopped`: run the same command with
