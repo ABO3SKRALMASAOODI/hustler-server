@@ -360,7 +360,7 @@ FILL_GAP_S = 3.0          # no stretch of the take over about this long without 
 def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, stress, checker, rejected=(), composed_stills=(), rounds=3,
                originals=None, cut_dir=None, ffmpeg=None):
     """Fill long holds inside a planned clause using its own spare clips or source stills."""
-    from wf1_coverage import shared_candidates, same_picture, fresh_interval
+    from wf1_coverage import shared_candidates, same_picture, fresh_interval, camera_remainder
     pool = shared_candidates(coverage, footage)
     for block in coverage.get("blocked_sources", []):
         i = block["window"]
@@ -373,7 +373,7 @@ def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, str
             if url and clip.get("time_range"):
                 taken.setdefault(url, []).append(tuple(clip["time_range"]))
     for i, window in enumerate(coverage["windows"]):
-        if window.get('on_take'):
+        if window.get('on_take') or camera_remainder(window):
             continue
         a = max(f_first, round(window["t0"] * FPS) + LEAD_F)
         b = min(f_last, round(window["t1"] * FPS) + LEAD_F)
@@ -748,6 +748,23 @@ def build(script, sup, style_id, direction=None):
     take = sup["take"]
     keys, meta = {}, {}
     from placement_check import file_digest
+    # A rescout can give identical bytes another filename. Carry its exact
+    # window-local finding when both the original bytes and provenance match.
+    findings = [*d.get("reject", []), *d.get("reframe", [])]
+    known = {}
+    for r in findings:
+        if isinstance(r, dict) and r.get("origin_sha256") and r.get("source"):
+            known.setdefault((r["origin_sha256"], r["source"]), []).append(r)
+    if known:
+        for candidates in [*footage.values(), *pics.values()]:
+            for c in candidates:
+                path = c["path"]
+                if not os.path.isfile(path):
+                    continue
+                source = (c.get("source") or {}).get("url") or c.get("page")
+                for r in known.get((file_digest(path), source), []):
+                    pairs = reframes if r["fault"] == "reframe" else rejected_pairs
+                    pairs.add((r["window"],path))
     def asset_id(kind, rec):
         path = rec["path"]
         import hashlib
@@ -1050,14 +1067,25 @@ def build(script, sup, style_id, direction=None):
         # The original camera can cut to a listener halfway through one speaker's account.
         # The preceding complete sentence takes its own cited reading interval.
         complete = [i for i,(_,end) in enumerate(clock.segs) if end <= clock_start+.12]
-        if not complete or not script.get("source_credit"):
+        if not script.get("source_credit"):
             return False
-        if complete[-1] not in (reading.get('quote_segments') or []):
+        segment = complete[-1] if complete else 0
+        if segment not in (reading.get('quote_segments') or []):
             return False
-        segment = complete[-1]
         claim = next((c for c in d.get("claims") or [] if clock.words[c["first"]]["seg"] <= segment
                       <= clock.words[c["last"]]["seg"]), None)
         line = claim["report"] if claim else str(script["segments"][segment]["say"]).strip()
+        if not complete:
+            # Open a listener shot on the attributed words being heard, until
+            # the interview cuts to the actual speaker. Use the whole off-camera
+            # phrase even when a finish divides that source shot into two pieces.
+            off = next((r for r in coverage.get("off_camera", []) if r["first"] == 0), None)
+            if not off:
+                return False
+            claim = None
+            phrase = [w["w"] for w in clock.words[:off["last"]+1]]
+            punctuated = [i+1 for i,w in enumerate(phrase) if w.endswith((",", ".", "?", "!", ";"))]
+            line = " ".join(phrase[:punctuated[-1]] if punctuated else phrase).rstrip(",;")
         if not line:
             return False
         P.page([fa,fb],"#171B23","#0D1015",grain=.018)
@@ -1070,10 +1098,14 @@ def build(script, sup, style_id, direction=None):
         else:
             byline = next((s.get("speaker") for s in script.get("speaking_turns", [])
                            if all(type(s.get(k)) in (int,float) for k in ("start","end"))
-                           and s["start"] <= source_time < s["end"]), "") or ""
+                           and s["start"] < script.get("source_start",0)+clock.segs[segment][1] and source_time < s["end"]), "") or ""
         credit = "  ·  ".join(filter(None,(byline,citation)))
         wf1_display.reading_card(P,(fa,fb),line if claim else "“"+line+"”",byline,citation,pal,centre=.46)
-        reading_spans.append((fa,fb))
+        # A short opening quotation hands the rest of the sentence back to
+        # the ordinary timed captions, even while its source credit stays up.
+        quoted_end = fb if complete else min(fb, Clock.f(clock.words[(punctuated[-1] if punctuated else len(phrase))-1]["t1"]))
+        if quoted_end > fa:
+            reading_spans.append((fa,quoted_end))
         record = dict(report=line, chain=claim) if claim else dict(quote=line)
         coverage_report.setdefault("quoted_source", []).append(dict(record, f=[fa,fb], credit=credit,
                                                                       url=script.get("source_url")))
@@ -1223,6 +1255,14 @@ def build(script, sup, style_id, direction=None):
                                verified_motion=rec.get('verified_motion') is True,
                                source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"), time_range=rec.get("time_range")))
 
+        if rec.get("fresh_of") and (not rec.get("text_cleared") or rec.get("fresh_candidate")):
+            # Restore the original freshly cut media, including its own dimensions,
+            # before running a new placement check or text-clearing pass.
+            saved = dict(rec)
+            if rec.get("text_cleared"):
+                saved = dict(rec["fresh_candidate"])
+            P.pictures[-1]["fresh_clip"] = saved
+
     def settle_push(n, land=0.035, push=0.04):
         return [r4(1.0 + land - land * smooth(q / 7.0)) if q < 8 else r4(1.0 + push * (q - 8) / max(n - 9, 1)) for q in range(n)]
 
@@ -1255,7 +1295,7 @@ def build(script, sup, style_id, direction=None):
     def window(f0, f1, kind, name, rec, key, source_ink=()):
         n = f1 - f0
         mono = is_mono(f0)
-        evidence = bool(source_ink or rec.get("attribution") or archive_event(rec)) or rec.get("provider") == "primary-document"
+        evidence = bool(source_ink or rec.get("attribution") or rec.get("reframe") or rec.get("full_source") or archive_event(rec)) or rec.get("provider") == "primary-document"
         if evidence:
             P.page([f0, f1], "#171B23", "#0D1015", grain=.018)
         else:
@@ -1282,7 +1322,7 @@ def build(script, sup, style_id, direction=None):
 
     def bleed(f0, f1, kind, name, rec, key):
         source_ink = clipped_source_ink(rec) if kind == "clip" else []
-        if rec.get("reframe") or rec.get("provider") == "primary-document" or source_ink or archive_event(rec) or (rec.get("attribution") and rec.get("verified_motion") is False):
+        if rec.get("reframe") or rec.get("full_source") or rec.get("provider") == "primary-document" or source_ink or archive_event(rec) or (rec.get("attribution") and rec.get("verified_motion") is False):
             return window(f0, f1, kind, name, rec, key, source_ink)             # the approved document crop is already the editorial rectangle
         bal = None if is_mono(f0) else clip_balance(take.get("still"), rec.get("still") if kind == "clip" else rec.get("path"))
         gk = dict(grade=bal) if bal else {}               # matched to the take it cuts against, part of the way (round1 colour)
@@ -1373,6 +1413,10 @@ def build(script, sup, style_id, direction=None):
                 labels.append((f0,f1,label,keys[rec["path"]]))
                 continue
             source_url = (rec.get("source") or {}).get("url") or rec.get("page")
+            if source_url and not label and rec.get("provider") != "interview-frame":
+                publisher = (rec.get("source") or {}).get("channel") or rec.get("credit")
+                if publisher:
+                    label = f"Source · {publisher}"
             if source_url and label and label not in labelled and f1 - f0 >= 16:
                 labelled.add(label)
                 labels.append((f0 + 2, min(f1, f0 + int(2.4 * FPS)), label, keys[rec["path"]]))

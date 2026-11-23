@@ -508,3 +508,39 @@ def test_narrower_spoken_boundary_reuses_the_intersection_of_verified_footage(tm
     rows=proposals(dict(windows=[window],passed_placements={"0":[passed]}),{0:clips},{})
     assert len(rows)==1 and rows[0][:2]==[283,296] and rows[0][4]["path"]==clips[1]["path"]
     assert rows[0][4]["src"]==pytest.approx([.30,.82])
+
+
+def test_retry_uses_the_checked_pixel_region_and_source_clock(tmp_path):
+    import placement_check as pc
+    path = tmp_path / "codex.mp4"
+    path.write_bytes(b"same source")
+    rec = dict(path=str(path), w=1920, h=1080, x=.50001, seconds=2., src=[.2,1.2])
+    def key(x, src):
+        return pc.media_key([64,87,"clip","coding agent",dict(rec,x=x,src=src)],[])
+    assert key(.50001,[.2,1.2]) == key(.50002,[.2,1.2])
+    assert key(.50001,[.2,1.2]) != key(.51,[.2,1.2])
+    assert key(.50001,[.2,1.2]) != key(.50001,[.3,1.3])
+
+
+def test_retry_keeps_scout_crop_and_directed_focus_separate(tmp_path, monkeypatch):
+    import placement_check as pc
+    import wf1_coverage as cov
+    from footage import motion
+    monkeypatch.setattr(motion, "of_shot", lambda *a: {"p90": 2})
+    monkeypatch.setattr(pc, "evidence", lambda *a: [b"full", b"portrait"])
+    path = tmp_path / "campus.mp4"
+    path.write_bytes(b"source")
+    clip = dict(path=str(path), seconds=2., w=1920, h=1080, x=.45)
+    window = dict(name="campus", say="Silicon Valley", must_show="Cupertino", t0=0., t1=1.)
+    calls = []
+    def check(rows):
+        return pc.check(rows, dict(segments=[dict(say=window["say"])]), _clock(),
+                        str(tmp_path), "ff", call=_approving(calls, subject_x=.63, full_source=True))
+    for _ in range(2):
+        kept, _ = cov.checked_proposals(dict(windows=[window]), {0:[clip]}, {}, 1., check)
+        assert kept[0][4]["x"] == .63
+        assert kept[0][4]["full_source"]
+    assert len(calls) == 1
+    clip["x"] = .8
+    cov.checked_proposals(dict(windows=[window]), {0:[clip]}, {}, 1., check)
+    assert len(calls) == 2

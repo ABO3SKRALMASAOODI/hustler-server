@@ -788,3 +788,35 @@ def test_m09_final_mix_uses_composed_picture_and_repairs_resumed_audio(tmp_path,
         assert doc["sound"] == [] and doc["sound_design"] == sc["beats"]["sound_design"]
     assert json.loads(audio.read_text())["spine"] == ["interview"]
     assert json.loads(audio.read_text())["music_marks"] == {"payoff_s":21}
+
+
+def test_no_new_source_after_hold_research_reuses_the_reviewed_render(tmp_path,monkeypatch):
+    ctx = SimpleNamespace(supply=str(tmp_path), run_dir=str(tmp_path))
+    pack = dict(coverage=dict(windows=[dict(name="place",t0=0,t1=1)]))
+    (tmp_path/"pack.json").write_text(json.dumps(dict(pack=pack)))
+    monkeypatch.setattr(wf.wf3, "render", lambda *args: dict(film="copy.mp4"))
+    monkeypatch.setattr(wf, "_render_review", lambda *args: dict(placements=[],rejected=0,moving_share=1.))
+    def research(ctx, script, sc, rd, defer):
+        sc["beats"]["research_windows"] = [0]
+        return True
+    monkeypatch.setattr(wf, "_rebuild_holds", research)
+    monkeypatch.setattr(wf, "refill", lambda ctx,script,pack,shortage: pack.update(coverage_repairs=4))
+    monkeypatch.setattr(wf, "_rescore", lambda *args: pytest.fail("research changed only its receipt"))
+    rd = wf.render(ctx, {}, dict(beats=dict(pictures=[])))
+    assert len(rd["picture_review"]) == 1
+
+
+def test_renamed_source_carries_the_actual_crop_finding(tmp_path):
+    ctx = SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda _:None)
+    pictures = [dict(path=str(tmp_path/"scouted.mp4"),window=0,source="publisher/original",
+                     source_crop=[.3,0,.7,1],f=[64,87])]
+    (tmp_path/"scouted.mp4").write_bytes(b"source frames")
+    report = dict(placements=[dict(id=0,ok=False,fault="reframe",framing_key="framing",
+                                   reason="File list cuts off which source file the agent changed.")])
+    assert wf._rebuild_rejected(ctx,{},dict(beats=dict(pictures=pictures)),report,defer=True)
+    (tmp_path/"rescout.mp4").write_bytes(b"source frames")
+    pictures[0].update(path=str(tmp_path/"rescout.mp4"),mode="source-insert")
+    assert wf._rebuild_rejected(ctx,{},dict(beats=dict(pictures=pictures)),report,defer=True)
+    attempts = wf.current_rejections(str(tmp_path))
+    assert [a["fault"] for a in attempts] == ["reframe","contradiction"]
+    assert all(a["reason"] == report["placements"][0]["reason"] and a["framing_key"] == "framing" for a in attempts)

@@ -285,6 +285,15 @@ An original institutional film can still provide truthful contextual premises wh
 illustration intent allows them. Do not ban the entire source merely because one shot shows a person.
 Return no source block unless the contradiction applies to the whole source in this specific window.
 Never ban a source globally or invent a URL absent from the rejected placements.'''
+    prompt += """
+For a personal recollection or judgment, if replacing this failed picture with another of the
+available examples would still imply an unsupported event, return camera_remainders as a list
+of {window,why}. This directs the unresolved portion of that clause on the original interview,
+keeping placements already verified there. Read the attempted crops, exact findings and the
+available sources. A demonstration can illustrate the agent doing work on the words that name
+that action; it cannot document a person's childhood, working hours or private realization.
+Prefer a different grounded source when it can actually resolve the finding. Return an empty
+list when a source or timing repair can resolve it."""
     def receipt(windows):
         data=[prompt,coverage["words"],windows,coverage.get("blocked_sources",[]),rejected]
         return hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()
@@ -320,6 +329,18 @@ Never ban a source globally or invent a URL absent from the rejected placements.
     if any(a['last']>=b['first'] for a,b in zip(proposed,proposed[1:])):
         raise RuntimeError('overlapping documentary boundary repair')
     changed=any((a['first'],a['last'])!=(b['first'],b['last']) for a,b in zip(proposed,coverage['windows']))
+    for treatment in decision.get('camera_remainders') or []:
+        i = treatment.get('window')
+        if i not in {row['window'] for row in evidence} or not treatment.get('why'):
+            continue
+        w = proposed[i]
+        known = sorted({(c["source"], c.get("shows") or "") for r in evidence if r["window"] == i
+                        for c in r.get("available", []) if c.get("source")})
+        direction = dict(clause_t=[w['t0'],w['t1']], clause=w.get('say'), why=treatment['why'],
+                         sources=[list(pair) for pair in known])
+        if w.get('camera_remainder') != direction:
+            w['camera_remainder'] = direction
+            changed = True
     retained=coverage.setdefault('blocked_sources',[])
     for row in blocks:
         if not any((old['window'],old['source'])==(row['window'],row['source']) for old in retained):
@@ -450,12 +471,19 @@ def fresh_interval(pool, taken, originals, cut_dir, length, ffmpeg, reach=8.0, s
     return []
 
 
+def camera_remainder(window):
+    treatment = window.get("camera_remainder") or {}
+    return (bool(treatment) and treatment.get("clause_t") == [window["t0"], window["t1"]]
+            and treatment.get("clause") == window.get("say"))
+
+
 def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=None, originals=None, cut_dir=None, ffmpeg=None):
     """Only the semantic window can place a picture; a sentence start cannot. The candidates of a window go in the order
     the picture check ranked them for that clause (fits[(window, path)], best first), then moving footage first; each
     carries its whole clause, so it is judged on the complete thought and not the second of words under its slice.
     Nothing is placed twice: a window whose candidates have all been shown takes a fresh interval of the same kept
     original (fresh_interval), else nothing."""
+    from placement_check import file_digest
     rejected=rejected or set()
     fits=fits or {}
     footage=shared_candidates(coverage,footage)
@@ -480,11 +508,19 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
         names=list(dict.fromkeys([window['name'],*window.get('subjects',[])]))
         candidates += sorted([('photo', name, p) for name in names for p in pictures.get(name, [])],
                              key=lambda row:-fits.get((i,row[2]['path']),5))
+        priorities = coverage.get("passed_placements", {}).get(str(i), [])
+        for prior in priorities:
+            # A fresh excerpt is cut locally, so it need not occur in the scout's
+            # catalogue. Offer its checked bytes again on the original clause.
+            candidate = prior.get("fresh_clip")
+            if (candidate and prior.get("clause") == window.get("say") and
+                    prior.get("clause_t") == [window["t0"],window["t1"]] and
+                    os.path.isfile(candidate["path"]) and
+                    file_digest(candidate["path"]) == prior["sha256"]):
+                candidates.append(("clip", candidate.get("subject") or window["name"], candidate))
         blocked={r['source'] for r in coverage.get('blocked_sources',[]) if r['window']==i}
         pool=[row for row in candidates if not is_rejected(rejected,i,row[2])
               and ((row[2].get('source') or {}).get('url') or row[2].get('page')) not in blocked]
-        priorities = coverage.get("passed_placements", {}).get(str(i), [])
-        from placement_check import file_digest
         by_path = {row[2]["path"]: row for row in pool}
         pins = []
         for prior in sorted(priorities, key=lambda item: (item.get("motion_ok") is not True,item["f"])):
@@ -526,6 +562,13 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
             out.append([lo,hi,kind,name,dict(rec,window=i,illustration=window["must_show"],clause=window.get("say"),
                                             clause_t=[window["t0"], window["t1"]],
                                             **({"association":window["must_show"]} if window.get("association") else {}))])
+        if camera_remainder(window):
+            known = window["camera_remainder"].get("sources", [])
+            # Keep the speaker through this gap until a source actually depicts
+            # something else. A neighbour cut from the same scout description
+            # is still the same illustration.
+            pool = [(kind,name,r) for kind,name,r in pool if
+                    [(r.get("source") or {}).get("url") or r.get("page"), r.get("shows") or r.get("title") or ""] not in known]
         gaps = [(left,right) for left,right in zip([a]+[row[1] for row in pins],
                                                    [row[0] for row in pins]+[b]) if right-left >= 10]
         distinct=[]
@@ -582,8 +625,15 @@ def checked_proposals(coverage, footage, pictures, duration, checker, composed_s
         signature=tuple((r[0],r[1],r[4]['window'],r[4]['path'],tuple(r[4].get('src',()))) for r in ins)
         if signature in seen:break
         seen.add(signature)
+        input_focus = []
+        for row in ins:
+            rec = row[4]
+            focus = rec.get("placement_focus", {})
+            if focus and focus["selected"] == rec.get("x"):
+                rec["x"] = focus["input"]
+            input_focus.append(rec.get("x"))
         accepted,report=checker(ins)
-        for row,decision in zip(ins,report['placements']):
+        for row,decision,focus in zip(ins,report['placements'],input_focus):
             if row[4]['path'] in composed_stills:
                 decision['motion_ok']=False;row[4]['verified_motion']=False
             if decision.get('fit') is not None:
@@ -591,8 +641,10 @@ def checked_proposals(coverage, footage, pictures, duration, checker, composed_s
             for candidate in footage.get(row[4]['window'],[]):
                 if candidate['path']==row[4]['path']:
                     candidate['subject_motion']=decision.get('motion_ok') is True
-                    if decision.get('ok') is True and decision.get('subject_x') is not None:
-                        candidate['x']=row[4].get('x',candidate.get('x'))
+                    if decision.get("ok") and decision.get("subject_x") is not None:
+                        selected = row[4].get("x")
+                        candidate["placement_focus"] = dict(input=focus, selected=selected)
+                        candidate["x"] = selected
         attempts.append(report)
         rejected.update((r[4]['window'],r[4]['path']) for r,d in zip(ins,report['placements']) if not d['ok'])
         # The next proposal follows the check's ranking; when it is the one just checked (nothing rejected, the order
@@ -677,14 +729,14 @@ def require_coverage(ins, coverage, duration, fps=30, final=False):
     def moving_picture(row):
         return row[2]=='clip' and row[4].get('verified_motion') is True and row[4].get('placed_motion_p90',0)>=1.
     moving = sum(r[1]-r[0] for r in ins if moving_picture(r))/fps
-    missing = [i for i,w in enumerate(coverage['windows']) if not w.get('on_take') and not any(r[4].get('window')==i for r in ins)]
+    missing = [i for i,w in enumerate(coverage['windows']) if not w.get('on_take') and not camera_remainder(w) and not any(r[4].get('window')==i for r in ins)]
     named = sum(w['t1']-w['t0'] for w in coverage['windows'])
     unique=[]
     for row in ins:
         if not any(same_picture(row[4],old) for old in unique):unique.append(row[4])
     rate = len(unique)*10/max(named,.01)
     weak = [i for i,w in enumerate(coverage['windows'])
-            if not w.get('on_take') and (sum(r[1]-r[0] for r in ins if r[4].get('window')==i)/fps < .8*(w['t1']-w['t0'])
+            if not w.get('on_take') and not camera_remainder(w) and (sum(r[1]-r[0] for r in ins if r[4].get('window')==i)/fps < .8*(w['t1']-w['t0'])
             or sum(r[1]-r[0] for r in ins if r[4].get('window')==i and moving_picture(r))/fps < .6*(w['t1']-w['t0']))]
     report = dict(real_seconds=real,moving_seconds=moving,required_real_seconds=.45*duration,required_moving_seconds=.6*max(real,.45*duration),named_seconds=named,new_per_10s=rate,new_pictures=len(unique),repeated_pictures=len(ins)-len(unique),weak_windows=weak,missing_windows=missing)
     short = bool(real/max(duration,.01)<.45 or moving/max(real,.01)<.60 or rate<6 or missing)

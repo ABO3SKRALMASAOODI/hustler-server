@@ -582,3 +582,28 @@ def test_m09_staged_picture_replay(tmp_path):
     assert [w["say"] for w in plan["windows"]] == ["And they started doing dashboards."]
     assert wf1_short.hold_windows(dict(holds=[[a/30,b/30]],cuts_per_10s=10),plan,[]) == []
     print("m09 copy: 43 rejected car placements across 18 repeat reviews avoided; dashboard archive retained")
+
+
+def test_repaired_camera_remainder_preserves_a_verified_moving_excerpt(tmp_path):
+    import hashlib
+    path = tmp_path/"campus.mp4"
+    path.write_bytes(b"moving Cupertino exterior")
+    window = dict(first=0,last=2,t0=0,t1=3,name="campus",say="in Silicon Valley",must_show="Cupertino")
+    rec = dict(path=str(path),seconds=1.,subject="campus",source={"url":"paper/drone"},fresh_of="original.mp4")
+    pin = dict(path=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest(), f=[3,24],
+               src=[.1,.8],clause=window["say"],clause_t=[0,3],motion_ok=True,source="paper/drone",fresh_clip=rec)
+    data = dict(windows=[window],words=[dict(w=w,start=i,end=i+1) for i,w in enumerate(window["say"].split())],
+                passed_placements={"0":[pin]})
+    reason = "A campus locates the city but cannot depict his private experience."
+    llm = SimpleNamespace(ask=lambda *a,**kw:("",{}),json_block=lambda _:dict(camera_remainders=[dict(window=0,why=reason)]))
+    assert coverage.repair_boundaries(data,[dict(f=[24,90],reason=reason)],llm)
+    rows = coverage.proposals(data,{0:[]},{})
+    assert [(r[:2],r[4]["src"]) for r in rows] == [([3,24],[.1,.8])]
+    assert data["windows"][0]["camera_remainder"]["why"] == reason
+
+    # A newly identified, genuinely different action can still earn these words.
+    data["windows"][0]["camera_remainder"]["sources"] = [["paper/drone", "campus exterior"]]
+    old = dict(rec,path=str(tmp_path/"another-drone.mp4"),shows="campus exterior")
+    new = dict(rec,path=str(tmp_path/"documented-event.mp4"),shows="Ghodsi working in the Valley",source={"url":"oral-history"})
+    rows = coverage.proposals(data,{0:[old,new]},{})
+    assert {r[4]["path"] for r in rows} == {str(path),new["path"]}

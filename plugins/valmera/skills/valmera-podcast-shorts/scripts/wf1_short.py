@@ -877,7 +877,8 @@ def refill(ctx, script, pack, shortage):
     """Research missing coverage through the same engines, preserving all checked originals."""
     coverage = pack['coverage']
     windows = coverage['windows']
-    wanted = [i for i in (shortage['weak_windows'] or range(len(windows))) if not windows[i].get('on_take')]
+    from wf1_coverage import camera_remainder
+    wanted = [i for i in (shortage['weak_windows'] or range(len(windows))) if not windows[i].get('on_take') and not camera_remainder(windows[i])]
     if not wanted:
         return
     if not pack.get('referent_research'):
@@ -1277,7 +1278,7 @@ def _render_review(ctx, rd, sc):
     pack = wf3.load_pack(ctx)
     script = dict(segments=[dict(say=ln["text"]) for ln in pack["lines"]])
     clock = F.Clock(pack["words"], script)
-    l1 = json.load(open(sc["l1"]))
+    l1 = json.load(open(sc.get("composed_l1") or sc["l1"]))
     display = [it for it in l1["items"] if it.get("k") == "word" and it.get("role") in ("big", "stat")]      # the film's own type: display words and name supers
     captions = [it for it in l1["items"] if it.get("k") == "word" and it.get("role") == "cap"]
     rows = []
@@ -1299,6 +1300,13 @@ def _render_review(ctx, rd, sc):
     _, report = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"), pack["ffmpeg"],
                                 review="composed")
     for row in report["placements"]:
+        a,b = row["f"]
+        geometry = []
+        for it in l1["items"]:
+            if (it.get("k") not in ("shot", "card") or it["f"][1] <= a or it["f"][0] >= b):
+                continue
+            geometry.append({k:it[k] for k in ("k","pic","f","src","crop","x","y","w","h","s","z") if k in it})
+        row["framing_key"] = hashlib.sha256(json.dumps(geometry,sort_keys=True).encode()).hexdigest()
         row["transition_audit"] = dict(ok=row.get("ok") is True, reason=row.get("reason", ""), review="composed")
     real=sum(p['f'][1]-p['f'][0] for p in report['placements'])/F.FPS
     moving=sum(p['f'][1]-p['f'][0] for p in report['placements'] if p.get('motion_ok') is True)/F.FPS
@@ -1326,7 +1334,7 @@ def render_revision(sc):
     worker=os.environ.get('VALMERA_WORKER')
     if worker:
         for rel in ('score/music.py','score/audibility.py','score/sound.py','score/sfx_quality.json','scene/pace.py','scene/compile.py','scene/runtime.py','scene/text_layout.py','scene/run.py',
-                    'scene/palette/layout.py','scene/palette/rhythm.py','scene/palette/__init__.py','scene/palette/behind.py',
+                    'scene/segments.py','scene/alien/answer.py','scene/palette/kit.py','scene/palette/match.py','scene/palette/layout.py','scene/palette/rhythm.py','scene/palette/__init__.py','scene/palette/behind.py',
                     'scene/palette/matte.py','scene/palette/type.py','scene/palette/sense.py','scene/palette/punct.py'):
             path=os.path.join(worker,rel)
             if os.path.isfile(path):digest.update(open(path,'rb').read())
@@ -1391,6 +1399,26 @@ def prepare_picture_mix(ctx, sc):
     sc["composed_l1"] = scene_path
 
 
+def repair_options(pack, wanted):
+    """What a rescore can actually place after researching these windows."""
+    from placement_check import file_digest
+    windows = pack["coverage"]["windows"]
+    options = []
+    for i in sorted(set(wanted)):
+        window = windows[i]
+        names = {window["name"], *window.get("subjects", [])}
+        candidates = [c for group in pack.get("footage", []) if group["i"] == i for c in group["clips"]]
+        candidates.extend(p for name in names for p in pack.get("pictures", {}).get(name, []))
+        sources = set()
+        for c in candidates:
+            if os.path.isfile(c["path"]) and not c.get("dull"):
+                sources.add((file_digest(c["path"]), json.dumps(c.get("source") or c.get("page"),sort_keys=True),
+                             tuple(c.get("time_range") or ()), c.get("shows"), c.get("x")))
+        clause = tuple(window.get(k) for k in ("t0","t1","say","must_show","on_take"))
+        options.append((clause, frozenset(sources)))
+    return options
+
+
 def render(ctx, script, sc):
     """The product repairs rejected placements before branding and music, never a delivered film."""
     history_path = os.path.join(ctx.supply, "render_reviews.json")
@@ -1439,7 +1467,8 @@ def render(ctx, script, sc):
                     passed.setdefault(str(pic.get("window")), []).append(
                         dict(path=path, sha256=file_digest(path), f=pic["f"], src=pic.get("source_slice"),
                              clause=pic.get("clause"), clause_t=pic.get("clause_t"), source=pic.get("source"),
-                             motion_ok=row.get("motion_ok")))
+                             motion_ok=row.get("motion_ok"),
+                             **({"fresh_clip":pic["fresh_clip"]} if pic.get("fresh_clip") else {})))
             coverage=pack.setdefault("coverage", {})
             for window,older in coverage.get("passed_placements",{}).items():
                 rows=passed.setdefault(window,[])
@@ -1456,28 +1485,29 @@ def render(ctx, script, sc):
             changed = _rebuild_rejected(ctx, script, sc, report, defer=True)
         if report["moving_share"] < .6:
             changed = _rebuild_motion(ctx, script, sc, report, defer=True) or changed
-        changed = _rebuild_holds(ctx, script, sc, rd, defer=True) or changed
-        if changed:
-            wanted = sc["beats"].pop("research_windows", [])
-            if wanted:
-                pack = wf3.load_pack(ctx)
-                shortage = dict(sc["beats"].get("coverage") or {})
-                shortage.update(weak_windows=sorted(set(wanted)), real_seconds=report.get("real_seconds",0),
-                                moving_seconds=report.get("moving_seconds",0),
-                                required_moving_seconds=.6*report.get("real_seconds",0))
-                shortage.setdefault("missing_windows",[])
-                refill(ctx,script,pack,shortage)
-                save_pack(ctx,pack)
+        holds = _rebuild_holds(ctx, script, sc, rd, defer=True)
+        wanted = sc["beats"].pop("research_windows", [])
+        if wanted:
+            pack = wf3.load_pack(ctx)
+            before = repair_options(pack, wanted)
+            shortage = dict(sc["beats"].get("coverage") or {})
+            shortage.update(weak_windows=sorted(set(wanted)), real_seconds=report.get("real_seconds",0),
+                            moving_seconds=report.get("moving_seconds",0),
+                            required_moving_seconds=.6*report.get("real_seconds",0))
+            shortage.setdefault("missing_windows",[])
+            refill(ctx,script,pack,shortage)
+            save_pack(ctx,pack)
+            holds = before != repair_options(pack, wanted)
+        if changed or holds:
             _rescore(ctx,script,sc)
             continue
-        else:
-            if report["rejected"]:
-                report["unrepaired"] = [r["id"] for r in report["placements"] if not r.get("ok")]
-                json.dump(history, open(history_path, "w"), indent=1)
-            json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
-            rd["picture_review"] = history
-            rd["spend"] = [dict(stage="render", what="composed picture-to-words check", **u) for h in history for u in h.get("spend", [])]
-            return rd
+        if report["rejected"]:
+            report["unrepaired"] = [r["id"] for r in report["placements"] if not r.get("ok")]
+            json.dump(history, open(history_path, "w"), indent=1)
+        json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
+        rd["picture_review"] = history
+        rd["spend"] = [dict(stage="render", what="composed picture-to-words check", **u) for h in history for u in h.get("spend", [])]
+        return rd
 
 
 def _rebuild_motion(ctx, script, sc, report, defer=False):
@@ -1550,9 +1580,10 @@ def hold_windows(measured, coverage, pictures, fps=None, lead=None):
     import math
     fps = fps or F.FPS
     lead = F.LEAD_F if lead is None else lead
+    from wf1_coverage import camera_remainder
     out = set()
     for i, w in enumerate(coverage.get("windows") or []):
-        if w.get('on_take'):
+        if w.get('on_take') or camera_remainder(w):
             continue
         a, b = (round(w["t0"]*fps)+lead)/fps, (round(w["t1"]*fps)+lead)/fps
         placed = [p for p in pictures if p.get("window") == i]
@@ -1609,7 +1640,7 @@ def _rebuild_holds(ctx, script, sc, rd, defer=False):
     return True
 
 
-def current_rejections(supply):
+def current_rejections(supply, active_only=True):
     """The composed review's findings in force: [{window, path, fault, reason}], each local to the window it was found
     in (window None: a picture placed outside every window). fault 'reframe': the picture is framed again; otherwise
     that window's slot goes to its next candidate. A changed frame/layout contract requires fresh source AND composed
@@ -1622,7 +1653,7 @@ def current_rejections(supply):
     rows = json.load(open(path)) if os.path.exists(path) else []
     rows=[r if isinstance(r, dict) else dict(window=None,path=r,fault="contradiction") for r in rows]
     path=os.path.join(supply,"pack.json")
-    if not os.path.isfile(path):
+    if not active_only or not os.path.isfile(path):
         return rows
     with open(path) as f:
         windows=(json.load(f).get("pack",{}).get("coverage") or {}).get("windows",[])
@@ -1665,7 +1696,23 @@ def _repair_window_boundaries(ctx, rejected):
         return
     pack=wf3.load_pack(ctx)
     try:
-        wf1_coverage.repair_boundaries(pack['coverage'],rejected,_llm())
+        attempts = current_rejections(ctx.supply)
+        windows = pack["coverage"]["windows"]
+        findings = []
+        for row in rejected:
+            span = row.get("f")
+            i = next((i for i,w in enumerate(windows) if span and
+                      w["t0"] <= (sum(span)/2-wf1_film.LEAD_F)/F.FPS < w["t1"]), None)
+            tried = [a for a in attempts if a.get("window") == i]
+            alternatives = [dict(source=(c.get("source") or {}).get("url"), shows=c.get("shows"),
+                                 time_range=c.get("time_range")) for group in pack.get("footage",[])
+                            if group.get("i") == i and i is not None for c in group["clips"]]
+            if i is not None:
+                names = {windows[i].get("name"), *windows[i].get("subjects", [])}
+                alternatives.extend(dict(source=c.get("page"), shows=c.get("title")) for name in names
+                                    for c in pack.get("pictures", {}).get(name, []))
+            findings.append(dict(row, attempted=tried, available=alternatives) if tried else row)
+        wf1_coverage.repair_boundaries(pack['coverage'],findings,_llm())
     except (RuntimeError, ValueError, KeyError, TypeError) as error:
         ctx.log(f'boundary repair not applied: {str(error)[:200]}')
         return
@@ -1700,7 +1747,13 @@ def _rebuild_rejected(ctx, script, sc, report, defer=False):
         if r.get("ok"):
             continue
         p = pics[r["id"]]
-        window, origin = p.get("source_slot") or p.get("window"), p.get("origin") or p["path"]
+        window = p["source_slot"] if p.get("source_slot") is not None else p.get("window")
+        origin = p.get("origin") or p["path"]
+        from placement_check import file_digest
+        origin_digest = file_digest(origin) if os.path.isfile(origin) else None
+        if origin_digest and p.get("source"):
+            before.update((window, origin, old["fault"]) for old in previous if old.get("window") == window
+                          and old.get("origin_sha256") == origin_digest and old.get("source") == p["source"])
         # If the whole checked source is already on screen, widening its crop is
         # a no-op. Review the source and clause together before spending another render.
         if r.get("fault", "reframe") == "reframe" and can_widen_source(p) and not has((window, origin, "reframe")):
@@ -1714,13 +1767,27 @@ def _rebuild_rejected(ctx, script, sc, report, defer=False):
         if step[2] != "reframe" and p.get("mode") != "source-insert":
             boundary_findings.append(r)
         timing = {k:p[k] for k in ("f","clause_t") if p.get(k)}
+        for field in ("source", "source_slice", "time_range", "source_crop", "mode", "reframed"):
+            if p.get(field) is not None:
+                timing[field] = p[field]
+        if os.path.isfile(p["path"]):
+            timing["placed_sha256"] = file_digest(p["path"])
+        if origin_digest:
+            timing["origin_sha256"] = origin_digest
+        if r.get("key"):
+            timing["review_key"] = r["key"]
+        if r.get("framing_key"):
+            timing["framing_key"] = r["framing_key"]
         added.append(dict(window=step[0], path=step[1], fault=step[2], placed=p["path"],
-                          reason=str(r.get("reason") or "")[:240], **timing))
+                          reason=str(r.get("reason") or ""), **timing))
     if not added:
         ctx.log("composed picture check: every finding has had each repair; the film is delivered with them on record")
         return False
     rejected_path = os.path.join(ctx.supply, "render_rejected.json")
-    json.dump(previous + added, open(rejected_path, "w"), indent=1)
+    history = current_rejections(ctx.supply, active_only=False)
+    with open(rejected_path+".part", "w") as handle:
+        json.dump(history + added, handle, indent=1)
+    os.replace(rejected_path+".part", rejected_path)
     from placement_check import CONTRACT
     json.dump(CONTRACT, open(os.path.join(ctx.supply,"render_rejected_contract.json"),"w"))
     ctx.log(f"composed picture check: {sum(a['fault'] == 'reframe' for a in added)} framed again, "
