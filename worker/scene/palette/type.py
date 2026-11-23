@@ -278,11 +278,20 @@ def name(l1, work, ask, sense=None):
         if evidence:
             nm, _, title = evidence["name_super"].partition(",")
         else:
-            words = [w for w in K.said(l1) if w[1] < z and w[2] > a][:4]
-            if not words:
+            # Only perform lettering the Director authored and the speaker actually says here.
+            # Otherwise carry the picture through this cue. Captions already have the speech.
+            words = [w for w in K.said(l1) if w[1] < z and w[2] > a]
+            for phrase in (nm, title):
+                hit = K.find(l1, phrase, near=a, words=words)
+                if hit and [K.norm(w) for w, _ in hit] == [K.norm(w) for w in phrase.split()]:
+                    nm = " ".join(w for w, _ in hit)
+                    a = land = max(a, hit[0][1])
+                    z = min(z, next(w[2] for w in words if w[1] == hit[-1][1]))
+                    if z > a:
+                        break
+            else:
                 from .rhythm import settle
                 return settle(l1, work, ask, sense)
-            nm = "“" + " ".join(w[0] for w in words) + "”"
             title = ""
     else:
         a = max(0, min(a, land - 4))

@@ -718,3 +718,14 @@ def test_conversation_strike_stays_with_its_word_and_spoken_dip_keeps_picture(tm
     dip = lambda f: punct.black(scene, str(tmp_path), dict(id="turn",f=f), sense)["items"][0]
     assert 0 < dip(40)["a"] < .6
     assert dip(74)["a"] == 1
+
+
+def test_documentary_name_without_identity_keeps_the_words_in_the_caption(tmp_path):
+    scene = film(tmp_path, dur=185)
+    scene["documentary_cuts"] = [dict(f=[92,127], pic="p2", name_super="", source_evidence=dict(url="campus"))]
+    scene["said"] = [[w, f, f+5, 1] for w, f in zip(("UC","Berkeley","when","we","wanted"), (117,121,127,134,141))]
+    ask = dict(dev="name", id="campus", f=[117,119], args=dict(name="Ali Ghodsi"))
+    out, log = laid(scene, tmp_path, [ask])
+    assert log[0]["done"]
+    assert not any(it["k"] == "word" for it in mine(out, "campus"))
+    assert out["said"] == scene["said"]
