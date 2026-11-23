@@ -183,14 +183,25 @@ def plan(l1, work, ask):
 
 
 def words_only(l1, work, ask, bare, a, z):
-    """The fallback for named words without a picture: each word punched in large on its own frame, held to the
-    next one (the palette's ``verb``), so the run still lands on every syllable that names something."""
-    from ..palette import type as PT
+    """Land each unpictured word in its spoken cue, or use a display punch when it has no cue."""
+    from ..palette import kit, type as PT
     items, voices, marks, log = [], {}, [], []
+    accented = {}
     fs = [min(max(int(p["f"]), a), z - 2) for p in bare]
     for i, p in enumerate(bare):
         end = min(fs[i + 1] if i + 1 < len(bare) else z, z)
         if end - fs[i] < 2:
+            continue
+        cue = kit.accent_cue(l1, fs[i], end, p["word"])
+        if cue is not None:
+            previous = accented.get(cue["id"])
+            start = max(fs[i], cue["f"][0])
+            if previous:
+                offset = start - cue["f"][0]
+                cue["y"][:offset] = previous["y"][:offset]
+            accented[cue["id"]] = cue
+            marks.append({"f": start, "what": "answer cue lands"})
+            log.append({"word": p["word"], "f": start, "cue": cue["id"]})
             continue
         got = PT.verb(l1, work, {"id": f"{ask['id']}.x{i}", "dev": "verb", "at": [fs[i], end],
                                  "args": {"t": str(p["word"]), "verb": "punch", "seat": ask.get("seat")}})
@@ -200,6 +211,7 @@ def words_only(l1, work, ask, bare, a, z):
         voices.update(got.get("voices") or {})
         marks += [{"f": fs[i], "what": "answer word lands"}]
         log.append({"word": p["word"], "f": fs[i], "picture": p.get("pic") in (l1.get("assets") or {})})
+    items.extend(accented.values())
     if not items:
         return {"skip": "answer needs a word and a picture for it"}
     return {"items": items, "voices": voices, "marks": marks, "log": {"words": log}}

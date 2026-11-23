@@ -362,11 +362,15 @@ def blur_in(l1, work, ask, sense):
 
 def word_blend(l1, work, ask, sense):
     a, b = span(ask, l1)
-    b = max(b, a + 30)
     mode = next((m for m in (ask.get("blend"), ask.get("as")) if m in ("difference", "multiply")), "difference")
     ws = [w for w in sense.words_in(a, b) if w.get("role") in ("big", "stat") and not w.get("behind")]
     if not ws:
-        return {"skip": "no display word in the span"}
+        from .kit import accent_cue
+        cue = accent_cue(l1, a, b, ask.get("t"))
+        if cue is None:
+            return {"skip": "no matching lettering in the span"}
+        return {"items": [cue], "events": [{"f": max(a, cue["f"][0]), "kind": "word_blend", "strength": .4}],
+                "log": {"cue": cue["id"], "treatment": "lift"}}
     out = [dict({k: v for k, v in w.items() if not (mode == "difference" and k == "stroke")}, blend=mode,
                 ink="#FFFFFF" if mode == "difference" else w.get("ink")) for w in ws]
     return {"items": out, "events": [{"f": out[0]["f"][0], "kind": "word_blend", "strength": 0.4}],
@@ -403,7 +407,7 @@ DEVICES = {
                   "card": "spotlight f[a,b] amount. A vignette pushes in round the face over the shot. Confession, focus, a single person against everything"},
     "blur_in": {"plan": blur_in, "layer": "surface", "fallback": ("white",),
                 "card": "blur_in at. The new picture opens defocused and is sharp by its fourth frame. Section openers, after a flash, 'focus', 'realised'"},
-    "word_blend": {"plan": word_blend, "layer": "type", "needs": ("words",), "fallback": ("white",),
+    "word_blend": {"plan": word_blend, "layer": "type", "needs": ("words",), "fallback": ("settle",),
                    "card": "word_blend f[a,b] blend(difference|multiply). The display words cut through the picture (difference) or print on it (multiply). A word that must feel part of the picture"},
 }
 ALIASES = {"negative": "neg", "polarity": "neg", "invert": "neg", "flip": "neg", "inverse": "neg", "strobe": "neg",

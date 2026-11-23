@@ -361,6 +361,31 @@ def wrap(v, text, width_px):
 
 # ----------------------------------------------------------------- what the frame holds there
 
+def accent_cue(l1, a, b, text=None):
+    """Land emphasis in the existing ink of the nearest overlapping spoken cue."""
+    want = [norm(t) for t in (text or "").split()]
+    cues = []
+    for cue in l1["items"]:
+        if cue.get("role") != "cap" or cue["k"] != "word" or cue["f"][1] <= a or cue["f"][0] >= b:
+            continue
+        words = [norm(t) for t in cue["t"].split()]
+        if want and not any(words[i:i+len(want)] == want for i in range(len(words))):
+            continue
+        cues.append(cue)
+    if not cues:
+        return None
+    cue = min(cues, key=lambda it: max(it["f"][0], a))
+    lo, hi = cue["f"]
+    start = max(a, lo)
+    length = min(hi, b, start + max(2, round(.24*l1["fps"]))) - start
+    # Lift and settle on the word while preserving the authored baseline,
+    # contrast, scale and timing everywhere outside the accent.
+    y = [A(cue["y"], f, lo) for f in range(lo, hi)]
+    for i in range(length):
+        y[start-lo+i] -= .008 * math.sin(math.pi*(i+1)/(length+1))
+    return dict(cue, y=y)
+
+
 def caption_top(l1, a=None, z=None):
     """The highest a caption's ink reaches on the lower caption seat (frame fraction), over [a, z) or the whole film;
     0.80 with none. A caption the film lifts to the top of the frame (over a busy lower picture) is not a floor: it is

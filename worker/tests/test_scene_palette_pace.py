@@ -747,3 +747,21 @@ def test_mark_moves_the_stencil_and_its_footage_together(monkeypatch):
     shift = kit.clear_of_mark(items, {}, 1080, 1920, "dr7.")
     assert shift > 0
     assert items[0]["y"] - items[1]["y0"] == pytest.approx(.01)
+
+
+@pytest.mark.parametrize("device,phrase,word", [
+    ("answer", "we haven't had a problem,", "we"),
+    ("word_blend", "they do the math.", "math"),
+])
+def test_spoken_device_lands_on_the_existing_phrase_and_picture(film, device, phrase, word):
+    l1, work = film
+    cue = dict(l1["items"][-1], id="phrase", t=phrase, f=[5,47], on=5, y=.86)
+    l1.update(items=l1["items"][:-1] + [cue], workflow_text_layout=True,
+              documentary_cuts=[dict(pic="p1", f=[5,34])])
+    ask = dict(id="land", dev=device, at=[0,40], f=[0,40], picks=[dict(f=0, pic="p1", word=word)])
+    out, log = palette.apply(l1, work, [ask])
+    assert log[0]["landed"] == device, log
+    assert [it for it in out["items"] if it["k"] != "word"] == l1["items"][:-1]
+    words = [it for it in out["items"] if it["k"] == "word"]
+    assert [(it["t"], it["f"]) for it in words] == [(phrase, [5,47])]
+    assert words[0]["y"] != cue["y"] and words[0]["y"][-1] == cue["y"]
