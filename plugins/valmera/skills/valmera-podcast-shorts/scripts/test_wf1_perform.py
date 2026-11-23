@@ -72,3 +72,13 @@ def test_a_decoration_of_the_sentence_ends_with_its_sentence(tmp_path, quiet_eng
     l1, _ = _build(tmp_path, [dict(seg=0, text="coach me", role="hook", perform=dict(dev=dev))])
     ask = l1["devices"][0]
     assert ask["until"] <= _seg_end(l1, 0) + 10 < l1["dur_f"]
+
+
+def test_contrast_plate_belongs_to_the_word_after_crop_and_brand_seating(tmp_path, quiet_engines, monkeypatch):
+    import wf1_coverage
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *args: ([], []))
+    l1, _ = _build(tmp_path, [dict(seg=1, text="between", role="contrast", key="between")])
+    owners = [it for it in _display_words(l1) if it.get("backplate")]
+    assert [it["t"] for it in owners] == ["BETWEEN"]
+    accent = owners[0]["backplate"]
+    assert not any(it.get("pic") == "plate" and it.get("plate", {}).get("c0") == accent for it in l1["items"])

@@ -716,13 +716,18 @@ def seat_brand_words(l1):
     if not words:
         return moved
     ruler = F.Ruler(l1["voices"])
+    shifts = {}
     for word in words:
         x, y, size = (F._rest(word.get(k, v)) for k, v in (("x", 0), ("y", 0), ("s", 1)))
         right = x + ruler.width(word["v"], word["t"]) * size / F.W
         top = y - ruler.cap(word["v"]) * size / F.H
         left, upper, end, bottom = F.MARK
         if x < end and right > left and top < bottom and y > upper:
-            dy = bottom + .008 - top
+            group = word.get("chunk") or word["id"]
+            shifts[group] = max(shifts.get(group, 0), bottom + .008 - top)
+    for word in words:
+        dy = shifts.get(word.get("chunk") or word["id"])
+        if dy:
             word["y"] = l1pass._shift(word["y"], dy)
             moved.append(dict(id=word["id"], dy=dy))
     return moved
@@ -1264,7 +1269,7 @@ def render_revision(sc):
     # Audio fixes must invalidate both an engine soundtrack and a cached final mix.
     worker=os.environ.get('VALMERA_WORKER')
     if worker:
-        for rel in ('score/music.py','score/audibility.py','score/sound.py','score/sfx_quality.json','scene/pace.py','scene/compile.py','scene/text_layout.py','scene/run.py',
+        for rel in ('score/music.py','score/audibility.py','score/sound.py','score/sfx_quality.json','scene/pace.py','scene/compile.py','scene/runtime.py','scene/text_layout.py','scene/run.py',
                     'scene/palette/layout.py','scene/palette/rhythm.py','scene/palette/__init__.py','scene/palette/behind.py',
                     'scene/palette/matte.py','scene/palette/sense.py','scene/palette/punct.py'):
             path=os.path.join(worker,rel)
@@ -1294,7 +1299,7 @@ def render(ctx, script, sc):
     found=current_rejections(ctx.supply)
     rejected_plan=any(unrepaired(p,found) for p in sc.get('beats',{}).get('pictures',[]))
     stale_captions=('caption_lines' in sc.get('beats',{})
-                    and sc['beats'].get('caption_contract')!=7)
+                    and sc['beats'].get('caption_contract')!=8)
     if rejected_plan or stale_captions:
         if history and rejected_plan:
             pictures = sc.get("beats", {}).get("pictures", [])

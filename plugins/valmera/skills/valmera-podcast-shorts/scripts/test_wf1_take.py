@@ -214,6 +214,10 @@ def test_scarce_footage_keeps_live_argument_and_attributes_listener_cut(tmp_path
     panel=evidence["speaker_panels"][0]
     live=next(i for i in l1["items"] if i["k"]=="card" and i["f"]==panel["f"])
     assert l1["assets"][live["pic"]]["path"]==sup["take"]["path"]
+    assert live["h"] >= .80
+    edges = [(y-live["h"]*scale/2, y+live["h"]*scale/2) for y,scale in zip(live["y"],live["s"])]
+    assert min(b for _,b in edges) >= .86
+    assert edges[0] == edges[-1] == pytest.approx((0.,1.))
     assert live["src"][0]==pytest.approx((panel["word_frame"]-film.LEAD_F)/film.FPS)
 
 

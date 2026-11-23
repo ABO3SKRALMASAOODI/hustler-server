@@ -909,6 +909,20 @@ def build(script, sup, style_id, direction=None):
     if pages:
         ins,cleared=DR.hold_take(ins,pages,min_f=1,fps=FPS)
         coverage_report["authored_pages"]=dict(spans=pages,cleared_f=cleared)
+    # Reserve picture space for actual multi-line performances on the speaker.
+    # Read the same hold and word clock as the palette, including its implicit exit.
+    said = [[w["w"], Clock.f(w["t0"])-1, Clock.f(w["t1"]), int(w["seg"])] for w in clock.words]
+    stacks = []
+    for ask in pre:
+        if ask.get("dev") != "staircase" or len(ask.get("lines") or []) < 2:
+            continue
+        from scene.palette import kit
+        lines = [line if isinstance(line, dict) else {"t":line} for line in ask["lines"]]
+        first, end, _ = kit.span(dict(dur_f=f_end, said=said), ask, need=int(ask.get("hold",36)),
+                                 text=" ".join(str(line.get("t","")) for line in lines))
+        entry = min(line["at"] for line in lines) if all(isinstance(line.get("at"), int) for line in lines) else first
+        stacks.append((max(0, max(first,entry)-8), min(f_end,end+8), ask["id"]))
+
     def quote_panel(fa, fb, clock_start):
         # The original camera can cut to a listener halfway through one speaker's account.
         # Cite the preceding complete spoken sentence on a source card; the active captions continue below.
@@ -972,22 +986,38 @@ def build(script, sup, style_id, direction=None):
         if eligible:
             _,cue,finish=max(eligible)
             panel=(cue,finish)
-        edges = sorted({a, b, *[c for c in tcuts + joins + list(panel) if a+3 <= c <= b-3]})
+        edges = sorted({a, b, *[c for c in tcuts + joins + list(panel) if a+3 <= c <= b-3],
+                        *(f for span in stacks for f in span[:2] if a < f < b)})
         for fa, fb in zip(edges, edges[1:]):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
             if pieces[k]["who"] == "listener" and quote_panel(fa,fb,t0):
                 cut_pts.append(fa)
                 continue
-            if panel and panel[0] <= fa < panel[1]:
-                info=meta[pieces[k]["key"]]
+            stack = next((span for span in stacks if span[0] <= fa < span[1]), None)
+            active_panel = stack or (panel if panel and panel[0] <= fa < panel[1] else None)
+            info = meta[pieces[k]["key"]]
+            if active_panel and info.get("faces") and pieces[k]["who"] == "speaker":
                 face=max(info["faces"],key=lambda box:box[2]*box[3])
-                box=[.025,.13,.975,.66]
+                box = [0.,0.,1.,.73] if stack else [0.,.055,1.,.915]
                 asp=(box[2]-box[0])*W/((box[3]-box[1])*H)
                 crop=F.cover_crop(info["pw"],info["ph"],asp,(face[0]+face[2]/2,face[1]+face[3]/2),(.5,.5))
                 P.page([fa,fb],"#171B23","#0D1015",grain=.018)
-                P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],crop=crop,radius=.008,source_ink=[box])
-                coverage_report.setdefault("speaker_panels",[]).append(dict(f=[fa,fb],word_frame=panel[0]))
+                # A short pullback from bleed, then the reverse on the way out.
+                # Keep the tracked face at the same horizontal anchor through the move.
+                height = box[3] - box[1]
+                centre = (box[3] + box[1]) / 2
+                first, end = active_panel[:2]
+                ramp = min(8, max(1, (end-first-1)//2))
+                scale, centres = [], []
+                for frame in range(fa, fb):
+                    u = min(1., (frame-first)/ramp, (end-1-frame)/ramp)
+                    eased = u*u*(3-2*u)
+                    scale.append(1 + (1/height-1)*(1-eased))
+                    centres.append(.5+(centre-.5)*eased)
+                P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],crop=crop,
+                       s=scale,y=centres,speaker_panel=True, **({"panel_type": stack[2]} if stack else {}))
+                coverage_report.setdefault("speaker_panels",[]).append(dict(f=[fa,fb],word_frame=first))
                 cut_pts.append(fa)
                 continue
             kw = dict(grade=dict(TAKE_PAST)) if any(s0 <= fa < s1 for s0, s1 in take_past) else {}
@@ -1334,14 +1364,11 @@ def build(script, sup, style_id, direction=None):
         big = max(range(len(rows)), key=lambda k: rows[k][1])
         for k, (line, px) in enumerate(rows):
             P.voices[f"dsp{a}_{k}"] = dict(P.voices["dsp"], px=float(px))
-        if role == "contrast":                           # the contrast on a bar: dark ink on the accent
-            wd = P.R.width(f"dsp{a}_{big}", rows[big][0]) / W
-            P.block([a, b], [0.5 - wd / 2 - 0.02, ys[big] - P.R.cap(f"dsp{a}_{big}") / H - 0.014, 0.5 + wd / 2 + 0.02, ys[big] + 0.016],
-                    pal["accent"], z=7, op=0.96, radius=0.006, bar_on=a)     # part of the block: seat_display moves and shrinks it with its lines
         for k, (line, px) in enumerate(rows):
             vk = f"dsp{a}_{k}"
             line_ink, line_edge = (DARK_INK, pal["accent"]) if role == "contrast" and k == big else (ink, edge)
-            land(a, b, line, vk, ys[k], line_ink, delay=0 if k == big else min(2, b - a - 1), stroke=line_edge, on=a)
+            plate = {"backplate": pal["accent"]} if role == "contrast" and k == big else {}
+            land(a, b, line, vk, ys[k], line_ink, **plate, delay=0 if k == big else min(2, b - a - 1), stroke=line_edge, on=a)
         if a == spoken_a:
             omit += F.said_span(clock, seg, text)
         P.events.append(a)
@@ -1364,6 +1391,9 @@ def build(script, sup, style_id, direction=None):
             P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat", name_picture=pic)
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
                             omit=omit)
+    for word in P.items:
+        if word.get("role") == "cap":
+            word["chunk"] = f'caption-{word["f"][1]}'
     P.items = inside(P.items, f_end)
     P.items = ink_by_ground(P.items, P.voices, bright)
     film = dict(grain=float(st["grain"]), vignette=float(st["vignette"]), over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))
@@ -1394,7 +1424,7 @@ def build(script, sup, style_id, direction=None):
             except Exception as e:  # noqa: BLE001 - a section the driver cannot cut keeps the film's own band
                 bands.append(dict(energy=en, take=is_take, fault=repr(e)[:200]))
     # the film's word clock, for the palette's devices: each word on the frame a display word lands on it, and its sentence
-    l1["said"] = [[w["w"], Clock.f(w["t0"]) - 1, Clock.f(w["t1"]), int(w.get("seg", 0))] for w in clock.words]
+    l1["said"] = said
     # the Director's story beats for the sound's hero hits (worker/score/sound_screen.py): a beat it held (energy hold)
     # lands a short dry hit, not a trailer impact (lane sfx-moments, 20 Nov: an impact on a suicide line read wrong)
     l1["sound_beats"] = [dict(f=int(word_frame(b["w"])), role=b.get("role"), energy=b.get("energy"))
@@ -1454,7 +1484,7 @@ def build(script, sup, style_id, direction=None):
                  events=sorted(set(P.events) | set(cut_pts) | set(changes) | {it["f"][0] for it in l1["items"] if it["k"] == "card"}
                                | {e["f"] for e in dev_events if 0 <= e["f"] < f_end}),
                  device_events=dev_events,
-                 pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=7, display=[dict(f=[a, b], text=t) for a, b, t in shown],
+                 pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=8, display=[dict(f=[a, b], text=t) for a, b, t in shown],
                  display_facts=fact_pages,
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t, pic=pic) for a, b, t, pic in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
