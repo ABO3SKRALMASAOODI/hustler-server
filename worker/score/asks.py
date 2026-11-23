@@ -498,6 +498,13 @@ def build(ctx, request, history=None, edl=None):
     own = patch._own_media(ctx, edl)
     inventory = [{k: v for k, v in r.items() if k != "frame"} for r in own]
     content += "\nAvailable customer uploads (including unused/new assets):\n" + json.dumps(inventory, ensure_ascii=False)
+    track_titles = []
+    if edl.get("music"):
+        import music_library
+        track_titles = [track["title"] for track in music_library.catalog() if track.get("title")]
+        content += ("\nAvailable soundtrack titles for this film. Use the conversation to resolve "
+                    "a selection. These titles describe available audio, not visual directions.\n"
+                    + json.dumps(track_titles, ensure_ascii=False))
     if any(r.get("frame") for r in own):
         import llm
         content = [{"type": "text", "text": content}]
@@ -517,7 +524,10 @@ def build(ctx, request, history=None, edl=None):
         usage = {"usd": round(usage["usd"] + again["usd"], 6), "s": round(usage["s"] + again["s"], 2), "model": again["model"]}
         if not value.get("asks"):
             raise ValueError("the ledger came back empty twice")
-    return settle(value, edl, usage)
+    ledger = settle(value, edl, usage)
+    if track_titles:
+        ledger["soundtrack_options"] = track_titles
+    return ledger
 
 
 def settle(value, edl, usage=None):
