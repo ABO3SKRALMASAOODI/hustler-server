@@ -17,7 +17,7 @@ def test_runs_never_stop_the_line():
     text = active_text()
     for phrase in ("The only input is the link", "no brief, no count, no style, no song",
                    "do not end your turn while it runs", "run the same command with the same link",
-                   "shorts already made are kept", "nothing is delivered until the set is whole"):
+                   "the short in hand keeps its work", "nothing is delivered until the set is whole"):
         assert phrase in text, phrase
     prompt = (SKILL / "agents/openai.yaml").read_text()
     assert "link as its only argument" in prompt and "Ask me nothing else" in prompt
@@ -50,7 +50,7 @@ def test_no_quota_style_exclusion_wording():
     # exclusions; no count or theme quota may replace the individual bar.
     source = script()
     for phrase in ("Grade each moment on its own", "There is no target number",
-                   "no minimum and no maximum", "the strongest moments you left out",
+                   "no minimum and no maximum", "every other candidate you weighed and left out",
                    "the reason"):
         assert phrase in source, phrase
     text = active_text()
@@ -64,7 +64,7 @@ def test_selection_is_a_full_scan_graded_independently():
                    "hook_score", "payoff_score", "story_score", "strength"):
         assert phrase in source, phrase
     text = active_text()
-    assert "One reading of the whole conversation" in text
+    assert "The conversation is read in ten-minute parts" in text
     assert "Each is graded 1 to 10 on its own" in text
     assert "A builder never rates its own film" in text
     assert "measurements, not scores" in text
@@ -78,13 +78,13 @@ def test_selection_reads_the_audience_heatmap():
     assert "else the whole source heard locally" in text
     source = script()
     for phrase in ("# The source", "# Transcript", "identity_text(info)",
-                   "lines_of(ws)"):
+                   "sentence_lines(ws)"):
         assert phrase in source, phrase
     calls = [n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Call)
              and isinstance(n.func, ast.Attribute) and n.func.attr in ("ask", "ask_metered")
              and n.args and any(isinstance(x, ast.Name) and x.id == "SELECT_SYSTEM" for x in ast.walk(n.args[0]))]
     assert calls
-    assert any(len(c.args) > 1 and isinstance(c.args[1], ast.Name) and c.args[1].id == "content"
+    assert any(len(c.args) > 1 and any(isinstance(arg, ast.Name) and arg.id == "content" for arg in ast.walk(c.args[1]))
                and any(k.arg == "effort" and isinstance(k.value, ast.Constant) and k.value.value == "high" for k in c.keywords)
                for c in calls)
 
@@ -94,7 +94,7 @@ def test_challenge_pass_runs_before_make_shorts():
     # stage before engine construction; the fixed bar still precedes the build.
     source = script()
     assert '("fetch", "hear", "moments", "shorts", "deliver")' in source
-    assert 'assign_styles(rank(rows)' in source
+    assert source.index('kept = rank(rows)') < source.index('kept = assign_styles(kept,')
     assert 'no moment of this source clears the bar' in source
     assert 'shorts(run, results["fetch"], results["moments"]' in source
 
@@ -105,8 +105,8 @@ def test_a_craft_defect_is_a_fix_never_a_kill():
     assert "A short that failed is tried again on that run" in text
     assert "anything in `not_made` with its reason" in text
     assert "Pictures never move to a different sentence without a fresh placement check" in text
-    assert "Rejected assets are replaced from checked supply; insufficient coverage stops the run" in text
-    assert "zero rejected pictures with insufficient real-picture coverage is a failure" in text
+    assert "a picture that contradicts its words never ships, and its slot goes to the next-ranked candidate" in text
+    assert "measured coverage shortfall (`coverage.short`) is reported with it, never hidden" in text
 
 
 def test_payoff_never_holds_on_a_freeze_or_slow_tail():
