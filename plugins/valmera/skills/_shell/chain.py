@@ -842,7 +842,7 @@ def music_version(ctx, rd, sc):
     music = dict(picked_by_valmera=True, title=ch.get("title"), author=ch.get("author"), license=ch.get("license"), credit=ch.get("credit"),
                  page_url=ch.get("page_url"), cid=ch.get("cid"), why=ch.get("why"), chosen_by=ch.get("chosen_by"), tried=rep.get("tried"), does=does,
                  tracks=ch.get("tracks"), pool=ch.get("pool"), entry=ch.get("entry"),
-                 checks={k: chk.get(k) for k in ("length_ok", "endcard_ok", "mark_ok", "lufs", "loud_ok")}, removable=True,
+                 checks={k: chk.get(k) for k in ("length_ok", "endcard_ok", "mark_ok", "lufs", "lra", "true_peak_dbtp", "loud_ok")}, removable=True,
                  note="CC-BY: the credit line goes wherever the film is published; film_clean.mp4 is the same film without music")
     return dict(final_music=final, music=music, spend=spend)
 

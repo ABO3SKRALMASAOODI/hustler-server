@@ -22,6 +22,7 @@ import math
 import os
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 V = "/Users/masaoodi/Documents/Valmera"
@@ -487,7 +488,7 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
     gain = min(target - _k_db(voice), TP_CEIL_DB - _true_peak_db(voice))
     at = min(total - cut + round(CARD_LINE_AT * SR), n_tail - len(voice))
     end = at + len(voice)
-    duck = np.interp(np.arange(n_tail), [at - .06*SR, at, end, end + .12*SR],
+    duck = np.interp(np.arange(n_tail), [at - .35*SR, at, end, end + .90*SR],
                      [1., .25, .25, 1.])[:, None]
     acc *= duck
     out *= duck
@@ -619,6 +620,44 @@ def card_duration(config):
     return max(float(config.OUTRO_DURATION_S), minimum)
 
 
+def encoded_levels(path):
+    """Integrated level, range and maximum true peak on the complete decoded soundtrack."""
+    r = subprocess.run([FF, "-hide_banner", "-nostats", "-i", path, "-map", "0:a:0",
+                        "-af", "loudnorm=print_format=json", "-f", "null", "-"],
+                       capture_output=True, text=True, check=True)
+    data = json.loads(r.stderr[r.stderr.rindex("{"):r.stderr.rindex("}")+1])
+    return {key: float(data[field]) for key, field in
+            (("lufs","input_i"), ("lra","input_lra"), ("true_peak_dbtp","input_tp"))}
+
+
+def encode_finish_audio(programme, wav, cut, total, has_audio, out):
+    """Join once on the sample clock. Correct codec overshoot from the original stems before muxing."""
+    if has_audio:
+        head = f"[0:a]aresample={SR},aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_len={total},"
+    else:
+        head = f"anullsrc=r={SR}:cl=stereo,"
+    join = (head + f"atrim=end_sample={cut},asetpts=N/SR/TB[h];"
+            "[1:a]aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=N/SR/TB[t];"
+            "[h][t]concat=n=2:v=0:a=1,aresample=192000,")
+    ceiling = TP_CEIL_DB
+    trim_db = 0.
+    while True:
+        limiter = (f"alimiter=limit={10**(ceiling/20):.8f}:attack=5:release=80:level=0:latency=1,"
+                   f"aresample={SR},volume={trim_db:.3f}dB[a]")
+        subprocess.run([FF, "-v", "error", "-y", "-i", programme, "-i", wav, "-filter_complex", join+limiter,
+                        "-map", "[a]", "-c:a", "aac", "-b:a", "192k", out], capture_output=True, check=True)
+        levels = encoded_levels(out)
+        excess = levels["true_peak_dbtp"] + 1.
+        if excess <= 0:
+            return levels
+        # First give the transient more room. For a persistent codec overshoot
+        # scale the limited signal itself so each correction lowers its peak.
+        if ceiling == TP_CEIL_DB:
+            ceiling = max(-20., ceiling - excess - .5)
+        else:
+            trim_db -= excess + .5
+
+
 def finish(programme, out, workdir, used=(), accent=True, last_word_s=None, card_bed=None):
     """programme (the engine's film) -> out, with the mark on every programme frame and the end card joined.
     The film's sound holds a little past its last word (`last_word_s`, programme seconds; brand.last_word reads it from
@@ -650,23 +689,22 @@ def finish(programme, out, workdir, used=(), accent=True, last_word_s=None, card
     wav, cut, info = accent_tail(programme, workdir, n_prog / fps, fps, j, outro_s, used=used, has_audio=p["audio"],
                                  last_word_s=last_word_s, sting=accent, card_bed=card_bed)
     total = int(round(n_prog / fps * SR))
-    cmd += ["-i", wav]
-    if dark:
-        cmd += ["-loop", "1", "-r", str(fps), "-i", dark]          # input 4: the mark's dark twin
-    if p["audio"]:
-        g.append(f"[0:a]aresample={SR},aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_len={total},"
-                 f"atrim=start_sample=0:end_sample={cut},asetpts=N/SR/TB[ahead]")
-    else:
-        g.append(f"anullsrc=r={SR}:cl=stereo,atrim=end_sample={cut},aformat=sample_fmts=fltp:channel_layouts=stereo[ahead]")
-    g += [f"[3:a]aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=N/SR/TB[atail]",
-          "[ahead][atail]concat=n=2:v=0:a=1[aout]",
-          "[vjoin][ovid]concat=n=2:v=1:a=0[vout]"]
-    cmd += ["-filter_complex", ";".join(g), "-map", "[vout]", "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-r", str(fps),
-            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out]
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    # Keep the existing picture inputs and render the picture once. The AAC
+    # measured here goes into the final MP4 verbatim, including the card.
+    with tempfile.TemporaryDirectory(dir=workdir) as audio_dir:
+        audio = os.path.join(audio_dir, "finished.m4a")
+        levels = encode_finish_audio(programme, wav, cut, total, p["audio"], audio)
+        cmd += ["-i", audio]
+        if dark:
+            cmd += ["-loop", "1", "-r", str(fps), "-i", dark]
+        g.append("[vjoin][ovid]concat=n=2:v=1:a=0[vout]")
+        cmd += ["-filter_complex", ";".join(g), "-map", "[vout]", "-map", "3:a:0",
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-r", str(fps),
+                "-c:a", "copy", "-movflags", "+faststart", out]
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
     res = dict(programme_s=round(prog_s, 3), outro_s=outro_s, join_frames=j, mark_xy=[x, y], card=os.path.basename(card),
                mark_ink=dict(dark_spans=spans))
+    res.update(levels)
     res["voice"] = info["voice"]
     res["tail"] = {k: v for k, v in info.items() if k in ("last_word_s", "fall_from_s")}
     if last_word_s is not None:                       # the breath between the last word and the card's first frame
@@ -722,14 +760,7 @@ def check(programme, final, workdir):
     e = _frame(final, f["dur"] - 2.5, W, H)
     cd = float(np.abs(c - e).mean())
     out.update(endcard_diff=round(cd, 2), endcard_ok=cd < 6.0)
-    r = subprocess.run([FF, "-v", "info", "-i", final, "-t", f"{prog_s:.3f}", "-af", "ebur128", "-f", "null", "-"],
-                       capture_output=True, text=True)
-    lufs = None
-    for line in r.stderr.splitlines()[::-1]:
-        s = line.strip()
-        if s.startswith("I:") and "LUFS" in s:
-            lufs = float(s.split()[1])
-            break
-    out.update(lufs=lufs, loud_ok=lufs is not None and -18.0 <= lufs <= -10.0)
+    out.update(encoded_levels(final))
+    out["loud_ok"] = -18.0 <= out["lufs"] <= -10.0 and out["true_peak_dbtp"] <= -1.
     out["ok"] = all(out[k] for k in ("length_ok", "mark_ok", "endcard_ok", "loud_ok"))
     return out

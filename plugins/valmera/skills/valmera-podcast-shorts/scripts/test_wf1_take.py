@@ -434,3 +434,25 @@ def test_adjacent_survey_rows_reuse_clean_panel_then_show_live_speaker(tmp_path,
     llm = SimpleNamespace(ask=lambda *a,**k:(json.dumps(answer),{}), json_block=json.loads)
     plan = wf1_coverage.plan(words, "Survey", str(tmp_path), llm, frames=frames)
     assert [(w["first"],w["last"]) for w in plan["windows"]] == [(9,12)]
+
+
+def test_m12_live_account_owns_its_report_and_lamp_payoff(tmp_path, quiet_engines, monkeypatch):
+    import wf1_coverage
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *a: ([], []))
+    pack = _sup(tmp_path,cuts_two_shot())
+    words = pack["words"]["words"]
+    phrase = "actually making decisions"
+    for row, token in zip(words[13:16], phrase.split()):
+        row["w"] = token
+    script = dict(title="The People Making Decisions", source_credit="All-In Podcast",
+                  segments=[dict(say=" ".join(w["w"] for w in words if w["seg"]==s),pictures=[]) for s in (0,1)])
+    claim = dict(speaker="Jason Calacanis", report="Asked the bot to join every Slack channel as him.")
+    report = dict(first=4, last=8, facts=[dict(chain=claim, value=claim["report"],source={})])
+    ask = dict(dev="lamp", at=dict(w=13,seg=1,word="actually"), until=dict(w=15,seg=1,word="decisions"),args=dict(t=phrase))
+    scene, beats = film.build(script,pack,"prints",dict(coverage_final=True,display_facts=[report],
+        display=[dict(seg=1,text=phrase,key="actually",role="payoff")], director=dict(asks=[ask])))
+    assert beats["display_facts"] == [] and not beats["coverage"].get("authored_source")
+    assert any(it["k"]=="shot" and it.get("src") and it["f"][0] <= 50 < it["f"][1] for it in scene["items"])
+    assert any(row["text"] == phrase for row in beats["display"])
+    assert any(it["dev"]=="lamp" and it["t"]==phrase for it in scene["devices"])
+    assert not any(it.get("role")=="big" and it.get("t","").lower() in phrase for it in scene["items"])

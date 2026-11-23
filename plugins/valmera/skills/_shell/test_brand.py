@@ -109,7 +109,7 @@ def make_programme(path, audio):
     """A 540x960 30 fps programme of moving test pattern with the given mono audio."""
     wav = str(path) + ".wav"
     with wave.open(wav, "wb") as f:
-        f.setnchannels(1)
+        f.setnchannels(1 if audio.ndim == 1 else audio.shape[1])
         f.setsampwidth(2)
         f.setframerate(SR)
         f.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
@@ -364,3 +364,24 @@ def test_same_music_remains_through_last_encoded_quarter_and_ducks_for_easton(tm
     # The cached line is removed in this measurement; compare the bed itself.
     levels=report["card_quarters_dbfs"]
     assert min(levels[2:5]) < np.median(levels[-5:-1])-8
+
+
+def test_final_aac_holds_a_scored_peak_at_a_spoken_seam(tmp_path):
+    from pathlib import Path
+    voices = Path(brand.CARD_LINE).parent / "voices"
+    n = PROG_F * SR // FPS
+    t = np.arange(n) / SR
+    bed = .065*np.cos(2*np.pi*196*t)
+    talk = np.zeros(n)
+    for i, name in enumerate(("iris.flac","atlas.flac")):
+        source = brand._pcm(str(voices/name), SR, 4*SR).mean(axis=1)
+        talk[i*3*SR:(i+1)*3*SR] = source * .60 / np.max(abs(source))
+    # Two edits meet on a pitched attack while the speaker is mid-phrase.
+    seam = slice(round(2.44*SR),round(2.45*SR))
+    bed[seam] += .995*np.hanning(len(t[seam]))*np.sin(2*np.pi*3500*t[seam])
+    prog = make_programme(tmp_path/"scored.mp4", np.column_stack((talk+bed, talk+bed)))
+    final = str(tmp_path/"finished.mp4")
+    brand.finish(prog, final, str(tmp_path), accent=False)
+    assert true_peak(final, 0.) <= -1.
+    measured = brand.check(prog, final, str(tmp_path))
+    assert measured["true_peak_dbtp"] <= -1 and np.isfinite(measured["lra"])

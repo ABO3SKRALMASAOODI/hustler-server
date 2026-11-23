@@ -1327,7 +1327,7 @@ def render_revision(sc):
     if worker:
         for rel in ('score/music.py','score/audibility.py','score/sound.py','score/sfx_quality.json','scene/pace.py','scene/compile.py','scene/runtime.py','scene/text_layout.py','scene/run.py',
                     'scene/palette/layout.py','scene/palette/rhythm.py','scene/palette/__init__.py','scene/palette/behind.py',
-                    'scene/palette/matte.py','scene/palette/sense.py','scene/palette/punct.py'):
+                    'scene/palette/matte.py','scene/palette/type.py','scene/palette/sense.py','scene/palette/punct.py'):
             path=os.path.join(worker,rel)
             if os.path.isfile(path):digest.update(open(path,'rb').read())
     digest.update(file_digest(brand.__file__).encode())
@@ -1400,7 +1400,7 @@ def render(ctx, script, sc):
     found=current_rejections(ctx.supply)
     rejected_plan=any(unrepaired(p,found) for p in sc.get('beats',{}).get('pictures',[]))
     stale_captions=('caption_lines' in sc.get('beats',{})
-                    and sc['beats'].get('caption_contract')!=8)
+                    and sc['beats'].get('caption_contract')!=9)
     if rejected_plan or stale_captions:
         if history and rejected_plan:
             pictures = sc.get("beats", {}).get("pictures", [])

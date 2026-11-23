@@ -860,6 +860,10 @@ def build(script, sup, style_id, direction=None):
         pages = [p for p in pages if p not in competing]
         pages.append(dict(first=comparison["first"], last=comparison["last"], facts=[
             dict(relation=comparison["premise"], value=comparison["consequence"], source={})], analogy=True))
+    # The take reader already located speakers in ordinary camera shots.
+    # Screen-share presenter tiles are only one of the possible live returns.
+    live_spans = [(round(sp["t0"]*FPS)+LEAD_F, round(sp["t1"]*FPS)+LEAD_F)
+                  for shot in tshots for sp in shot.get("spans", []) if sp["who"] == "speaker"]
     for page in pages:
         a = word_frame(page["first"])
         b = min(f_end, Clock.f(clock.words[page["last"]]["t1"]))
@@ -872,7 +876,8 @@ def build(script, sup, style_id, direction=None):
         qualified = any((f.get("chain") or {}).get("stance") in wf1_display.ESTIMATE_LABELS or
                         (f.get("chain") or {}).get("original") for f in facts)
         narrated = all(f.get("chain") and not f.get("relation") for f in facts)
-        on_presenter = any(lo <= a and b <= hi for lo,hi,_ in speakers)
+        on_presenter = (any(lo <= a and b <= hi for lo,hi,_ in speakers)
+                        or any(lo < b and a < hi for lo,hi in live_spans))
         if b > a and (qualified or not (on_evidence(a,b) or (on_presenter and narrated))):
             timed_facts.append((a,b,page))
     # Retained directions can predate the claims chain. A dense attributed block
@@ -1047,7 +1052,7 @@ def build(script, sup, style_id, direction=None):
         complete = [i for i,(_,end) in enumerate(clock.segs) if end <= clock_start+.12]
         if not complete or not script.get("source_credit"):
             return False
-        if 'quote_segments' in reading and complete[-1] not in reading['quote_segments']:
+        if complete[-1] not in (reading.get('quote_segments') or []):
             return False
         segment = complete[-1]
         claim = next((c for c in d.get("claims") or [] if clock.words[c["first"]]["seg"] <= segment
@@ -1510,7 +1515,12 @@ def build(script, sup, style_id, direction=None):
                           and ask["dev"] not in palette_menu.FIGURES and isinstance(ask.get("f"), list)
                           and ask["f"][:1] == [a]
                           and all(palette_menu.drawn(dict(dev=ask["dev"], args=ask), text))), None)
-        if performed:
+        # A relit phrase can span several display rows and start a frame
+        # before the display. Its timed lettering owns the whole phrase.
+        lamp = any(ask["dev"] == "lamp" and ask["at"][0] < b and a < ask["at"][1]
+                   and [F.norm_word(w) for w in str(ask.get("t") or "").split()] ==
+                       [F.norm_word(w) for w in text.split()] for ask in pre)
+        if lamp or performed:
             shown.append((a, b, text))
             P.events.append(a)
             continue
@@ -1691,7 +1701,7 @@ def build(script, sup, style_id, direction=None):
                  events=sorted(set(P.events) | set(cut_pts) | set(changes) | {it["f"][0] for it in l1["items"] if it["k"] == "card"}
                                | {e["f"] for e in dev_events if 0 <= e["f"] < f_end}),
                  device_events=dev_events,
-                 pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=8, display=[dict(f=[a, b], text=t) for a, b, t in shown],
+                 pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=9, display=[dict(f=[a, b], text=t) for a, b, t in shown],
                  display_facts=fact_pages,
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t, pic=pic) for a, b, t, pic in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),

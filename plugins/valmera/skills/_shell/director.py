@@ -57,9 +57,8 @@ PRINCIPLES = """How the best vertical edits keep a stranger watching (principles
   Keep the unit, relation and any qualification together with the figure.
 - Every turn changes something you can see: the surface, the polarity, the pace, or a type card.
 - Lists burst: one picture or one hit per item, fast, for as long as the list is said (about a second), then it lands.
-- The pace alternates fast against hold: some 3 s windows carry one cut, others six to ten. Shots of 1-2 frames are
-  punctuation (a white, black or negative frame on a hit, a glimpse): about one shot in twelve, never a section's
-  texture.
+- The pace alternates fast against hold: some 3 s windows carry one cut, others six to ten. Use a brief dip or held image to separate two thoughts when the pause,
+  change of subject or new picture gives it a purpose. Carry an unbroken spoken turn on the moving picture.
 - Pictures move inside their shots: a push, a drift, a settle on the word; a still never just sits.
 - Premium, never cringe: one look carries the film (its colour; black and white for the past against colour for the
   present; a film gate, a tape or a page for an era the story names), and a surface changes where the story changes.
@@ -612,8 +611,9 @@ def signal_director(sentences, words, stress_w, pictures=(), seed=0, recent=(), 
             asks.append(dict(dev="spotlight", beat=bi, at=a, args={}, pics=[]))
         elif b["role"] == "payoff":
             prev = max(0, b["w"] - 1)
-            asks.append(dict(dev="black", beat=bi, at=dict(w=prev, seg=words[prev]["seg"], word=words[prev]["w"]), args=dict(n=2), pics=[]))
-            asks.append(dict(dev="white", beat=bi, at=a, args={}, pics=[]))
+            if words[b["w"]]["t0"] - words[prev]["t1"] >= .3:
+                asks.append(dict(dev="black", beat=bi, at=dict(w=prev, seg=words[prev]["seg"], word=words[prev]["w"]), args=dict(n=2), pics=[]))
+            asks.append(dict(dev="settle", beat=bi, at=a, args=dict(dir="in"), pics=[]))
     # a burst on the strongest stress between the hook and the payoff, about a second of pictures from the pool
     # nearest it; and the sentence densest with stress spreads into a layout, one tile per stressed word
     hook_t = words[first[0]]["t0"] + 2.0
