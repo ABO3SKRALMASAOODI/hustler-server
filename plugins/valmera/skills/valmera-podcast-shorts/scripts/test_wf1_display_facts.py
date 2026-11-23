@@ -363,3 +363,29 @@ def test_interview_context_completes_a_spoken_list_promise():
     pages = wf1_display.bind(score,edit,words)["display_facts"]
     assert [(p["first"],p["last"],p["facts"][0]["value"]) for p in pages] == [
         (0,1,claims[0]["report"]), (2,8,claims[1]["report"])]
+
+
+def test_dense_scenario_keeps_each_active_thought_with_its_credit():
+    import wf1_display
+    from scene.palette.kit import item_box
+    from wf1_layout import intersects
+
+    labels = ["Hypothetical holder", "Sell shares → cash now", "Keep shares → retain growth exposure",
+              "What if 1.7³ or 1.7⁴?", "Holder rethinks how much to sell"]
+    palette = {"accent": "#FFCC44", "ink": "#FFFFFF"}
+    for height in (.303, .20):
+        for active, label in enumerate(labels):
+            voice = dict(font="InterDisplay-Bold.ttf", px=58, track=0)
+            plan = wf.F.Plan({"cap": voice, "dsp": voice}, {})
+            wf1_display.reading_card(plan, [0, 30], "", "Ali Ghodsi · Scenario", "All-In Podcast",
+                                     palette, centre=.605, max_height=height,
+                                     steps=[(t, i == active) for i, t in enumerate(labels)])
+            for f in range(30):
+                visible = [it for it in plan.items if it["f"][0] <= f < it["f"][1]]
+                lines = [it["t"] for it in visible if it["v"] == "sequence_label" and it["ink"] == palette["accent"]]
+                assert " ".join(lines) == label
+                assert visible[0]["t"] == "Ali Ghodsi · Scenario" and visible[-1]["t"] == "All-In Podcast"
+                boxes = [item_box(it, plan.voices, wf.F.W, wf.F.H, f) for it in visible]
+                assert all(.06 < x0 < x1 < .86 and .44 < y0 < y1 < .77 for x0, y0, x1, y1 in boxes)
+                assert not any(intersects(box, other, pad=0) for i, box in enumerate(boxes) for other in boxes[i+1:])
+            assert plan.voices["sequence_label"]["px"] >= 54

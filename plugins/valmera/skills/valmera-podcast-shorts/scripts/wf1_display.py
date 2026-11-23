@@ -412,16 +412,34 @@ def reading_card(plan, span, body, byline, source, palette, *, centre=.64, max_h
     head = [measure(row,credit,palette["accent"]) for row in header]
     foot = [measure(row,credit,palette["accent"]) for row in footer]
     body = [measure(row,"quote_body",palette["ink"]) for row in body_rows]
+    nodes = []
     for label, active in steps:
+        lines = []
         for i, line in enumerate(wrap(label, "sequence_label")):
             node = ("●" if active else "○") if i == 0 else None
-            body.append(measure(line, "sequence_label", palette["accent"] if active else palette["ink"], node))
+            lines.append(measure(line, "sequence_label", palette["accent"] if active else palette["ink"], node))
+        nodes.append((lines, active))
     # Seat the shaped ink, including descenders. Each page repeats the evidence
     # credit; its share of the interval follows the number of words on that page.
     gap = 26
     def height(rows):
         return sum(bottom-top for _,_,_,top,bottom,_ in rows) + gap*(len(rows)-1)
 
+    if nodes:
+        # Keep a wrapped label together for the whole spoken state. Fit the
+        # gutters first. If the list needs more room, turn the page on its cue.
+        all_rows = head + body + [row for lines, _ in nodes for row in lines] + foot
+        gutters = max(1, len(all_rows) - 1)
+        gap = max(16, min(gap, gap + (max_height * H - height(all_rows)) / gutters))
+        active_node = next((i for i, (_, active) in enumerate(nodes) if active), 0)
+        page = []
+        for i, (lines, _) in enumerate(nodes):
+            if page and height(head + body + page + lines + foot) > max_height * H:
+                if i > active_node:
+                    break
+                page = []
+            page.extend(lines)
+        body.extend(page)
     pages = []
     for row in body:
         if not pages or height(head+pages[-1]+[row]+foot) > max_height*H:
