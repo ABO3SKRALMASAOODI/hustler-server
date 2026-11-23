@@ -314,6 +314,13 @@ def item_box(it, voices, W, H, f=None):
     return drawn(v, str(it.get("t") or ""), A(it.get("x", 0), f, lo), A(it.get("y", 0), f, lo), W, H, s=A(it.get("s", 1), f, lo))
 
 
+def backplate_box(it, voices, W, H, f):
+    """The live ink plus the contrast plate's padding at the word's current scale."""
+    l, t, r, b = item_box(it, voices, W, H, f)
+    scale = A(it.get("s", 1), f, it["f"][0])
+    return (l - .02*scale, t - .014*scale, r + .02*scale, b + .014*scale)
+
+
 def fit(v, text, width_px, cap_px=None, floor_px=None):
     """The voice at the size where ``text`` is ``width_px`` wide (never past ``cap_px``, never under the floor)."""
     got = glyphs.fit_px(v, text, width_px, cap_px=cap_px)

@@ -606,10 +606,10 @@ def settle(l1, work, ask, sense_=None, pool=None):
     size = float(args.get("size", 0.22 if out_dir else 0.09))
     peak = float(args.get("peak", 0.18))
     items, log = [], []
-    targets = [s for s in K.shots(l1) if a <= s["f"][0] < z] or [s for s in K.shots(l1) if s["f"][0] <= a < s["f"][1]]
+    pictures = [s for s in K.shots(l1) if s.get("pic") != "plate"]
+    pictures.extend(it for it in l1["items"] if it.get("speaker_panel"))
+    targets = [s for s in pictures if a <= s["f"][0] < z] or [s for s in pictures if s["f"][0] <= a < s["f"][1]]
     for sh in targets:
-        if sh.get("pic") == "plate":
-            continue
         pic = K.pic_of_asset(l1, work, sh.get("pic"))
         n = sh["f"][1] - sh["f"][0]
         cs = K.crops(l1, work, sh)

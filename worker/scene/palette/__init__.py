@@ -580,24 +580,47 @@ def share_word_time(scene, patch, made):
     from .kit import cut
     from itertools import groupby
     from ..plan import A
+    from unicodedata import category
+    def lettering(text):
+        # Keep printed symbols when testing literal equality (REVENUE ↑? carries more ink than "revenue").
+        tokens = ("".join(c for c in token.casefold() if c.isalnum() or category(c).startswith("S"))
+                  for token in text.split())
+        return [token for token in tokens if token]
+
+    caps = sorted((it for it in scene["items"] if it.get("role") == "cap" and it["id"] not in made),
+                  key=lambda it: it.get("on", it["f"][0]))
+    cap_tokens = [lettering(c["t"]) for c in caps]
     drawn = []
     for word in patch.get("items", []):
-        if word["k"] != "word" or not word.get("t"):
+        if word["k"] != "word" or word.get("role") == "cap" or not word.get("t"):
             continue
         start,end = word["f"]
+        tokens = lettering(word["t"])
+        # The public caption inks one token per item. Match a performed line to
+        # one contiguous occurrence, so a later repeated word keeps its caption.
+        owned = set()
+        if len(tokens) > 1:
+            expected = [[t] for t in tokens]
+            matches = [caps[i:i+len(tokens)] for i in range(len(caps)-len(tokens)+1)
+                       if cap_tokens[i:i+len(tokens)] == expected
+                       and any(c["f"][0] < end and start < c["f"][1] for c in caps[i:i+len(tokens)])]
+            if matches:
+                run = min(matches, key=lambda rows: abs(rows[0].get("on",rows[0]["f"][0])-start))
+                owned = {c["id"] for c in run}
         pixels = lambda f: A(word.get("op",1.),f,start) > .01
         for visible, span in groupby(range(start,end),key=pixels):
             if visible:
                 frames = list(span)
-                drawn.append((_words(word["t"]),frames[0],frames[-1]+1))
+                drawn.append((tokens,owned,frames[0],frames[-1]+1))
     items = []
     for it in scene["items"]:
         if it["k"] != "word" or it["id"] in made:
             items.append(it)
             continue
         lo, hi = it["f"]
-        spans = sorted((max(lo,a), min(hi,b)) for text,a,b in drawn
-                       if text == _words(it["t"]) and lo < b and a < hi)
+        visible_text = lettering(it["t"])
+        spans = sorted((max(lo,a), min(hi,b)) for text,owned,a,b in drawn
+                       if (it["id"] in owned or text == visible_text) and lo < b and a < hi)
         if not spans:
             items.append(it)
             continue

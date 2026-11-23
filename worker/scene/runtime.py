@@ -972,6 +972,11 @@ class Runtime:
             rx, ry = cx + (rx - cx) * s_now, cy + (ry - cy) * s_now
             rw, rh = rw * s_now, rh * s_now
         v = self.plan.voices.get(it.get("v")) or {}
+        if it.get("backplate"):
+            from .palette.kit import backplate_box
+            l, t, r, b = backplate_box(it, self.plan.voices, W, H, f)
+            self.draw_card(dict(id=it["id"], pic="plate", f=it["f"], plate={"c0":it["backplate"]},
+                                x=(l+r)/2, y=(t+b)/2, w=r-l, h=b-t, radius=.006, op=.96*op), f)
         blend = BLENDS.get(it.get("blend"), 0)
         ss = spr["ss"]
         lod = max(math.log2(max(ss / max(s_now, 1e-3), 1.0)), 0.0)

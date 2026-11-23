@@ -322,3 +322,51 @@ def test_podcast_bed_yields_to_quiet_midphrase_speech_without_moving_the_tail(tm
     assert np.array_equal(bed[:36*sr],original[:36*sr])
     assert np.array_equal(bed[39*sr:],original[39*sr:])
     assert report['card_bed']['at_s'] == 26.
+
+
+def test_started_using_is_owned_by_the_live_staircase():
+    from scene.palette import share_word_time
+    caps = [word(str(i), t, "cap", .2+i*.1, .8, [a, 201], "cap")
+            for i,(t,a) in enumerate([("who",167),("started",174),("using",183)])]
+    stair = dict(word("r0","STARTED USING","big",.15,.4,[173,191],"big"), op=[0]+[1]*17)
+    items = share_word_time(dict(items=caps+[stair]),dict(items=[stair]),{"r0"})["items"]
+    for f in range(167,201):
+        visible = [i["t"] for i in items if i.get("role")=="cap" and i["f"][0]<=f<i["f"][1]]
+        assert visible == [i["t"] for i in caps if i["f"][0]<=f and (i["t"]=="who" or f>=191)]
+
+
+def test_contrast_plate_follows_moving_revenue_until_its_last_frame():
+    from scene.palette.kit import item_box
+    voices = {"v": dict(px=32,font="ArchivoBlack-Regular.ttf")}
+    w = dict(word("revenue","REVENUE","v",.15,.4,[1,5],"big"),
+             y=[.34,.54,.76,.68], op=[.6,1.,1.,0.], s=[.8,1.,.9,1.],
+             ink="#101010", backplate="#E5AF35")
+    scene = film([plate(6,"#101010"),w],dur=6,frame=(360,640),voices=voices)
+    for f in range(6):
+        rgb=one(scene,f)[:,:,:3].astype(float)
+        ys,xs=np.where((rgb[:,:,0]-rgb[:,:,2]>45) & (rgb[:,:,0]>100))
+        if 1<=f<=3:
+            l,t,r,b=item_box(w,voices,360,640,f)
+            assert len(xs) and xs.min()/360<l<r<xs.max()/360 and ys.min()/640<t<b<ys.max()/640
+            assert abs((ys.min()+ys.max())/1280-(t+b)/2)<.012
+        else:
+            assert not len(xs)
+
+
+def test_exchange_keeps_one_baseline_through_reframing_and_word_entrances():
+    from scene.plan import A
+    # The Ghodsi two-shot at 18.3 s. The early mark pass moved only the
+    # rightmost tokens of a caption page. The final crop must seat them together.
+    voice = {"cap":dict(px=58, font="InterDisplay-Bold.ttf")}
+    shot = dict(id="s",k="shot",pic="take",f=[553,630],src=[18.3333,20.9],
+                crop=[.13601,0,.45242,1])
+    meta = dict(pw=1920,ph=1080,faces=[[.17236,.21036,.25962,.54879]],
+                track=[[18.3,.17076,.21473,.3473,.6531],[20.9,.21,.18,.4,.69]])
+    caps = [dict(word(t,t,"cap",x,y,[a,b],"cap"),chunk=f"caption-{b}") for t,x,y,a,b in (
+        ("we",.29,.18143,569,591),("need",.375,.18143,577,591),("to",.511,.22228,582,591),
+        ("move",.573,.22228,585,591),("Token",.296,.17365,597,609),("matching.",.456,.22228,603,609))]
+    scene = dict(items=[shot,*caps], fps=30, frame=[1080,1920], voices=voice)
+    resolve(scene,{"take":meta})
+    seats = {A(i["y"],f,i["f"][0]) for i in caps for f in range(*i["f"])}
+    assert len(seats)==1 and .70 < seats.pop() < .94
+    assert [i["f"][0] for i in caps]==[569,577,582,585,597,603]

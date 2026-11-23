@@ -1,11 +1,12 @@
 """Seat the final composed words after palette expansion, on their rendered ink."""
 
 from collections import defaultdict
+from itertools import groupby
 import math
 
 import numpy as np
 
-from .palette.kit import MARK, item_box
+from .palette.kit import MARK, backplate_box, item_box, metrics
 from .motion import Cam
 from .plan import A
 from .runtime import plane_hom
@@ -34,10 +35,12 @@ def speaker_seats(scene, metadata):
     width, height = scene["frame"]
     for shot in scene["items"]:
         meta = metadata.get(shot.get("pic"))
-        if shot["k"] != "shot" or not meta or not meta.get("faces"):
+        panel = shot.get("speaker_panel")
+        if (shot["k"] != "shot" and not panel) or not meta or not meta.get("faces"):
             continue
         lo, hi = shot["f"]
-        cam = Cam(meta["pw"], meta["ph"], width / height, width, meta.get("max_up", 3))
+        w, h = (shot["w"], shot["h"]) if panel else (1., 1.)
+        cam = Cam(meta["pw"], meta["ph"], width*w/(height*h), width*w, meta.get("max_up", 3))
         track = meta.get("track") or []
         times = [row[0] for row in track]
         fx, fy, fw, fh = max(meta["faces"], key=lambda r:r[2]*r[3])[:4]
@@ -60,7 +63,12 @@ def speaker_seats(scene, metadata):
                 l,top,right,bot = cam.rect(cx,cy,right-l)
             l,top,right,bot = cam.keep_whole([l,top,right,bot],[(x,y,r-x,bottom-y)])
             crops.append([l,top,right,bot])
-            seats[f] = [(x-l)/(right-l),(y-top)/(bot-top),(r-l)/(right-l),(bottom-top)/(bot-top)]
+            face = [(x-l)/(right-l),(y-top)/(bot-top),(r-l)/(right-l),(bottom-top)/(bot-top)]
+            if panel:
+                scale = A(shot.get("s",1),f,lo)
+                cx, cy = A(shot["x"],f,lo), A(shot["y"],f,lo)
+                face = [cy+(q-.5)*h*scale if i%2 else cx+(q-.5)*w*scale for i,q in enumerate(face)]
+            seats[f] = face
         shot["crop"] = crops
     return seats
 
@@ -90,6 +98,16 @@ def resolve(scene, speaker_layout=None):
             x,y = A(card["x"],f,lo), A(card["y"],f,lo)
             w,h = card["w"]*scale/2,card["h"]*scale/2
             occupied[f].append((x-w,y-h,x+w,y+h))
+    # A speaker panel opened for a stack reserves the strip directly beneath
+    # its live image. Follow the measured edge through the pullback and release.
+    panel_edges = defaultdict(dict)
+    for card in scene["items"]:
+        if card.get("panel_type"):
+            lo, hi = card["f"]
+            panel_edges[card["panel_type"]].update({
+                f: A(card["y"],f,lo) + card["h"]*A(card.get("s",1),f,lo)/2
+                for f in range(lo,hi)
+            })
     overflow = set()
     active = defaultdict(list)
     for layer in scene["items"]:
@@ -101,6 +119,18 @@ def resolve(scene, speaker_layout=None):
                     if layer.get("proof_line"):
                         occupied[f].append(proof_bounds(layer, f, width, height))
     fixed = {f: list(boxes) for f,boxes in occupied.items()}
+    # Choose the reading baseline for the continuous interview picture. Word
+    # timings and horizontal positions still come from the original page.
+    reading_seat = {}
+    for _, run in groupby(enumerate(sorted(faces)), lambda pair: pair[1]-pair[0]):
+        frames = [frame for _,frame in run]
+        baseline = min(.91, max(.79, max(faces[f][3] for f in frames)+.045))
+        reading_seat.update(dict.fromkeys(frames, baseline))
+
+    def ink_box(layer, f):
+        measure = backplate_box if layer.get("backplate") else item_box
+        return measure(layer, voices, width, height, f)
+
     words, groups = [], {}
     for layer in scene["items"]:
         glyph = layer["k"] == "join" and layer.get("mode") == "glyph"
@@ -110,6 +140,11 @@ def resolve(scene, speaker_layout=None):
         caption = not glyph and layer.get("role") == "cap"
         if caption:
             layer["contrast_shadow"] = True
+        if caption and "chunk" in layer:
+            lo, hi = layer["f"]
+            if lo in reading_seat:
+                layer["y"] = reading_seat[lo]
+            group = ("caption", layer["chunk"])
         if caption and group is None:
             # The authored line types on word by word. All of its words leave on
             # the same frame and must share a translation, even across a cut.
@@ -122,6 +157,8 @@ def resolve(scene, speaker_layout=None):
             key, {"id": str(key), "role": "cap" if caption else "registered", "layers": [], "boxes": {}}
         )
         g["layers"].append(layer)
+        if caption and "chunk" in layer and layer["f"][0] in reading_seat:
+            g["reading"] = True
         lo, hi = layer["f"]
         measure = (
             dict(layer, k="word", x=layer.get("x0", 0.5), y=layer.get("y0", 0.5))
@@ -131,7 +168,7 @@ def resolve(scene, speaker_layout=None):
         for f in range(lo, hi):
             if A(layer.get("a" if glyph else "op", 1), f, lo) <= 0.01:
                 continue
-            box = item_box(measure, voices, width, height, f)
+            box = ink_box(measure, f)
             if box:
                 old = g["boxes"].get(f, box)
                 g["boxes"][f] = (
@@ -147,7 +184,7 @@ def resolve(scene, speaker_layout=None):
 
     def frame_box(it, f):
         if "layers" not in it:
-            return item_box(it, voices, width, height, f)
+            return ink_box(it, f)
         box = it["boxes"].get(f)
         if box:
             lo = it["f"][0]
@@ -163,7 +200,7 @@ def resolve(scene, speaker_layout=None):
     # words at the same priority keep their seat as the next word types on.
     words.sort(
         key=lambda it: (
-            {"registered": -1, "cap": 0, "big": 2, "stat": 3}.get(it.get("role"), 1),
+            -2 if it.get("reading") else {"registered": -1, "cap": 0, "big": 2, "stat": 3}.get(it.get("role"), 1),
             it["f"][0],
             -it.get("z", 0),
             it["id"],
@@ -190,12 +227,14 @@ def resolve(scene, speaker_layout=None):
         if not boxes:
             continue
 
+        panel = panel_edges.get(it["id"], {})
         def available(frames):
             intervals = []
             low, high = -1.0, 1.0
             for f in frames:
                 x0, y0, x1, y1 = boxes[f]
                 top_margin = MARK[3] + .018 if display_on_take else .04
+                top_margin = max(top_margin, panel.get(f, 0) + .008)
                 low, high = max(low, top_margin - y0), min(high, .94 - y1)
                 for left, top, right, bottom in occupied[f]:
                     if x0 < right and left < x1:
@@ -215,6 +254,20 @@ def resolve(scene, speaker_layout=None):
             )
 
         shift = available(boxes)
+        if shift is None and it.get("role") == "registered":
+            # Fit the complete moving lockup in one seat across its lifetime.
+            # Scale about the centre of its ink, including the entrance overshoot.
+            cx = (min(b[0] for b in boxes.values())+max(b[2] for b in boxes.values()))/2
+            cy = (min(b[1] for b in boxes.values())+max(b[3] for b in boxes.values()))/2
+            original = boxes
+            for size in (.90, .80, .70, .60, .50):
+                boxes = {f:tuple(c+(q-c)*size for q,c in zip(b,(cx,cy,cx,cy))) for f,b in original.items()}
+                shift = available(boxes)
+                if shift is not None:
+                    it.update(s=size, x=(cx-.5)*(1-size), y=(cy-.5)*(1-size))
+                    break
+            else:
+                boxes = original
         # A crowded moving composition can require a different seat on a cut.
         dy = {}
         for f, (x0, y0, x1, y1) in boxes.items():
@@ -275,15 +328,21 @@ def resolve(scene, speaker_layout=None):
                 1.0, 0.93 * slot / max(y1 - y0, 1e-6), 0.94 / max(x1 - x0, 1e-6)
             )
             lo, hi = it["f"]
+            cx, cy = (x0+x1)/2, (y0+y1)/2
+            tx, ty = A(it.get("x",0),f,lo), A(it.get("y",0),f,lo)
+            # A group's scale pivots at screen centre; a single sprite scales at its own ink centre.
+            if "layers" in it:
+                cx = .5+(cx-.5-tx)*scale+tx
+                cy = .5+(cy-.5-ty)*scale+ty
             for key, val in (
                 ("s", A(it.get("s", 1), f, lo) * scale),
-                ("x", A(it.get("x", 0), f, lo) + 0.5 - (x0 + x1) / 2),
+                ("x", tx + .5 - cx),
                 (
                     "y",
-                    A(it.get("y", 0), f, lo)
+                    ty
                     + begin
                     + (row + 0.5) * slot
-                    - (y0 + y1) / 2,
+                    - cy,
                 ),
             ):
                 if not isinstance(it.get(key), list):
@@ -298,6 +357,10 @@ def resolve(scene, speaker_layout=None):
         origin = g["f"][0]
         for layer in g["layers"]:
             lo, hi = layer["f"]
+            # A word sprite scales about its ink centre, not its pen. Move that
+            # centre through the group transform, preserving the layer's own motion.
+            px, py = metrics(voices[layer["v"]], layer["t"])["c"]
+            pivot = {"x":px/width, "y":py/height}
             for coord, offset in (("x", "x"), ("y", "y"), ("s", "s")):
                 key = coord + "0" if layer["k"] == "join" and coord != "s" else coord
                 base = layer.get(key, 1 if key == "s" else 0)
@@ -308,6 +371,6 @@ def resolve(scene, speaker_layout=None):
                     values.append(
                         n * scale
                         if key == "s"
-                        else 0.5 + (n - 0.5) * scale + A(g.get(offset, 0), f, origin)
+                        else 0.5 + (n + pivot[coord] - 0.5) * scale - pivot[coord] + A(g.get(offset, 0), f, origin)
                     )
                 layer[key] = values[0] if min(values) == max(values) else values

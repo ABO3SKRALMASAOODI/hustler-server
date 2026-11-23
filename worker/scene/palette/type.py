@@ -209,6 +209,12 @@ def staircase(l1, work, ask, sense=None):
     wid = max((lines[i]["t"] for i in big), key=lambda t: K.ink_box(vb, t)[1][2])
     vb = K.fit(vb, wid, float(o.get("width", 0.80)) * W, cap_px=0.15 * H)
     vs = K.mono(max(K.FLOOR_PX + 6, round(vb["px"] * 0.30 / K.SCALE, 1)))
+    supporting = [line["t"] for i,line in enumerate(lines) if i not in big]
+    if supporting and any(it.get("panel_type") == ask["id"] for it in l1["items"]):
+        # In the dedicated panel both sides carry the argument. The supporting
+        # line gets the display face and enough ink to read alongside its partner.
+        longest = max(supporting, key=lambda text: K.ink_box(vb, text)[0])
+        vs = K.fit(vb, longest, .80*W, cap_px=max(58*K.SCALE, .58*vb["px"]))
     stairs = bool(o.get("stairs", len(lines) >= 3))
     rows, y, wmax = [], 0.0, 0.0
     for i, x in enumerate(lines):
