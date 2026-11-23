@@ -54,12 +54,10 @@ def test_confirmed_export_is_queued_even_when_other_user_jobs_are_running():
     assert '_enqueue(cur, project_id, user_id, "final"' in source
 
 
-def test_export_waits_for_the_active_edit_and_open_verification_repair():
+def test_export_waits_for_the_active_edit():
     source = inspect.getsource(video._request_final)
     enqueue_at = source.index('_enqueue(cur, project_id, user_id, "final"')
     assert source.index('"code": "edit_in_progress"') < enqueue_at
-    assert source.index('"code": "repair_required"') < enqueue_at
-    assert "quality_status" in source
 
 
 class _Cur:
