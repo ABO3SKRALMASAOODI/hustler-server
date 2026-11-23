@@ -1,3 +1,9 @@
+# boto3's lazy imports run here, on the main thread, before any module
+# below starts a thread (P0 23 Nov 2026: two threads importing them at once
+# deadlocked storage for a whole worker). storage_routing imports no boto3.
+import storage_routing as _storage_routing
+_storage_routing.warm_boto3()
+
 import hashlib
 import os
 import secrets

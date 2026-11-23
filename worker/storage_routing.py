@@ -196,11 +196,16 @@ def store_config(name, env=None):
 # builds never overlap; warm_boto3() runs the lazy imports once, on the
 # importing thread, before any request or probe thread exists.
 CLIENT_BUILD_LOCK = threading.RLock()
+_warmed = []
 
 
 def warm_boto3():
     """Build and drop one S3 client so boto3/botocore finish their lazy
-    imports on the calling (importing) thread. No network, never raises."""
+    imports on the calling thread. app.py calls it first thing, before any
+    module starts a thread; later calls return at once. No network, never
+    raises."""
+    if _warmed:
+        return True
     try:
         import boto3
         with CLIENT_BUILD_LOCK:
@@ -210,6 +215,7 @@ def warm_boto3():
                 aws_access_key_id="warm", aws_secret_access_key="warm")
             import boto3.s3.inject  # noqa: F401
             import boto3.s3.transfer  # noqa: F401
+        _warmed.append(True)
         return True
     except Exception:  # noqa: BLE001 — warming is a saving, never a gate
         return False

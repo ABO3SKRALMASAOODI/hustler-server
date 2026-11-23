@@ -293,6 +293,8 @@ class Prober:
                 # A pass that never ends: say where it is stuck.
                 out["stalled_s"] = int(self._clock() - started)
                 out["stack"] = self._stack()
+                # Who holds what it waits for: every other thread's stack.
+                out["threads"] = self._all_stacks()
             return out
         except Exception as e:  # noqa: BLE001
             return {"stores": {}, "write_ok": None,
@@ -307,6 +309,26 @@ class Prober:
                 out.append(f"{os.path.basename(code.co_filename)}:"
                            f"{frame.f_lineno} {code.co_name}")
                 frame = frame.f_back
+            return out
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _all_stacks(self):
+        try:
+            names = {t.ident: t.name for t in threading.enumerate()}
+            out = {}
+            for ident, frame in sys._current_frames().items():
+                if self._thread is not None and ident == self._thread.ident:
+                    continue
+                lines = []
+                while frame is not None and len(lines) < 10:
+                    code = frame.f_code
+                    lines.append(f"{os.path.basename(code.co_filename)}:"
+                                 f"{frame.f_lineno} {code.co_name}")
+                    frame = frame.f_back
+                out[f"{names.get(ident, '?')}#{ident % 100000}"] = lines
+                if len(out) >= 40:
+                    break
             return out
         except Exception:  # noqa: BLE001
             return None
