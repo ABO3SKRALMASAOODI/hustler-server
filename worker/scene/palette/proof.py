@@ -45,7 +45,20 @@ def _interest(sense, pic):
 
 def proof_object(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=66, min_len=30)
-    pic = _doc(l1, ask, a, sense)
+    box = arg(ask, "box")
+    if "documentary_cuts" in l1:
+        # The scored layers already play each approved clip on its verified clock.
+        # Only a still placed for the whole ask takes the desk and line treatment.
+        pic = next((r.get("pic") for r in l1["documentary_cuts"] if r["f"][0] <= a and b <= r["f"][1]
+                    and l1["assets"].get(r.get("pic"), {}).get("kind") == "image"), None)
+        if not pic:
+            from .rhythm import scored_run
+            return scored_run(l1, {}, a, b, keep_single=True)
+        chosen = arg(ask, "pics") or arg(ask, "pool") or []
+        if not chosen or pic != chosen[0]:
+            box = None
+    else:
+        pic = _doc(l1, ask, a, sense)
     if pic is None:
         return {"skip": "no document or still to lay on the desk"}
     asset = l1["assets"][pic]
@@ -54,7 +67,6 @@ def proof_object(l1, work, ask, sense):
     if not iw or not ih:
         img = sense.picture(pic, long_side=800)
         ih, iw = img.shape[:2]
-    box = arg(ask, "box")
     found = "asked"
     if not box:
         box, found = _interest(sense, pic)

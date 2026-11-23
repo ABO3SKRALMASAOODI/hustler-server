@@ -244,3 +244,18 @@ def test_pip_crossing_a_checked_portrait_keeps_its_credit(tmp_path, monkeypatch)
     assert item["id"] == source["id"] and item["pic"] == source["pic"]
     assert item["f"] == [30,55] and item["crop"] == source["crop"]
     assert item["s"][:3] == [1,1,1] and item["s"][3] < item["s"][-1] == 1
+
+
+def test_documentary_collage_and_proof_follow_checked_video_clock(tmp_path):
+    from scene.palette import layout, proof
+    film = scene_of([dict(id="patient", k="shot", pic="baylor", f=[0,45], src=[1.,2.5]),
+                     dict(id="return", k="shot", pic="main", f=[45,90], src=[1.5,3.])], 90,
+                    dict(baylor=dict(kind="video",w=1920,h=1080,path="patient.mp4"),
+                         mri=dict(kind="image",w=900,h=1200,path="scan.jpg")))
+    film["documentary_cuts"] = [dict(pic="baylor", f=[0,45],path="patient.mp4",source_slice=[1.,2.5])]
+    ask = dict(f=[30,80], pics=["mri"], box=[.2,.2,.6,.4])
+    for planner in (proof.proof_object, layout.collage):
+        patch = planner(film, str(tmp_path), ask, None)
+        assert not any(i.get("pic") == "mri" for i in patch["items"])
+        assert patch["log"]["pictures"] == ["baylor","main"]
+        assert all(i.get("id") not in patch.get("drop",[]) for i in film["items"])

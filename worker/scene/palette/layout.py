@@ -268,6 +268,11 @@ def collage(l1, work, ask, sense_=None, pool=None):
     W, H, fps = K.geometry(l1)
     args = K.args_of(ask)
     a, z = K.span(l1, args, default_s=2.4, least=12)
+    if any(row["f"][0] < z and a < row["f"][1] for row in l1.get("documentary_cuts", [])):
+        from .rhythm import scored_run
+        scored = scored_run(l1, args, a, z)
+        if scored is not None:
+            return scored
     rng = K.rng_of(l1, args)
     want = int(args.get("prints") or len([f for f in args.get("steps") or [] if isinstance(f, (int, float))]) or _n_chosen(args) or 6)
     pics = K.pictures(l1, work, args, pool, sense_=sense_, need=min(want, 9), length_s=(z - a) / fps * 0.5, distinct=True)

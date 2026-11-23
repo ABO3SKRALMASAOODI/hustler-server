@@ -311,12 +311,12 @@ def _brisk_seq(pics, lens, start, avoid_last, W, H, fps, rng, used, before=None,
     return seq, k
 
 
-def scored_run(l1, args, a, z):
+def scored_run(l1, args, a, z, *, keep_single=False):
     """Cut a documentary rhythm on its selected timeline when the ask spans different evidence.
     Keep each camera's tracking, source clock and the foreground of a fitted document.
     """
-    if "documentary_cuts" not in l1 or any(r["f"][0] <= a and z <= r["f"][1]
-                                            for r in l1["documentary_cuts"]):
+    if "documentary_cuts" not in l1 or (not keep_single and any(
+            r["f"][0] <= a and z <= r["f"][1] for r in l1["documentary_cuts"])):
         return None
     from .kit import cut
     layers = [it for it in l1["items"] if it["k"] in ("shot", "card") and
