@@ -47,7 +47,7 @@ def test_post_plan_catalog_exposes_only_declared_edit_domains():
     assert routed_chars <= full_chars
 
 
-def test_fresh_catalog_is_small_and_loads_writes_explicitly():
+def test_fresh_catalog_has_workflow_tools_and_loads_detailed_writes_explicitly():
     names = agent_tools.planning_tool_names()
     assert {"look_at", "get_edl", "read_skill", "load_tools"} <= names
     assert "list_assets" not in names
@@ -58,10 +58,10 @@ def test_fresh_catalog_is_small_and_loads_writes_explicitly():
     assert "set_edit_plan" not in names
     assert "apply_edit_recipe" not in names
     assert "generate_video" not in names
-    assert not (names & agent_tools.WRITE_TOOLS)
+    assert names & agent_tools.WRITE_TOOLS == {"plan_piece", "direct", "score", "dress"}
 
     schemas = agent_tools.openai_tools(compact=True, names=names)
-    assert len(schemas) <= 10
+    assert len(schemas) <= 14
     assert len(json.dumps(schemas, separators=(",", ":"))) < 12_000
 
 

@@ -2076,6 +2076,10 @@ def run_agent_job(worker_db, job):
     # "the picture follows" claim there would be a lie). ToolContext ships
     # with direct sight off; the loop that can honour it turns it on.
     ctx.direct_sight = True
+    # The editing model reads the movie itself. Keep signal measurements in
+    # its render receipt and leave subjective story and mix decisions to it.
+    ctx.second_opinions_off = True
+    ctx.audio_model_review = False
     ctx.user_message = user_message.get("content") or ""
     ctx.verification_request = _customer_verification_request(
         worker_db, session_id, user_message, continuation_state)

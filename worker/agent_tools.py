@@ -25559,10 +25559,6 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                          "repeat the exact call that just failed, and never "
                          "give up while a genuinely different approach "
                          "remains.")
-            # The in-house editor gets an independent second opinion. MCP is
-            # different: its outside editing model already receives these
-            # exact frames as image content, so paying a Valmera-funded model
-            # to inspect them again would duplicate the caller's own vision.
             critic_report = _preview_critic_report(ctx, result, plan)
             if critic_report is not None:
                 ctx.last_visual_critic = critic_report
@@ -26716,10 +26712,7 @@ def _queue_check_frames(ctx, result, plan=None):
     so the editor reviews its own render with its own eyes. Returns True
     when at least one picture was queued; False falls back to the separate
     vision reviewer (blind agent model, missing sheets, storage hiccup)."""
-    can_see = getattr(ctx, "sight_out", False) or \
-        (getattr(ctx, "direct_sight", False)
-         and llm.agent_sees(ctx.agent_model))
-    if not can_see:
+    if not _can_receive_images(ctx):
         return False
     queued = 0
     vkey = result.get("verify_sheet_key")
@@ -26786,6 +26779,20 @@ def _queue_check_frames(ctx, result, plan=None):
             queued += 1
         except Exception as e:
             print(f"[render] result sheet fetch failed: {e}", flush=True)
+    if not queued and result.get("render_asset_id"):
+        # A legacy preview or an interrupted sheet upload still has its movie.
+        # Use that exact asset, including when the render is a proof fragment.
+        try:
+            asset = ctx.db.run(dbx.get_asset, result["render_asset_id"])
+            if asset and asset.get("project_id") == ctx.project_id:
+                before = len(ctx.pending_images)
+                duration = float(asset.get("duration_s") or result.get("duration_s") or 0)
+                if duration:
+                    look_at_asset(ctx, asset["storage_key"],
+                                  times=[duration * part for part in (0.08, 0.35, 0.65, 0.92)])
+                    queued += len(ctx.pending_images) - before
+        except Exception as exc:
+            print(f"[render] movie frame extraction failed: {exc}", flush=True)
     return queued > 0
 
 
@@ -27105,13 +27112,8 @@ def _visual_change_summary(previous, current):
 
 
 def _preview_critic_report(ctx, result, plan=None):
-    """Run paid second-opinion vision only for Valmera's in-house editor.
-
-    MCP sets ``sight_out`` and receives the rendered sheets as image content
-    in its own tool response. Its outside model is already the editor and the
-    visual reviewer, so a second Valmera-funded call is pure duplication.
-    """
-    if getattr(ctx, "sight_out", False):
+    """Legacy vision transport for a model which cannot itself receive pixels."""
+    if _can_receive_images(ctx):
         return None
     try:
         edl = ctx.latest_edl()["json"]
@@ -27187,7 +27189,7 @@ def _preview_critic_report(ctx, result, plan=None):
 
 def _preview_fallback_check(ctx, result, plan, delivered, critic_report):
     """Never route MCP pixels through a Valmera-funded fallback model."""
-    if getattr(ctx, "sight_out", False):
+    if _can_receive_images(ctx):
         return None
     if delivered or critic_report is not None:
         return None
@@ -34887,6 +34889,8 @@ TOOLS = {
 }
 
 # Browser-rendered motion design + the approved real sound library (worker/motion_tools.py).
+import customer_craft
+TOOLS.update(customer_craft.TOOLS)
 TOOLS.update(motion_tools.TOOL_SPECS)
 TOOLS.update(motion_planner.TOOL_SPECS)
 # Optional jump-cut concealment (worker/cut_steps.py): a tool the editor
@@ -34920,6 +34924,7 @@ for _retired_tool in (
 TOOL_DOMAIN_NAMES = set(AGENT_TOOL_DOMAINS)
 AGENT_SCHEMA_HIDDEN = {"expand_toolset"}  # legacy MCP alias for load_tools
 TOOL_CORE = {
+    *customer_craft.TOOLS,
     "load_tools",
     "wait_for_job",
     "get_edl", "open_visual_page", "look_at",
@@ -35219,7 +35224,7 @@ REQUIRED_ARGS = {
 # is a version diff line (write_edl's "EDL vX -> vY: ..." format).
 # fetch_url is here for the capabilities digest; its success is tracked
 # separately via ctx.urls_fetched (it creates an asset the agent then places).
-WRITE_TOOLS = {"apply_edit_batch", "keep_segments", "cut_range", "cut_output_range",
+WRITE_TOOLS = {"direct", "score", "dress", "plan_piece", "apply_edit_batch", "keep_segments", "cut_range", "cut_output_range",
                "add_motion_graphic", "set_motion_graphic", "remove_motion_graphic",
                "set_typography_scene", "remove_typography_scene",
                "set_picture_card", "remove_picture_card",

@@ -8279,6 +8279,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     if program_edges is None:
         program_edges = (not render_fragment, not render_fragment)
     edl_dict = render_plan.canonical_program(edl_dict)
+    if edl_dict.get("direction") and not audio_only:
+        import customer_direction
+        edl_dict, asset_locals = customer_direction.materialize(
+            edl_dict, index, src_path, workdir, preview, asset_locals, patch_locals, cancelled_cb)
     if is_canvas_program(edl_dict):
         # No main video: the program is built on the canvas from inserts alone.
         return _render_canvas_edl(edl_dict, out_path, workdir, preview,

@@ -155,6 +155,8 @@ def _footage_composite(edl):
 def _item_windows(edl, tl, duration):
     """[(a, b, kind)] output spans of every changeable item in this EDL."""
     out = []
+    for m in edl.get("direction") or []:
+        out.append((float(m["start"]), float(m["end"]), "direction"))
     for t in (edl.get("texts") or []):
         if t.get("behind"):
             continue
@@ -771,6 +773,10 @@ def window_edl(edl, tl, w0, w1, keep_audio=False, fps=None,
     fps: the render rate, when known — EDL.fx windows are then rebased
     frame-exactly (_window_fx)."""
     e = json.loads(json.dumps(edl))
+    if e.get("direction"):
+        e["direction"] = [
+            dict(m, start=max(0.0, m["start"] - w0), end=min(w1, m["end"]) - w0)
+            for m in e["direction"] if m["start"] < w1 and m["end"] > w0]
     keep, speed = [], []
     for (s0, s1), pcs, off, L in zip(tl.segs, tl.pieces, tl.offsets,
                                      tl.seg_out_len):

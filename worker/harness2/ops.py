@@ -1315,7 +1315,11 @@ def _apply_chunk(stage, chunk, keys, env, report=False):
     return True
 
 
+from customer_craft import direct_moments
+
+
 HANDLERS = {
+    "direct_moments": direct_moments,
     "keep": op_keep, "cut": op_cut, "restore": op_restore,
     "speed": op_speed, "fit_length": op_fit_length,
     "card": op_card, "text": _verb_op("add_text"),

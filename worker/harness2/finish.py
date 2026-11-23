@@ -69,7 +69,8 @@ def program_words(stage):
     out = []
     for w in words:
         try:
-            a, b = float(w["start"]), float(w["end"])
+            a = float(w["t0"] if "t0" in w else w["start"])
+            b = float(w["t1"] if "t1" in w else w["end"])
         except (KeyError, TypeError, ValueError):
             continue
         oa, ob = tl.src_to_out(a), tl.src_to_out(b)
@@ -303,8 +304,10 @@ def _music(stage, v, env, index, run_verb):
         program = _program(stage.edl)
         share = speech_share(stage)
         cuts = len(pieces(stage.edl)) + len(stage.edl.get("inserts") or [])
-        film = {"kind": "marketing" if share < 0.15 else "podcast",
-                "duration_s": round(max(program, 6.0), 1), "turns": [],
+        film = {"kind": v.get("kind") or ("marketing" if share < 0.15 else "podcast"),
+                "duration_s": round(max(program, 6.0), 1),
+                "turns": [{"t": m["start"], "role": m["role"]}
+                          for m in stage.edl.get("direction") or [] if m.get("role")],
                 "pace": {"cuts10": round(10.0 * max(cuts, 1)
                                          / max(program, 1.0), 2)},
                 "speech_share": round(share, 3),
@@ -313,18 +316,20 @@ def _music(stage, v, env, index, run_verb):
             call = music_choose._product_call(stage)
         except Exception:  # noqa: BLE001
             call = None
-        choice = music_choose.choose(
-            film, call=call or (lambda *_a: {"option": 1, "why": "the "
-                                "closest match to the references"}),
-            ctx=stage, n=6, pool=music_choose.reference_pool())
-        if not choice:
-            env.finding("finish: no track of reference grade is available "
-                        "on this worker")
-            return False
-        key, err = music_choose.ensure_project_asset(stage, choice)
-        if err:
-            env.skip(index, f"finish music: {err}",
-                     "find(kind='music') and place another id")
+        pools = music_choose.workflow_pools(film) if v.get("workflow_pool") else []
+        pools = pools or [("reference library", music_choose.reference_pool())]
+        key = None
+        for label, pool in pools:
+            choice = music_choose.choose(
+                film, call=call or (lambda *_: {"option": 1, "why":
+                    "the closest match to the references"}), ctx=stage, n=6, pool=pool)
+            if choice:
+                key, err = music_choose.ensure_project_asset(stage, choice)
+                if key:
+                    break
+                env.finding(f"finish music: {label} track unavailable ({err})")
+        if not key:
+            env.finding("finish music: no reference track could be placed")
             return False
         music_gate.grant(stage, key, music_choose.PROVENANCE)
         track = music_choose.find(choice["cid"]) or {}
@@ -363,6 +368,11 @@ def events(edl, fps=30.0):
             return
         if f >= 0:
             ev.append(dict(f=f, kind=kind, **kw))
+    if edl.get("direction"):
+        from score.sound import device_landings
+        ev.extend(device_landings({"device_events": [
+            {"id": m["id"], "f": round(m["start"] * fps), "dev": m["device"]}
+            for m in edl["direction"]]}))
     for i in edl.get("inserts") or []:
         at(i.get("at_output_s"), "picture", moving=True,
            still=str(i.get("kind") or "").startswith("image"),
