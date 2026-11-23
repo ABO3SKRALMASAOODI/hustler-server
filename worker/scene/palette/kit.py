@@ -676,7 +676,8 @@ def picture_spans(l1, pic, a, b):
         live = [v for v in layers if v["f"][0] <= start < v["f"][1]]
         # A source document can be a card over the interview. A montage with
         # more than one foreground subject cannot identify a single portrait.
-        front = [v for v in live if v["k"] == "card"] or live
+        subjects = [v for v in live if v["pic"] not in ("palette_gate", "palette_crt")]
+        front = [v for v in subjects if v["k"] == "card"] or subjects
         if front and all(v["pic"] == pic for v in front):
             if spans and spans[-1][1] == start:
                 spans[-1][1] = end

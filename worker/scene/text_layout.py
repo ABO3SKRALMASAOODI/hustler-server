@@ -107,12 +107,19 @@ def resolve(scene, speaker_layout=None):
         if not glyph and layer["k"] != "word":
             continue
         group = layer.get("text_group")
+        caption = not glyph and layer.get("role") == "cap"
+        if caption:
+            layer["contrast_shadow"] = True
+        if caption and group is None:
+            # The authored line types on word by word. All of its words leave on
+            # the same frame and must share a translation, even across a cut.
+            group = ("caption", layer["f"][1], layer.get("v"))
         if group is None and not glyph:
             words.append(layer)
             continue
         key = group or layer["id"]
         g = groups.setdefault(
-            key, {"id": key, "role": "registered", "layers": [], "boxes": {}}
+            key, {"id": str(key), "role": "cap" if caption else "registered", "layers": [], "boxes": {}}
         )
         g["layers"].append(layer)
         lo, hi = layer["f"]
@@ -165,6 +172,15 @@ def resolve(scene, speaker_layout=None):
     for it in words:
         lo, hi = it["f"]
         boxes = {}
+        display_on_take = it.get("role") == "big" and any(f in faces for f in range(lo, hi))
+        if display_on_take:
+            # Measure the moving ink, including the overshoot of a palette word.
+            # Leave an editorial margin on both sides of a full-width headline.
+            extents = [frame_box(it, f) for f in range(lo, hi)]
+            widest = max((box[2] - box[0] for box in extents if box), default=0)
+            if widest > .86:
+                base = it.get("s", 1)
+                it["s"] = [A(base, f, lo) * .86 / widest for f in range(lo, hi)]
         for f in range(lo, hi):
             if A(it.get("op", 1), f, lo) > 0.01:
                 box = frame_box(it, f)
@@ -179,7 +195,8 @@ def resolve(scene, speaker_layout=None):
             low, high = -1.0, 1.0
             for f in frames:
                 x0, y0, x1, y1 = boxes[f]
-                low, high = max(low, 0.04 - y0), min(high, 0.94 - y1)
+                top_margin = MARK[3] + .018 if display_on_take else .04
+                low, high = max(low, top_margin - y0), min(high, .94 - y1)
                 for left, top, right, bottom in occupied[f]:
                     if x0 < right and left < x1:
                         intervals.append((top - y1 - 0.006, bottom - y0 + 0.006))

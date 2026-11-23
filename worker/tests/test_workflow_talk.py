@@ -267,3 +267,37 @@ def test_orbital_reveal_mattes_only_the_visible_take_interval(tmp_path,monkeypat
     clip.write_bytes(b"new source!")
     matte._ready(doc,sensor,dict(f=[1132,1154]))
     assert len(seen)==2
+
+
+def test_ghodsi_caption_tokens_move_as_one_line_across_the_picture_cut():
+    from scene.plan import A
+    voices = {"v": dict(font="ArchivoBlack-Regular.ttf", px=58)}
+    first = word("first", "you", "v", .27, .615, [0,24], "cap")
+    second = word("second", "know", "v", .51, .615, [10,24], "cap")
+    card = dict(k="card", id="evidence", f=[0,12], source_ink=[[.24,.50,.41,.75]])
+    scene = dict(frame=[1080,1920], fps=30, voices=voices, items=[card,first,second])
+    resolve(scene)
+    for f in range(10,24):
+        assert abs(A(first["y"], f, 0)-A(second["y"], f, 10)) < .0001
+
+
+def test_archival_credit_survives_a_transparent_projector_finish():
+    from scene.palette.kit import picture_spans
+    layers = [dict(k="card", pic="archive", f=[4,24]),
+              dict(k="card", pic="palette_gate", f=[8,20], z=40)]
+    assert picture_spans(dict(items=layers), "archive", 4,24) == [[4,24]]
+
+
+def test_full_width_headline_has_margins_on_a_tracked_closeup():
+    from scene.palette.kit import MARK, place
+    voice = dict(font="ArchivoBlack-Regular.ttf", px=138)
+    x, y = place(voice, "INTELLIGENCE", .5, .35, 1080, 1920)
+    title = word("headline", "INTELLIGENCE", "v", x, y, [0,2], "big")
+    title["s"] = [1.18,1.0]
+    shot = dict(k="shot",id="take",pic="main",f=[0,2],crop=[0,0,1,1])
+    face = dict(pw=1080,ph=1920,faces=[[.09,.22,.82,.53]])
+    scene = dict(frame=[1080,1920],fps=30,voices={"v":voice},items=[shot,title])
+    resolve(scene, {"main":face})
+    for frame in range(2):
+        left, top, right, _ = item_box(title, scene["voices"],1080,1920,frame)
+        assert left >= .065 and right <= .935 and top >= MARK[3]+.018
