@@ -631,6 +631,8 @@ def hear_devices(ctx, l1, beats, replan, name="l1_heard.json"):
     sounds = [s for s in sounds if not any(abs(int(s.get("event_f", -99)) - int(o.get("event_f", -99))) <= 2 for o in own)]
     l1["sound"] = sorted(own + list(sounds), key=lambda s: (int(s.get("event_f", 0)), str(s.get("id"))))
     l1["sound_design"] = rep
+    if beats is not None:
+        beats["sound_design"] = rep
     on = {int(e["f"]) for e in ev}
     heard = sorted({int(s["event_f"]) for s in sounds if any(abs(int(s.get("event_f", -99)) - f) <= 2 for f in on)})
     return dict(events=len(ev), sounds=len(l1["sound"]), on_devices=len(heard), frames=heard)

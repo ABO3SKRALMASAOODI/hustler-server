@@ -1062,7 +1062,10 @@ def build(script, sup, style_id, direction=None):
         n = f1 - f0
         mono = is_mono(f0)
         evidence = bool(source_ink or rec.get("attribution") or archive_event(rec)) or rec.get("provider") == "primary-document"
-        bed_of(f0, f1, key, kind, rec, mono)
+        if evidence:
+            P.page([f0, f1], "#171B23", "#0D1015", grain=.018)
+        else:
+            bed_of(f0, f1, key, kind, rec, mono)
         x0, y0, x1, y1 = WINDOW_BOX
         aspect = float(rec.get("w") or W) / float(rec.get("h") or H)
         height = min(y1-y0, (x1-x0)*W/H/aspect)

@@ -40,6 +40,7 @@ def test_the_sound_is_planned_again_on_the_landings(tmp_path, monkeypatch):
     assert seen["events"] == ev, "the sound design reads the palette's landings"
     assert [s["id"] for s in l1["sound"]] == ["n1", "hero"], "the fresh plan, the reel's own device sound kept, no double"
     assert l1["sound_design"] == dict(placed=2) and beats["events"] == [10, 40, 80] and beats["device_events"] == ev
+    assert beats["sound_design"] == l1["sound_design"]
     assert rec["on_devices"] == 1 and rec["frames"] == [40]
 
 

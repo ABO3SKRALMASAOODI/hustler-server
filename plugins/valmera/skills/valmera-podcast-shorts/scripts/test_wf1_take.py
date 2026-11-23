@@ -243,6 +243,7 @@ def test_full_page_year_cards_and_archival_footage_own_distinct_frames(tmp_path,
     import placement_check,wf1_coverage
     sup=_sup(tmp_path,cuts_two_shot())
     rec=dict(path="/archive.mp4",w=1920,h=1080,seconds=2.,src=[0.,47/30],audit_until=100)
+    rec["provider"]="primary-document"
     sup["archived_placement_plan"]=dict(run_id="copy",rows=[[53,100,"clip","Lab",rec]],
                                       report=dict(contract=placement_check.CONTRACT,rejected=[],placements=[]))
     pages=dict(dev="type_run",words=["2009","2010"],f=[72,115])
@@ -253,3 +254,6 @@ def test_full_page_year_cards_and_archival_footage_own_distinct_frames(tmp_path,
     assert pages in scene["devices"]
     shot=beats["pictures"][0]
     assert shot["f"]==shot["visible_f"]==[53,72] and shot["source_slice"]==pytest.approx([0.,19/30],abs=1e-4)
+    window = next(it for it in scene["items"] if it.get("source_ink") and it["f"] == [53,72])
+    assert window["crop"] == [0,0,1,1]
+    assert any(it["k"] == "shot" and it["pic"] == "plate" and it["f"] == window["f"] for it in scene["items"])
