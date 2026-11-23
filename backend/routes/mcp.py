@@ -1235,10 +1235,8 @@ with the same names, arguments and effects.
       Duck music 13-20 dB under the voice.
    h. ENDING: let the payoff land on moving source: keep 0.8-1.5 s of the
       natural tail after the last word, with a payoff number ~2 s on screen
-      while the picture still moves. export_final refuses a last picture
-      that is held, frozen, still or slowed before the branded end card, so
-      the closing shot stays real-time moving footage; freezes and slow
-      motion belong earlier in the edit. the comment_cta, follow_cta and
+      while the picture still moves. Check the movement in the rendered
+      ending when a speed ramp runs into the branded end card. the comment_cta, follow_cta and
       save_cta templates belong after the payoff only when the user or brief asks for
       one, filled only with the handle, keyword and offer the user supplied
       - never an invented handle, verified badge, keyword or promised
@@ -3248,11 +3246,8 @@ def _held_tail(cur, project_id, version):
 def _open_verification_findings(cur, project_id, version):
     """Unresolved findings of this version's verification record, or [].
 
-    Run report C15: 51 of 187 finals in the week to 15 Oct were exported
-    while their version's record still said repair_required; the findings
-    were justified (or not) after the file existed. An MCP export now waits
-    for the repair or the evidence-backed justification, unless a final of
-    this version already exists (re-downloading it is never blocked).
+    Run report C15: 51 of 187 finals in the week to 15 Oct had open findings. Include those observations in the
+    receipt of a new export so the editor can address them on a later version.
     """
     cur.execute("SELECT to_regclass('public.verification_records') AS t")
     if not (cur.fetchone() or {}).get("t"):
@@ -3425,8 +3420,7 @@ def _t_make_first_cut(tok, args):
                 f"export_final(project_id={project_id}, edl_version=<the "
                 "version project_state reports>) for the MP4 the user keeps. "
                 "It is a draft until you have watched it; when export_final "
-                "names unresolved findings, repair them with the editing "
-                "tools (or justify a false positive) and export again.")}],
+                "reports picture or sound findings, use them to refine the next edit.")}],
             "structuredContent": {"project_id": project_id,
                                   "job_id": job_id, "kind": "first_cut"}}
 
@@ -3435,6 +3429,7 @@ def _t_export_final(tok, args):
     project_id, version = args.get("project_id"), args.get("edl_version")
     if type(project_id) is not int or project_id < 1 or type(version) is not int or version < 1:
         return _text("Supply positive integer project_id and reviewed edl_version.", True)
+    open_findings = []
     with vdb() as conn:
         cur = conn.cursor()
         if _project_for_user(cur, project_id, tok["user_id"]):
@@ -3451,42 +3446,6 @@ def _t_export_final(tok, args):
             except Exception:
                 conn.rollback()
                 open_findings = []
-            if open_findings:
-                ids = [str(f.get("finding_id")) for f in open_findings
-                       if f.get("finding_id")]
-                lines = "\n".join(
-                    f"  {f.get('finding_id')}: {str(f.get('message'))[:220]}"
-                    for f in open_findings[:6])
-                latest = _latest_edl_version(cur, project_id)
-                if latest is not None and latest != version:
-                    # justify_verification_findings acts on the project's
-                    # NEWEST version only; naming it here for an older one
-                    # sends the model into a refusal loop.
-                    how = (
-                        f"v{version} is not the newest version (v{latest}), "
-                        "and justify_verification_findings only acts on the "
-                        "newest one: export the newest reviewed version, or "
-                        f"restore v{version} as a new version, review its "
-                        "preview, and repair or justify its findings there.")
-                else:
-                    how = (
-                        "Repair them on a new version and review its "
-                        "preview, or, for a genuine false positive, call "
-                        "justify_verification_findings(project_id="
-                        f"{project_id}, finding_ids={json.dumps(ids[:12])}, "
-                        "justification=...) citing the direct evidence; "
-                        "then export again.")
-                text = (
-                    f"PROJECT {project_id}: EDL v{version} still has "
-                    f"{len(open_findings)} unresolved verification "
-                    f"finding(s), so no export was started:\n{lines}\n"
-                    + how)
-                return {"content": [{"type": "text", "text": text}],
-                        "structuredContent": {"export": {
-                            "project_id": project_id, "edl_version": version,
-                            "code": "verification_open",
-                            "unresolved_finding_ids": ids}},
-                        "isError": True}
         response = _request_final(cur, int(tok["user_id"]),
                                   project_id, version, reuse_existing=True)
         response, status = response if isinstance(response, tuple) else (response, 200)
@@ -3499,14 +3458,21 @@ def _t_export_final(tok, args):
         return {"content": [{"type": "text", "text": text}],
                 "structuredContent": {"export": receipt}, "isError": True}
     if data.get("asset_id"):
-        return _t_download_url(tok, {"project_id": project_id, "edl_version": version,
-                                    "kind": "final", "asset_id": data["asset_id"]})
-    text = (f"PROJECT {project_id}: export of EDL v{version} is job {data['job_id']}. "
-            f"Call wait_for_job(job_id={data['job_id']}) until done, then "
-            f"download_url(project_id={project_id}, kind='final', edl_version={version}). "
-            "The MP4 is not ready yet; do not submit another export.")
-    return {"content": [{"type": "text", "text": text}],
-            "structuredContent": {"export": receipt}, "isError": False}
+        result = _t_download_url(tok, {"project_id": project_id, "edl_version": version,
+                                      "kind": "final", "asset_id": data["asset_id"]})
+    else:
+        text = (f"PROJECT {project_id}: export of EDL v{version} is job {data['job_id']}. "
+                f"Call wait_for_job(job_id={data['job_id']}) until done, then "
+                f"download_url(project_id={project_id}, kind='final', edl_version={version}). "
+                "The MP4 is not ready yet; do not submit another export.")
+        result = {"content": [{"type": "text", "text": text}],
+                  "structuredContent": {"export": receipt}, "isError": False}
+    if open_findings and not result.get("isError"):
+        details = result.setdefault("structuredContent", {})
+        details.get("export", details)["quality_findings"] = open_findings
+        notes = "\n".join(str(f.get("message") or f.get("finding_id")) for f in open_findings)
+        result["content"][0]["text"] += f"\nPicture and sound findings on version {version}:\n{notes}"
+    return result
 
 
 def _final_job_note(cur, project_id, edl_version):

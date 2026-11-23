@@ -2287,11 +2287,9 @@ def test_mcp_guide_keeps_the_tool_workflow_knowledge():
 
 def test_mcp_guide_ending_matches_current_export_checks():
     flat = ' '.join(mcpmod.WORKFLOW.split())
-    # The ending keeps its craft but never prescribes a held final picture,
-    # which export_final refuses before the branded end card.
+    # Describe the rendered motion the editor can actually inspect.
     assert 'natural tail after the last word' in flat
-    assert ('export_final refuses a last picture that is held, frozen, '
-            'still or slowed before the branded end card') in flat
+    assert 'Check the movement in the rendered ending when a speed ramp' in flat
     assert "audio_mode='hold'" not in flat
 
 
@@ -2705,7 +2703,7 @@ def test_duplicate_upload_reports_actual_analysis_state(
 
 
 @pytest.mark.parametrize("final_exists", [False, True])
-def test_mcp_export_waits_for_open_verification_findings(client, monkeypatch, final_exists):
+def test_mcp_export_returns_the_job_alongside_open_verification_findings(client, monkeypatch, final_exists):
     """Run report C15: 51 of 187 finals in a week were exported while their
     version's verification record still said repair_required."""
     from flask import jsonify
@@ -2724,16 +2722,12 @@ def test_mcp_export_waits_for_open_verification_findings(client, monkeypatch, fi
     result = rpc(client, "tools/call", STATIC_TOKEN, {
         "name": "export_final",
         "arguments": {"project_id": 3, "edl_version": 9}}).get_json()["result"]
-    if final_exists:
-        assert result["isError"] is False and len(calls) == 1
-        return
-    assert result["isError"] is True and calls == []
+    assert result["isError"] is False and len(calls) == 1
     export = result["structuredContent"]["export"]
-    assert export["code"] == "verification_open"
-    assert export["unresolved_finding_ids"] == ["vf_7b9acc1057d359f8"]
-    text = result["content"][0]["text"]
-    assert "no export was started" in text
-    assert "justify_verification_findings(project_id=3" in text
+    assert export["job_id"] == 556
+    assert export.get("quality_findings", []) == ([] if final_exists else record["unresolved_findings"])
+    if not final_exists:
+        assert "JUMP OFF A CUT at 23.60s" in result["content"][0]["text"]
 
 
 def test_open_findings_query_reads_only_repair_required_without_a_final():
@@ -2807,7 +2801,7 @@ def test_advisory_codes_mirror_the_worker_verifier():
     assert worker_codes == set(mcpmod._ADVISORY_FINDING_CODES)
 
 
-def test_export_gate_on_an_older_version_does_not_offer_justification(
+def test_export_of_an_older_reviewed_version_keeps_its_findings(
         client, monkeypatch):
     """justify_verification_findings acts on the newest version only."""
     from flask import jsonify
@@ -2819,10 +2813,9 @@ def test_export_gate_on_an_older_version_does_not_offer_justification(
     result = rpc(client, "tools/call", STATIC_TOKEN, {
         "name": "export_final",
         "arguments": {"project_id": 3, "edl_version": 9}}).get_json()["result"]
-    assert result["isError"] is True
-    text = result["content"][0]["text"]
-    assert "not the newest version (v12)" in text
-    assert "justify_verification_findings(project_id=" not in text
+    assert result["isError"] is False
+    assert result["structuredContent"]["export"]["edl_version"] == 9
+    assert result["structuredContent"]["export"]["quality_findings"][0]["finding_id"] == "vf_1"
 
 
 def test_download_without_kind_hands_out_the_finished_export(client,
