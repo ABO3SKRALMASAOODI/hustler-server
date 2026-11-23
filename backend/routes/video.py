@@ -8021,27 +8021,10 @@ def _request_final(cur, user_id, project_id, version, render_group=None,
                 (str(version), project_id))
     latest_assistant = cur.fetchone() or {}
     assistant_meta = latest_assistant.get("meta") or {}
-    try:
-        reviewed_version = int(assistant_meta.get("edl_version"))
-    except (TypeError, ValueError):
-        reviewed_version = None
-    repair_required = (
-        reviewed_version == version
-        and (assistant_meta.get("quality_status") == "repair_required"
-             or assistant_meta.get("export_ready") is False))
-    if repair_required:
-        findings = list(assistant_meta.get("quality_findings") or [])[:4]
-        record_client_event(
-            user_id, project_id, "export_blocked",
-            detail={"code": "repair_required", "version": version,
-                    "findings": findings}, origin="server")
-        return jsonify({
-            "error": ("This version still has an open verification "
-                      "repair. Finish the repair and review the new "
-                      "preview before exporting."),
-            "code": "repair_required",
-            "quality_findings": findings,
-        }), 409
+    # The query selected this exact EDL version. Return its observations to
+    # the caller alongside the export so they can review the resulting file.
+    notes = assistant_meta.get("quality_findings")
+    review = {"quality_findings": notes} if notes else {}
     current_version = _obsolete_failed_render_version(
         cur, project_id, version)
     if current_version is not None:
@@ -8117,14 +8100,14 @@ def _request_final(cur, user_id, project_id, version, render_group=None,
     if render_group or reuse_existing:
         if existing and _final_gate(cur, project_id, user_id)(
                 existing["id"], existing.get("meta") or {}, version):
-            return jsonify(asset_id=existing["id"], reused=True)
+            return jsonify(asset_id=existing["id"], reused=True, **review)
     cur.execute("""SELECT id, payload FROM video_jobs
                    WHERE project_id = %s AND type = 'final'
                      AND state IN ('queued','running')""", (project_id,))
     running = cur.fetchone()
     if running:
         if reuse_existing and (running.get("payload") or {}).get("edl_version") == version:
-            return jsonify(job_id=running["id"], reused=True)
+            return jsonify(job_id=running["id"], reused=True, **review)
         record_client_event(
             user_id, project_id, "export_blocked",
             detail={"code": "already_running", "version": version},
@@ -8170,7 +8153,7 @@ def _request_final(cur, user_id, project_id, version, render_group=None,
     record_client_event(
         user_id, project_id, "export_job_started",
         detail={"job_id": job_id, "version": version}, origin="server")
-    return jsonify({"job_id": job_id})
+    return jsonify({"job_id": job_id, **review})
 
 
 @video_bp.route("/projects/<int:project_id>/render/final", methods=["POST"])

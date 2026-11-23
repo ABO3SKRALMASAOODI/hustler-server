@@ -16,7 +16,7 @@ class Cur:
         self.row=None
         if 'pg_advisory_xact_lock' in sql: self.locked=True
         elif 'SELECT version, json FROM edls' in sql: self.row={'version':4,'json':{}}
-        elif 'SELECT cm.meta' in sql and self.repair: self.row={'meta':{'edl_version':4,'quality_status':'repair_required'}}
+        elif 'SELECT cm.meta' in sql and self.repair: self.row={'meta':{'edl_version':4,'quality_status':'repair_required','quality_findings':['Low contrast at 2.1s']}}
         elif "kind='render'" in sql: self.row=self.asset
         elif "type = 'final'" in sql and "'queued','running'" in sql: self.row=self.running
     def fetchone(self):return self.row
@@ -57,6 +57,7 @@ def test_existing_current_final_is_reused_without_encoding():
 def test_new_export_enters_the_shared_final_queue():
     assert run(Cur())==({'job_id':777},200)
 
-def test_known_open_repair_is_not_bypassed():
+def test_reviewed_export_returns_job_and_picture_findings():
     data,status=run(Cur(repair=True))
-    assert status==409 and data['code']=='repair_required'
+    assert status == 200 and data['job_id'] == 777
+    assert data['quality_findings'] == ['Low contrast at 2.1s']

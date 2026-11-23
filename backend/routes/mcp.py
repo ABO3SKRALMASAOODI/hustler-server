@@ -3469,7 +3469,10 @@ def _t_export_final(tok, args):
                   "structuredContent": {"export": receipt}, "isError": False}
     if open_findings and not result.get("isError"):
         details = result.setdefault("structuredContent", {})
-        details.get("export", details)["quality_findings"] = open_findings
+        export = details.get("export", details)
+        findings = list(export.get("quality_findings") or [])
+        findings.extend(f for f in open_findings if f not in findings)
+        export["quality_findings"] = findings
         notes = "\n".join(str(f.get("message") or f.get("finding_id")) for f in open_findings)
         result["content"][0]["text"] += f"\nPicture and sound findings on version {version}:\n{notes}"
     return result
