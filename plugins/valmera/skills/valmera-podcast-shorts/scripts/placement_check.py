@@ -521,6 +521,11 @@ def media_key(row, frames):
     return [file_digest(rec["path"]),kind,sample_times(rec),visible_slice(rec,kind)]
 
 
+def _review_key(review, media, said):
+    return hashlib.sha256(json.dumps([CONTRACT,MODEL,review,media,said],
+                                     ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+
+
 def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repair=True):
     here = os.path.dirname(os.path.abspath(__file__))
     spec = importlib.util.spec_from_file_location("wf1_check_llm", os.path.join(here, "../../_shell/llm.py"))
@@ -536,6 +541,7 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
     pending, rows, spend = [], [], []
     reading = {}
     indices = {}
+    segment_aliases = {}
     hits = 0
     for i, row in enumerate(ins):
         a, b, kind, name, rec = row
@@ -564,12 +570,17 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
             said["spoken_slice"] = entry["spoken_slice"] = words_under(clock,a,b)
         media = media_key(row, indices.get(rec["path"], []))
         images = None
-        if media is None:
+        key = _review_key(review, media, said) if media is not None else None
+        if media is None or (rec.get("composed_fps") and key not in cache):
             images = evidence(row, ffmpeg)
             images = [images] if isinstance(images,bytes) else images
-            media = [hashlib.sha256(x).hexdigest() for x in images]
-        key = entry["key"] = hashlib.sha256(json.dumps([CONTRACT,MODEL,review,media,said],
-                                                 ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            # Another part of this GOP can change while every audited frame and
+            # its words stay identical. Its exact sampled bytes identify the verdict.
+            pixel_key = _review_key(review, [hashlib.sha256(x).hexdigest() for x in images], said)
+            if key is not None:
+                segment_aliases[key] = pixel_key
+            key = pixel_key
+        entry["key"] = key
         if key in cache:
             entry.update(cache[key])
             hits += 1
@@ -627,6 +638,13 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
             os.replace(cache_path + ".part", cache_path)
         if not unanswered:
             break
+    if segment_aliases:
+        for fast, exact in segment_aliases.items():
+            if exact in cache:
+                cache[fast] = cache[exact]
+        with open(cache_path + ".part", "w") as stream:
+            json.dump(cache, stream, indent=1)
+        os.replace(cache_path + ".part", cache_path)
     for entry, _, _ in unanswered:
         # Keep the existing composed placement on a provider outage. New candidates yield to the take.
         entry.update(ok=review != "placement", fit=0, subject_x=None, fault="none", model=MODEL, unchecked=True,

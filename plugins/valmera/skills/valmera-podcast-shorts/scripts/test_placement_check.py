@@ -444,19 +444,20 @@ def test_duplicate_excerpt_in_one_batch_shares_one_source_reading(tmp_path, monk
     assert len(report["placements"]) == 2
 
 
-def test_second_render_decodes_only_changed_encoded_segments(tmp_path,monkeypatch):
+@pytest.mark.parametrize("pixels_change", [False, True])
+def test_second_render_decodes_only_changed_encoded_segments(tmp_path,monkeypatch,pixels_change):
     import hashlib, json, placement_check as pc
     film=tmp_path/"film.mp4"
     rows=_rows(film,[3,3])
     decoded=[]
     calls=[]
-    monkeypatch.setattr(pc,"evidence",lambda r,ff:decoded.append(r[3]) or [b"pixel"]*3)
+    monkeypatch.setattr(pc,"evidence",lambda r,ff:decoded.append(r[3]) or [film.read_bytes() if pixels_change and r[3]=="p1" else b"pixel"]*3)
     for n in (1,2):
         film.write_bytes(bytes([n]))
         (tmp_path/"film.mp4.log.json").write_text(json.dumps(dict(encoded_sha256=hashlib.sha256(film.read_bytes()).hexdigest(),
                                    encoded_segments=[[0,30,"same"],[30,60,"changed"+str(n)]])))
         pc.check(rows,dict(segments=[dict(say="word")]),_Clock(),str(tmp_path),"unused",call=_approving(calls),review="composed")
-    assert decoded==["p0","p1","p1"] and len(calls)==2
+    assert decoded==["p0","p1","p1"] and len(calls)==1+int(pixels_change)
 
 
 def test_research_keeps_verified_picture_at_exact_cut_until_its_source_changes(tmp_path):

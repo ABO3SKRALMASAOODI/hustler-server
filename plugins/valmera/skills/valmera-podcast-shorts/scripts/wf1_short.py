@@ -1217,8 +1217,8 @@ def _render_review(ctx, rd, sc):
     rows = []
     for p in sc["beats"].get("pictures") or []:
         a, b = p.get("visible_f") or p["f"]
-        words = [dict(f=it["f"], text=it["t"]) for it in display if it["f"][0] < b and it["f"][1] > a]
-        caption_words = [dict(f=it["f"], text=it["t"]) for it in captions if it["f"][0] < b and it["f"][1] > a]
+        words = [dict(f=[max(a,it["f"][0]),min(b,it["f"][1])], text=it["t"]) for it in display if it["f"][0] < b and it["f"][1] > a]
+        caption_words = [dict(f=[max(a,it["f"][0]),min(b,it["f"][1])], text=it["t"]) for it in captions if it["f"][0] < b and it["f"][1] > a]
         frames = {a, (a+b)//2, max(a,b-1)}
         for word in words:
             frames.update(f for edge in word["f"] for f in (edge-1,edge,edge+1) if a <= f < b)
