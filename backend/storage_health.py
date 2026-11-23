@@ -104,7 +104,10 @@ def _short(exc):
     return f"{type(exc).__name__}: {str(exc)[:200]}"
 
 
-_CLIENT_LOCK = threading.Lock()
+# The same lock every boto3 client build in this process takes (storage.py's
+# request clients included): separate locks let the probe and a request
+# thread run boto3's lazy imports at once and deadlock (P0, 23 Nov 2026).
+_CLIENT_LOCK = routing.CLIENT_BUILD_LOCK
 
 
 def _default_client(cfg, timeout_s=10.0):

@@ -51,6 +51,13 @@ def _connection_config():
 
 
 def client():
+    # Built under the process-wide build lock: concurrent first builds run
+    # boto3's lazy imports at once and can deadlock (storage_routing).
+    with routing.CLIENT_BUILD_LOCK:
+        return _build_legacy_client()
+
+
+def _build_legacy_client():
     return boto3.client(
         "s3",
         endpoint_url=config.S3_ENDPOINT,
@@ -181,7 +188,10 @@ if creds.env_complete(os.environ) or any(
         str(os.environ.get(n) or "").strip() for n in creds.KEKS):
     _mode_feed.start()
 _locator = routing.Locator()
-_next_lock = threading.Lock()
+# The process-wide boto3 client-build lock (storage_routing.CLIENT_BUILD_LOCK,
+# P0 23 Nov 2026): the health probe builds under the same one.
+_next_lock = routing.CLIENT_BUILD_LOCK
+routing.warm_boto3()
 _next_cached = {}
 
 

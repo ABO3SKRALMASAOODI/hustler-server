@@ -204,7 +204,10 @@ def _client_limits(fast=False, assemble=False):
         return 5.0, 15.0, 2
     return S3_CONNECT_TIMEOUT_S, S3_READ_TIMEOUT_S, S3_MAX_ATTEMPTS
 _clients = {}
-_clients_lock = threading.Lock()
+# The process-wide client-build lock (storage_routing.CLIENT_BUILD_LOCK): the
+# health probe builds under the same one, so no two builds overlap.
+_clients_lock = routing.CLIENT_BUILD_LOCK
+routing.warm_boto3()
 
 
 def client(public=False, fast=False, assemble=False):

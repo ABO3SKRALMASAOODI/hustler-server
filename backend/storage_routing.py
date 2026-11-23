@@ -184,6 +184,37 @@ def store_config(name, env=None):
     }
 
 
+# Every boto3 client this process builds is built under this one lock
+# (P0, 23 Nov 2026). Building a client runs boto3's lazy imports (the
+# creating-client-class hooks import boto3.s3.inject, s3transfer, ...). The
+# storage health probe built its clients under a lock of its own while
+# request threads built theirs under storage._clients_lock, so right after
+# a restart both imported the same modules at once and deadlocked on
+# Python's import locks: the probe sat 20 minutes in importlib's
+# _lock_unlock_module and every upload start, asset link and download in
+# that worker hung until Render killed the instance. One lock means two
+# builds never overlap; warm_boto3() runs the lazy imports once, on the
+# importing thread, before any request or probe thread exists.
+CLIENT_BUILD_LOCK = threading.RLock()
+
+
+def warm_boto3():
+    """Build and drop one S3 client so boto3/botocore finish their lazy
+    imports on the calling (importing) thread. No network, never raises."""
+    try:
+        import boto3
+        with CLIENT_BUILD_LOCK:
+            boto3.session.Session().client(
+                "s3", region_name="us-east-1",
+                endpoint_url="https://s3.us-east-1.amazonaws.com",
+                aws_access_key_id="warm", aws_secret_access_key="warm")
+            import boto3.s3.inject  # noqa: F401
+            import boto3.s3.transfer  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001 — warming is a saving, never a gate
+        return False
+
+
 def botocore_config_kwargs(cfg, **extra):
     """Keyword arguments for botocore.config.Config for one store.
 
