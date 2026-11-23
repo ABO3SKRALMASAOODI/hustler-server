@@ -418,13 +418,15 @@ def checked_class(value):
     return value
 
 
-def classify_review(cur, session_key, reviewed_at, cause_class):
-    """Annotate the exact review read by the model, preserving subsequent reviews."""
+def classify_review(cur, session_key, reviewed_at, cause_class, *, previous_class=None):
+    """Update only the review revision and prior diagnosis the classifier saw."""
+    if previous_class is not None:
+        checked_class(previous_class)
     _w(cur, """UPDATE session_reviews
                   SET signals = COALESCE(signals, '{}'::jsonb) || %s::jsonb
                 WHERE session_key = %s AND reviewed_at = %s
-                  AND signals->>'cause_class' IS NULL RETURNING id""",
-       (json.dumps({"cause_class": checked_class(cause_class)}), session_key, reviewed_at))
+                  AND (signals->>'cause_class') IS NOT DISTINCT FROM %s RETURNING id""",
+       (json.dumps({"cause_class": checked_class(cause_class)}), session_key, reviewed_at, previous_class))
     return bool(cur.fetchone())
 
 

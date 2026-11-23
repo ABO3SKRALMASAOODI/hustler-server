@@ -911,7 +911,7 @@ def test_historical_classification_preserves_ratings_and_ticket_state():
     assert store.classify_review(cur, "p1-22", NOW, "production")
     sql, params = cur.sql[-1]
     assert "reviewed_at = %s" in sql and "score" not in sql
-    assert params == ('{"cause_class": "production"}', "p1-22", NOW)
+    assert params == ('{"cause_class": "production"}', "p1-22", NOW, None)
     cur = Cur([{"history": [], "cause_key": "index-scratch"}])
     assert store.classify_ticket(cur, 7, "tool") == "tool"
     sql, params = cur.sql[-1]
@@ -921,3 +921,13 @@ def test_historical_classification_preserves_ratings_and_ticket_state():
     cur = Cur([ticket])
     assert store.classify_ticket(cur, 7, "production", missing_only=True) == "tool"
     assert len(cur.sql) == 1
+
+
+def test_correct_only_the_review_and_diagnosis_that_were_audited():
+    cur = Cur([{"id": 17}])
+    assert store.classify_review(cur, "p1-22", NOW, "product", previous_class="outside")
+    sql, params = cur.sql[-1]
+    assert "reviewed_at = %s" in sql and "IS NOT DISTINCT FROM %s" in sql
+    assert params == ('{"cause_class": "product"}', "p1-22", NOW, "outside")
+    assert "score" not in sql and "review_count" not in sql
+    assert not store.classify_review(Cur([None]), "p1-22", NOW, "tool", previous_class="outside")

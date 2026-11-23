@@ -408,6 +408,8 @@ def _infer_cause_class(diagnosis):
         "crash, timeout, upload, index, render, storage, queue or provider failure. "
         "product: Studio, plan, credits or product flow prevented the outcome. "
         "outside: the user's device or network, or a client never requested an edit. "
+        "A client that requested captions, overlays or timeline assembly requested an edit. "
+        "When an external app drove an edit, identify the cause supported by the tool and product evidence. "
         "Reply with exactly one lowercase class name.")
     payload = {"model": "gpt-6.2-sol", "_proxy_run": "review-cause-recovery",
                "messages": [{"role": "system", "content": instruction},
@@ -492,7 +494,8 @@ def cmd_classify(a):
     updated, skipped = 0, []
     with Writer(a.dry_run) as w:
         for row in data["reviews"]:
-            if store.classify_review(w, row["session_key"], row["reviewed_at"], row["class"]):
+            if store.classify_review(w, row["session_key"], row["reviewed_at"], row["class"],
+                                     previous_class=row.get("previous_class")):
                 updated += 1
             else:
                 skipped.append(row["session_key"])
