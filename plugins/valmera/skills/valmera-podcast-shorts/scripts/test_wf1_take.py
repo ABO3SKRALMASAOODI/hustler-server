@@ -191,3 +191,65 @@ def test_the_story_turn_flash_snaps_to_a_real_cut_or_stays_off(tmp_path, quiet_e
         assert real and min(real, key=lambda f: (abs(f - story_f), f)) in flashes
     else:
         assert not real and len(flashes) == 1                              # the payoff's flash alone
+
+
+def test_scarce_footage_keeps_live_argument_and_attributes_listener_cut(tmp_path,quiet_engines,monkeypatch):
+    import wf1_coverage
+    face=dict(box=[.36,.15,.65,.54],eyes=[[.43,.28],[.56,.28]],score=1.)
+    cuts=[dict(t0=a,t1=b,faces=[face],spans=[dict(t0=a,t1=b,who=who,box=face,track=0)])
+          for a,b,who in [(0,12,"speaker"),(12,16,"listener")]]
+    sup=_sup(tmp_path,cuts)
+    for word in sup["words"]["words"]:
+        word["start"]*=3.0
+        word["end"]*=3.0
+    sup["take"]["dur"]=sup["words"]["duration"]=16.
+    monkeypatch.setattr(wf1_coverage,"speaker_moves",lambda *a:([dict(word=4,why="turn to the answer")],[]))
+    lines=[" ".join(w["w"] for w in sup["words"]["words"] if w["seg"]==i) for i in (0,1)]
+    script=dict(title="Coach",source_credit="Interview",source_start=120,source_url="https://example.org/interview",
+                segments=[dict(say=line,pictures=[]) for line in lines])
+    l1,beats=film.build(script,sup,"footage-cut",dict(coverage_final=True))
+    evidence=beats["coverage"]
+    quoted=evidence["quoted_source"][0]
+    assert quoted["quote"]==lines[0] and quoted["credit"]=="Interview  ·  2:00" and quoted["url"]==script["source_url"]
+    panel=evidence["speaker_panels"][0]
+    live=next(i for i in l1["items"] if i["k"]=="card" and i["f"]==panel["f"])
+    assert l1["assets"][live["pic"]]["path"]==sup["take"]["path"]
+    assert live["src"][0]==pytest.approx((panel["word_frame"]-film.LEAD_F)/film.FPS)
+
+
+def test_a_local_card_repair_preserves_other_frames_layer_identity():
+    def ids(extra):
+        p=film.F.Plan({}, {}, frame_ids=True)
+        if extra:p.page([300,340],"#010203")
+        a=p.shot([0,120],"main",[0,0,1,1])
+        b=p.word([3,25],"Hello","cap",.1,.7)
+        return a["id"],b["id"]
+    assert ids(False)==ids(True)
+
+
+def test_archival_credit_quotes_event_date_independently_of_recollection():
+    rec=dict(faces=[{}],source=dict(url="archive",channel="Berkeley",title="Algorithms (DataEDGE Conference 2012)"))
+    assert film.archive_event(rec)=="DataEDGE Conference 2012"
+    rec["source"].update(title="Intro to Big Data - UC Berkeley AmpLab 2013",upload_date="20171015")
+    assert film.archive_event(rec)=="UC Berkeley AmpLab 2013"
+    rec["source"]["title"]="Intro to Big Data"
+    assert film.archive_event(rec)==""
+
+    rec["source"]["title"]="Transit Across Africa - September 2017"
+    assert film.archive_event(rec)==""
+
+
+def test_full_page_year_cards_and_archival_footage_own_distinct_frames(tmp_path,quiet_engines,monkeypatch):
+    import placement_check,wf1_coverage
+    sup=_sup(tmp_path,cuts_two_shot())
+    rec=dict(path="/archive.mp4",w=1920,h=1080,seconds=2.,src=[0.,47/30],audit_until=100)
+    sup["archived_placement_plan"]=dict(run_id="copy",rows=[[53,100,"clip","Lab",rec]],
+                                      report=dict(contract=placement_check.CONTRACT,rejected=[],placements=[]))
+    pages=dict(dev="type_run",words=["2009","2010"],f=[72,115])
+    monkeypatch.setattr(film._director(),"palette_asks",lambda *a:([pages],[]))
+    monkeypatch.setattr(wf1_coverage,"speaker_moves",lambda *a:([],[]))
+    script=dict(title="Interview",segments=[dict(say=" ".join(w["w"] for w in sup["words"]["words"] if w["seg"]==i),pictures=[]) for i in (0,1)])
+    scene,beats=film.build(script,sup,"footage-cut",dict(coverage_final=True,director=dict(by="director")))
+    assert pages in scene["devices"]
+    shot=beats["pictures"][0]
+    assert shot["f"]==shot["visible_f"]==[53,72] and shot["source_slice"]==pytest.approx([0.,19/30],abs=1e-4)

@@ -137,9 +137,9 @@ def test_resume_rebuilds_caption_pagination_before_reusing_render(tmp_path,monke
     ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda _:None)
     (tmp_path/'film_engine.mp4').write_bytes(b'old caption omission')
     sc=dict(beats=dict(pictures=[],caption_lines=4),spend=[])
-    monkeypatch.setattr(wf,'score',lambda *a:dict(beats=dict(pictures=[],caption_lines=4,caption_contract=1),spend=[]))
+    monkeypatch.setattr(wf,'score',lambda *a:dict(beats=dict(pictures=[],caption_lines=4,caption_contract=7),spend=[]))
     def render(ctx,script,score):
-        assert score['beats']['caption_contract']==1
+        assert score['beats']['caption_contract']==7
         assert not (tmp_path/'film_engine.mp4').exists()
         return dict(film='complete-captions.mp4')
     monkeypatch.setattr(wf.wf3,'render',render)
@@ -699,3 +699,50 @@ def test_every_style_asks_the_footage_engine_for_the_full_phone(tmp_path,monkeyp
     assert all((kw['W'],kw['H'])==(1080,1920)==wf.wf1_film.FOOTAGE_FRAME for kw in calls)
     import inspect
     assert 'style["footage"]' not in inspect.getsource(wf.supply)
+
+
+def test_all_findings_on_one_render_share_one_rescore(tmp_path,monkeypatch):
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda _:None)
+    repaired=set()
+    scores=[]
+    film=dict(film='programme.mp4')
+    monkeypatch.setattr(wf.wf3,'render',lambda *args:film)
+    def review(*args):
+        return dict(rejected=int('placement' not in repaired),moving_share=1. if 'motion' in repaired else .4,
+                    placements=[],spend=[])
+    monkeypatch.setattr(wf,'_render_review',review)
+    def repair(name):
+        def apply(*args,**kwargs):
+            if name in repaired:return False
+            repaired.add(name)
+            if not kwargs.get('defer'):scores.append(set(repaired))
+            return True
+        return apply
+    for step,name in (('_rebuild_rejected','placement'),('_rebuild_motion','motion'),('_rebuild_holds','hold')):
+        monkeypatch.setattr(wf,step,repair(name))
+    monkeypatch.setattr(wf,'_rescore',lambda *args:scores.append(set(repaired)),raising=False)
+    wf.render(ctx,{},dict(beats={'pictures':[]}))
+    assert scores==[{'placement','motion','hold'}]
+
+
+def test_revised_words_try_retained_moving_footage_before_more_acquisition(tmp_path,monkeypatch):
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
+    pack=dict(motion_recovered=True,composed_stills=[],coverage=dict(windows=[dict(first=20,last=31)],
+              boundary_reviews=[dict(updates=[dict(i=0)])]),footage=[dict(i=0,clips=[dict(path="gesture",motion_p90=1.6)])])
+    (tmp_path/"pack.json").write_text(json.dumps(dict(pack=pack)))
+    monkeypatch.setattr(wf.wf3,"load_pack",lambda _:pack)
+    sc=dict(beats=dict(pictures=[dict(path="slide",window=0)]))
+    report=dict(moving_share=.25,placements=[dict(id=0,ok=True,motion_ok=False)])
+    assert wf._rebuild_motion(ctx,{},sc,report,defer=True)
+    assert pack["coverage"]["motion_windows"]==[0] and not sc["beats"].get("research_windows")
+    assert not wf._rebuild_motion(ctx,{},sc,report,defer=True)
+
+
+def test_changed_window_rechecks_candidate_rejected_on_earlier_words(tmp_path):
+    from placement_check import CONTRACT
+    (tmp_path/"render_rejected_contract.json").write_text(json.dumps(CONTRACT))
+    rows=[dict(window=0,path="lecture",fault="contradiction",f=[185,220],clause_t=[6.,14.]),
+          dict(window=0,path="slide",fault="reframe",f=[315,335],clause_t=[6.,14.])]
+    (tmp_path/"render_rejected.json").write_text(json.dumps(rows))
+    (tmp_path/"pack.json").write_text(json.dumps(dict(pack=dict(coverage=dict(windows=[dict(t0=9.34,t1=14.)])))))
+    assert wf.current_rejections(str(tmp_path))==[rows[1]]

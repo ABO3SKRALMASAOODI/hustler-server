@@ -477,16 +477,48 @@ def lay_devices(ctx, l1_path):
         return l1_path
     import glob
     import hashlib
-    # named by the scene's own bytes and the palette's code: a scene scored again, or a palette that changed, is laid
-    # again, never drawn from a stale layout
-    h = hashlib.sha256(open(l1_path, "rb").read())
-    for src in sorted(glob.glob(os.path.join(brand.worker_dir(), "scene", "palette", "*.py")) +
-                      glob.glob(os.path.join(brand.worker_dir(), "scene", "alien", "*.py"))):
+    # Picture composition hears the original speech spine. The later SFX mix is independent.
+    shared = doc.get("workflow_text_layout") and getattr(ctx,"workflow",None) == "wf1"
+    sound_fields = ("sound","sound_design")
+    source = {k:v for k,v in doc.items() if k not in (*sound_fields,"device_events","story_landings")} if shared else doc
+    h = hashlib.sha256(json.dumps(source,sort_keys=True).encode())
+    wk = brand.worker_dir()
+    if shared:
+        from placement_check import file_digest
+        for entries in ((doc.get("assets") or {}).values(), doc.get("pool") or []):
+            for record in entries:
+                path = os.path.join(ctx.supply,record.get("path") or "")
+                if os.path.isfile(path):
+                    h.update(file_digest(path).encode())
+        models = os.environ.get("VALMERA_MODELS") or MODELS_DIR
+        for variable,name in (("MATTE_RVM_MODEL","rvm_mobilenetv3_fp32.onnx"),
+                              ("YUNET_MODEL","face_detection_yunet_2023mar.onnx")):
+            path = os.environ.get(variable) or os.path.join(models,name)
+            h.update((file_digest(path) if os.path.isfile(path) else "missing").encode())
+    for src in sorted(glob.glob(os.path.join(wk, "scene", "palette", "*.py")) +
+                      glob.glob(os.path.join(wk, "scene", "alien", "*.py"))):
         h.update(open(src, "rb").read())
-    out = os.path.splitext(l1_path)[0] + f".devices.{h.hexdigest()[:10]}.json"
-    if not os.path.exists(out):
-        wk = brand.worker_dir()
-        log = os.path.join(ctx.supply, "devices_log.json")
+    key = h.hexdigest()
+    out = os.path.splitext(l1_path)[0] + f".devices.{key[:12]}.json"
+    log = os.path.join(ctx.supply, "devices_log.json")
+    memo = os.path.join(ctx.supply,"picture-devices-"+key+".json")
+    if shared and os.path.isfile(memo):
+        with open(memo) as f:
+            cached = json.load(f)
+        if all(os.path.isfile(path) and file_digest(path)==digest for path,digest in cached["derived"].items()):
+            composed = dict(cached["scene"])
+            for field in sound_fields:
+                if field in doc:
+                    composed[field] = doc[field]
+                else:
+                    composed.pop(field,None)
+            with open(out+".part","w") as f:
+                json.dump(composed,f)
+            os.replace(out+".part",out)
+            with open(log,"w") as f:
+                json.dump(cached["log"],f)
+            return out
+    if shared or not os.path.exists(out):
         src = l1_path
         mod = "scene.palette.run"
         if not os.path.isdir(os.path.join(wk, "scene", "palette")):
@@ -501,6 +533,21 @@ def lay_devices(ctx, l1_path):
         except (RuntimeError, subprocess.SubprocessError, OSError) as e:
             ctx.log(f"devices could not be laid, the film is drawn as scored: {str(e)[:300]}")
             return l1_path
+        if shared and os.path.isfile(log):
+            with open(out) as f:
+                composed = json.load(f)
+            with open(log) as f:
+                landings = json.load(f)
+            derived = {}
+            for aid,asset in composed.get("assets",{}).items():
+                if asset == doc.get("assets",{}).get(aid):
+                    continue
+                path = os.path.join(ctx.supply,asset.get("path") or "")
+                if os.path.isfile(path):
+                    derived[path] = file_digest(path)
+            with open(memo+".part","w") as f:
+                json.dump(dict(scene=composed,log=landings,derived=derived),f)
+            os.replace(memo+".part",memo)
         if doc.get("alien"):
             try:
                 rows = json.load(open(log))
@@ -747,7 +794,20 @@ def music_version(ctx, rd, sc):
     final = os.path.join(ctx.run_dir, f"final_{tag}.mp4")
     if not os.path.exists(final):
         try:
-            brand.finish(out, final + ".part.mp4", ctx.tmp, last_word_s=last_word(ctx, sc), **end_accent(ctx, sc))
+            bed = (rep.get("mix") or {}).get("card_bed")
+            if bed and not os.path.isfile(bed["path"]):
+                # A remote mix can name its own music cache. Resolve the same licensed recording locally.
+                library = use_music_set() or MUSIC_SET
+                choice = rep.get("choice") or {}
+                if song:
+                    bed = dict(bed,path=song)
+                elif choice.get("cid") and os.path.isfile(os.path.join(library,"index.json")):
+                    with open(os.path.join(library,"index.json")) as f:
+                        track = next((r for r in json.load(f)["tracks"] if r["cid"] == choice["cid"]),None)
+                    if track:
+                        bed = dict(bed,path=os.path.join(library,track["file"]))
+            brand.finish(out, final + ".part.mp4", ctx.tmp, card_bed=bed,
+                         last_word_s=last_word(ctx, sc), **end_accent(ctx, sc))
             os.replace(final + ".part.mp4", final)
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:     # the clean film is delivered either way
             ctx.log(f"{tag} version not finished: {str(e)[:300]}")
@@ -758,6 +818,8 @@ def music_version(ctx, rd, sc):
                 tempo=plan.get("tempo"), cuts=plan.get("cuts"), payoff_flow_s=levels.get("payoff_flow_s"),
                 holes=levels.get("holes"), hits=levels.get("hits"), under_voice_db=levels.get("under_voice_db"), lifts=len(levels.get("lifts") or []),
                 accents=len(levels.get("accents") or []), lufs=(mix.get("master") or {}).get("lufs"))
+    if "opening_bed_dbfs" in mix:
+        does["opening_bed_dbfs"] = mix["opening_bed_dbfs"]
     if rep.get("chapters"):                      # a long film: a track a chapter, each opening on an entrance and closing on a hit
         does["chapters"] = [dict(film=c.get("film"), title=(c.get("choice") or {}).get("title"), end_hit_s=c.get("end_hit_s"), why=c.get("why")) for c in rep["chapters"]]
     spend = [dict(stage="check", provider="openai", model="gpt-6.1-sol", what="music: story marks and the pick", usd=float(rep.get("spend_usd") or 0))]
@@ -772,6 +834,9 @@ def music_version(ctx, rd, sc):
     if not (chk.get("length_ok") and chk.get("endcard_ok")):
         ctx.log(f"music version not delivered: its finish does not hold ({ {k: chk.get(k) for k in ('length_ok', 'endcard_ok', 'mark_ok', 'lufs')} })")
         return None
+    if mix.get("card_bed"):
+        tail = brand.tail_shape(final, chk["programme_s"], sc.get("last_word_s"), chk["outro_s"])
+        does["encoded_card_bed"] = {k:tail[k] for k in ("card_last250_dbfs","card_quarters_dbfs")}
     music = dict(picked_by_valmera=True, title=ch.get("title"), author=ch.get("author"), license=ch.get("license"), credit=ch.get("credit"),
                  page_url=ch.get("page_url"), cid=ch.get("cid"), why=ch.get("why"), chosen_by=ch.get("chosen_by"), tried=rep.get("tried"), does=does,
                  tracks=ch.get("tracks"), pool=ch.get("pool"), entry=ch.get("entry"),

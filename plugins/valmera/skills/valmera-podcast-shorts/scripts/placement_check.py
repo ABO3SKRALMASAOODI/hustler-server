@@ -11,6 +11,7 @@ is modified.
 """
 import base64
 import hashlib
+from functools import lru_cache
 import importlib.util
 import io
 import json
@@ -19,7 +20,7 @@ import subprocess
 import sys
 
 MODEL = "gpt-6-sol"
-CONTRACT = 14       # The excerpt and its source must support the role attributed in this clause.
+CONTRACT = 16       # The excerpt and its source must support the role attributed in this clause.
 PHONE = 9 / 16
 # One call carries as many placements as fit these bounds. On the codex-proxy a call's cost is its harness prefix
 # (about 13k input tokens); each phone frame adds about 0.6k tokens and no latency (calls.jsonl, 15-16 Nov: 1 image
@@ -29,9 +30,9 @@ MAX_IMAGES = 24
 MAX_PLACEMENTS = 8
 FAULTS = ("none", "reframe", "contradiction")
 COMPOSED = (" These are the composed phone frames of the finished film, including the frames at each display word's "
-            "edges. Each picture was already chosen for its clause on its source frames: do not judge again whether it "
-            "fits its words, and never fault a picture for missing attribution or for illustrating rather than "
-            "recording the clause. Judge only what composing changed and report it as fault: 'reframe' when the crop "
+            "edges. Check what was newly juxtaposed in the composite: the visible attribution, active caption, eyes, "
+            "evidence lettering and exact speech under this slice. A different group beneath a personal recollection, "
+            "or a named demo used to depict a general opinion, implies an unsupported event. Mark that contradiction. Report 'reframe' when the crop or foreground tile clips source lettering, covers the eyes, "
             "cuts through a face (forehead, eyes, mouth or chin) or leaves the subject the words name outside the "
             "frame; 'contradiction' when a display word, or text left over from the preceding picture, states "
             "something the picture visibly contradicts (a wrong name, era or claim); 'none' otherwise. ok is true "
@@ -44,16 +45,13 @@ def words_under(clock, a, b, fps=30):
 
 def sample_times(rec):
     """Where a clip is looked at. A composed film: the frames the viewer sees (check_times, else the placement's
-    entry, middle and exit). A source clip: across the whole clip (its first, middle and last stretch), so the verdict
-    belongs to the picture and survives any slice of it the film later cuts: a re-proposal or a boundary repair moves
-    the slice, never the picture (19 Nov m07: a moved boundary changed the sampled frames and a picture approved three
-    times was judged again and lost)."""
+    entry, middle and exit). A source clip is sampled within the excerpt the viewer will see."""
     if rec.get("check_times"):
         return list(rec["check_times"])
     start, end = rec.get("src") or (0.0, float(rec.get("seconds") or 0.0))
     seconds = float(rec.get("seconds") or 0.0)
     if not rec.get("composed_fps") and seconds > 0:
-        return [round(seconds * q, 3) for q in (0.15, 0.5, 0.85)]
+        return [round(start+(end-start)*q,3) for q in (.15,.5,.85)]
     return [start, (start + end) / 2, max(start, end - 1/30)]
 
 
@@ -69,7 +67,7 @@ def evidence(row, ffmpeg):
             # CFR output intervals are half-open. Seek inside the selected frame,
             # avoiding float rounding onto the next picture at an exclusive cut.
             if rec.get("composed_fps"):
-                t = max(0, t - .5 / rec["composed_fps"])
+                t = max(0, (round(t*rec["composed_fps"]) - .25) / rec["composed_fps"])
             r = subprocess.run([ffmpeg, "-v", "error", "-ss", str(t),
                                 "-i", rec["path"], "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-"],
                                capture_output=True, check=True, timeout=60)
@@ -171,7 +169,7 @@ def repair_text(row, decision, ffmpeg, work):
     if not rect:
         return None
     os.makedirs(os.path.join(work, "text-cleared"), exist_ok=True)
-    stem = hashlib.sha256(json.dumps([rec["path"], rect]).encode()).hexdigest()[:16]
+    stem = hashlib.sha256(json.dumps([file_digest(rec["path"]), rect]).encode()).hexdigest()[:16]
     dst = os.path.join(work, "text-cleared", f"{stem}.mp4")
     if not os.path.exists(dst):
         overlay.crop_clip(rec["path"], dst + ".part.mp4", rect, ffmpeg)
@@ -316,7 +314,7 @@ def clear_seated_text(rec, ffmpeg, work):
         kinds = sorted({s_["kind"] for s_ in m["seated"] if s_.get("kind") in ("subtitles", "label", "still_text")} | ({"band"} if bands else set()))
         return dict(rec, text_kept=", ".join(kinds)), "text_kept"
     os.makedirs(os.path.join(work, "text-cleared"), exist_ok=True)
-    stem = hashlib.sha256(json.dumps([path, rect]).encode()).hexdigest()[:16]
+    stem = hashlib.sha256(json.dumps([file_digest(path), rect]).encode()).hexdigest()[:16]
     dst = os.path.join(work, "text-cleared", f"{stem}.mp4")
     if not os.path.exists(dst):
         try:
@@ -373,7 +371,7 @@ SYSTEM = (
     "description, what the footage engine saw on it), never a filename. For a wide source the frames are the full "
     "source frame, lower thirds, wordmarks and signs included, and the last image is the phone-shaped slice the film "
     "shows full screen. "
-    "For each placement read the whole spoken clause and its context. "
+    "For a remembered question or answer, the picture may show the storyteller, an attributed record of the actual exchange, or a source explaining the specific point. An unrelated demonstration casts other people in that exchange. For a broad opinion with no concrete visual referent, stay with the speaker. When the speaker names a real place or object in a figurative payoff, authentic footage of that named object illustrates its scale. It need not prove the prediction. Distinguish a literal visual referent from an unrelated example of the technology. Judge the clause in words; use context to resolve its meaning. "
     "Ask which person, company, object, place or event these words refer to, including the role implied by "
     "their action. Choose an external picture only when the visible frames and their source support that "
     "identification. A source title can describe an entire compilation; it does not identify each person in it. "
@@ -486,6 +484,43 @@ KEPT = ("ok", "fit", "subject_x", "fault", "reason", "model", "motion_ok", "moti
         "foreign_text", "text_box", "text_reason", "foley")
 
 
+@lru_cache(maxsize=4096)
+def _digest(path, identity):
+    with open(path,"rb") as stream:
+        return hashlib.file_digest(stream,"sha256").hexdigest()
+
+
+def file_digest(path):
+    st = os.stat(path)
+    return _digest(path, (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+
+
+def segment_index(path):
+    """A mux can be replaced on resume. Trust its segment map only for those exact output bytes."""
+    try:
+        with open(path+".log.json") as f:
+            log = json.load(f)
+        if log.get("encoded_sha256") and file_digest(path) == log["encoded_sha256"]:
+            return log.get("encoded_segments", [])
+    except (OSError, ValueError):
+        pass
+    return []
+
+
+def media_key(row, frames):
+    a,b,kind,_,rec = row
+    if not os.path.isfile(rec["path"]):
+        return None
+    if rec.get("composed_fps"):
+        fps = rec["composed_fps"]
+        samples = [int(round(t*fps)) for t in sample_times(rec)]
+        parts = [(sha, f-lo) for f in samples for lo,hi,sha in frames if lo <= f < hi]
+        if len(parts)==len(samples):
+            return ["encoded", fps, parts]
+        return None
+    return [file_digest(rec["path"]),kind,sample_times(rec),visible_slice(rec,kind)]
+
+
 def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repair=True):
     here = os.path.dirname(os.path.abspath(__file__))
     spec = importlib.util.spec_from_file_location("wf1_check_llm", os.path.join(here, "../../_shell/llm.py"))
@@ -500,6 +535,8 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         cache = {}
     pending, rows, spend = [], [], []
     reading = {}
+    indices = {}
+    hits = 0
     for i, row in enumerate(ins):
         a, b, kind, name, rec = row
         b = max(b, int(rec.get("audit_until", b)))
@@ -520,19 +557,26 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         # never re-judges an approved picture (19 Nov m03, m05). A re-proposal that slices the same clip differently,
         # a picture proposed again in a later attempt and a resume all reuse it; a changed pixel or word is checked
         # afresh.
-        images = evidence(row, ffmpeg)
-        if isinstance(images, bytes):
-            images = [images]
-        # The phone slice is derived from the source frames and the subject's place (x, which this check itself
-        # repairs): it is shown, but the verdict is keyed on the source frames alone.
-        picture = [x for x, label in zip(images, frame_labels(row, len(images))) if not label.startswith("the phone")]
+        if rec.get("composed_fps") and rec["path"] not in indices:
+            indices[rec["path"]] = segment_index(rec["path"])
         said = {k: v for k, v in entry.items() if k not in ("id", "f")}
-        entry["key"] = key = hashlib.sha256(json.dumps(
-            [CONTRACT, MODEL, review, [hashlib.sha256(x).hexdigest() for x in picture], said],
-            ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        if review != "placement":
+            said["spoken_slice"] = entry["spoken_slice"] = words_under(clock,a,b)
+        media = media_key(row, indices.get(rec["path"], []))
+        images = None
+        if media is None:
+            images = evidence(row, ffmpeg)
+            images = [images] if isinstance(images,bytes) else images
+            media = [hashlib.sha256(x).hexdigest() for x in images]
+        key = entry["key"] = hashlib.sha256(json.dumps([CONTRACT,MODEL,review,media,said],
+                                                 ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         if key in cache:
             entry.update(cache[key])
+            hits += 1
         elif key not in reading:
+            if images is None:
+                images = evidence(row, ffmpeg)
+                images = [images] if isinstance(images,bytes) else images
             reading[key] = entry
             pending.append((entry, row, images))
         rows.append(entry)
@@ -624,7 +668,7 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         if (review == "placement" and row[2] == "clip" and decision.get("ok") is True and decision.get("subject_x") is not None
                 and not rec.get("composed_fps")):
             rec["x"] = round(float(decision["subject_x"]), 4)
-    report = dict(contract=CONTRACT, model=MODEL, review=review, proposed=len(rows),
+    report = dict(contract=CONTRACT, model=MODEL, review=review, reused=hits, proposed=len(rows),
                   accepted=sum(r.get("ok") is True for r in rows), rejected=sum(r.get("ok") is not True for r in rows),
                   unchecked=sum(1 for r in rows if r.get("unchecked")), placements=rows, spend=spend,
                   foreign_text=sum(1 for r in rows if r.get("foreign_text")),

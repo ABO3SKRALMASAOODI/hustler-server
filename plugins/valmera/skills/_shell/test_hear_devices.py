@@ -74,3 +74,32 @@ def test_the_palette_runs_with_this_macs_models_named_in_its_environment(monkeyp
     assert f"VALMERA_MODELS='{chain.MODELS_DIR}'" in env
     monkeypatch.setenv("VALMERA_MODELS", "/elsewhere")
     assert "VALMERA_MODELS='/elsewhere'" in chain.model_env()
+
+
+def test_verified_device_picture_survives_sound_replan_and_reopens_on_source_change(tmp_path,monkeypatch):
+    import shlex
+    ctx=_ctx(tmp_path)
+    ctx.workflow="wf1"
+    scene=tmp_path/"l1.json"
+    source=tmp_path/"source.mp4"
+    source.write_bytes(b"take A")
+    doc=dict(assets={"main":{"path":str(source)}},items=[],devices=[{"dev":"whip"}],
+             workflow_text_layout=True,sound=[{"id":"old"}])
+    calls=[]
+    def apply(ctx,cmd,**kwargs):
+        flags=shlex.split(cmd[-1])
+        def path(flag):return flags[flags.index(flag)+1]
+        with open(path("--l1")) as f: drawn=json.load(f)
+        with open(path("--out"),"w") as f:json.dump(dict(drawn,device_events=[{"f":811}]),f)
+        with open(path("--log"),"w") as f:json.dump([{"done":True}],f)
+        calls.append(1)
+    monkeypatch.setattr(chain,"sh",apply)
+    monkeypatch.setattr(chain,"engine_kind",lambda:"scene")
+    for name in ("heard","render","changed"):
+        path=tmp_path/(name+".json")
+        path.write_text(json.dumps(doc))
+        drawn=chain.lay_devices(ctx,str(path))
+        assert json.load(open(drawn))["sound"]==doc["sound"]
+        if name=="heard":doc["sound"]=[{"id":"new"}]
+        if name=="render":source.write_bytes(b"take B")
+    assert len(calls)==2

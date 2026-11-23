@@ -534,3 +534,16 @@ def test_same_subject_in_different_roles_keeps_its_own_words():
             for i, (words, need) in enumerate([("raised money", "Scale's completed round"),
                                                 ("passed on us", "documented rejection of Scale")])]
     assert coverage.join_windows(rows) == rows
+
+
+def test_resume_keeps_an_applied_word_boundary_for_the_same_picture_finding():
+    import wf1_coverage as coverage
+    from types import SimpleNamespace
+    calls=[]
+    llm=SimpleNamespace(ask=lambda *a,**k:(calls.append(1),{}),json_block=lambda _:dict(updates=[dict(i=0,first=1,last=2,why="named lab begins here")]))
+    words=[dict(w=w,start=i,end=i+.9) for i,w in enumerate(["recalled","the","lab"])]
+    data=dict(words=words,windows=[dict(name="lab",first=0,last=2,t0=0,t1=2.9)])
+    row=dict(f=[3,25],reason="other presenter under the recollection")
+    assert coverage.repair_boundaries(data,[row],llm)
+    assert not coverage.repair_boundaries(data,[row],llm)
+    assert calls==[1]

@@ -2413,7 +2413,9 @@ def render(ctx, script, sc):
                                  "--work", ctx.supply, "--out", out + ".part.mp4", "--tier", "master", "--strict", "--cache", cache, "--audio", sound],
                            label=f"wf3-render-{ctx.run_id}", heavy=True, timeout=7200)
             try:
-                j = json.loads(log[log.index("{"):log.rindex("}") + 1])
+                # The engine writes the complete map even when shell logging abbreviates stdout.
+                native = out + ".part.mp4.log.json"
+                j = json.load(open(native)) if os.path.isfile(native) else json.loads(log[log.index("{"):log.rindex("}") + 1])
             except ValueError:
                 j = {}
         os.replace(out + ".part.mp4", out)

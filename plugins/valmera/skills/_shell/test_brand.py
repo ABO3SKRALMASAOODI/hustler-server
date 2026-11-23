@@ -350,3 +350,17 @@ def test_easton_line_survives_final_aac_on_the_card(tmp_path):
     assert abs(at/SR-brand.CARD_LINE_AT) < 1/FPS
     assert np.corrcoef(card[at:at+len(master)], master)[0,1] > .95
     assert info["voice"]["end_s"] < PROG_F/FPS + info["outro_s"]
+
+
+def test_same_music_remains_through_last_encoded_quarter_and_ducks_for_easton(tmp_path):
+    t=np.arange(SR*6)/SR
+    # Track alone in its own file. The programme also has speech.
+    track=make_programme(tmp_path/"track.mp4", .12*np.sin(2*np.pi*440*t))
+    programme=make_programme(tmp_path/"talk.mp4", .18*np.sin(2*np.pi*180*t))
+    final=str(tmp_path/"finished.mp4")
+    info=brand.finish(programme,final,str(tmp_path),accent=False,card_bed=dict(path=track,at_s=1.,tempo=1.))
+    report=brand.tail_shape(final,6.,5.5,info["outro_s"])
+    assert report["card_last250_dbfs"] > -42
+    # The cached line is removed in this measurement; compare the bed itself.
+    levels=report["card_quarters_dbfs"]
+    assert min(levels[2:5]) < np.median(levels[-5:-1])-8

@@ -407,7 +407,7 @@ def last_word(l1_path, work=None):
         return None
 
 
-def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=True, last_word_s=None, sting=True):
+def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=True, last_word_s=None, sting=True, card_bed=None):
     """The closing section's sound, as a 48 kHz stereo WAV laid from `cut` samples on: the programme's own samples
     there, holding TAIL_AFTER_WORD_S past the last word and then falling as the references' music falls (tail_gain),
     the low end near mono, nothing under the card; with `sting`, the sting on the card's reveal (on the music's beat
@@ -449,6 +449,19 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
     ramp = np.clip((tdry - cut / SR) / MONO_RAMP_S, 0.0, 1.0)
     out = np.zeros((n_tail, 2), np.float64)
     out[:len(dry)] = mono_low(dry, ramp) * g[:, None]
+    if card_bed:
+        overlap = min(len(dry), round(.20 * SR))
+        tempo = float(card_bed["tempo"])
+        start = max(0, card_bed["at_s"] - overlap/SR*tempo)
+        cmd = [FF, "-v", "error", "-stream_loop", "-1", "-i", card_bed["path"],
+               "-af", f"atrim=start={start:.6f},asetpts=PTS-STARTPTS,atempo={tempo:.8f}",
+               "-ar", str(SR), "-ac", "2", "-t", str((overlap+n_out)/SR+.05), "-f", "f32le", "-"]
+        pcm = subprocess.run(cmd, capture_output=True, check=True, timeout=120).stdout
+        music = np.frombuffer(pcm, np.float32).reshape(-1,2)[:overlap+n_out]
+        target_db = min(-24., ref-9.)
+        gain = min(10**((target_db-_k_db(music))/20), .35/max(np.max(np.abs(music)),1e-6))
+        env = np.interp(np.arange(len(music)), [0, overlap, len(music)-.12*SR, len(music)-1], [0,1,1,0])
+        out[len(dry)-overlap:len(dry)-overlap+len(music)] += music * (gain*env[:,None])
     acc = np.zeros((n_tail, 2), np.float64)
     info["ref_lufs"] = round(ref, 1)
     st = pick_sting(used) if sting else None
@@ -532,10 +545,19 @@ def tail_shape(final, prog_s, last_word_s=None, outro_s=None):
     line = _pcm(CARD_LINE)
     at = min(round(CARD_LINE_AT * SR), len(card) - len(line))
     if at >= 0:
+        # The brand receipt rounds the programme boundary to milliseconds; fit the cached voice on the AAC samples.
+        from scipy.signal import correlate
+        lo,hi = max(0,at-round(.010*SR)),min(len(card)-len(line),at+round(.010*SR))
+        aligned = correlate(card[lo:hi+len(line)].mean(axis=1),line.mean(axis=1),mode="valid",method="fft")
+        at = lo + int(np.argmax(aligned))
         card = card.copy()
         window = card[at:at+len(line)]
         gain = np.sum(window * line, axis=0) / np.maximum(np.sum(line * line, axis=0), 1e-9)
         window -= line * gain
+    def dbfs(x):
+        return round(float(10*np.log10(max(np.mean(x*x),1e-14))),2)
+    quarter = SR//4
+    tail_windows = [dbfs(card[i:i+quarter]) for i in range(0,len(card)-quarter+1,quarter)]
     sec = int(0.4 * SR)
     card_db, card_low = -140.0, 0.0
     for i in range(0, max(1, len(card) - sec + 1), sec // 2):
@@ -565,6 +587,7 @@ def tail_shape(final, prog_s, last_word_s=None, outro_s=None):
                 ends_after_word_s=None if end_s is None else round(end_s - L, 2),
                 fall_to_minus20_s=None if fall_s is None else round(fall_s, 2),
                 at_card_vs_bed_db=round(float(np.max(lv[pre])) - bed, 1) if pre.any() else None,
+                card_last250_dbfs=dbfs(card[-quarter:]), card_quarters_dbfs=tail_windows,
                 card_peak400_vs_bed_db=round(card_db - bed, 1), card_peak400_low_share=round(card_low, 3),
                 card_low_vs_bed_low_db=round(low_db(card) - low_db(bed_seg), 1) if len(bed_seg) > 64 and len(card) > 64 else None,
                 side_to_mid_lt150_db=round(float(s2m), 1),
@@ -596,7 +619,7 @@ def card_duration(config):
     return max(float(config.OUTRO_DURATION_S), minimum)
 
 
-def finish(programme, out, workdir, used=(), accent=True, last_word_s=None):
+def finish(programme, out, workdir, used=(), accent=True, last_word_s=None, card_bed=None):
     """programme (the engine's film) -> out, with the mark on every programme frame and the end card joined.
     The film's sound holds a little past its last word (`last_word_s`, programme seconds; brand.last_word reads it from
     the plan) and falls as the references' music falls, near mono in the low end, gone at the card (accent_tail).
@@ -625,7 +648,7 @@ def finish(programme, out, workdir, used=(), accent=True, last_word_s=None):
     cmd = [FF, "-v", "error", "-y", "-i", programme, "-loop", "1", "-r", str(fps), "-i", mark]
     cmd += R._endcard_input_args(card, outro_s, fps)
     wav, cut, info = accent_tail(programme, workdir, n_prog / fps, fps, j, outro_s, used=used, has_audio=p["audio"],
-                                 last_word_s=last_word_s, sting=accent)
+                                 last_word_s=last_word_s, sting=accent, card_bed=card_bed)
     total = int(round(n_prog / fps * SR))
     cmd += ["-i", wav]
     if dark:

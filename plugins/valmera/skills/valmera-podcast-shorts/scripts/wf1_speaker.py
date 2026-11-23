@@ -281,7 +281,9 @@ def track_box(track, a=None, b=None):
     box = [round(v, 5) for v in box]
     eyes = [[round(float(np.median([f["eyes"][e][c] for f in fs])), 5) for c in (0, 1)] for e in (0, 1)]
     path = [[round((f["box"][0] + f["box"][2]) / 2, 4), round((f["box"][1] + f["box"][3]) / 2, 4)] for f in fs]
-    return dict(box=box, eyes=eyes, path=path[::max(1, len(path) // 12)])
+    return dict(box=box, eyes=eyes, path=path[::max(1, len(path) // 12)],
+                samples=[[round(k / RATE, 4), *[round(v, 5) for v in f["box"]]] for k,f in track
+                         if (a is None or k >= a) and (b is None or k < b)])
 
 
 class _Tracker:

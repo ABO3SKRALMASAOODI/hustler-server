@@ -362,6 +362,9 @@ def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, str
     """Fill long holds inside a planned clause using its own spare clips or source stills."""
     from wf1_coverage import shared_candidates, same_picture, fresh_interval
     pool = shared_candidates(coverage, footage)
+    for block in coverage.get("blocked_sources", []):
+        i = block["window"]
+        pool[i] = [r for r in pool.get(i, []) if (r.get("source") or {}).get("url") != block["source"]]
     report = dict(proposed=0, accepted=0, rejected=0, fresh=0, spend=[], placements=[])
     taken = {}
     for clips in list(pool.values()) + [[x[4] for x in ins]]:
@@ -432,6 +435,7 @@ def fill_size(rec, work, ffmpeg):
     record (its faces and x are fractions and stand), or the record as it is when it already fills within MAX_UP,
     cannot be read, or the scale fails: then the driver fills the phone past 3x for that clip (clip_meta)."""
     import hashlib
+    from placement_check import file_digest
     import math
     import subprocess
     up = clip_cover_up(rec)
@@ -441,7 +445,7 @@ def fill_size(rec, work, ffmpeg):
     w2 = int(math.ceil(float(rec["w"]) * up / 2) * 2)
     h2 = int(math.ceil(float(rec["h"]) * up / 2) * 2)
     out_dir = os.path.join(work, "filled")
-    dst = os.path.join(out_dir, hashlib.sha256(json.dumps([os.path.realpath(path), w2, h2]).encode()).hexdigest()[:16] + ".mp4")
+    dst = os.path.join(out_dir, hashlib.sha256(json.dumps([file_digest(path), w2, h2]).encode()).hexdigest()[:16] + ".mp4")
     if not os.path.exists(dst):
         os.makedirs(out_dir, exist_ok=True)
         r = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", path, "-vf",
@@ -454,9 +458,34 @@ def fill_size(rec, work, ffmpeg):
     return dict(rec, path=dst, w=w2, h=h2, upscaled_from=dict(path=path, w=int(rec["w"]), h=int(rec["h"]), up=round(up, 3)))
 
 
+def archive_event(rec):
+    """A short dated event credit quoted verbatim from the publisher's title."""
+    if not (rec.get("faces") or rec.get("attribution")):
+        return ""
+    source=rec.get("source") or {}
+    if not source.get("url") or not source.get("channel"):
+        return ""
+    title=(source.get("title") or "").strip()
+    tail=title.rpartition("(")[2][:-1] if title.endswith(")") and "(" in title else title
+    for sep in (" — ", " – ", " - "):
+        tail=tail.rsplit(sep,1)[-1].strip()
+    # A calendar-only title suffix can be a release date and does not identify the recorded event.
+    import datetime
+    for fmt in ("%B %Y","%b %Y","%Y"):
+        try:
+            datetime.datetime.strptime(tail,fmt)
+        except ValueError:
+            continue
+        return ""
+    # This reads a literal date from a citation; it does not date events from upload time.
+    if len(tail)<=44 and any(word.isdecimal() and len(word)==4 and 1800<=int(word)<=2199 for word in tail.split()):
+        return tail
+    return ""
+
+
 def clipped_source_ink(rec):
     """Would the phone crop slice through measured lettering on an attributed source?"""
-    if not rec.get("attribution") or rec.get("faces") or not rec.get("still"):
+    if not rec.get("attribution") or not rec.get("still"):
         return []
     import cv2
     from footage import overlay
@@ -471,7 +500,7 @@ def clipped_source_ink(rec):
     left = max(0., min(1. - span, centre - span / 2))
     preview = cv2.resize(image, (overlay.WIDTH, round(height * overlay.WIDTH / width)))
     _, boxes = overlay.lines(preview)
-    return boxes if any(x0 + .008 < edge < x1 - .008 for x0, _, x1, _ in boxes for edge in (left, left + span)) else []
+    return boxes if any(x0 < left - .008 or x1 > left + span + .008 for x0, _, x1, _ in boxes) else []
 
 
 def clip_meta(rec):
@@ -604,7 +633,7 @@ def take_pieces(cuts, dur, punch=(), fps=FPS, lead=LEAD_F, until=None):
             if fb <= fa:
                 continue
             box = sp.get("box")
-            faces = [dict(box=box["box"], eyes=box["eyes"], score=1.0)] if box and sp.get("who") != "quiet" else None
+            faces = [dict(box=box["box"], eyes=box["eyes"], samples=box.get("samples", []), score=1.0)] if box and sp.get("who") != "quiet" else None
             segs.append(dict(f=[fa, fb], faces=faces, who=sp.get("who") or "speaker", cut=k, punch=False))
     for i, sg in enumerate(segs):                     # a quiet stretch (or a reading with no face) keeps its neighbour's framing
         if sg["faces"] is None:
@@ -688,7 +717,7 @@ def build(script, sup, style_id, direction=None):
         "dsp": dict(st["dsp"], shadow={"a": 0.85, "blur": 0.010}),
         "lab": {"font": "InterDisplay-Bold.ttf", "px": 38, "track": 6},
     }
-    P = F.Plan(voices, sup.get("sounds") or {})
+    P = F.Plan(voices, sup.get("sounds") or {}, frame_ids=True)
     import config
     d["delivery_tail_s"] = float(config.OUTRO_DURATION_S)
     pal = dict(ink=st["ink"], accent=d.get("accent") or st["accent"], plate="#0A0A0A")
@@ -709,25 +738,30 @@ def build(script, sup, style_id, direction=None):
     # next-ranked candidate and leaves the picture to every other window.
     # Findings are keyed on the candidate's own path (origin); a copy derived from it (text cleared) inherits the
     # candidate's reframe, so clip_meta frames it again.
-    reframe = {(r.get("origin") or r.get("path")) if isinstance(r, dict) else r for r in d.get("reframe") or []}
-    if reframe:
-        footage = {i: [dict(c, reframe=True) if c["path"] in reframe else c for c in lst] for i, lst in footage.items()}
-        pics = {k: [dict(r, reframe=True) if r["path"] in reframe else r for r in lst] for k, lst in pics.items()}
+    reframes = {(r.get("window"),r.get("origin") or r.get("path")) if isinstance(r, dict) else (None,r)
+                for r in d.get("reframe") or []}
     # (window, path): that window's slot goes to its next candidate; (window, None): the window rests on the speaker.
     rejected_pairs = {(r.get("window"), r.get("origin") or r.get("path")) for r in d.get("reject") or []
                       if isinstance(r, dict) and (r.get("origin") or r.get("path") or (r.get("fault") == "speaker" and r.get("window") is not None))}
     take = sup["take"]
     keys, meta = {}, {}
+    from placement_check import file_digest
+    def asset_id(kind, rec):
+        path = rec["path"]
+        import hashlib
+        # Stable across a rescout that inserts or reorders unused candidates.
+        identity = file_digest(path) if os.path.isfile(path) else hashlib.sha256(path.encode()).hexdigest()
+        return kind + identity[:24]
     # the take's own shots (a show cut between cameras): each is framed on its own speaker. One file, one asset a shot
     tshots = [s_ for s_ in take.get("cuts") or [] if float(s_["t1"]) - float(s_["t0"]) > 0.2] or [dict(t0=0.0, t1=float(take["dur"]), faces=take.get("faces") or [])]
     for lst in pics.values():
         for rec in lst:
             if rec["path"] not in keys:
-                keys[rec["path"]] = P.image(f"p{len(keys):02d}", rec)
+                keys[rec["path"]] = P.image(asset_id("p",rec), rec)
     for lst in footage.values():
         for c in lst:
             if c["path"] not in keys:
-                keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
+                keys[c["path"]] = P.video(asset_id("v",c), c)
     if True:                                     # every style's footage fills the phone: a portrait face under the seat is left out
         seat = float(st["cap_y"]) - 0.045
 
@@ -788,7 +822,11 @@ def build(script, sup, style_id, direction=None):
     # (the gap fill's last frame, fill_holes)
     f_last = max(turn_f - 6, f_voice_end - int(4.0 * FPS)) if turn_f is not None else f_voice_end - 45
     # the take as framings: each stretch on the one who speaks it, the payoff a punch-in. One file, one asset a framing
-    pieces = take_pieces(tshots, float(take["dur"]), punch=[turn_f] if turn_f is not None and turn_f > 2 * FPS else [],
+    punches = [turn_f] if turn_f is not None and turn_f > 2*FPS else []
+    if story_turn_f and all(not (w["t0"] - 2 <= story_turn_f/FPS <= w["t1"] + 2)
+                            for w in coverage["windows"]) and all(abs(f-story_turn_f)>3*FPS for f in punches):
+        punches.append(story_turn_f)
+    pieces = take_pieces(tshots, float(take["dur"]), punch=punches,
                          until=f_voice_end)
     for k, pc in enumerate(pieces):
         key = P.video("main" if k == 0 else f"own:cut{k}", dict(path=take["path"], w=take["w"], h=take["h"], fps=take.get("fps") or FPS, seconds=take["dur"]))
@@ -800,6 +838,8 @@ def build(script, sup, style_id, direction=None):
         meta[key] = dict(pw=int(take["w"]), ph=int(take["h"]), faces=fm, max_up=up,
                          face_h=PUNCH_FACE_H if pc["punch"] else medium_face_h(fm, int(take["h"]), up))
         pc["key"] = key
+        if fm:
+            meta[key]["track"] = next((f["samples"] for f in pc["faces"] if f.get("samples")), [])
     from placement_check import CONTRACT as placement_contract, check
     from wf1_coverage import checked_proposals, require_coverage, originals_of
     checker=lambda rows:check(rows,script,clock,sup['work'],sup['ffmpeg'])
@@ -822,18 +862,23 @@ def build(script, sup, style_id, direction=None):
                                ffmpeg=sup["ffmpeg"])
         placement_report["gap_fill"] = {k: v for k, v in fill.items() if k != "spend"}
         placement_report["spend"].extend(fill["spend"])
+    for row in ins:
+        rec = row[4]
+        origin = (rec.get("text_cleared") or {}).get("from_path") or rec["path"]
+        if (rec.get("window"),origin) in reframes or (None,origin) in reframes:
+            row[4] = dict(rec,reframe=True)
     for row in ins:                                      # a clip the check cut clear of another editor's text is a new file
         if row[4]["path"] not in keys:
-            keys[row[4]["path"]] = (P.video if row[2] == "clip" else P.image)(f"{'v' if row[2] == 'clip' else 'p'}{len(keys):02d}", row[4])
+            keys[row[4]["path"]] = (P.video if row[2] == "clip" else P.image)(asset_id("v" if row[2]=="clip" else "p",row[4]), row[4])
         if row[4].get("foley") and keys.get(row[4]["path"]) in P.assets:
             # the object the check saw in this picture (placement_check foley): its landing sounds as that object
             # (worker/score/sound_screen.py)
             P.assets[keys[row[4]["path"]]]["foley"] = str(row[4]["foley"])
     coverage_report = require_coverage(ins, coverage, f_end/FPS, final=archive is not None or bool(d.get('coverage_final')))
     past = {int(i) for i in d.get("past_segs") or [] if isinstance(i, int)}
-    cut_pts, drive_ids, look_pics, mono_spans, bright = [], set(), [], [], []
-    if take.get("still"):
-        look_pics.append(take["still"])
+    cut_pts, drive_ids, mono_spans, bright = [], set(), [], []
+    # Match inserts locally in bleed(); the interview anchors the programme-wide grade.
+    look_pics = [take["still"]] if take.get("still") else []
     tcuts = [pc["f"][0] for pc in pieces[1:]]          # the take's own cuts and its cuts between speakers, in film frames
     from wf1_coverage import speaker_moves, move_frame
     resolved_moves,move_spend=speaker_moves(coverage,ins,f_end,tcuts,sup['work'])
@@ -857,6 +902,48 @@ def build(script, sup, style_id, direction=None):
             ins, cleared = DR.hold_take(ins, held, fps=FPS)
             coverage_report['take_held'] = dict(spans=held, cleared_f=cleared)
 
+    # Full-page authored type takes the screen. A documentary insert underneath would
+    # report source footage and motion that cannot be seen, or date a later archival event.
+    pages=[ask["f"] for ask in pre if ask.get("dev")=="type_run" and ask.get("words")
+           and isinstance(ask.get("f"),list) and len(ask["f"])==2]
+    if pages:
+        ins,cleared=DR.hold_take(ins,pages,min_f=1,fps=FPS)
+        coverage_report["authored_pages"]=dict(spans=pages,cleared_f=cleared)
+    def quote_panel(fa, fb, clock_start):
+        # The original camera can cut to a listener halfway through one speaker's account.
+        # Cite the preceding complete spoken sentence on a source card; the active captions continue below.
+        complete = [i for i,(_,end) in enumerate(clock.segs) if end <= clock_start+.12]
+        if not complete or not script.get("source_credit"):
+            return False
+        line = str(script["segments"][complete[-1]]["say"]).strip()
+        if not line:
+            return False
+        P.page([fa,fb],"#171B23","#0D1015",grain=.018)
+        tokens = ("“"+line.rstrip('.,')+"”").split()
+        face = dict(voices["dsp"],px=89,track=0)
+        while True:
+            voice = f"quotation{face['px']}"
+            ruler = F.Ruler({voice:face})
+            rows = []
+            for token in tokens:
+                if rows and ruler.width(voice,rows[-1]+" "+token) < W*.85:
+                    rows[-1] += " "+token
+                else:
+                    rows.append(token)
+            if (len(rows)<=5 and max(ruler.width(voice,r) for r in rows) <= W*.86) or face["px"]<=32:
+                break
+            face = dict(face,px=face["px"]-5)
+        P.voices[voice] = face
+        line_h=face["px"]*1.20/H
+        y=.40-(len(rows)-1)*line_h/2
+        for n,row in enumerate(rows):
+            P.word([fa,fb],row,voice,.075,y+n*line_h,ink=pal["ink"],role="graphic",note=False)
+        stamp=int(script.get("source_start",0)+clock.segs[complete[-1]][0])
+        credit=f'{script["source_credit"]}  ·  {stamp//60}:{stamp%60:02d}'
+        P.word([fa,fb],credit,"lab",.075,y+len(rows)*line_h+.026,ink=pal["accent"],role="graphic",note=False)
+        coverage_report.setdefault("quoted_source",[]).append(dict(f=[fa,fb],quote=line,credit=credit,url=script.get("source_url")))
+        return True
+
     def take_shot(a, b):
         """The take between pictures: each framing on the one who speaks it, cut where the show cut and where the
         speaker changes; the moves inside a framing are the driver's (motivated words, the voice's stress)."""
@@ -865,10 +952,44 @@ def build(script, sup, style_id, direction=None):
         # a section of the past is graded apart, so its edges are real cuts in the take; the payoff and the story turn
         # are not joins of their own (a flash there would land inside a continuous shot: it snaps to a real cut)
         joins = [f for sp in take_past for f in sp]
-        edges = sorted({a, b, *[c for c in tcuts + joins if a+3 <= c <= b-3]})
+        # When a full-height crop has no room to tighten, widen the live source into a readable
+        # interview panel on one of the director's actual rhetorical turns.
+        anchors = sorted(move_frame(coverage,m,FPS,LEAD_F) for m in resolved_moves
+                         if m.get("why") and a+2*FPS < move_frame(coverage,m,FPS,LEAD_F) < b-2*FPS)
+        panel = ()
+        eligible = []
+        for pc in pieces:
+            start,end=max(a,pc["f"][0]),min(b,pc["f"][1])
+            if pc["who"]!="speaker" or end-start<=8*FPS:
+                continue
+            info=meta[pc["key"]]
+            max_width=min(1.,(W/H)/(info["pw"]/info["ph"]))
+            turns=[f for f in anchors if start+2*FPS<f<end-2*FPS]
+            if turns and any(face[2]>.75*max_width for face in info.get("faces",[])):
+                cue=min(turns,key=lambda f:abs(f-(start+end)/2))
+                finish=min([end]+[f for f in turns if f>=cue+2*FPS])
+                eligible.append((end-start,cue,finish))
+        if eligible:
+            _,cue,finish=max(eligible)
+            panel=(cue,finish)
+        edges = sorted({a, b, *[c for c in tcuts + joins + list(panel) if a+3 <= c <= b-3]})
         for fa, fb in zip(edges, edges[1:]):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
+            if pieces[k]["who"] == "listener" and quote_panel(fa,fb,t0):
+                cut_pts.append(fa)
+                continue
+            if panel and panel[0] <= fa < panel[1]:
+                info=meta[pieces[k]["key"]]
+                face=max(info["faces"],key=lambda box:box[2]*box[3])
+                box=[.025,.13,.975,.66]
+                asp=(box[2]-box[0])*W/((box[3]-box[1])*H)
+                crop=F.cover_crop(info["pw"],info["ph"],asp,(face[0]+face[2]/2,face[1]+face[3]/2),(.5,.5))
+                P.page([fa,fb],"#171B23","#0D1015",grain=.018)
+                P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],crop=crop,radius=.008,source_ink=[box])
+                coverage_report.setdefault("speaker_panels",[]).append(dict(f=[fa,fb],word_frame=panel[0]))
+                cut_pts.append(fa)
+                continue
             kw = dict(grade=dict(TAKE_PAST)) if any(s0 <= fa < s1 for s0, s1 in take_past) else {}
             it = P.shot([fa,fb], pieces[k]["key"], None, src=[round(t0,4),round(max(t1,t0+1/FPS),4)], **kw)
             it.pop("crop")
@@ -907,8 +1028,6 @@ def build(script, sup, style_id, direction=None):
                                finish="black and white" if is_mono(f0) else None, motion_p90=rec.get('placed_motion_p90'),
                                verified_motion=rec.get('verified_motion') is True,
                                source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"), time_range=rec.get("time_range")))
-        if rec.get("still") or kind == "photo":
-            look_pics.append(rec.get("still") or rec["path"])
 
     def settle_push(n, land=0.035, push=0.04):
         return [r4(1.0 + land - land * smooth(q / 7.0)) if q < 8 else r4(1.0 + push * (q - 8) / max(n - 9, 1)) for q in range(n)]
@@ -942,11 +1061,8 @@ def build(script, sup, style_id, direction=None):
     def window(f0, f1, kind, name, rec, key, source_ink=()):
         n = f1 - f0
         mono = is_mono(f0)
-        evidence = bool(source_ink) or rec.get("provider") == "primary-document"
-        if evidence:
-            take_shot(f0, f1)
-        else:
-            bed_of(f0, f1, key, kind, rec, mono)
+        evidence = bool(source_ink or rec.get("attribution") or archive_event(rec)) or rec.get("provider") == "primary-document"
+        bed_of(f0, f1, key, kind, rec, mono)
         x0, y0, x1, y1 = WINDOW_BOX
         aspect = float(rec.get("w") or W) / float(rec.get("h") or H)
         height = min(y1-y0, (x1-x0)*W/H/aspect)
@@ -968,7 +1084,7 @@ def build(script, sup, style_id, direction=None):
 
     def bleed(f0, f1, kind, name, rec, key):
         source_ink = clipped_source_ink(rec) if kind == "clip" else []
-        if rec.get("provider") == "primary-document" or source_ink:
+        if rec.get("reframe") or rec.get("provider") == "primary-document" or source_ink or archive_event(rec) or (rec.get("attribution") and rec.get("verified_motion") is False):
             return window(f0, f1, kind, name, rec, key, source_ink)             # the approved document crop is already the editorial rectangle
         bal = None if is_mono(f0) else clip_balance(take.get("still"), rec.get("still") if kind == "clip" else rec.get("path"))
         gk = dict(grade=bal) if bal else {}               # matched to the take it cuts against, part of the way (round1 colour)
@@ -1043,6 +1159,11 @@ def build(script, sup, style_id, direction=None):
             cut_pts.append(f0)
             P.events.append(f0)
             label = rec.get("name_super") or (rec.get("attribution") if d.get("labels") else None)
+            event=archive_event(rec)
+            if event:
+                label=" · ".join(s for s in (rec.get("name_super"),event) if s)
+                labels.append((f0,f1,label,keys[rec["path"]]))
+                continue
             source_url = (rec.get("source") or {}).get("url") or rec.get("page")
             if source_url and label and label not in labelled and f1 - f0 >= 16:
                 labelled.add(label)
@@ -1108,7 +1229,6 @@ def build(script, sup, style_id, direction=None):
     # timing (a word too early, too close to another or too short to hold gives its place to the next), so a film
     # never loses its display words to timing. A long phrase is stacked (display_rows), never skipped for its length.
     omit = []
-    free = set()                                         # rows a device draws only in part: the caption keeps its seat for the rest
     devices = []                                         # the palette's asks: rows whose type performs (laid at the render, chain.alien_bank)
     proposed = d.get("display") or []
     for row in proposed:
@@ -1155,7 +1275,6 @@ def build(script, sup, style_id, direction=None):
                     omit += span
                 else:
                     omit += palette_menu.omit_of(span, text, mask, F.norm_word)
-                    free.add((a, b, text))
                 P.events.append(a)
                 shown.append((a, b, text))
                 continue
@@ -1210,7 +1329,7 @@ def build(script, sup, style_id, direction=None):
         y = 0.752
         for n, r_ in enumerate(rows):
             P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat", name_picture=pic)
-    lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), hold=[(a - 1, b) for a, b, t in shown if (a, b, t) not in free], z=5,
+    lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
                             omit=omit)
     P.items = inside(P.items, f_end)
     P.items = ink_by_ground(P.items, P.voices, bright)
@@ -1249,7 +1368,8 @@ def build(script, sup, style_id, direction=None):
                          for b in (dr.get("beats") or []) if isinstance(b, dict) and isinstance(b.get("w"), int)
                          and b.get("role") in ("hook", "turn", "payoff", "close") and word_frame(b["w"]) is not None]
     l1["workflow_text_layout"] = True
-    l1["story_cues"] = _director().sound_cues(dr, word_frame)
+    l1["story_cues"] = (d["retained_story_cues"] if "retained_story_cues" in d
+                        else _director().sound_cues(dr, word_frame))
     if devices:
         l1["devices"] = devices
     l1 = F.engines_finish(l1, sup, stress, drive_ids, meta, dict(d, look_pictures=look_pics),
@@ -1263,6 +1383,7 @@ def build(script, sup, style_id, direction=None):
         if key not in meta:
             rec = next((r for rows in list(pics.values()) + list(footage.values()) for r in rows if r["path"] == path), {})
             meta[key] = dict(faces=F.face_meta(rec))
+    l1["speaker_layout"] = {pc["key"]: meta[pc["key"]] for pc in pieces if meta[pc["key"]]["faces"]}
     title_layout = seat_display(l1, meta, P.R)
     caps = [i for i in l1["items"] if i["k"] == "word" and i.get("role") == "cap"]
     if caps:
@@ -1300,7 +1421,7 @@ def build(script, sup, style_id, direction=None):
                  events=sorted(set(P.events) | set(cut_pts) | set(changes) | {it["f"][0] for it in l1["items"] if it["k"] == "card"}
                                | {e["f"] for e in dev_events if 0 <= e["f"] < f_end}),
                  device_events=dev_events,
-                 pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=1, display=[dict(f=[a, b], text=t) for a, b, t in shown],
+                 pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=7, display=[dict(f=[a, b], text=t) for a, b, t in shown],
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t, pic=pic) for a, b, t, pic in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=(sorted(set(layouts_used)) if dr and len(set(layouts_used)) > 1 else (layouts_used[0] if dr and layouts_used else st["layout"])), placement_check=placement_report, coverage=coverage_report,

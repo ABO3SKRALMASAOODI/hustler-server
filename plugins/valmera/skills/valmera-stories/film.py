@@ -218,14 +218,21 @@ class Clock:
 # ----------------------------------------------------------------- the plan
 
 class Plan:
-    def __init__(self, voices, lib):
+    def __init__(self, voices, lib, frame_ids=False):
         self.voices, self.lib = voices, lib
         self.items, self.sounds, self.assets = [], [], {}
         self.events, self.shown, self.pictures, self.cuts = [], [], [], []
         self.R = Ruler(voices)
         self.n = 0
 
-    def nid(self, p):
+        self.frame_ids = {} if frame_ids else None
+
+    def nid(self, p, frame=None):
+        if self.frame_ids is not None and frame is not None:
+            key=(p,int(frame))
+            serial=self.frame_ids.get(key,0)
+            self.frame_ids[key]=serial+1
+            return f"{p}{int(frame):06d}.{serial:03d}"
         self.n += 1
         return f"{p}{self.n:04d}"
 
@@ -248,17 +255,17 @@ class Plan:
         return key
 
     def page(self, f, c0, c1=None, grain=0.03, **kw):
-        self.items.append(dict(id=self.nid("pg"), k="shot", f=[int(f[0]), int(f[1])], pic="plate", plate=dict(c0=c0, c1=c1 or c0, grain=grain), **kw))
+        self.items.append(dict(id=self.nid("pg",f[0]), k="shot", f=[int(f[0]), int(f[1])], pic="plate", plate=dict(c0=c0, c1=c1 or c0, grain=grain), **kw))
 
     def shot(self, f, pic, crop, **kw):
-        it = dict(id=self.nid("sh"), k="shot", f=[int(f[0]), int(f[1])], pic=pic, crop=crop)
+        it = dict(id=self.nid("sh",f[0]), k="shot", f=[int(f[0]), int(f[1])], pic=pic, crop=crop)
         it.update(kw)
         self.items.append(it)
         return it
 
     def card(self, f, pic, box, z=1, **kw):
         x0, y0, x1, y1 = box
-        it = dict(id=self.nid("cd"), k="card", f=[int(f[0]), int(f[1])], z=z, pic=pic, s=1, rot=0, op=1,
+        it = dict(id=self.nid("cd",f[0]), k="card", f=[int(f[0]), int(f[1])], z=z, pic=pic, s=1, rot=0, op=1,
                   x=r4((x0 + x1) / 2), y=r4((y0 + y1) / 2), w=r4(x1 - x0), h=r4(y1 - y0))
         it.update(kw)
         self.items.append(it)
@@ -273,14 +280,14 @@ class Plan:
         if align != "l" and not isinstance(x, list):
             wd = self.R.width(v, t) / W
             x = x - wd if align == "r" else x - wd / 2
-        it = dict(id=self.nid("w"), k="word", f=[int(f[0]), int(f[1])], t=t, v=v, x=r4l(x), y=r4l(y), ink=ink, op=r4l(op),
+        it = dict(id=self.nid("w",f[0]), k="word", f=[int(f[0]), int(f[1])], t=t, v=v, x=r4l(x), y=r4l(y), ink=ink, op=r4l(op),
                   role=role, on=int(f[0]))
         it.update(kw)
         self.items.append(it)
         return it
 
     def flash(self, f, mode="fill", c="#FFFFFF", a=1.0, rect=None, **kw):
-        it = dict(id=self.nid("fl"), k="flash", f=[int(f[0]), int(f[1])], mode=mode, c=c, a=r4l(a), **kw)
+        it = dict(id=self.nid("fl",f[0]), k="flash", f=[int(f[0]), int(f[1])], mode=mode, c=c, a=r4l(a), **kw)
         if rect:
             it["rect"] = [r4(v) for v in rect]
         self.items.append(it)

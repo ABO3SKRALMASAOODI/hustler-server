@@ -267,7 +267,7 @@ def deliver(ctx, state, out_root, results):
     dlog, ddir = jload(os.path.join(ctx.supply, "devices_log.json"), None), jload(os.path.join(ctx.supply, "director.json"), None)
     if dlog or ddir:                             # what the Director chose and what landed, with the signal it measured
         rec["devices"] = dict(by=(ddir or {}).get("by"), why=(ddir or {}).get("why"), repairs=len((ddir or {}).get("repairs") or []),
-                              asked=len(dlog or []), landed=sum(1 for r in dlog or [] if r.get("done")),
+                              asked=len(dlog or []), landed=sum(1 for r in dlog or [] if r.get("done") and not r.get("fallback")),
                               fell_back=sum(1 for r in dlog or [] if r.get("fallback")),
                               sections=(ddir or {}).get("sections"), log=dlog,
                               measure=jload(os.path.join(ctx.supply, "devices_measure.json"), None))

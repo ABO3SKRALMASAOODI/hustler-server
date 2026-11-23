@@ -6,7 +6,7 @@ import hashlib
 import importlib.util
 import subprocess
 
-CONTRACT = 5
+CONTRACT = 6
 
 
 class CoverageError(RuntimeError):
@@ -74,6 +74,7 @@ Do not inventory an abstract feeling, rhetorical connective or this interview it
 external subject. When a number modifies an entity or event, inventory that complete referent,
 not an isolated numeral needing an unrelated picture. A date belongs to the event it dates.
 Plan nonoverlapping EXTERNAL picture windows using inclusive word IDs. Each window has one subject doing one attributed action. End the window when its role changes, even if its name stays the same.
+Open an institutional archive on the words naming or describing the institution itself. Keep a first-person lead-in, recalled consensus or private deliberation on the synchronous speaker until that referent is spoken.
 Use complete explanatory clauses, typically 2-5 seconds, not a separate window for each word.
 The acquisition engine chooses several distinct shots within each window. Do not split one clause
 into fragments such as 'There are scale' and 'effects, like Google'. Give it the complete thought.
@@ -114,7 +115,10 @@ a primary artifact carries the actual claim. Keep associations out of documentar
 Keep the opening audio and captions intact. External pictures may begin on the very first word;
 they never remove or delay speech or captions. Do not impose a two-second speaker-only opening.
 An identifiable opening artifact can appear on its first word.
-Preserve short speaker passages at emotional turns.
+Keep recalled questions and their answers with the storyteller unless a primary source documents
+the exchange. A general opinion supplies no referent for a particular product demonstration.
+When evidence is scarce, plan a change of framing on the question, answer or shift from recollection
+to conclusion. Give the move the timed word and a reason. Keep the original dates in their context.
 Use the original camera through private or unverifiable events. A relevant picture or motivated
 move may help long passages. A move cannot count as a picture.
 Moves are sparse rhetorical changes that justify an eased camera move on the speaker, each with
@@ -185,8 +189,11 @@ def repair_boundaries(coverage, rejected, llm):
     prompt = '''Review rejected picture placements against the full timed speech and existing documentary windows.
 Return JSON {"updates":[{"i":integer,"first":integer,"last":integer,"why":string}],
 "blocked_sources":[{"window":integer,"source":string,"why":string}]}.
-Only repair an existing window's word boundary when the reported mismatch comes from carrying its
-subject into words naming the next different subject, or entering that subject too late. Move the
+Repair an existing window's word boundary when archival pictures enter before their referent is
+spoken, continue past it, or arrive too late. A public talk about a named institution may document
+the institution; if it currently sits on a speaker recalling their reasoning or a private consensus,
+start the archive at the first word of the actual institution reference and leave the recollection
+on the synchronized interview. Use the supplied exact frame and word evidence. Move the
 adjacent boundary too when needed. Retain every subject and the original speech; do not rename,
 remove or merge windows. Do not repair an incorrect source identity, unreadable picture, cropped
 face, or factual/source contradiction by moving its time. Those assets must still be replaced.
@@ -203,6 +210,14 @@ An original institutional film can still provide truthful contextual premises wh
 illustration intent allows them. Do not ban the entire source merely because one shot shows a person.
 Return no source block unless the contradiction applies to the whole source in this specific window.
 Never ban a source globally or invent a URL absent from the rejected placements.'''
+    def receipt(windows):
+        data=[prompt,coverage["words"],windows,coverage.get("blocked_sources",[]),rejected]
+        return hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()
+    # A resumed render can still carry the rejected score after the boundary repair was saved.
+    # Reuse that completed decision only while its words, findings and resulting windows agree.
+    current=receipt(coverage["windows"])
+    if any(r.get("receipt")==current for r in coverage.get("boundary_reviews",[])):
+        return False
     evidence=[]
     for row in rejected:
         f=row.get('f') or []
@@ -233,7 +248,8 @@ Never ban a source globally or invent a URL absent from the rejected placements.
     for row in blocks:
         if not any((old['window'],old['source'])==(row['window'],row['source']) for old in retained):
             retained.append(row);changed=True
-    coverage.setdefault('boundary_reviews',[]).append(dict(updates=updates,blocked_sources=blocks,changed=changed,spend=use))
+    coverage.setdefault('boundary_reviews',[]).append(dict(updates=updates,blocked_sources=blocks,changed=changed,spend=use,
+                                                          receipt=receipt(proposed)))
     if changed:coverage['windows']=proposed
     return changed
 
@@ -380,44 +396,85 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
             key=lambda c:(-fits.get((i,c['path']),5),
                           0 if c.get('subject_motion') is True else 2 if c.get('subject_motion') is False else 1,
                           -c.get('motion_p90',0)))]
+        if i in coverage.get("motion_windows",[]):
+            # Try new or genuinely moving takes ahead of footage already measured static in this window.
+            candidates.sort(key=lambda row:row[2].get("subject_motion") is False)
         names=list(dict.fromkeys([window['name'],*window.get('subjects',[])]))
         candidates += sorted([('photo', name, p) for name in names for p in pictures.get(name, [])],
                              key=lambda row:-fits.get((i,row[2]['path']),5))
         blocked={r['source'] for r in coverage.get('blocked_sources',[]) if r['window']==i}
         pool=[row for row in candidates if not is_rejected(rejected,i,row[2])
               and ((row[2].get('source') or {}).get('url') or row[2].get('page')) not in blocked]
+        priorities = coverage.get("passed_placements", {}).get(str(i), [])
+        from placement_check import file_digest
+        by_path = {row[2]["path"]: row for row in pool}
+        pins = []
+        for prior in sorted(priorities, key=lambda item: (item.get("motion_ok") is not True,item["f"])):
+            if prior.get("motion_ok") is False and i in coverage.get("motion_windows",[]):
+                continue
+            path = prior["path"]
+            if path not in by_path:
+                path = next((p for p,(_,_,r) in by_path.items() if os.path.isfile(p)
+                             and file_digest(p)==prior["sha256"]
+                             and ((r.get("source") or {}).get("url") or r.get("page"))==prior.get("source")),None)
+            lo, hi = prior["f"]
+            old=prior.get("clause_t") or []
+            same_words=prior.get("clause")==window.get("say") and old==[window["t0"],window["t1"]]
+            narrowed=(len(old)==2 and old[0]<=window["t0"]<=window["t1"]<=old[1]
+                      and prior.get("motion_ok") is True and window.get("say")
+                      and (" "+window["say"]+" ") in (" "+(prior.get("clause") or "")+" "))
+            if (path not in by_path or not a <= lo < hi <= b or any(x<hi and lo<y for x,y,*_ in pins)
+                    or not (same_words or narrowed)
+                    or not os.path.isfile(path) or file_digest(path) != prior["sha256"]):
+                continue
+            kind, name, rec = by_path[path]
+            url = (rec.get("source") or {}).get("url") or rec.get("page")
+            if ("source" in prior and url!=prior["source"]) or any(same_picture(rec, old) for old in used):
+                continue
+            rec = dict(rec, src=prior["src"]) if prior.get("src") else dict(rec)
+            pins.append((lo,hi,kind,name,rec))
+            used.append(rec)
+        pins.sort(key=lambda row:row[0])
+        for lo,hi,kind,name,rec in pins:
+            out.append([lo,hi,kind,name,dict(rec,window=i,illustration=window["must_show"],clause=window.get("say"),
+                                            clause_t=[window["t0"], window["t1"]],
+                                            **({"association":window["must_show"]} if window.get("association") else {}))])
+        gaps = [(left,right) for left,right in zip([a]+[row[1] for row in pins],
+                                                   [row[0] for row in pins]+[b]) if right-left >= 10]
         distinct=[]
         for row in pool:
             if is_rejected(rejected,i,row[2]):continue
             if not any(same_picture(row[2],old) for old in used+[r[2] for r in distinct]):distinct.append(row)
         # A later reference may return to the same authentic evidence, never to the same interval of it: a fresh
         # interval of the kept original, checked on this window's words, or nothing (the ladder and the gap fill).
-        candidates=distinct or fresh_interval(pool,taken,originals,cut_dir,max(.5,min(1.4,(b-a)/fps))+2/fps,ffmpeg,
-                                              skip={p for j,p in rejected if j==i})
-        wanted = max(1, math.ceil((b-a)/fps*.8))
-        candidates = candidates[:wanted]
-        # Enough pictures: a new one about every 1.4 s. Fewer: the chosen pictures share the whole clause, a clip up to
-        # its own seconds, so the clause is never handed back to the speaker while a chosen picture can cover it (round
-        # 1, 19 Nov: windows with one or two survivors showed 1.4 s of picture and then 15-34 s of the speaker).
-        lengths = clause_shares((b-a)/fps, [min(1.4 if len(candidates) >= wanted else float('inf'),
-                                                 float(rec['seconds'])-1/fps if kind == 'clip' else float('inf'))
-                                             for kind, _, rec in candidates])
-        pos = a
-        for j, (kind, name, rec) in enumerate(candidates):
-            end = min(b, a+round(sum(lengths[:j+1])*fps))         # cumulative: no frame lost to rounding
-            if kind == 'clip': end = min(end, pos+int((float(rec['seconds'])-1/fps)*fps))
-            if end-pos < 10: continue
-            if kind == 'clip':
-                start = max(0., (float(rec['seconds'])-(end-pos)/fps)/2)
-                rec = dict(rec, src=[start,start+(end-pos)/fps])
-                if os.path.isfile(rec['path']):
-                    from footage import motion
-                    measured = motion.of_shot(rec['path'],*rec['src'])
-                    rec['placed_motion_p90'] = measured['p90']
-            out.append([pos,end,kind,name,dict(rec, window=i, illustration=window['must_show'], clause=window.get('say'),
-                                                    clause_t=[window['t0'],window['t1']],
-                                                    **({'association':window['must_show']} if window.get('association') is True else {}))])
-            used.append(rec); pos=end
+        for a,b in gaps:
+            candidates=[r for r in distinct if not any(same_picture(r[2], old) for old in used)] or fresh_interval(pool,taken,originals,cut_dir,max(.5,min(1.4,(b-a)/fps))+2/fps,ffmpeg,
+                                                  skip={p for j,p in rejected if j==i})
+            wanted = max(1, math.ceil((b-a)/fps*.8))
+            candidates = candidates[:wanted]
+            # Enough pictures: a new one about every 1.4 s. Fewer: the chosen pictures share the whole clause, a clip up to
+            # its own seconds, so the clause is never handed back to the speaker while a chosen picture can cover it (round
+            # 1, 19 Nov: windows with one or two survivors showed 1.4 s of picture and then 15-34 s of the speaker).
+            lengths = clause_shares((b-a)/fps, [min(1.4 if len(candidates) >= wanted else float('inf'),
+                                                     float(rec['seconds'])-1/fps if kind == 'clip' else float('inf'))
+                                                 for kind, _, rec in candidates])
+            pos = a
+            for j, (kind, name, rec) in enumerate(candidates):
+                end = min(b, a+round(sum(lengths[:j+1])*fps))         # cumulative: no frame lost to rounding
+                if kind == 'clip': end = min(end, pos+int((float(rec['seconds'])-1/fps)*fps))
+                if end-pos < 10: continue
+                if kind == 'clip':
+                    start = max(0., (float(rec['seconds'])-(end-pos)/fps)/2)
+                    rec = dict(rec, src=[start,start+(end-pos)/fps])
+                    if os.path.isfile(rec['path']):
+                        from footage import motion
+                        measured = motion.of_shot(rec['path'],*rec['src'])
+                        rec['placed_motion_p90'] = measured['p90']
+                out.append([pos,end,kind,name,dict(rec, window=i, illustration=window['must_show'], clause=window.get('say'),
+                                                        clause_t=[window['t0'],window['t1']],
+                                                        **({'association':window['must_show']} if window.get('association') is True else {}))])
+                used.append(rec); pos=end
+    out.sort(key=lambda row: row[0])
     return out
 
 
@@ -576,11 +633,12 @@ def device_pool(pack, report=None, fps=30, lead=3, work=None, ffmpeg='ffmpeg', p
     def unseated(rec):
         """The record with another editor's seated text cut away (or recorded), for a clip no check looked at."""
         p = rec.get('path')
-        key = f"v4|{p}|{os.path.getsize(p) if p and os.path.isfile(p) else 0}"       # v4: text lines, still bands and marks, held text in the graphics zones
+        import placement_check
+        key = json.dumps([5, p, placement_check.file_digest(p), rec.get("w"), rec.get("h"),
+                          rec.get("x"), rec.get("faces")], sort_keys=True)
         if key in memo:
             got = memo[key]
             return dict(rec, **got) if got.get('path') is None or os.path.isfile(got['path']) else rec
-        import placement_check
         new, how = placement_check.clear_seated_text(rec, ffmpeg, work)
         got = {k: new[k] for k in ('path', 'w', 'h', 'x', 'faces', 'text_kept', 'text_cleared') if k in new and new.get(k) != rec.get(k)}
         memo[key] = got
@@ -650,7 +708,7 @@ def expand_context(coverage, available, work, llm):
     else:
         prompt='''Reconsider the documentary direction of this spoken story after acquisition stalled.
 Return JSON {"updates":[{"i":integer,"first":integer,"last":integer,"why":string}]}.
-The existing windows identify concrete subjects. The gaps currently show the speaker. Read the
+The existing windows identify concrete subjects. The gaps currently show the speaker. Keep a recalled exchange or a broad personal judgment on the speaker unless a primary document records the specific exchange or standard. Read the
 whole timed speech: a subject may continue through a recollection, explanation or consequence
 even when its proper name is not repeated. Extend an existing window ONLY into such genuinely
 related adjacent speech, with a specific narrative reason. For example, a discussion of why a

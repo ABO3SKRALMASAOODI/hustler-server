@@ -271,7 +271,7 @@ def test_the_verdict_belongs_to_the_picture_and_its_clause_not_its_slice_or_the_
     assert sent["words"] == clause and "illustration_intent" not in sent
     assert sent["source_evidence"]["title"].startswith("Steve Jobs") and sent["source_evidence"]["description"]
     assert sent["source_evidence"]["shows"].startswith("a man")
-    assert seen[0] == seen[1] == [0.36, 1.2, 2.04]
+    assert seen == [[.35, .7, 1.05], [1.15, 1.5, 1.85]]  # only identical sampled evidence shares a verdict
 
 
 def test_an_unread_candidate_returns_the_slot_to_the_interview(tmp_path, monkeypatch):
@@ -442,3 +442,50 @@ def test_duplicate_excerpt_in_one_batch_shares_one_source_reading(tmp_path, monk
     assert [len(c["rows"]) for c in calls] == [1]
     assert [r[4]["name_super"] for r in kept] == ["Alexandr Wang"] * 2
     assert len(report["placements"]) == 2
+
+
+def test_second_render_decodes_only_changed_encoded_segments(tmp_path,monkeypatch):
+    import hashlib, json, placement_check as pc
+    film=tmp_path/"film.mp4"
+    rows=_rows(film,[3,3])
+    decoded=[]
+    calls=[]
+    monkeypatch.setattr(pc,"evidence",lambda r,ff:decoded.append(r[3]) or [b"pixel"]*3)
+    for n in (1,2):
+        film.write_bytes(bytes([n]))
+        (tmp_path/"film.mp4.log.json").write_text(json.dumps(dict(encoded_sha256=hashlib.sha256(film.read_bytes()).hexdigest(),
+                                   encoded_segments=[[0,30,"same"],[30,60,"changed"+str(n)]])))
+        pc.check(rows,dict(segments=[dict(say="word")]),_Clock(),str(tmp_path),"unused",call=_approving(calls),review="composed")
+    assert decoded==["p0","p1","p1"] and len(calls)==2
+
+
+def test_research_keeps_verified_picture_at_exact_cut_until_its_source_changes(tmp_path):
+    from wf1_coverage import proposals
+    from hashlib import sha256
+    window=dict(name='Archive',t0=0.,t1=4.,say='a specific archive',must_show='the record')
+    paths=[]
+    for name in ['new','verified','alternate']:
+        path=tmp_path/name
+        path.write_bytes(name.encode())
+        paths.append(str(path))
+    approved=dict(path=paths[1],sha256=sha256(b'verified').hexdigest(),f=[38,79],src=None,
+                  clause=window['say'],clause_t=[0.,4.])
+    coverage=dict(windows=[window],passed_placements={'0':[approved]})
+    def cut():
+        rows=proposals(coverage,{},dict(Archive=[dict(path=p) for p in paths]))
+        return next(row[:2] for row in rows if row[4]['path']==paths[1])
+    assert cut()==[38,79]
+    approved.update(clause="we recall a specific archive in the lab",clause_t=[-.5,5.],motion_ok=True)
+    assert cut()==[38,79]
+    (tmp_path/'verified').rename(tmp_path/'restored')
+    paths[1]=str(tmp_path/'restored')
+    assert cut()==[38,79]
+    (tmp_path/'restored').write_bytes(b'modified')
+    assert cut()!=[38,79]
+
+
+def test_adjacent_speaker_hold_does_not_reopen_a_covered_evidence_window():
+    from wf1_short import hold_windows
+    covered=dict(windows=[dict(t0=6.,t1=12.)])
+    pics=[dict(window=0,f=[180,270]),dict(window=0,f=[270,360])]
+    assert hold_windows(dict(holds=[[0.,6.1],[11.9,20.]],cuts_per_10s=2),covered,pics,lead=0)==[]

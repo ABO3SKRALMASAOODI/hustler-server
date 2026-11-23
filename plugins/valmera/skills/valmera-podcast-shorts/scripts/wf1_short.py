@@ -558,8 +558,17 @@ def take_cuts(src, shots, dur, sup_dir, turns=None):
     spans = [(float(s["start"]), float(s["end"])) for s in shots if float(s["end"]) - float(s["start"]) > 0.2] or [(0.0, dur)]
     try:
         import wf1_speaker
+        from placement_check import file_digest
+        key = [file_digest(src),spans,turns,file_digest(wf1_speaker.__file__)]
+        key = hashlib.sha256(json.dumps(key,sort_keys=True).encode()).hexdigest()
+        cached = os.path.join(sup_dir, "speaker.json")
+        if os.path.isfile(cached):
+            with open(cached) as f:
+                saved = json.load(f)
+            if saved.get("key") == key:
+                return saved["cuts"]
         cuts = wf1_speaker.read_take(PX.FF, src, spans, dur, turns=turns)
-        json.dump(dict(turns=turns, cuts=cuts), open(os.path.join(sup_dir, "speaker.json"), "w"), indent=1)
+        json.dump(dict(key=key, turns=turns, cuts=cuts), open(os.path.join(sup_dir, "speaker.json"), "w"), indent=1)
         return cuts
     except Exception as e:  # noqa: BLE001 - the speaker reading is a framing aid: the take is framed by its faces
         print(f"speaker reading failed, faces only: {str(e)[:300]}", file=sys.stderr)
@@ -661,6 +670,18 @@ def direction_of(ctx, script, pack):
     st = wf1_film.STYLES.get(((script or {}).get("style") or {}).get("id") or "", {})
     take = pack.get("take") or {}
     llm = _llm()
+    from placement_check import file_digest
+    intent = hashlib.sha256(json.dumps([DR.CONTRACT,rows,stress,st,script.get("title"),script.get("direction"),
+                                         script.get("hook_line"),script.get("close_line"),take.get("cuts")],
+                                        sort_keys=True).encode()).hexdigest()
+    choice_path = os.path.join(ctx.supply, "direction_dependencies.json")
+    if os.path.isfile(choice_path):
+        with open(choice_path) as f:
+            prior = json.load(f)
+        available = set(ids.values())
+        if prior["intent"] == intent and all(path in available and os.path.isfile(path) and file_digest(path)==sha
+                                             for path,sha in prior["assets"].items()):
+            return prior["direction"]
     d = DR.direct(ctx.supply, [dict(i=int(ln["i"]), text=ln["text"]) for ln in pack.get("lines") or []], rows, stress, pics,
                   take=dict(on_camera=take.get("on_camera"), shots=take.get("shots"), faces=len(take.get("faces") or []),
                             matte="made on demand for devices that need it (neg_world, words behind him)") if take else None,
@@ -669,7 +690,37 @@ def direction_of(ctx, script, pack):
                   workflow="podcast short", dur_s=dur, title=(script or {}).get("title"), hook=(script or {}).get("hook_line"),
                   payoff=(script or {}).get("close_line"), ask=llm.ask, log=getattr(ctx, "log", None))
     d["pictures"] = ids
+    if d.get("by") == "model":
+        refs = {pid for ask in d.get("asks", []) for pid in ask.get("pics", [])}
+        if not refs.issubset(ids):
+            return d
+        used = {ids[pid] for pid in refs}
+        assets = {path:file_digest(path) for path in used if os.path.isfile(path)}
+        if set(assets) == used:
+            with open(choice_path+".part","w") as f:
+                json.dump(dict(intent=intent,assets=assets,direction=d),f)
+            os.replace(choice_path+".part",choice_path)
     return d
+
+
+def seat_brand_words(l1):
+    alien = os.path.join(os.path.dirname(HERE),"alien")
+    if alien not in sys.path:
+        sys.path.insert(0,alien)
+    import l1pass
+    moved = []
+    # Device words also take the brand seat; the general safe rectangle includes the mark.
+    ruler = F.Ruler(l1["voices"])
+    for word in (it for it in l1["items"] if it["k"] == "word"):
+        x, y, size = (F._rest(word.get(k, v)) for k, v in (("x", 0), ("y", 0), ("s", 1)))
+        right = x + ruler.width(word["v"], word["t"]) * size / F.W
+        top = y - ruler.cap(word["v"]) * size / F.H
+        left, upper, end, bottom = F.MARK
+        if x < end and right > left and top < bottom and y > upper:
+            dy = bottom + .008 - top
+            word["y"] = l1pass._shift(word["y"], dy)
+            moved.append(dict(id=word["id"], dy=dy))
+    return moved
 
 
 def _repair(l1, beats, taste):
@@ -682,6 +733,7 @@ def _repair(l1, beats, taste):
         sys.path.insert(0, alien)
     import l1pass
     moved = l1pass.repair_placement(l1)                 # type outside the safe area moves inside, never dropped for it
+    moved.extend(seat_brand_words(l1))
     if moved:
         beats.setdefault("taste_moved", []).extend(moved)
         taste = F.taste_check(l1, beats)
@@ -1072,6 +1124,8 @@ def score(ctx, script):
     sys.path[:0] = [p for p in wf3.env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     sc = dict(title=script.get("title"), hook_line=script.get("hook_line"), close_line=script.get("close_line"),
+              source_credit=(ctx.args or {}).get("channel"), source_url=(ctx.args or {}).get("source_url"),
+              source_start=(script.get("window") or [0])[0],
               segments=[dict(say=ln["text"], pictures=[n for n in ln.get("subjects") or []]) for ln in pack["lines"]])
     for attempt in range(RECOVERY_PASSES + 3 + LADDER_RUNGS):
         knobs["coverage_final"] = coverage_final(pack) or bool(pack.get("coverage_recoveries"))
@@ -1100,6 +1154,9 @@ def score(ctx, script):
     else:
         knobs["coverage_final"] = True
         l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
+    early = seat_brand_words(l1)
+    if early:
+        beats.setdefault("taste_moved",[]).extend(early)
     shown = beats.get("pictures") or []
     l1["pool"] = wf1_coverage.device_pool(pack, beats.get("placement_check"), work=ctx.supply,
                                           ffmpeg=pack.get("ffmpeg") or "ffmpeg",
@@ -1189,12 +1246,25 @@ def render_revision(sc):
     digest=hashlib.sha256()
     for path in files:
         if path and os.path.isfile(path):digest.update(open(path,'rb').read())
+    from placement_check import file_digest
+    try:
+        with open(files[0]) as f:
+            scene = json.load(f)
+    except (ValueError,OSError):
+        scene = {}
+    for asset in (scene.get("assets") or {}).values():
+        path = os.path.join(os.path.dirname(files[0]), asset.get("path",""))
+        if os.path.isfile(path):
+            digest.update(file_digest(path).encode())
     # Audio fixes must invalidate both an engine soundtrack and a cached final mix.
     worker=os.environ.get('VALMERA_WORKER')
     if worker:
-        for rel in ('score/music.py','score/audibility.py','score/sound.py','score/sfx_quality.json','scene/pace.py'):
+        for rel in ('score/music.py','score/audibility.py','score/sound.py','score/sfx_quality.json','scene/pace.py','scene/compile.py','scene/text_layout.py','scene/run.py',
+                    'scene/palette/layout.py','scene/palette/rhythm.py','scene/palette/__init__.py','scene/palette/behind.py',
+                    'scene/palette/matte.py','scene/palette/sense.py','scene/palette/punct.py'):
             path=os.path.join(worker,rel)
             if os.path.isfile(path):digest.update(open(path,'rb').read())
+    digest.update(file_digest(brand.__file__).encode())
     return digest.hexdigest()
 
 
@@ -1219,7 +1289,7 @@ def render(ctx, script, sc):
     found=current_rejections(ctx.supply)
     rejected_plan=any(unrepaired(p,found) for p in sc.get('beats',{}).get('pictures',[]))
     stale_captions=('caption_lines' in sc.get('beats',{})
-                    and sc['beats'].get('caption_contract')!=1)
+                    and sc['beats'].get('caption_contract')!=7)
     if rejected_plan or stale_captions:
         if history and rejected_plan:
             _repair_window_boundaries(ctx,[r for r in history[-1]['placements'] if not r['ok'] and r.get('fault')!='reframe'])
@@ -1240,11 +1310,52 @@ def render(ctx, script, sc):
         history.append(report)
         json.dump(history, open(history_path, "w"), indent=1)
         sc["beats"]["rendered_check"] = report
-        if not report["rejected"] and report["moving_share"]<.6 and _rebuild_motion(ctx,script,sc,report):
+        changed = False
+        if os.path.isfile(os.path.join(ctx.supply,"pack.json")):
+            pack = wf3.load_pack(ctx)
+            passed = {}
+            for row in report.get("placements", []):
+                if not row.get("ok") or row.get("unchecked"):
+                    continue
+                pic = sc["beats"]["pictures"][row["id"]]
+                path = pic.get("origin") or pic["path"]
+                if os.path.isfile(path):
+                    from placement_check import file_digest
+                    passed.setdefault(str(pic.get("window")), []).append(
+                        dict(path=path, sha256=file_digest(path), f=pic["f"], src=pic.get("source_slice"),
+                             clause=pic.get("clause"), clause_t=pic.get("clause_t"), source=pic.get("source"),
+                             motion_ok=row.get("motion_ok")))
+            coverage=pack.setdefault("coverage", {})
+            for window,older in coverage.get("passed_placements",{}).items():
+                rows=passed.setdefault(window,[])
+                identities={(r["sha256"],tuple(r["f"])) for r in rows}
+                for row in older:
+                    identity=(row.get("sha256"),tuple(row.get("f",[])))
+                    if row.get("motion_ok") and identity not in identities:
+                        rows.append(row)
+                        identities.add(identity)
+            coverage["passed_placements"] = passed
+            coverage.pop("motion_windows",None)
+            save_pack(ctx,pack)
+        if report["rejected"]:
+            changed = _rebuild_rejected(ctx, script, sc, report, defer=True)
+        if report["moving_share"] < .6:
+            changed = _rebuild_motion(ctx, script, sc, report, defer=True) or changed
+        changed = _rebuild_holds(ctx, script, sc, rd, defer=True) or changed
+        if changed:
+            wanted = sc["beats"].pop("research_windows", [])
+            if wanted:
+                pack = wf3.load_pack(ctx)
+                shortage = dict(sc["beats"].get("coverage") or {})
+                shortage.update(weak_windows=sorted(set(wanted)), real_seconds=report.get("real_seconds",0),
+                                moving_seconds=report.get("moving_seconds",0),
+                                required_moving_seconds=.6*report.get("real_seconds",0))
+                shortage.setdefault("missing_windows",[])
+                refill(ctx,script,pack,shortage)
+                save_pack(ctx,pack)
+            _rescore(ctx,script,sc)
             continue
-        if not report["rejected"] and _rebuild_holds(ctx,script,sc,rd):
-            continue
-        if not report["rejected"] or not _rebuild_rejected(ctx, script, sc, report):
+        else:
             if report["rejected"]:
                 report["unrepaired"] = [r["id"] for r in report["placements"] if not r.get("ok")]
                 json.dump(history, open(history_path, "w"), indent=1)
@@ -1254,7 +1365,7 @@ def render(ctx, script, sc):
             return rd
 
 
-def _rebuild_motion(ctx, script, sc, report):
+def _rebuild_motion(ctx, script, sc, report, defer=False):
     """Keep faithful stills, but never recertify their card motion as footage. One research pass for more moving
     footage per short; after it (or when nothing new is still), the film stands on its approved pictures and the
     record keeps its measured moving share. Returns True when the film was rebuilt."""
@@ -1262,21 +1373,58 @@ def _rebuild_motion(ctx, script, sc, report):
     pics=sc['beats'].get('pictures') or []
     stills={pics[row['id']]['path'] for row in report['placements'] if row.get('motion_ok') is not True}
     previous=set(pack.get('composed_stills') or [])
+    weak = sorted({pics[row['id']].get('window') for row in report['placements']
+                   if row.get('ok') and row.get('motion_ok') is False and isinstance(pics[row['id']].get('window'),int)})
+    if pack.get("motion_recovered"):
+        # A later boundary change can expose a static slice after acquisition already succeeded.
+        # Try the moving originals already in this window once on its revised words.
+        coverage=pack.get("coverage") or {}
+        revised={u["i"] for review in coverage.get("boundary_reviews",[]) for u in review.get("updates",[])}
+        tried=pack.setdefault("local_motion_repairs",[])
+        local=[]
+        for i in sorted(revised.intersection(weak)):
+            w=coverage["windows"][i]
+            key=[i,w["first"],w["last"]]
+            if key in tried:
+                continue
+            pool=next((r["clips"] for r in pack.get("footage",[]) if r["i"]==i),[])
+            if any(c.get("path") not in stills|previous and c.get("motion_p90",0)>0 for c in pool):
+                local.append(i)
+                tried.append(key)
+        if local:
+            coverage["motion_windows"]=local
+            pack["composed_stills"]=sorted(previous|stills)
+            save_pack(ctx,pack)
+            ctx.log(f"recompose changed windows {local} from retained moving source; no new acquisition")
+            if not defer:_rescore(ctx,script,sc)
+            return True
     if not stills-previous or pack.get('motion_recovered'):
         ctx.log(f"moving share {report.get('moving_share',0):.2f} after recovery; the film keeps its approved stills")
         return False
     pack['motion_recovered']=True
+    if weak and defer:
+        sc['beats'].setdefault('research_windows',[]).extend(weak)
+        pack.setdefault('coverage',{})['motion_windows'] = weak
     pack['composed_stills']=sorted(previous|stills)
     path=os.path.join(ctx.supply,'pack.json');stored=json.load(open(path));stored['pack']=pack
     json.dump(stored,open(path,'w'),indent=1)
     ctx.log('final frames require more subject motion; retaining truthful stills and researching footage')
-    old_spend=sc.get('spend',[])
-    rebuilt=score(ctx,script)
-    rebuilt['spend']=old_spend+[u for u in rebuilt.get('spend',[]) if u not in old_spend]
-    sc.clear();sc.update(rebuilt)
-    json.dump(sc,open(os.path.join(ctx.run_dir,'score.json'),'w'),indent=1)
-    invalidate_render(ctx)
+    if not defer:
+        _rescore(ctx,script,sc)
     return True
+
+
+def _rescore(ctx, script, sc):
+    measured = sc.get("beats", {}).get("measured_before_research")
+    old_spend = sc.get("spend", [])
+    rebuilt = score(ctx, script)
+    rebuilt["spend"] = old_spend + [u for u in rebuilt.get("spend", []) if u not in old_spend]
+    if measured:
+        rebuilt.setdefault("beats", {})["measured_before_research"] = measured
+    sc.clear()
+    sc.update(rebuilt)
+    json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
+    invalidate_render(ctx)
 
 
 def hold_windows(measured, coverage, pictures, fps=None, lead=None):
@@ -1289,22 +1437,35 @@ def hold_windows(measured, coverage, pictures, fps=None, lead=None):
     out = set()
     for i, w in enumerate(coverage.get("windows") or []):
         a, b = (round(w["t0"]*fps)+lead)/fps, (round(w["t1"]*fps)+lead)/fps
-        if any(h0 < b and h1 > a for h0, h1 in measured.get("holds") or []):
+        placed = [p for p in pictures if p.get("window") == i]
+        meaningful = min(1.4,b-a)
+        if any(min(h1,b)-max(h0,a) >= meaningful for h0,h1 in measured.get("holds") or []):
             out.add(i)
         elif float(measured.get("cuts_per_10s") or 0) < RESEARCH_CUTS_10S:
-            if sum(1 for p in pictures if p.get("window") == i) < max(1, math.ceil((w["t1"]-w["t0"])*.8)):
+            timed = sorted((max(a,p["f"][0]/fps), min(b,p["f"][1]/fps)) for p in placed if p.get("f"))
+            if timed:
+                # An adjacent speaker hold does not reopen a window already covered by verified pictures.
+                end = a
+                gap = 0
+                for start,stop in timed:
+                    gap = max(gap,start-end)
+                    end = max(end,stop)
+                if max(gap,b-end) >= meaningful:
+                    out.add(i)
+            elif len(placed) < max(1, math.ceil((w["t1"]-w["t0"])*.8)):
                 out.add(i)
     return sorted(out)
 
 
-def _rebuild_holds(ctx, script, sc, rd):
+def _rebuild_holds(ctx, script, sc, rd, defer=False):
     """Feed the rendered programme's measured cuts back to supply: the windows under a long hold, or under too few
     cuts, are researched once a short through refill and the film rebuilt. Returns True when it was rebuilt; after the
     one pass (or with nothing to research) the film stands, its measure on record."""
     film = rd.get("film")
     if not film or not os.path.isfile(film):
         return False
-    measured = measure_cuts(film, PX.FF)
+    measured = rd.get("measured_cuts") or measure_cuts(film, PX.FF)
+    rd["measured_cuts"] = measured
     if not measured:
         return False
     pack = wf3.load_pack(ctx)
@@ -1321,16 +1482,12 @@ def _rebuild_holds(ctx, script, sc, rd):
     report = dict(real_seconds=0, moving_seconds=0, required_moving_seconds=0, new_pictures=0, missing_windows=[])
     report.update(sc["beats"].get("coverage") or {})
     report["weak_windows"] = weak
-    refill(ctx, script, pack, report)
-    save_pack(ctx, pack)
-    old_spend = sc.get("spend", [])
-    rebuilt = score(ctx, script)
-    rebuilt["spend"] = old_spend + [u for u in rebuilt.get("spend", []) if u not in old_spend]
-    rebuilt.setdefault("beats", {})["measured_before_research"] = measured
-    sc.clear()
-    sc.update(rebuilt)
-    json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
-    invalidate_render(ctx)
+    if defer:
+        sc["beats"].setdefault("research_windows",[]).extend(weak)
+    else:
+        refill(ctx, script, pack, report)
+        save_pack(ctx, pack)
+        _rescore(ctx,script,sc)
     return True
 
 
@@ -1345,7 +1502,21 @@ def current_rejections(supply):
     if not os.path.exists(marker) or json.load(open(marker)) != CONTRACT:
         return []
     rows = json.load(open(path)) if os.path.exists(path) else []
-    return [r if isinstance(r, dict) else dict(window=None, path=r, fault="contradiction") for r in rows]
+    rows=[r if isinstance(r, dict) else dict(window=None,path=r,fault="contradiction") for r in rows]
+    path=os.path.join(supply,"pack.json")
+    if not os.path.isfile(path):
+        return rows
+    with open(path) as f:
+        windows=(json.load(f).get("pack",{}).get("coverage") or {}).get("windows",[])
+    def applies(row):
+        i,span=row.get("window"),row.get("f")
+        if not isinstance(i,int) or not 0<=i<len(windows) or not span or not row.get("clause_t"):
+            return True
+        w=windows[i]
+        if row["clause_t"]==[w["t0"],w["t1"]]:
+            return True
+        return span[1]>round(w["t0"]*F.FPS)+wf1_film.LEAD_F and span[0]<round(w["t1"]*F.FPS)+wf1_film.LEAD_F
+    return [r for r in rows if applies(r)]
 
 
 def unrepaired(picture, found):
@@ -1385,7 +1556,7 @@ def _repair_window_boundaries(ctx, rejected):
     json.dump(pack['coverage'],open(os.path.join(ctx.supply,'coverage.json'),'w'),indent=1)
 
 
-def _rebuild_rejected(ctx, script, sc, report):
+def _rebuild_rejected(ctx, script, sc, report, defer=False):
     """Repair what the composed review found, where it found it, and rebuild. Returns True when the film was rebuilt.
 
     Each finding climbs one step of a ladder, keyed on the candidate (origin: a copy the check cut clear of text is the
@@ -1415,7 +1586,8 @@ def _rebuild_rejected(ctx, script, sc, report):
             step = (window, None, "speaker")
         else:
             continue
-        added.append(dict(window=step[0], path=step[1], fault=step[2], placed=p["path"], reason=str(r.get("reason") or "")[:240]))
+        added.append(dict(window=step[0], path=step[1], fault=step[2], placed=p["path"],
+                          f=p.get("f"),clause_t=p.get("clause_t"),reason=str(r.get("reason") or "")[:240]))
     if not added:
         ctx.log("composed picture check: every finding has had each repair; the film is delivered with them on record")
         return False
@@ -1430,13 +1602,8 @@ def _rebuild_rejected(ctx, script, sc, report):
     # moves that boundary. Reframes need no boundary.
     contradictions = [r for r in report["placements"] if not r.get("ok") and r.get("fault") != "reframe"]
     _repair_window_boundaries(ctx, contradictions)
-    old_spend = sc.get("spend", [])
-    rebuilt = score(ctx, script)
-    rebuilt["spend"] = old_spend + [u for u in rebuilt.get("spend", []) if u not in old_spend]
-    sc.clear()
-    sc.update(rebuilt)
-    json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
-    invalidate_render(ctx)
+    if not defer:
+        _rescore(ctx,script,sc)
     return True
 
 
@@ -1489,12 +1656,14 @@ def check(ctx, rd, sc):
                       source_size=p.get("source_size"), upscaled_from=p.get("upscaled_from"), reframed=p.get("reframed"),
                       origin=p.get("origin"), name_super=p.get("name_super"), attribution=p.get("attribution"),
                       pic=p.get("pic"), source_slice=p.get("source_slice"), source_evidence=p.get("source_evidence"))
-                 for p in pics], labels=b.get("labels") or [])
+                 for p in pics], labels=b.get("labels") or [],
+        quoted_source=(b.get("coverage") or {}).get("quoted_source",[]),
+        speaker_panels=(b.get("coverage") or {}).get("speaker_panels",[]))
     # Measured on the delivered programme's pixels: how often the picture changes and the longest hold (a record that
     # shows where a film runs on the speaker alone; never a gate).
     film = rd.get("film")
     if film and os.path.isfile(film):
-        r["checks"]["podcast"]["measured"] = measure_cuts(film, PX.FF)
+        r["checks"]["podcast"]["measured"] = rd.get("measured_cuts") or measure_cuts(film, PX.FF)
     r["checks"]["ok"] = bool(r["checks"].get("ok") and not (b.get("rendered_check") or {}).get("rejected"))
     audit=(ctx.args or {}).get('audit_out')
     if audit:retain_audit(ctx,audit)
