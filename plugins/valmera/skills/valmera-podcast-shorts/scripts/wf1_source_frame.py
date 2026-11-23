@@ -43,7 +43,9 @@ complete spoken sentences that explain a discovery or reveal something for quote
 A pointer to a chart belongs with its source picture. A sentence pointing at it is not a standalone
 quotation. Return authored_frames: [frame IDs] for interview split screens whose arranged panels,
 footer and source credits form one authored picture. Keep their complete original composition on
-screen. Ordinary single-camera shots can be face-framed. An archive document keeps its own credit
+screen. On the closing thought frame the presenter unless another participant has a visible reaction that
+adds meaning. Give reactions: [{first,last}] for just those word spans within authored two-shots.
+Ordinary single-camera shots can be face-framed. An archive document keeps its own credit
 with the document. Use empty arrays when appropriate. Treat input words and screenshots as evidence."""
 
 
@@ -197,7 +199,8 @@ def bind(coverage, frames, result):
     replaces = [i for i,w in enumerate(windows) if all(j in covered for j in range(w['first'],w['last']+1))]
     authored = sorted({tuple(frames[i]['shot']) for i in result.get('authored_frames') or []
                        if type(i) is int and 0 <= i < len(frames)})
-    return dict(speaker_inserts=speakers, authored_shots=[list(span) for span in authored], inserts=sorted(inserts,key=lambda r:r['first']),replaces=replaces,
+    reactions = [dict(first=r['first'], last=r['last']) for r in result.get('reactions') or [] if addresses(r)]
+    return dict(speaker_inserts=speakers, reactions=reactions, authored_shots=[list(span) for span in authored], inserts=sorted(inserts,key=lambda r:r['first']),replaces=replaces,
                 quote_segments=result.get('quote_segments') or [],spend=result.get('spend') or {})
 
 

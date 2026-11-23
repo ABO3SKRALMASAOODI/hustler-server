@@ -98,6 +98,7 @@ estimates a value. For a reported claim, only when you inspected the original re
 attach quotations:[{speaker,event,locator,words}] to the original transcript source. Use its resolved URL, the
 actual event (use the claim’s event label when it is the same occasion), timestamp or page, and the complete verbatim qualified statement. A launch
 announcement, redirected homepage or a secondary account remains a supports summary. Give each finding in the supporting source's own supports field.
+Include author and publication_date on that source when shown in the original.
 Preserve uncertainty, dates and the distinction between a later depiction and the
 historical event. Do not fabricate identities, documents or footage. A document or original product
 can depict its subject without proving every emotional or economic claim made in the speech.

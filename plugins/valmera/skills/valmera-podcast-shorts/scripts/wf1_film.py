@@ -900,7 +900,7 @@ def build(script, sup, style_id, direction=None):
     # Retained directions can predate the claims chain. A dense attributed block
     # still gets a reading interval, with all its authored copy and provenance.
     def needs_reading_page(facts):
-        if any(f.get("chain") for f in facts):
+        if any(f.get("chain") or wf1_display.source_statement(f, script.get("source_url")) for f in facts):
             return True
         if not any(f.get("attribution") for f in facts):
             return False
@@ -1140,7 +1140,11 @@ def build(script, sup, style_id, direction=None):
             _,cue,finish=max(eligible)
             panel=(cue,finish)
         authored = reading.get("authored_shots", [])
+        reactions = [(word_frame(r["first"]), Clock.f(clock.words[r["last"]]["t1"]))
+                     for r in reading.get("reactions", [])]
         layout_edges = [round(t*FPS)+LEAD_F for shot in authored for t in shot]
+        layout_edges.extend(f for span in reactions for f in span)
+        layout_edges.append(turn_f if turn_f is not None else f_last)
         layout_edges.extend(f for span in report_spans for f in span)
         layout_edges.extend(f for lo,hi,_ in speakers for f in (lo,hi))
         edges = sorted({a, b, *(f for f in layout_edges if a < f < b), *[c for c in tcuts + joins + list(panel) if a+3 <= c <= b-3],
@@ -1160,7 +1164,27 @@ def build(script, sup, style_id, direction=None):
                                sup['work'],sup['ffmpeg'],decode_region,presenter_insert=True,source_ink=[dest],caption_baseline=.87)
                 cut_pts.append(fa)
                 continue
-            if on_report or any(start <= (t0+t1)/2 < end for start,end in authored):
+            authored_span = next(((start, end) for start, end in authored if start <= (t0+t1)/2 < end), None)
+            close_start = turn_f if turn_f is not None else f_last
+            closing_speaker = (authored_span and fa >= close_start - FPS
+                               and (round(authored_span[0]*FPS)+LEAD_F >= close_start or
+                                    round(authored_span[1]*FPS)+LEAD_F >= f_voice_end)
+                               and pieces[k]["who"] == "speaker" and meta[pieces[k]["key"]]["faces"]
+                               and not any(lo <= fa < hi for lo, hi in reactions))
+            if closing_speaker and on_report:
+                # Keep the citation's reading surface below the live presenter.
+                from scene.motion import Cam
+                info = meta[pieces[k]["key"]]
+                box = [.05, .10, .95, .47]
+                camera = Cam(info["pw"], info["ph"], .90*W/(.37*H), .90*W, info["max_up"])
+                face = max(info["faces"], key=lambda f: f[2]*f[3])
+                crop = camera.on_face(face[:4], height=.68)
+                P.page([fa,fb], "#14171B", grain=0)
+                P.card([fa,fb], pieces[k]["key"], box, crop=crop, src=[t0,t1],
+                       speaker_panel=True, source_ink=[box], caption_baseline=.88)
+                cut_pts.append(fa)
+                continue
+            if on_report or (authored_span and not closing_speaker):
                 # The source cut is already a composition. Fit all panels and both original
                 # credit corners together, with an independent ground for the caption.
                 aspect = take["w"]/take["h"]
@@ -1320,6 +1344,46 @@ def build(script, sup, style_id, direction=None):
         note(f0, f1, kind, name, rec, "window")
         P.pictures[-1]["source_crop"] = kw["crop"]
 
+    def document(f0, f1, kind, name, rec, key):
+        from scene.motion import fit_panel
+        from wf1_documents import recorded_detail, valid_detail
+
+        span = [f0, f1]
+        size = (rec["w"], rec["h"])
+        literal = rec.get("attribution") or ""
+        detail = (rec.get("document") or {}).get("detail")
+        if not valid_detail(detail):
+            detail = recorded_detail(rec["path"], literal)
+        P.page(span, "#171B23", "#0D1015", grain=.018)
+
+        def view(crop, seat, during, **kw):
+            box = fit_panel(crop, size, (W, H), seat)
+            P.card(during, key, box, crop=crop, source_ink=[box], caption_baseline=.88, **kw)
+
+        full = [0., 0., 1., 1.]
+        if detail or literal:
+            context = [.055, .198, .945, .30]
+            reading = span
+            # A broad UI or diagram needs its full overview before the enlarged detail.
+            overview = fit_panel(full, size, (W, H), context)
+            if overview[2] - overview[0] < .6 and f1-f0 >= 18:
+                reveal = f0 + round((f1-f0)*.4)
+                view(full, [.055, .198, .945, .50], [f0, reveal])
+                reading = [reveal, f1]
+            view(full, context, reading)
+            if detail:
+                # Older raster UI headings can be only a few dozen pixels wide.
+                # Enlarge their ink without blowing a low-resolution label up to screen width.
+                half = min(.445, (detail[2]-detail[0])*size[0] / 360)
+                view(detail, [.5-half, .31, .5+half, .50], reading, document_excerpt=True)
+            else:
+                # The already-read label also works on machines without local text recognition.
+                wf1_display.reading_card(P, reading, literal, "", "", pal, centre=.40, max_height=.15, group="excerpt")
+        else:
+            view(full, [.055, .198, .945, .48], span)
+        note(f0, f1, kind, name, rec, "document")
+        P.pictures[-1].update(source_crop=full, document=rec.get("document"), excerpt_crop=detail)
+
     def bleed(f0, f1, kind, name, rec, key):
         source_ink = clipped_source_ink(rec) if kind == "clip" else []
         if rec.get("reframe") or rec.get("full_source") or rec.get("provider") == "primary-document" or source_ink or archive_event(rec) or (rec.get("attribution") and rec.get("verified_motion") is False):
@@ -1360,7 +1424,7 @@ def build(script, sup, style_id, direction=None):
         """One readable print at a time; prior UI/document detail cannot occlude it."""
         for q, k in enumerate(run):
             f0, f1, kind, name, rec = ins[k]
-            if kind == "clip" or rec.get('provider') == 'interview-frame':
+            if kind == "clip" or rec.get('provider') in ('interview-frame', 'primary-document'):
                 continue                                     # composed in its own layout below
             key = keys[rec["path"]]
             bed_of(f0, f1, key, kind, rec, is_mono(f0))
@@ -1378,6 +1442,7 @@ def build(script, sup, style_id, direction=None):
             P.card([f0,f1],key,[cx-width/2,cy-height/2,cx+width/2,cy+height/2],**kw)
             note(f0,f1,kind,name,rec,"print")
 
+    document_pics = set()
     pos, labelled, labels, flashes = 0, set(), [], []
     runs = _runs(ins)
     layouts_used = []
@@ -1400,6 +1465,9 @@ def build(script, sup, style_id, direction=None):
                             report=any(lo<=fa<hi for lo,hi in report_spans))
                 note(f0,f1,kind,name,rec,"source-insert")
                 P.pictures[-1].update(source_crop=rec["box"],source_slot=rec["source_slot"])
+            elif rec.get("provider") == "primary-document":
+                document(f0, f1, kind, name, rec, keys[rec["path"]])
+                document_pics.add(keys[rec["path"]])
             elif lay == "bleed" or kind == "clip":
                 bleed(f0, f1, kind, name, rec, keys[rec["path"]])
             elif lay == "window":
@@ -1407,6 +1475,15 @@ def build(script, sup, style_id, direction=None):
             cut_pts.append(f0)
             P.events.append(f0)
             label = rec.get("name_super") or (rec.get("attribution") if d.get("labels") else None)
+            if rec.get("provider") == "primary-document":
+                # The figure and the supporting statement may have different sources.
+                urls = {url for url in (rec.get("page"), rec.get("url")) if url}
+                credited = [(a, b) for a, b, page in timed_facts
+                            if any(fact["source"].get("url") in urls for fact in page["facts"])]
+                if rec.get("credit"):
+                    intervals, _ = _director().hold_take([ins[k]], credited, min_f=14)
+                    labels.extend((lo, hi, rec["credit"], keys[rec["path"]]) for lo, hi, *_ in intervals)
+                continue
             event=archive_event(rec)
             if event:
                 label=" · ".join(s for s in (rec.get("name_super"),event) if s)
@@ -1493,15 +1570,25 @@ def build(script, sup, style_id, direction=None):
                 speaker = fact.get("attribution") or ""
                 source = fact["source"].get("publisher") or fact["source"].get("url") or ""
                 body = str(fact["value"])
-                if claim:
+                statement = wf1_display.source_statement(fact, script.get("source_url"))
+                if statement:
+                    body = statement
+                    value = str(fact["value"])
+                    date = fact.get("publication_date") or fact["source"].get("publication_date")
+                    # Older cards carry a dated value. Keep it apart from the prose.
+                    stamp = date or (value if not fact.get("statement") and value not in statement else "")
+                    citation = " · ".join(dict.fromkeys(filter(None, (speaker, fact["source"].get("author"), source, stamp))))
+                    speaker = ""
+                elif claim:
                     citation = " · ".join(filter(None, (speaker if label else None, source, fact.get("relation"))))
                 else:
                     body = " ".join(filter(None, (fact.get("qualifier"), body, fact.get("relation"))))
                     citation = source
                 span = [a + round((b - a) * k / len(facts)) for k in (i, i + 1)]
                 wf1_display.reading_card(P, span, body, label or speaker, citation, pal)
-            reading_spans.append((a, b))
-            omit.extend(clock.words[page["first"]:page["last"] + 1])
+            if not all(wf1_display.source_statement(f, script.get("source_url")) for f in facts):
+                reading_spans.append((a, b))
+                omit.extend(clock.words[page["first"]:page["last"] + 1])
             fact_pages.append(dict(page, f=[a, b]))
             P.events.append(a)
             continue
@@ -1622,6 +1709,10 @@ def build(script, sup, style_id, direction=None):
     shown.sort()
     for a, b, text, pic in labels:
         if b - a < 14 or on_evidence(a,b):
+            continue
+        if pic in document_pics:
+            # The full byline remains in the picture credit. Wrap it at its reading size.
+            wf1_display.reading_card(P, [a,b], "", "", text, pal, centre=.09, group="figure-credit")
             continue
         t = text.upper()
         rows = [t]

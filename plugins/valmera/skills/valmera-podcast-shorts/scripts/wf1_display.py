@@ -7,7 +7,10 @@ WRITING = """Write the factual type for this passage from the attached source re
 For each date, amount, target or estimate worth displaying, put facts in its type ask's args:
 "facts":[{"source": a URL from sources (or "interview"), "relation": short event/meaning,
 "value": the date or amount with its units, "attribution": the actual speaker for an estimate,
-"qualifier": their qualifying words}]. All four pieces of copy travel to the screen together.
+"qualifier": their qualifying words}]. For supporting citations also write fact.statement, a single short
+standalone sentence of about 8–12 words carrying the point and its qualification. Put an event year in that statement when
+it matters. Put the publication date separately in fact.publication_date only when documented.
+Keep attribution, original date/value, literal quotation and relation in their own fields.
 For a forecast or reported speech carry the claims chain from the brief. The speaker is the voice heard;
 the subject may be someone else. Put a facts ask on the claim. If the brief lacks a chain, include
 args.claim={speaker,subject,event,report} from this passage, with a short qualified indirect sentence.
@@ -67,6 +70,9 @@ def editorial(ctx, script, pack):
                                                    for k in ("words", "speaker", "event", "locator", "url")):
                         if q not in evidence.setdefault("quotations", []):
                             evidence["quotations"].append(q)
+                for field in ("author", "publication_date"):
+                    if src.get(field):
+                        evidence[field] = src[field]
                 reading = src.get("supports") or ref.get("finding")
                 if reading and reading not in evidence["supports"]:
                     evidence["supports"].append(reading)
@@ -234,7 +240,22 @@ def typeset(facts, ruler, max_width, case):
     return rows
 
 
-def reading_card(plan, span, body, byline, source, palette, *, centre=.64):
+def source_statement(fact, interview):
+    """Retained citation cards already carry the source reader's indirect account."""
+    if fact.get("chain"):
+        return None
+    if isinstance(fact.get("statement"), str) and fact["statement"].strip():
+        return fact["statement"].strip()
+    source = fact["source"]
+    if interview and fact.get("attribution") and source.get("url") and source["url"] != interview:
+        readings = source.get("supports") or []
+        if readings and isinstance(readings[0], str):
+            # Preserve the source reader's prose, including abbreviations and qualifications.
+            return readings[0].strip()
+    return None
+
+
+def reading_card(plan, span, body, byline, source, palette, *, centre=.64, max_height=.303, group="quote"):
     """One stable reading surface. Page the body at its reading size, with its credit on every page."""
     from film import W, H
     plan.voices["quote_body"] = dict(plan.voices["dsp"], px=65, track=0, shadow={"a": 0})
@@ -281,10 +302,12 @@ def reading_card(plan, span, body, byline, source, palette, *, centre=.64):
 
     pages = []
     for row in body:
-        if not pages or height(head+pages[-1]+[row]+foot) > .303*H:
+        if not pages or height(head+pages[-1]+[row]+foot) > max_height*H:
             pages.append([])
         pages[-1].append(row)
-    weights = [sum(len(row[0].split()) for row in page) for page in pages]
+    if not pages and (head or foot):
+        pages.append([])
+    weights = [max(1, sum(len(row[0].split()) for row in page)) for page in pages]
     total = sum(weights)
     start,end = span
     elapsed = 0
@@ -296,5 +319,5 @@ def reading_card(plan, span, body, byline, source, palette, *, centre=.64):
         y = centre*H-height(rows)/2
         for row,voice,colour,top,bottom in rows:
             plan.word([a,b],row,voice,left,(y-top)/H,colour,role="graphic",z=8,fact_type=True,
-                      text_group=f"quote-{a}",note=False)
+                      text_group=f"{group}-{a}",note=False)
             y += bottom-top+gap

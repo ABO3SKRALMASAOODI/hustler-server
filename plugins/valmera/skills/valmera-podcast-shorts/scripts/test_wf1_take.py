@@ -456,3 +456,47 @@ def test_m12_live_account_owns_its_report_and_lamp_payoff(tmp_path, quiet_engine
     assert any(row["text"] == phrase for row in beats["display"])
     assert any(it["dev"]=="lamp" and it["t"]==phrase for it in scene["devices"])
     assert not any(it.get("role")=="big" and it.get("t","").lower() in phrase for it in scene["items"])
+
+
+def test_source_strip_has_a_reading_seat_and_close_follows_the_reaction(tmp_path, quiet_engines, monkeypatch):
+    from PIL import Image
+    import placement_check
+    import wf1_coverage
+
+    pack = _sup(tmp_path, cuts_two_shot())
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *args: ([], []))
+    words = pack["words"]["words"]
+    script = dict(title="Report", source_url="interview", segments=[
+        dict(say=" ".join(w["w"] for w in words if w["seg"] == seg), pictures=[]) for seg in (0, 1)])
+    path = tmp_path / "ranked-row.jpg"
+    Image.new("RGB", (1103, 189), "white").save(path)
+    rec = dict(path=str(path), w=1103, h=189, provider="primary-document", page="paper",
+               credit="Xavier Amatriain", attribution="Top 10 for Xavier", faces=[],
+               document=dict(page=4, detail=[.03,.05,.41,.95]))
+    pack["archived_placement_plan"] = dict(run_id="copy", rows=[[18, 87, "photo", "Netflix", rec]],
+                                           report=dict(contract=placement_check.CONTRACT, spend=[]))
+    pack["coverage"]["source_reading"] = dict(authored_shots=[[4.,7.]], reactions=[dict(first=15,last=16)])
+    fact = dict(statement="Spark ran collaborative filtering.", attribution="Matei Zaharia and coauthors",
+                relation="UC Berkeley Spark technical report", value="May 7, 2010", publication_date="May 7, 2010", source=dict(url="paper",publisher="UC Berkeley EECS"))
+    scene, beats = film.build(script, pack, "prints", dict(turn_seg=1, display_facts=[dict(first=2,last=8,facts=[fact])]))
+    fragment, = [i for i in scene["items"] if i.get("document_excerpt")]
+    assert fragment["crop"] == rec["document"]["detail"]
+    assert fragment["w"] * 360 >= 290 and fragment["h"] * 640 > 97
+    assert fragment["source_ink"][0][3] <= .50
+    assert beats["display_facts"][0]["facts"] == [fact]
+    rows = [i for i in scene["items"] if i.get("fact_type")]
+    assert " ".join(i["t"] for i in rows if i["v"] == "quote_body") == fact["statement"]
+    assert "May 7, 2010" in " ".join(i["t"] for i in rows if i["v"] == "quote_credit")
+    assert any(i.get("role") == "cap" and i["f"][0] < 87 and i["f"][1] > 18 for i in scene["items"])
+    wide = [i for i in scene["items"] if i.get("source_frame")]
+    reaction = round(words[15]["start"] * 30) + film.LEAD_F
+    assert any(i["f"][0] <= reaction < i["f"][1] for i in wide)
+    assert all(i["f"][1] < beats["dur_f"] for i in wide)
+    assert any(i["k"] == "shot" and i["pic"].startswith("own:") and i["f"][1] == beats["dur_f"]
+               for i in scene["items"])
+
+    end_page = dict(first=17, last=17, facts=[fact])
+    scene, _ = film.build(script, pack, "prints", dict(turn_seg=1, display_facts=[end_page]))
+    closing_word = round(words[17]["start"] * 30) + film.LEAD_F
+    assert any(i.get("speaker_panel") and i["crop"] != [0,0,1,1] and i["f"][0] <= closing_word < i["f"][1]
+               for i in scene["items"])

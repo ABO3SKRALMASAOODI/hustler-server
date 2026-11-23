@@ -1849,7 +1849,9 @@ def check(ctx, rd, sc):
                       mode=p.get("mode"), window=p.get("window"), w=p.get("w"), h=p.get("h"), rung=p.get("rung"), how=p.get("how"),
                       source_size=p.get("source_size"), upscaled_from=p.get("upscaled_from"), reframed=p.get("reframed"),
                       origin=p.get("origin"), name_super=p.get("name_super"), attribution=p.get("attribution"),
-                      pic=p.get("pic"), source_slice=p.get("source_slice"), source_evidence=p.get("source_evidence"))
+                      pic=p.get("pic"), source_slice=p.get("source_slice"), source_evidence=p.get("source_evidence"),
+                      **({k:p[k] for k in ("document","source_crop","excerpt_crop") if k in p}
+                         if p.get("mode") == "document" else {}))
                  for p in pics], labels=b.get("labels") or [],
         quoted_source=(b.get("coverage") or {}).get("quoted_source",[]),
         authored_source=(b.get("coverage") or {}).get("authored_source",[]),
