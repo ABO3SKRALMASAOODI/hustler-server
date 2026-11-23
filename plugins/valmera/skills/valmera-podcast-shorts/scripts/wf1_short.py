@@ -190,12 +190,17 @@ def supply(ctx, script):
         os.replace(pk,os.path.join(sup_dir,'previous-pack.json'))
     rec0 = chain.pack(ctx, script)                              # source.mp4 (the window), hearing.json, index.json
     idx = json.load(open(os.path.join(sup_dir, "index.json")))
-    heard_run=_near(ctx,*script["window"],pad=2)
-    idx,_=wf1_alignment.reconcile(ctx,script,idx,heard_run,_llm(),chain)
-    # the run transcript's own token boundaries ('49%', 'self-critical.'), so no caption starts on '-critical'
-    idx,joined=wf1_alignment.run_tokens(idx,heard_run,float(script["window"][0]))
-    if joined:
-        with open(os.path.join(sup_dir,"index.json"),"w") as f:json.dump(idx,f,indent=1)
+    # The script was written from the neighbourhood of the original pick. Its in-point
+    # can be late, so keep that opening evidence available on the original episode clock.
+    start, end = script["window"]
+    pick_start = (script.get("idea") or {}).get("t0", start)
+    heard_run = _near(ctx, min(start, float(pick_start))-25., end+2., pad=0)
+    idx, aligned = wf1_alignment.reconcile(ctx,script,idx,heard_run,_llm(),chain)
+    if not aligned:
+        # Already aligned on an older run: retain its cut and reconcile any split display tokens.
+        idx, joined = wf1_alignment.run_tokens(idx,heard_run,float(script["window"][0]))
+        if joined:
+            with open(os.path.join(sup_dir,"index.json"),"w") as f:json.dump(idx,f,indent=1)
     rec0.update(window=script["window"],dur=idx["video"]["duration"],words=len(idx["words"]),shots=len(idx["shots"]))
     src = os.path.join(sup_dir, "source.mp4")
     sents = idx.get("sentences") or []

@@ -169,3 +169,110 @@ def test_spelling_across_sentence_break_and_fused_name_preserve_heard_edges():
     assert [(w['w'],w['t0'],w['t1']) for w in out['words']] == [
         ('.NET',0,.31), ('and',.40,.52), ('Terry',.60,.80), ('Tao,',.80,1.), ('maybe',8.8,9.)]
     assert [s['text'] for s in out['sentences']] == ['.NET','and Terry Tao, maybe']
+
+
+def replay_opening(tmp_path, idx, script, caps, answer, old_error):
+    """A legacy failed decision beside the original source. Only the new aligner can answer."""
+    import hashlib
+    from pathlib import Path
+
+    src = tmp_path/'source.mp4'
+    src.write_bytes(b'old take')
+    script.update(source='episode.mp4')
+    content = dict(names=[], hook=script['hook_line'], close=script['close_line'],
+                   source_captions=caps, window_start=script['window'][0],
+                   timed_hearing=[dict(id=i, **w) for i,w in enumerate(idx['words'])])
+    digest = hashlib.sha256(src.read_bytes()).hexdigest()
+    key = hashlib.sha256(json.dumps([4,digest,content],sort_keys=True).encode()).hexdigest()[:16]
+    (tmp_path/f'alignment-{key}.json').write_text(json.dumps(dict(decision=dict(error=old_error),spend={})))
+    cuts = []
+    def cut(ctx, source, start, end, out, **kw):
+        assert source == 'episode.mp4'
+        cuts.append((start, end))
+        Path(out).write_bytes(b'new take')
+    def ask(system, evidence, **kw):
+        reply = answer(json.loads(evidence)) if callable(answer) else answer
+        return json.dumps(reply), {}
+    llm = SimpleNamespace(ask=ask, json_block=json.loads)
+    chain = SimpleNamespace(cut=cut, brand=SimpleNamespace(probe=lambda _: dict(dur=cuts[0][1]-cuts[0][0])),
+                            shots_of=lambda *a: [])
+    ctx = SimpleNamespace(supply=str(tmp_path), run_dir=str(tmp_path))
+    out, changed = A.reconcile(ctx, script, idx, caps, llm, chain)
+    assert changed and len(cuts) == 1
+    assert json.loads((tmp_path/'script.json').read_text()) == script
+    # An interrupted script save is restored from the digest-bound aligned index.
+    again = dict(script, window=[0,0],
+                 hook_line='previous hook')
+    assert A.reconcile(ctx,again,out,caps,None,None) == (out,False)
+    assert again == script
+    return out, cuts[0]
+
+
+def test_m17_restart_uses_second_we_and_preserves_every_remaining_heard_edge(tmp_path):
+    from pathlib import Path
+
+    f = json.loads((Path(__file__).parent/'fixtures/m17-opening.json').read_text())
+    idx = dict(words=[], sentences=[], video=dict(duration=f['duration']), shots=[])
+    for line in f['hearing']:
+        first = len(idx['words'])
+        idx['words'].extend(dict(w=text, t0=a, t1=b) for a,b,text in line)
+        idx['sentences'].append(dict(wi0=first, wi1=len(idx['words'])-1))
+    script = dict(window=f['window'], hook_line=f['hook'], close_line=f['close'])
+    caps = f['source_captions']
+    start = caps.index([2442.117, '>> We'])
+    stop = caps.index([2447.417, 'provide.'])
+    # A blended ASR onset, and an aligner that names the start rather than the continuation as first.
+    answer = dict(source_hook=[start, stop], heard_start=0, first=0, last=102)
+    out, (cut_in,cut_out) = replay_opening(tmp_path, idx, script, caps, answer, f['error'])
+    assert (cut_in,cut_out) == pytest.approx((2442.657,2473.68))
+    assert script['hook_line'] == f['hook'].split('I mean, ')[1]
+    captions = A.caption_words(out)
+    hook = [w for w in captions if w['seg'] == 0]
+    assert ' '.join(w['w'] for w in hook) == script['hook_line']
+    assert [cut_in+w['start'] for w in hook] == pytest.approx([t for t,w in caps[start+4:stop+1]], abs=.0001)
+    rest = captions[len(hook):]
+    # The existing display pass joins 70/-80%, and 1/.7 on the episode caption's
+    # spelling. Every retained ASR ID contributes to exactly one display span.
+    i = 17
+    for w in rest:
+        start = i
+        text = idx['words'][i]['w']
+        while text != w['w']:
+            assert w['w'].startswith(text)
+            i += 1
+            text += idx['words'][i]['w']
+        assert (cut_in+w['start'],cut_in+w['end']) == pytest.approx(
+            (f['window'][0]+idx['words'][start]['t0'],f['window'][0]+idx['words'][i]['t1']), abs=.0001)
+        i += 1
+    assert i == 103
+    assert script['close_line'] == f['close']
+
+
+def test_restore_meaningful_lead_before_old_window_without_moving_the_close(tmp_path):
+    idx = index()
+    idx['video']['duration'] = 10.8
+    script = dict(window=[100,110.8], hook_line='Only if rates fall.', close_line='last.')
+    # Two occurrences. The local one supplies a true qualification absent from the cut.
+    caps = [(80.,'Only'),(80.3,'if'),(80.6,'rates'),(81.,'fall.'),
+            (96.5,'>> Only'),(97.,'if'),(98.,'rates'),(99.,'fall.'),(100.,'sense')]
+    out, edges = replay_opening(tmp_path,idx,script,caps,dict(source_hook=[4,7], first=0,last=3),'missing premise')
+    assert edges == pytest.approx((96.44,110.8))
+    assert script['hook_line'] == out['sentences'][0]['text'] == 'Only if rates fall.'
+    assert [w['w'] for w in out['words'][4:]] == [w['w'] for w in idx['words']]
+    assert [w['t0']+edges[0] for w in out['words'][4:]] == pytest.approx([100+w['t0'] for w in idx['words']])
+    assert out['words'][-1]['t1']+edges[0] == pytest.approx(109.8)
+
+
+def test_hearing_alone_reauthors_only_the_opening(tmp_path):
+    idx = index()
+    script = dict(window=[100,110], hook_line='Well I mean The moat', close_line='last.')
+    calls = []
+    def reply(evidence):
+        calls.append(evidence)
+        if 'repair' not in evidence:
+            return dict(error='untimed filler')
+        return dict(first=1,hook_last=2,last=3,corrections=[dict(id=2,text='moat')])
+    out, _ = replay_opening(tmp_path,idx,script,[],reply,'untimed filler')
+    assert len(calls) == 2 and calls[-1]['repair']['mismatch'] == 'untimed filler'
+    assert script['hook_line'] == 'The moat'
+    assert [w['w'] for w in A.caption_words(out)] == ['The','moat','last.']
