@@ -10,6 +10,10 @@ PLAN_SYSTEM = """You are the footage researcher for a short documentary film (a 
 
 You get the film's lines (numbered) and the named things the writer listed. Write the searches that find real footage of each thing.
 
+Use the supplied product demos for the actions they actually show. Retained originals below are
+candidates for those actions. A speaker's concern or competitive verdict is documented by the
+interview. A comparison alone adds no new archive subject. Search for a different source only
+for a distinct factual depiction the supplied evidence cannot cover.
 Search for evidence of the actual line, including the role it attributes to the people shown.
 For an unnamed participant look for first-party records of the named company and event, never
 other people doing similar work. If there is no traceable event, return no external subject for
@@ -53,6 +57,12 @@ def plan(lines, named, about="", budget_s=90.0):
                if ln.get("see") else "")
             for ln in lines]
     subj = [dict(name=n.get("name"), kind=n.get("is"), must_show=n.get("must_show"), research_hints=n.get("video_searches") or []) for n in named or []]
+    for row, original in zip(subj, named or []):
+        demos = [dict(title=s["title"], publisher=s["channel"], url=s["url"])
+                 for s in original.get("video_sources") or [] if isinstance(s, dict)
+                 and all(s.get(k) for k in ("title", "channel", "url"))]
+        if demos:
+            row["retained_originals"] = demos
     content = (f"Film: {about}\n\nLines:\n" + "\n".join(rows) + "\n\nNamed things:\n" + json.dumps(subj, ensure_ascii=False))
     txt, usd = ask.ask(PLAN_SYSTEM, content, "footage_plan", budget_s=budget_s, max_tokens=6000)
     obj = ask.json_obj(txt)

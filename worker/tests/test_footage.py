@@ -645,3 +645,18 @@ def test_cli_preserves_explicit_zero_source_hearing(tmp_path,monkeypatch):
     assert seen[0]['hear_s']==0
 
 
+
+
+def test_plan_reads_the_retained_demo_for_a_competitive_comparison(monkeypatch):
+    demo = dict(title="Five brand new ways to use Claude at work", channel="Claude",
+                url="https://www.youtube.com/watch?v=t2Zo3YAJdj4", path="/private/local.mp4")
+    def read(system, content, *args, **kwargs):
+        named = json.loads(content.split("Named things:\n")[1])
+        assert named[0]["retained_originals"] == [dict(title=demo["title"], publisher=demo["channel"], url=demo["url"])]
+        assert "A comparison alone adds no new archive subject" in system
+        return json.dumps(dict(subjects=[dict(name="Claude Sheets", searches=[])],
+                               lines=[dict(i=4, subjects=["Claude Sheets"])])), 0
+    monkeypatch.setattr(plan.ask, "ask", read)
+    got, _ = plan.plan([dict(i=4, say="They compete with Excel", visual="The spreadsheet demo", pictures=["Claude Sheets"])],
+                       [dict(name="Claude Sheets", video_sources=[demo])])
+    assert [s["name"] for s in got["subjects"]] == ["Claude Sheets"]
