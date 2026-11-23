@@ -153,11 +153,20 @@ def test_encoded_ruler_recovers_independent_stem_gains_and_codec_delay():
     assert result['fit_residual_db'] < -100
 
 
-def test_podcast_payoff_hole_survives_half_second_measurement():
-    p=music.profile_for('podcast')
-    assert 1 <= p['hole_min_s'] <= p['hole_max_s'] <= 2.3
-    assert 10 <= p['hole_db'] <= 24
-    assert p['broadband_bed_db']==5.5
+def test_podcast_bed_stays_steady_through_spoken_turn_payoff_and_last_hit():
+    # Wang 01: the old ride took 18, 18 and 12 dB out before these beats.
+    # A constant-power music stem isolates fader movement from the notes.
+    hop = 0.01
+    marks = dict(words=[(0., 51.55)], payoff_s=47.133, accents=[19.433])
+    plan = dict(drop_at=14.433, build_at=9.767, drop_on="turn",
+                end_hit_s=51.567, beat_s=.58)
+    slow, fast, _ = music.flow(5256, hop, marks, plan, music.profile_for("podcast"), -6., -2.)
+    power = 10 ** ((slow + fast) / 10)
+    for window in (40, 300):  # momentary and short-term, sampled every 100 ms
+        levels = 10 * np.log10(np.convolve(power, np.ones(window) / window, "valid"))[::10]
+        times = window * hop + np.arange(len(levels)) * .1
+        for start, end in ((12., 16.), (44.5, 49.), (49., 51.6)):
+            assert np.ptp(levels[(times >= start) & (times <= end)]) <= 3.
 
 
 def test_primary_document_reader_rejects_private_urls(monkeypatch):

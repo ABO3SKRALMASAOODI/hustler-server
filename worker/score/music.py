@@ -119,8 +119,14 @@ def profile_for(kind):
     """The PROFILE for a kind of film (stories | marketing | podcast | longform)."""
     out = dict(PROFILE, under_voice_db=UNDER_VOICE.get(kind, PROFILE["under_voice_db"]))
     if kind == 'podcast':
-        out.update(hole_min_s=1.0, hole_max_s=1.3, broadband_bed_db=5.5, build_floor_db=6.)
-        out.update(HOLD)                # the story's arc held under every word (hold_under_words)
+        out.update(HOLD)
+        # Dialogue carries the cut. Keep the beat arrangement and ride phrases
+        # gently without making holes before the turn, payoff or final hit.
+        out.update(broadband_bed_db=5.5, build_floor_db=6., hole_db=0., end_hole_db=0.,
+                   swell_db=0., accent_db=0., hit_db=0., after_drop_db=0., end_hit_db=0.,
+                   open_db=4.5, lift_gap_s=1.2, lift_full_s=2.5, lift_db=0.5, lift_max_db=1.,
+                   lift_rise_s=1.2, lift_fall_s=0.8, duck_attack_s=1.5, duck_release_s=3.,
+                   phrase_ride_s=8., carve_max_db=1.5)
     return out
 
 
@@ -1027,6 +1033,8 @@ def flow(nf, hop_s, marks, plan, P, base, open_gain):
                 notes["lifts"].append({"t": round(p0, 2), "len_s": round(L, 2), "db": round(amt * float(w.max()), 1)})
     slow += lift
     fast = np.zeros(nf)
+    if P.get("phrase_ride_s") and not marks.get("joints"):
+        return slow, fast, notes
     d = plan.get("drop_at")
     e = plan["end_hit_s"]
     # A short's payoff often leaves fewer than two full bars before the close.
@@ -1284,7 +1292,7 @@ def _resting(rows, g, floored, parts, hop_s, hole_db=6.0):
     return out
 
 
-def hold_under_words(t, mk, g, vk, live, spoken, words, marks, plan, P, v_ref):
+def hold_under_words(t, mk, g, vk, live, spoken, words, marks, plan, P, v_ref, phrase_hit=None):
     """The bed held under the voice on the story's arc (profile "hold"): (gain dB per frame, notes).
 
     1. Each part of the story (arc_parts) is moved as a whole to its arc's depth (_part_moves: its words' gaps, voice
@@ -1354,6 +1362,8 @@ def hold_under_words(t, mk, g, vk, live, spoken, words, marks, plan, P, v_ref):
                          P["hold_attack_s"], P["hold_release_s"])   # the whole window it is read on, and gently
             g2 = g2 + cl
             floored += cl
+    if phrase_hit is not None and P.get("phrase_ride_s") and not marks.get("joints"):
+        g2 = phrase_ride(mk, g2, spoken & live, hop_s, P["phrase_ride_s"], phrase_hit, vk, words)
     for pn in moved:
         for row in pn:
             for nt in notes["parts"]:
@@ -1375,6 +1385,60 @@ def hold_under_words(t, mk, g, vk, live, spoken, words, marks, plan, P, v_ref):
                  words_over=round(float(np.mean(gaps < 0)), 3) if len(gaps) else None,
                  voiced_over=round(float(np.mean(m4[act] > vk4[act])), 3) if act.any() else None)
     return g2, notes
+
+
+def phrase_ride(music_db, gain, spoken, hop_s, seconds, hit_frame, voice_db, words):
+    """Follow the depth established under phrases, leaving attacks and the final ring intact.
+
+    Measure the arranged music itself before riding it. An incoming bar can
+    be much louder than the outgoing bar even at identical fader settings.
+    """
+    stop = min(len(gain), max(1, hit_frame))
+
+    def mean_level(db, window_s):
+        half = min(stop - 1, round(window_s / (2 * hop_s)))
+        power = 10 ** (db / 10)
+        padded = np.pad(power, half, mode="edge")
+        return 10 * np.log10(np.convolve(padded, np.ones(2 * half + 1) / (2 * half + 1), "valid") + 1e-12)
+
+    # The dialogue sets the resting level over several seconds. Only the
+    # recording drives the shorter compensating move, independent of syllables.
+    source = mean_level(music_db[:stop], 0.48)
+    resting = mean_level(music_db[:stop] + gain[:stop], seconds)
+    target = resting - source
+    adjustment = np.clip(target - gain[:stop], -12., 8.)
+    result = gain.copy()
+    result[:stop] += adjustment * 0.95
+    result[stop:] += adjustment[-1] * 0.95
+    # Keep the calibrated level under words. Smoothing valleys must not
+    # lift the entire recording beside the speaker.
+    active = spoken[:stop]
+    if active.any():
+        before = mean_level(music_db[:stop] + gain[:stop], .4)
+        after = mean_level(music_db[:stop] + result[:stop], .4)
+        result += np.median(before[active]) - np.median(after[active])
+    # Give softer words room without following syllables. Approach each
+    # required depth on a slow ramp and return even more gradually.
+    words = [(a, b) for a, b in words if 0 <= a < b and a < len(gain) * hop_s]
+    rows = word_gaps(voice_db, music_db + result, words)
+    if rows:
+        audible = np.median([row[1] for row in rows]) - 10.
+        # A consistent margin across the reel avoids turning an isolated
+        # soft word into an audible swell on either side of it.
+        gaps = [gap for _, level, _, gap in rows if level >= audible]
+        margin = min(max(0., 0.15 - np.percentile(gaps, 3)), max(0., 6.8 - np.median(gaps)))
+        correction = np.full(stop, margin)
+        for (a, b), (_, level, _, gap) in zip(words, rows):
+            if level >= audible and gap < 0.15:
+                lo, hi = max(0, int(a / hop_s)), min(stop, math.ceil(b / hop_s))
+                correction[lo:hi] = np.maximum(correction[lo:hi], 0.15 - gap)
+        for i in range(stop - 2, -1, -1):
+            correction[i] = max(correction[i], correction[i + 1] - 2.0 * hop_s)
+        for i in range(1, stop):
+            correction[i] = max(correction[i], correction[i - 1] - 1.0 * hop_s)
+        result[:stop] -= correction
+        result[stop:] -= correction[-1]
+    return result
 
 
 def track(path, song, plan, marks, voice=None, profile=None, song_pcm=None):
@@ -1447,7 +1511,7 @@ def track(path, song, plan, marks, voice=None, profile=None, song_pcm=None):
     if P.get("hold") and vk is not None and len(vk) and words:
         # the story's arc under every word, and never a voiced 400 ms frame with the bed near the voice
         vk_ = np.pad(vk, (0, max(0, nf - len(vk))), constant_values=-120.0)[:nf]
-        g, held = hold_under_words(t, mk, g, vk_, live, spoken, words, marks, plan, P, v_ref)
+        g, held = hold_under_words(t, mk, g, vk_, live, spoken, words, marks, plan, P, v_ref, phrase_hit=hit_f)
     if plan["segments"][0]["film"][0] > 0.02 or plan["segments"][0].get("role") != "open":
         g = np.where(t < 0.08, g - 30.0 * (1 - np.clip(t / 0.08, 0, 1)), g)       # an entry inside a bar comes in over 80 ms
     # the speech band alone, where the bed would still crowd the voice

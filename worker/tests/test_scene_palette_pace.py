@@ -470,6 +470,27 @@ def test_a_placed_clip_is_shown_only_inside_its_checked_slice(film):
 
 
 @needs_ffmpeg
+def test_position_match_keeps_a_short_checked_clip_moving_to_its_cut(film):
+    from scene.alien import sense
+    l1, work = film
+    out, _ = lay(l1, work, dict(dev="match_pos", id="m", at=[0, 148],
+                                pics=["v1", "p1"], cuts=[120], grow=1.06, only=True))
+    matched = shots(out, 0, 120)
+    assert len(matched) == 1 and matched[0]["f"] == [0, 120]
+    shot = matched[0]
+    assert shot["src"][1] > shot["src"][0]
+    widths = [right - left for left, _, right, _ in shot["crop"]]
+    assert widths[0] / widths[-1] == pytest.approx(1.06, abs=.001)
+    path = sense.path_of(out, work, shot["pic"])
+    frames = list(sense.frames(path, n=120, fps=30, size=(160, 284), gray=True))
+    assert len(frames) == 120
+    # The white square travels within the verified 0.5–2.5 s source slice.
+    centers = [np.where(frame[110] > 190)[0].mean() for frame in frames]
+    assert 38 < centers[0] < 43 and 96 < centers[-1] < 104
+    assert all(centers[i + 10] - centers[i] > 2 for i in range(110))
+
+
+@needs_ffmpeg
 def test_pip_dissolve_and_shrink_keep_the_incoming_clip_at_real_speed(film):
     l1, work = film
     # a placed clip's checked slice is its src: nothing before it was checked, so the window holds its first frame

@@ -9,6 +9,13 @@ when it offers ``faces(path, t)``; regions from the pictures' own gradients (pac
 ask {"dev": "match", "at": [a, z], "pics": [...], "cuts": [frames] | "n": k, "seat": [x, y] (default 0.5, 0.36),
      "face_h": 0.30 (a face's height in the frame), "grow": 1.12 (across the chain), "mono": bool}
 """
+import hashlib
+import math
+import os
+import subprocess
+import tempfile
+
+from ..alien import sense
 from .. import pace
 from . import picks as K
 
@@ -50,6 +57,53 @@ def registered(pic, W, H, seat, face_h, sense_=None, by="any"):
     return cam.cover(focus=focus, at=tuple(seat), zoom=1.25), "position"
 
 
+def fit_clip(pic, frames, fps, work):
+    """Keep a registered cut on its beat when the checked excerpt runs short.
+
+    Spread the source frames across the shot. For low source cadence, bake
+    intermediate frames before adding type, looks or a moving crop.
+    """
+    lo, hi = pic.span()
+    duration = frames / fps
+    if not pic.video or hi - lo >= duration - 1e-6:
+        return pic, None
+    speed = (hi - lo) / duration
+    native = K._probe(pic.path)[3]
+    if native <= 0 or speed * native >= fps * 0.98 or (hi - lo) * native < 2:
+        return pic, [lo, hi]
+    folder = os.path.abspath(os.path.join(work, "match-media"))
+    try:
+        st = os.stat(pic.path)
+        os.makedirs(folder, exist_ok=True)
+    except OSError:
+        return pic, [lo, hi]
+    key = (os.path.realpath(pic.path), st.st_mtime_ns, st.st_size, lo, hi, frames, fps)
+    aid = "match_" + hashlib.sha256(repr(key).encode()).hexdigest()[:20]
+    path = os.path.join(folder, aid + ".mp4")
+    if not os.path.exists(path):
+        # Rebase PTS after trimming. The two endpoint samples give the motion
+        # estimator its lookahead without extending the checked source range.
+        count = max(2, math.ceil(hi * native - 1e-6) - math.ceil(lo * native - 1e-6))
+        dt = (frames - 1) / fps / (count - 1)
+        vf = (f"trim=start={lo:.8f}:end={hi:.8f},tpad=stop_mode=clone:stop=2,"
+              f"settb=AVTB,setpts=N*{dt:.10f}/TB,"
+              f"minterpolate=fps={fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1")
+        with tempfile.TemporaryDirectory(dir=folder) as tmp:
+            staged = os.path.join(tmp, "shot.mp4")
+            cmd = [sense.ff(), "-v", "error", "-nostdin", "-i", pic.path, "-an", "-vf", vf,
+                   "-frames:v", str(frames), "-c:v", "libx264", "-preset", "veryfast", "-crf", "14",
+                   "-pix_fmt", "yuv420p", staged]
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, timeout=180)
+                if K._probe(staged)[2] < (frames - 0.5) / fps:
+                    return pic, [lo, hi]
+                os.replace(staged, path)
+            except (OSError, subprocess.SubprocessError):
+                return pic, [lo, hi]
+    asset = dict(kind="video", path=path, w=pic.w, h=pic.h, fps=fps, dur=duration)
+    return K.Pic(aid, path, "video", pic.w, pic.h, duration, new=asset), [0.0, duration]
+
+
 def plan(l1, work, ask, sense_=None, pool=None, by="any"):
     W, H, fps = K.geometry(l1)
     args = K.args_of(ask)
@@ -78,6 +132,7 @@ def plan(l1, work, ask, sense_=None, pool=None, by="any"):
     keep, gone, was = K.carve(l1, a, z)
     look = K.inherit(was)
     items, marks, chain = [], [], []
+    assets = {}
     mono = args.get("mono")
     mono = (n >= 3) if mono is None else bool(mono)
     for i, (s, e) in enumerate(zip(starts, ends)):
@@ -85,24 +140,35 @@ def plan(l1, work, ask, sense_=None, pool=None, by="any"):
         m = e - s
         u0, u1 = (s - a) / max(z - a, 1), (e - a) / max(z - a, 1)
         cam = K.cam_of(pic, W, H, 3.0)
+        # At the optical zoom ceiling, leave room at the start for the
+        # requested growth. Snapping each over-limit sample back to the
+        # initial crop used to cancel the move for an entire matched shot.
+        ex = crop[0] + (crop[2] - crop[0]) * seat[0]
+        ey = crop[1] + (crop[3] - crop[1]) * seat[1]
+        widest = min(1 / (crop[2] - crop[0]), 1 / (crop[3] - crop[1]))
+        room = min(widest, max(1., cam.up(crop, W) * grow / 3.))
+        shown, clock = fit_clip(pic, m, fps, work)
+        # On a stretched excerpt the camera carries the original growth
+        # through the whole take, with a continuous velocity into the cut.
         crops = []
         for j in range(m):
             u = u0 + (u1 - u0) * j / max(m - 1, 1)
-            k = 1.0 / (grow ** (u ** 1.4))             # the seat holds; the picture grows into the last cut
-            ex, ey = crop[0] + (crop[2] - crop[0]) * seat[0], crop[1] + (crop[3] - crop[1]) * seat[1]
-            c = K.scale_crop(crop, k, ex, ey)
-            if cam.up(c, W) > 3.0:
-                c = crop
+            progress = j / max(m - 1, 1) if clock is not None else u ** 1.4
+            k = 1.0 / (grow ** progress)             # the seat holds; the picture grows into the last cut
+            c = K.scale_crop(crop, min(widest, max(room * k, cam.up(crop, W) / 3.)), ex, ey)
             crops.append(K.r5(c))
         it = dict(look, id=f"{args.get('id', 'match')}.m{i}", k="shot", f=[s, e], pic=pic.aid, crop=crops)
         if mono:
             it["treat"] = {"mode": "mono"}
-        items += K.clocked(it, pic, fps, rng, i)
+        if clock is None:
+            items += K.clocked(it, pic, fps, rng, i)
+        else:
+            items.append(dict(it, pic=shown.aid, src=clock))
+        assets.update(K.new_assets([shown]))
         if i:
             marks.append({"f": s, "what": "match cut", "kind": "cut", "strength": 0.5})
         chain.append({"pic": pic.aid, "how": how})
-    used = list({it["pic"]: None for it in items})
-    return {"items": keep + items, "drop": gone, "assets": {k: v for k, v in K.new_assets([p for _, p, _, _ in framed]).items() if k in used},
+    return {"items": keep + items, "drop": gone, "assets": assets,
             "events": marks, "seat": {"x": seat[0], "y": seat[1], "f": [a, z]},
             "log": {"chain": chain, "eyes": sum(1 for c in chain if c["how"] == "eyes"), "mono": mono}}
 
