@@ -419,12 +419,17 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
                 path = next((p for p,(_,_,r) in by_path.items() if os.path.isfile(p)
                              and file_digest(p)==prior["sha256"]
                              and ((r.get("source") or {}).get("url") or r.get("page"))==prior.get("source")),None)
-            lo, hi = prior["f"]
+            original_lo, original_hi = prior["f"]
+            lo, hi = original_lo, original_hi
             old=prior.get("clause_t") or []
             same_words=prior.get("clause")==window.get("say") and old==[window["t0"],window["t1"]]
             narrowed=(len(old)==2 and old[0]<=window["t0"]<=window["t1"]<=old[1]
                       and prior.get("motion_ok") is True and window.get("say")
                       and (" "+window["say"]+" ") in (" "+(prior.get("clause") or "")+" "))
+            if narrowed:
+                lo,hi=max(a,lo),min(b,hi)
+                if hi-lo < 10:
+                    continue
             if (path not in by_path or not a <= lo < hi <= b or any(x<hi and lo<y for x,y,*_ in pins)
                     or not (same_words or narrowed)
                     or not os.path.isfile(path) or file_digest(path) != prior["sha256"]):
@@ -433,7 +438,11 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
             url = (rec.get("source") or {}).get("url") or rec.get("page")
             if ("source" in prior and url!=prior["source"]) or any(same_picture(rec, old) for old in used):
                 continue
-            rec = dict(rec, src=prior["src"]) if prior.get("src") else dict(rec)
+            rec = dict(rec)
+            if prior.get("src"):
+                start,end = prior["src"]
+                speed = (end-start)/(original_hi-original_lo)
+                rec["src"] = [start+(lo-original_lo)*speed, end-(original_hi-hi)*speed]
             pins.append((lo,hi,kind,name,rec))
             used.append(rec)
         pins.sort(key=lambda row:row[0])

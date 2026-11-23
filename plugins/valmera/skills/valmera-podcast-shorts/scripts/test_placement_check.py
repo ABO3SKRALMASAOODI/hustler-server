@@ -490,3 +490,21 @@ def test_adjacent_speaker_hold_does_not_reopen_a_covered_evidence_window():
     covered=dict(windows=[dict(t0=6.,t1=12.)])
     pics=[dict(window=0,f=[180,270]),dict(window=0,f=[270,360])]
     assert hold_windows(dict(holds=[[0.,6.1],[11.9,20.]],cuts_per_10s=2),covered,pics,lead=0)==[]
+
+
+def test_narrower_spoken_boundary_reuses_the_intersection_of_verified_footage(tmp_path,monkeypatch):
+    import hashlib
+    from footage import motion
+    from wf1_coverage import proposals
+    monkeypatch.setattr(motion,"of_shot",lambda *a:{"p90":.5})
+    clips=[]
+    for label in ("other","passed"):
+        path=tmp_path/label
+        path.write_bytes(label.encode())
+        clips.append(dict(path=str(path),seconds=2.,source={"url":label},time_range=[10.,12.],subject="Lab"))
+    passed=dict(path=clips[1]["path"],sha256=hashlib.sha256(b"passed").hexdigest(),f=[278,313],src=[.1,1.5],
+                clause="the Lab grew",clause_t=[9.,11.],source="passed",motion_ok=True)
+    window=dict(name="Lab",t0=9.34,t1=9.76,say="Lab",must_show="the lab")
+    rows=proposals(dict(windows=[window],passed_placements={"0":[passed]}),{0:clips},{})
+    assert len(rows)==1 and rows[0][:2]==[283,296] and rows[0][4]["path"]==clips[1]["path"]
+    assert rows[0][4]["src"]==pytest.approx([.30,.82])
