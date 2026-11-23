@@ -12,6 +12,7 @@ are graded toward their neighbours), so the frame's luminance stays under three 
 """
 import math
 
+from ..plan import A
 from ..alien import sense
 from . import picks as K
 
@@ -607,16 +608,34 @@ def settle(l1, work, ask, sense_=None, pool=None):
     peak = float(args.get("peak", 0.18))
     items, log = [], []
     pictures = [s for s in K.shots(l1) if s.get("pic") != "plate"]
-    pictures.extend(it for it in l1["items"] if it.get("speaker_panel"))
+    pictures.extend(it for it in l1["items"] if it.get("speaker_panel") or it.get("source_frame"))
     targets = [s for s in pictures if a <= s["f"][0] < z] or [s for s in pictures if s["f"][0] <= a < s["f"][1]]
     for sh in targets:
-        pic = K.pic_of_asset(l1, work, sh.get("pic"))
         n = sh["f"][1] - sh["f"][0]
-        cs = K.crops(l1, work, sh)
         start = max(a - sh["f"][0], 0) if sh["f"][0] < a else 0
         m = min(int(args.get("frames") or min(n - start, int(fps))), n - start)
         if m < 3:
             continue
+        if sh.get("source_frame"):
+            # Move the whole authored picture, including its credit corners. Approach
+            # its fitted size from inside the matte rather than zooming into the pixels.
+            step = K.decel(m, peak)
+            amount = min(.20, abs(size))
+            scales = []
+            for i in range(n):
+                u = step[min(max(i-start, 0), m-1)]
+                if out_dir:
+                    inset = u
+                elif start:
+                    inset = 4*u*(1-u)  # ease out and return to the existing full-width seat
+                else:
+                    inset = 1-u
+                scales.append(round(A(sh.get("s", 1), i, 0)*(1-amount*inset), 5))
+            items.append(dict(sh, s=scales))
+            log.append({"shot": sh["id"], "size": amount, "frames": m})
+            continue
+        pic = K.pic_of_asset(l1, work, sh.get("pic"))
+        cs = K.crops(l1, work, sh)
         sz = size
         if pic:                                        # the tightest frame stays inside the taste ceiling
             w_min = min(c[2] - c[0] for c in cs)

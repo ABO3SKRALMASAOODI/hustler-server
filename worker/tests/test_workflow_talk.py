@@ -383,3 +383,25 @@ def test_source_chart_keeps_whole_caption_page_below_both_axes():
     resolve(dict(frame=[1080,1920],fps=30,voices=voices,items=[card,first,second]))
     for layer in (first,second):
         assert all(abs(A(layer["y"],f,layer["f"][0])-.87)<.001 for f in range(*layer["f"]))
+
+
+def test_complete_source_frame_keeps_caption_clear_of_embedded_credit():
+    from scene.plan import A
+    card = dict(k="card", id="interview", f=[0,20], source_frame=True, x=.5, y=.52, w=1., h=.32,
+                caption_baseline=.77)
+    token = word("host", "families", "v", .25,.66,[0,20],"cap")
+    token["chunk"] = "families"
+    resolve(dict(frame=[1080,1920],fps=30,voices={"v":dict(font="ArchivoBlack-Regular.ttf",px=58)},
+                 items=[card,token]))
+    assert all(abs(A(token["y"],f,0)-.77)<.001 for f in range(20))
+
+
+def test_settle_moves_the_whole_authored_frame(tmp_path):
+    from scene.palette.rhythm import settle
+    card = dict(k="card", id="both", pic="interview", f=[0,40], source_frame=True, s=1.,
+                x=.5, y=.46, w=1., h=.3164, crop=[0,0,1,1], src=[0.,40/30])
+    scene = dict(frame=[1080,1920], fps=30, dur_f=40, items=[plate(40,"#101010"),card])
+    result = settle(scene,str(tmp_path),dict(at=[0,30],dir="in",size=.1))
+    moved, = result["items"]
+    assert moved["crop"] == card["crop"] and moved["src"] == card["src"]
+    assert min(moved["s"]) == .9 and max(moved["s"]) == moved["s"][-1] == 1.

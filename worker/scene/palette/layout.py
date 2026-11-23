@@ -458,12 +458,14 @@ def pip(l1, work, ask, sense_=None, pool=None):
         card, _ = _full_card(q, l1, work, c, c + 1, "tmp")
         # A documentary window sits over a cropped background of the same source.
         # Reveal the evidence itself, including its checked lettering and destination seat.
-        window = next((item for item in l1["items"] if item.get("k")=="card" and item.get("source_ink")
+        window = next((item for item in l1["items"] if item.get("k")=="card" and (item.get("source_ink") or item.get("source_frame"))
                        and (item.get("pic")==q.get("pic") or q.get("plate")) and item["f"][0]==c), None)
         cs = K.crops(l1, work, q)
         if window:
             q = window
             card.update(pic=window["pic"], w=window["w"], h=window["h"])
+            if window.get("source_frame"):
+                card["source_frame"] = True
             cs = [window["crop"][0] if isinstance(window["crop"][0],list) else window["crop"]]
         tx,ty = (window["x"],window["y"]) if window else (.5,.5)
         card = dict(card, id=f"{args.get('id', 'pip')}.in", f=[f0, c], crop=[cs[0]] * n)

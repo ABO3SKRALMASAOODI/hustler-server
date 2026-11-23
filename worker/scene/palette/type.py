@@ -267,7 +267,7 @@ def name(l1, work, ask, sense=None):
     if "documentary_cuts" in l1:
         # Use the selected excerpt's reading for both lines of this super.
         # The Director supplies typography and timing; its guessed name is never a credit.
-        for row in l1["documentary_cuts"]:
+        for row in [*l1["documentary_cuts"], *l1.get("interview_credits", [])]:
             if row.get("name_super") and (row.get("source_evidence") or {}).get("url") and row["f"][0] <= a < row["f"][1]:
                 spans = K.picture_spans(l1, row["pic"], a, min(z, row["f"][1]))
                 if spans and spans[0][0] == a and spans[0][1] - a >= 2:

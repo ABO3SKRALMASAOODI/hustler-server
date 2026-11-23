@@ -25,7 +25,7 @@ def proof_bounds(card, frame, width, height):
         xy = corners[:, :2] / np.maximum(corners[:, 2:], 1e-6) / [width, height]
         return (*xy.min(axis=0), *xy.max(axis=0))
     page = project([0, 0, 1, 1])
-    return project(card["proof_line"]) if page[3] - page[1] > .74 else page
+    return project(card["proof_line"]) if card.get("proof_line") and page[3] - page[1] > .74 else page
 
 
 def speaker_seats(scene, metadata):
@@ -112,14 +112,14 @@ def resolve(scene, speaker_layout=None):
     active = defaultdict(list)
     document_baselines = {}
     for layer in scene["items"]:
-        if layer.get("source_ink") or layer.get("proof_line"):
+        if layer.get("source_ink") or layer.get("proof_line") or layer.get("source_frame"):
             lo, hi = layer["f"]
             for f in range(lo, hi):
                 if A(layer.get("op", 1), f, lo) > .01:
                     occupied[f].extend(layer.get("source_ink", []))
                     if "caption_baseline" in layer:
                         document_baselines[f] = layer["caption_baseline"]
-                    if layer.get("proof_line"):
+                    if layer.get("proof_line") or layer.get("source_frame"):
                         occupied[f].append(proof_bounds(layer, f, width, height))
     fixed = {f: list(boxes) for f,boxes in occupied.items()}
     # Choose the reading baseline for the continuous interview picture. Word
