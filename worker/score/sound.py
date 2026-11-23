@@ -2244,20 +2244,85 @@ STORY_SOUNDS = {"air": "mx_whoosh_1462", "rise": "mx_riser_1492", "sub": "mx_imp
                 "impact": "mx_hit_2148", "tick": "mx_click_2582"}
 
 
-def story_accents(cues, events, voice, fps):
+def story_partners(l1):
+    """Resolve a podcast cue against the picture handed to the renderer. A nearby cut cannot inherit it."""
+    from scene.palette.kit import picture_spans
+
+    items = l1["items"]
+    duration = l1["dur_f"]
+    def visible(ref, start, end):
+        assets = l1.get("assets") or {}
+        keys = {k for k,asset in assets.items() if asset.get("path") == ref} | {ref}
+        if ref == "take":
+            keys.update(it["pic"] for it in items if str(it.get("pic", "")).startswith("own:") or it.get("pic") == "main")
+        spans = []
+        for a,b in sorted(span for key in keys for span in picture_spans(l1, key, start, end)):
+            if spans and a <= spans[-1][1]:
+                spans[-1][1] = max(b, spans[-1][1])
+            else:
+                spans.append([a,b])
+        return spans
+
+    partners = []
+    for cue in l1.get("story_cues") or []:
+        request = cue.get("partner") or {}
+        device, text = request.get("device"), request.get("text")
+        before, after = request.get("before"), request.get("after")
+        anchor = cue["f"]
+        radius = max(2, round(.4 * l1["fps"]))
+        start, end = max(0, anchor-radius), min(duration, anchor+radius+1)
+        candidates = []
+        if device:
+            for event in l1.get("composed_events") or []:
+                if event["beat"] == cue.get("beat") and device in (event["dev"], event["asked"]):
+                    if not (before or after or text) and event.get("strength", .5) < DEVICE_MIN:
+                        continue
+                    candidates.append(dict(f=event["f"], id=event["id"], device=event["dev"], items=event["items"],
+                                           kind="display" if event["kind"] == "type" else "device"))
+        words = [(max(it["f"][0], it.get("on", it["f"][0])), it["id"]) for it in items
+                 if text and it["k"] == "word" and it.get("role") != "cap"
+                 and str(it.get("t", "")).casefold() == text.casefold()]
+        if text and not device:
+            candidates = [dict(f=f, id=i, kind="display") for f,i in words if start <= f < end]
+        # Include the preceding frame so a continuous shot at the edge of the search
+        # interval cannot be mistaken for a new arrival.
+        spans = visible(after, max(0, start-1), end) if after else []
+        arrivals = {a for a,b in spans if start <= a and (a > max(0, start-1) or a == 0)}
+        if after and not device and not text:
+            candidates = [dict(f=f, id=after, kind="picture") for f in arrivals]
+        matches = []
+        for event in candidates:
+            f = event["f"]
+            if not 0 <= f < duration or (after and f not in arrivals):
+                continue
+            if before and (f < 1 or not visible(before, f-1, f)):
+                continue
+            if text and not any(w == f for w,_ in words):
+                continue
+            if cue["sound"] == "tick" and not (text or event["kind"] == "display"):
+                continue
+            matches.append(dict(event, **request))
+        partners.append(min(matches, key=lambda e: abs(e["f"]-anchor)) if matches else None)
+    return partners
+
+
+def story_accents(cues, events, voice, fps, bindings=None):
     from scipy.signal import resample_poly
     from . import sound_signal
     placed, sounds = [], []
-    for cue in cues:
+    for i, cue in enumerate(cues):
         sid = STORY_SOUNDS.get(cue.get("sound"))
         if len(sounds) == 2 or sid not in library() or cue.get("role") not in ("hook", "figure", "turn", "payoff", "contrast"):
             continue
-        partners = [e for e in events if abs(e["f"] - cue["f"]) <= max(2, round(.12 * fps))
-                    and (e["kind"] in ("display", "counter") if cue["sound"] == "tick"
-                         else e["kind"] in ("picture", "cut", "card", "display", "counter") or e.get("landing"))]
-        if not partners:
+        if bindings is None:
+            partners = [e for e in events if abs(e["f"] - cue["f"]) <= max(2, round(.12 * fps))
+                        and (e["kind"] in ("display", "counter") if cue["sound"] == "tick"
+                             else e["kind"] in ("picture", "cut", "card", "display", "counter") or e.get("landing"))]
+            partner = min(partners, key=lambda e: abs(e["f"] - cue["f"]), default=None)
+        else:
+            partner = bindings[i]
+        if not partner:
             continue
-        partner = min(partners, key=lambda e: abs(e["f"] - cue["f"]))
         f = partner["f"]
         if any(abs(f - s["event_f"]) < 2 * fps for s in sounds):
             continue
@@ -2276,10 +2341,18 @@ def story_accents(cues, events, voice, fps):
         peak = 10 * math.log10(np.convolve(power, np.ones(window)/window, mode="valid").max())
         db = round(min(0., ref - 10.7 - peak), 1)
         sounds.append(_item("accent" + str(len(sounds)), sid, f, fps, db, partner, cue["role"], "single"))
-        placed.append(dict(t=round(f / fps, 3), part=cue["role"], kind=partner["kind"], why=cue["why"],
+        why = cue["why"]
+        if bindings is not None:
+            sounds[-1]["picture_event"] = partner
+            label = partner.get("text") or partner.get("device") or partner["kind"]
+            pictures = " → ".join(partner[k] for k in ("before", "after") if partner.get(k))
+            why = f"{label} at frame {f}" + (f" ({pictures})" if pictures else "")
+        placed.append(dict(t=round(f / fps, 3), part=cue["role"], kind=partner["kind"], why=why,
+                           **({"picture_event": partner} if bindings is not None else {}),
                            layers=[[sid, db, 1]], voice_db=round(ref, 1), peak_db=round(peak+db, 1)))
     return sounds, dict(placed=placed, body=[], ticks=[], gestures=len(sounds), sounds=len(sounds),
-                        allow=2, allow_ticks=0, dropped=[], placement="director")
+                        allow=2, allow_ticks=0, dropped=[], placement="director",
+                        **({"picture_bindings": bindings} if bindings is not None else {}))
 
 
 def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=None, turn_s=None, bed=None, own_tiers=False, level_source=None):
@@ -2348,6 +2421,8 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
             return VOICE_LUFS
         lv = 20 * math.log10(float(np.sqrt((seg ** 2).mean())) + 1e-9) + 3.0 - 0.691 + shift
         return max(min(lv + NO_VOICE_LIFT, VOICE_LUFS + 6), VOICE_LUFS - 10)
+    if "story_cues" in l1 and l1.get("picture_bound_sound"):
+        return story_accents(l1["story_cues"], [], voice, fps, story_partners(l1))
     events = l1_events(l1, _kshots(perc, index))
     screen = SCR.on(supply)
     if screen:                               # how each picture arrives: its travel, speed, slam, a photograph, a page

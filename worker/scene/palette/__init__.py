@@ -670,6 +670,7 @@ def apply(l1, work, asks=None, pool=None):
     stamp_ranges(cur)            # each clip's checked slice, kept on its asset before any device carves its shots away
     sense = Sense(cur, work, pool=pool)
     log, events, made, seats = [], [], set(), []
+    picture_events = []
 
     from ..alien import ORDER as ALIEN_ORDER
 
@@ -757,6 +758,14 @@ def apply(l1, work, asks=None, pool=None):
         sense.lum += [int(f) for f in patch.get("lum") or []]
         for e in patch.get("events") or []:
             events.append(dict(e, dev=dev, id=ask["id"]))
+        if l1.get("picture_bound_sound") and not tried:
+            for event in list(patch.get("events") or []) + list(patch.get("marks") or []):
+                if not isinstance(event, dict) or not isinstance(event.get("f"), int):
+                    continue
+                frame = event["f"]
+                placed = [it["id"] for it in patch.get("items") or [] if it["f"][0] <= frame < it["f"][1]]
+                if placed:
+                    picture_events.append(dict(event, items=placed, beat=row["beat"], id=row["id"], dev=dev, asked=asked))
         log.append(dict(row, done=True, landed=dev, fallback=bool(tried), tried=tried, log=patch.get("log"),
                         marks=patch.get("marks") or [], seat=patch.get("seat"), **({"replaced": sorted(echoes)} if echoes else {})))
     cur, trimmed = behind_on_take(cur)
@@ -781,6 +790,14 @@ def apply(l1, work, asks=None, pool=None):
             for row in log if row.get("done")
             for m in row.get("marks", []) if isinstance(m.get("f"), int)
         ]
+    if l1.get("picture_bound_sound"):
+        items = {it["id"]: it for it in cur["items"]}
+        cur["composed_events"] = []
+        for event in picture_events:
+            frame = event["f"]
+            visible = [i for i in event["items"] if i in items and items[i]["f"][0] <= frame < items[i]["f"][1]]
+            if visible:
+                cur["composed_events"].append(dict(event, items=visible))
     cur["device_events"] = sorted(events, key=lambda e: (int(e.get("f", 0)), str(e.get("id"))))
     cur["device_log"] = log
     return cur, log

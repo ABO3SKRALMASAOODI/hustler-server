@@ -405,3 +405,41 @@ def test_settle_moves_the_whole_authored_frame(tmp_path):
     moved, = result["items"]
     assert moved["crop"] == card["crop"] and moved["src"] == card["src"]
     assert min(moved["s"]) == .9 and max(moved["s"]) == moved["s"][-1] == 1.
+
+
+def _m09_score(tmp_path, monkeypatch, substituted):
+    # The slice still fires even when the base layer underneath it falls back to
+    # the host. The same timing and event kind were sufficient on the old path.
+    frame = 349 if substituted else 347
+    items = [dict(k="shot", id="out", f=[0,frame], pic="explorer" if substituted else "main"),
+             dict(k="shot", id="in", f=[frame,390], pic="chassis" if substituted else "main")]
+    cue = dict(f=347, beat=4, role="contrast", sound="impact", why="The Explorer gives way to its underbody",
+               partner=dict(device="slice", before="explorer", after="chassis"))
+    from scene import palette
+    scene, log = palette.apply(dict(film(items,dur=390), picture_bound_sound=True, story_cues=[cue]),
+                               str(tmp_path), asks=[dict(id="dr5", beat=4, dev="slice", f=frame, shift=136)])
+    assert log[0]["landed"] == "slice"
+    source = tmp_path/"voice"
+    source.touch()
+    voice = .1 * np.sin(np.arange(13 * sound.AR) * 2*np.pi*1000/sound.AR)
+    monkeypatch.setattr(sound, "spine_audio", lambda *args: voice[:,None])
+    sid = sound.STORY_SOUNDS["impact"]
+    monkeypatch.setattr(sound, "library", lambda: {sid: dict(file=sid+".flac", hit_s=.12)})
+    monkeypatch.setattr(sound, "_full_band", lambda _: np.tile(voice[:sound.AR//2], 3))
+    return sound.design(scene, src=str(source), index=dict(words=[]), bed=True)
+
+
+def test_m09_failed_picture_substitution_keeps_host_clean(tmp_path, monkeypatch):
+    sounds, report = _m09_score(tmp_path, monkeypatch, False)
+    assert sounds == [] and report["placed"] == []
+
+
+def test_m09_real_picture_substitution_keeps_accent_at_composed_frame(tmp_path, monkeypatch):
+    sounds, report = _m09_score(tmp_path, monkeypatch, True)
+    hit, = sounds
+    partner = dict(f=349, kind="device", id="dr5", device="slice", before="explorer", after="chassis")
+    assert hit["picture_event"]["items"]
+    partner["items"] = hit["picture_event"]["items"]
+    assert hit["event_f"] == 349 and hit["picture_event"] == partner
+    assert abs(hit["start_s"] + hit["peak_s"] - 349/30) < .0002
+    assert report["placed"][0]["picture_event"] == partner
