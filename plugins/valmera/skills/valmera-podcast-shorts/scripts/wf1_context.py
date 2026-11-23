@@ -7,7 +7,7 @@ import os
 def direct(coverage,work,llm):
     """Resolve the speaker's referents before spending downloads on generic substitutes."""
     import wf1_coverage
-    key=hashlib.sha256(json.dumps([1,coverage],sort_keys=True).encode()).hexdigest()[:16]
+    key=hashlib.sha256(json.dumps([2,coverage],sort_keys=True).encode()).hexdigest()[:16]
     os.makedirs(work,exist_ok=True);path=os.path.join(work,'direction-'+key+'.json')
     if os.path.exists(path):
         record=json.load(open(path))
@@ -30,7 +30,7 @@ def research(coverage,work,llm):
         # The script stage's resolved referents (script.named): 'Alex' starts as Alexandr Wang, the livestream
         # event is a subject from the start. Research confirms and sources them; it never discards them unread.
         data['resolved_referents']=coverage['named']
-    key=hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()[:16]
+    key=hashlib.sha256(json.dumps([2,data],sort_keys=True).encode()).hexdigest()[:16]
     os.makedirs(work,exist_ok=True);path=os.path.join(work,key+'.json')
     if os.path.exists(path):return json.load(open(path))
     llm.openai_key()
@@ -49,7 +49,10 @@ institutional records and contemporaneous product announcements are appropriate 
 Do not assume an unnamed project is unknowable before researching the speaker's own account.
 Do not assume a recent scientific result is hypothetical just because it is absent from model memory.
 Search the concrete numbers and technical terms together. Distinguish what a source actually supports
-from inference. Preserve uncertainty, dates and the distinction between a later depiction and the
+from inference. For the factual typography, identify which event each date belongs to (including
+launch and later outcome), the units and endpoints of actual changes, fixed amounts and who
+estimates a value. Give each finding in the supporting source's own supports field.
+Preserve uncertainty, dates and the distinction between a later depiction and the
 historical event. Do not fabricate identities, documents or footage. A document or original product
 can depict its subject without proving every emotional or economic claim made in the speech.
 Include useful primary article pages even when they are HTML: the next stage follows their paper,

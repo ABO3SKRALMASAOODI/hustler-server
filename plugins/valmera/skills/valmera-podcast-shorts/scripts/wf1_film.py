@@ -131,7 +131,7 @@ def ink_by_ground(items, voices, bright):
     voices.setdefault("capd", dict(voices["cap"], shadow={"a": 0.0, "blur": 0.0}))
     out = []
     for it in items:
-        if it.get("k") != "word" or it.get("role") not in ("cap", "big"):
+        if it.get("k") != "word" or it.get("role") not in ("cap", "big") or it.get("fact_type"):
             out.append(it)
             continue
         a, b = it["f"]
@@ -1209,13 +1209,13 @@ def build(script, sup, style_id, direction=None):
     def cased(t):
         return t.upper() if st["upper"] else t
 
-    def land(a, b, text, vk, y, ink, delay=0, stroke="#0B0A09", on=None):
+    def land(a, b, text, vk, y, ink, delay=0, stroke="#0B0A09", on=None, **attrs):
         n = b - a
         kk = min(int(bake.BOUNCE["n"]), n)
         ys = [r4(y + float(q)) for q in bake.bounce(kk, rest=0.0)] + [r4(y)] * (n - kk)
         bl = [round(float(q), 3) for q in bake.bounce_blur(kk)] + [0.0] * (n - kk)
         P.word([a + delay, b], text, vk, 0.5, ys[delay:] if delay else ys, ink, [min(1.0, (q + 1) / 2) for q in range(n - delay)],
-               align="c", z=8, blur=bl[delay:] if delay else bl, role="big", stroke=dict(w=3.0, c=stroke), on=a if on is None else on)
+               align="c", z=8, blur=bl[delay:] if delay else bl, role="big", stroke=dict(w=3.0, c=stroke), on=a if on is None else on, **attrs)
 
     def ground_at(f, y0, y1):
         """The tone (0..1) of the picture up at frame f, under the band y0-y1 of the frame."""
@@ -1234,6 +1234,33 @@ def build(script, sup, style_id, direction=None):
     # never loses its display words to timing. A long phrase is stacked (display_rows), never skipped for its length.
     omit = []
     devices = []                                         # the palette's asks: rows whose type performs (laid at the render, chain.alien_bank)
+    # Authored facts stand for the selected clause. The interview's captions keep their own word clock.
+    import wf1_display
+    fact_pages = []
+    for page in d.get("display_facts") or []:
+        a = word_frame(page["first"])
+        b = min(f_end, Clock.f(clock.words[page["last"]]["t1"]))
+        next_word = word_frame(page["last"] + 1)
+        if next_word is not None:
+            b = min(b, next_word)
+        if b <= a:
+            continue
+        rows = wf1_display.typeset(page["facts"], P.R, DISPLAY_W * W, cased)
+        y = cap_y - .075
+        seats = []
+        for k in reversed(range(len(rows))):
+            line, px, emphasis = rows[k]
+            vk = f"dsp_fact{a}_{k}"
+            P.voices[vk] = dict(P.voices["dsp"], px=px)
+            seats.append((line, vk, y, emphasis))
+            y -= (P.R.cap(vk) + 18) / H
+        # The final seat can be on the dark page beside a bright paper. Measure contrast there at draw time.
+        for line, vk, base, emphasis in reversed(seats):
+            ink = pal["accent"] if emphasis else pal["ink"]
+            land(a, b, line, vk, base, ink, stroke=DARK_INK, contrast_shadow=True, fact_type=True, text_group=f"fact{a}")
+        fact_pages.append(dict(page, f=[a, b]))
+        P.events.append(a)
+
     proposed = d.get("display") or []
     for row in proposed:
         if len(shown) >= DISPLAY_MOST:
@@ -1257,6 +1284,8 @@ def build(script, sup, style_id, direction=None):
         if next_subject:
             b = min(b,min(next_subject))
         if b - a < 14:
+            continue
+        if any(a < page["f"][1] and page["f"][0] < b for page in fact_pages):
             continue
         role = row.get("role") or "hook"
         if role == "name" and not row.get("perform"):
@@ -1426,6 +1455,7 @@ def build(script, sup, style_id, direction=None):
                                | {e["f"] for e in dev_events if 0 <= e["f"] < f_end}),
                  device_events=dev_events,
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=7, display=[dict(f=[a, b], text=t) for a, b, t in shown],
+                 display_facts=fact_pages,
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t, pic=pic) for a, b, t, pic in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=(sorted(set(layouts_used)) if dr and len(set(layouts_used)) > 1 else (layouts_used[0] if dr and layouts_used else st["layout"])), placement_check=placement_report, coverage=coverage_report,

@@ -671,7 +671,9 @@ def direction_of(ctx, script, pack):
     take = pack.get("take") or {}
     llm = _llm()
     from placement_check import file_digest
-    intent = hashlib.sha256(json.dumps([DR.CONTRACT,rows,stress,st,script.get("title"),script.get("direction"),
+    import wf1_display
+    editorial = dict(writing=wf1_display.WRITING, material=wf1_display.editorial(ctx, script, pack))
+    intent = hashlib.sha256(json.dumps([DR.CONTRACT,editorial,rows,stress,st,script.get("title"),script.get("direction"),
                                          script.get("hook_line"),script.get("close_line"),take.get("cuts")],
                                         sort_keys=True).encode()).hexdigest()
     choice_path = os.path.join(ctx.supply, "direction_dependencies.json")
@@ -679,7 +681,9 @@ def direction_of(ctx, script, pack):
         with open(choice_path) as f:
             prior = json.load(f)
         available = set(ids.values())
-        if prior["intent"] == intent and all(path in available and os.path.isfile(path) and file_digest(path)==sha
+        writer_record = shell.jload(os.path.join(ctx.supply, "director.json"), {})
+        same_score = writer_record.get("key") == prior["direction"].get("key") and writer_record.get("contract") == DR.CONTRACT
+        if same_score and prior["intent"] == intent and all(path in available and os.path.isfile(path) and file_digest(path)==sha
                                              for path,sha in prior["assets"].items()):
             return prior["direction"]
     d = DR.direct(ctx.supply, [dict(i=int(ln["i"]), text=ln["text"]) for ln in pack.get("lines") or []], rows, stress, pics,
@@ -688,7 +692,8 @@ def direction_of(ctx, script, pack):
                   style=dict(name=st.get("name"), accent=st.get("accent"), font=(st.get("dsp") or {}).get("font"),
                              upper=st.get("upper")) if st else None,
                   workflow="podcast short", dur_s=dur, title=(script or {}).get("title"), hook=(script or {}).get("hook_line"),
-                  payoff=(script or {}).get("close_line"), ask=llm.ask, log=getattr(ctx, "log", None))
+                  payoff=(script or {}).get("close_line"), editorial=editorial, ask=llm.ask, log=getattr(ctx, "log", None))
+    d = wf1_display.bind(d, editorial["material"], rows)
     d["pictures"] = ids
     if d.get("by") == "model":
         refs = {pid for ask in d.get("asks", []) for pid in ask.get("pics", [])}
@@ -1088,7 +1093,7 @@ def descend(ctx, script, pack, missing):
 
 def film_direction(d):
     """Carry the Director's authored fields into the picture and sound composers."""
-    knobs = {k: d.get(k) for k in ("display", "past_segs", "turn_seg", "story_turn_seg", "arc")}
+    knobs = {k: d.get(k) for k in ("display", "display_facts", "past_segs", "turn_seg", "story_turn_seg", "arc")}
     if d.get("beats") or d.get("sections") or d.get("asks"):
         knobs["director"] = {k: d.get(k) for k in ("beats", "sections", "asks", "arc", "pictures", "by", "seed")}
     return knobs
@@ -1664,7 +1669,7 @@ def check(ctx, rd, sc):
         style=b.get("style"), layout=b.get("layout"), cutaway_share=b.get("cutaway_share"), finishes=b.get("finishes"), alien=b.get("alien"),
         pictures=len(pics), clips=len([p for p in pics if p.get("kind") == "clip"]), photographs=len([p for p in pics if p.get("kind") == "photo"]),
         new_pictures_10s=round(len(pics) / secs * 10, 2), display_words=[x.get("text") for x in b.get("display") or []],
-        placement_check=b.get("placement_check"), rendered_check=b.get("rendered_check"), render_reviews=rd.get("picture_review"),
+        display_facts=b.get("display_facts", []), placement_check=b.get("placement_check"), rendered_check=b.get("rendered_check"), render_reviews=rd.get("picture_review"),
         delivered_check=b.get("delivered_check"), delivery_reviews=history,
         sources=[dict(f=p.get("f"), visible_f=p.get("visible_f"), kind=p.get("kind"), name=p.get("name"), source=p.get("source"), time_range=p.get("time_range"),
                       mode=p.get("mode"), window=p.get("window"), w=p.get("w"), h=p.get("h"), rung=p.get("rung"), how=p.get("how"),

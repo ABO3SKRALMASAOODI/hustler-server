@@ -53,8 +53,8 @@ PRINCIPLES = """How the best vertical edits keep a stranger watching (principles
   Nothing on screen then says what he does not say: no number, counter or title he does not say, one piece of display
   type at a time, and no picture that carries another editor's own words or logo fighting the captions.
 - The name lands second (3-10 s), in two sizes.
-- A figure he says performs: it counts, stacks or lands with a hit on the word that says it; a counter counts only to
-  the figure he says, in his units. Never a figure he does not say.
+- A fixed figure lands whole on its word. Count between two sourced endpoints when the passage describes that change.
+  Keep the unit, relation and any qualification together with the figure.
 - Every turn changes something you can see: the surface, the polarity, the pace, or a type card.
 - Lists burst: one picture or one hit per item, fast, for as long as the list is said (about a second), then it lands.
 - The pace alternates fast against hold: some 3 s windows carry one cut, others six to ten. Shots of 1-2 frames are
@@ -694,7 +694,7 @@ def stress_words(words, stress_t, top=0.0):
 
 
 def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, style=None, workflow="podcast", dur_s=None,
-           title=None, hook=None, payoff=None, seed=0, recent=None, ask=None, effort="high", cache_name="director.json", log=None):
+           title=None, hook=None, payoff=None, seed=0, recent=None, ask=None, effort="high", cache_name="director.json", log=None, editorial=None):
     """The film's per-moment device score (DIRECTOR_CONTRACT 4), cached at supply/<cache_name>.
 
     sentences  [{"i", "text"}]; word_rows [{"w", "t0", "t1", "seg"}] in order (the film's own clock, seconds);
@@ -719,7 +719,7 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
     # a short whose lines were scored again never reads an answer that addresses words it no longer has
     key = hashlib.sha1(json.dumps([CONTRACT, words_sheet(sents, hot),
                                    [{k: p.get(k) for k in ("id", "path", "label", "kind", "rounds", "faces", "seg")} for p in pictures],
-                                   take, hashlib.sha1(open(cs, "rb").read()).hexdigest() if cs else None],
+                                   take, editorial, hashlib.sha1(open(cs, "rb").read()).hexdigest() if cs else None],
                                   sort_keys=True, default=str).encode()).hexdigest()[:16]
     prior = None
     if os.path.exists(path):
@@ -740,6 +740,8 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
             recent = []
     menu, names = palette_menu()
     sheet = moment_sheet(sents, hot, pictures, take, style, workflow, dur, recent, title, hook, payoff, can)
+    if editorial:
+        sheet += "\n\n" + editorial["writing"] + "\n" + json.dumps(editorial["material"], ensure_ascii=False)
     content = [{"type": "text", "text": sheet + "\n\n# The palette (one card a device: its fields with their units, then what it does and the moment it amplifies)\n" + menu}]
     if cs:
         content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
@@ -770,7 +772,7 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
                 missing = [i for i, row in enumerate(d.get("asks", [])) if isinstance(row, dict)
                            and row.get("dev") == "counter"
                            and any((row.get("args") or {}).get(k) is None for k in ("from", "to"))]
-                if missing and attempt == 0:
+                if missing and attempt == 0 and not editorial:
                     msg = content + [{"type": "text", "text": "Complete your score again. Counter asks "
                                       + str(missing) + " need numeric from and to from the actual passage. "
                                       "If there is no spoken number, choose a meaningful word device on that same beat."}]
