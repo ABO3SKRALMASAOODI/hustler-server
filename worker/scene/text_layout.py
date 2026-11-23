@@ -8,7 +8,7 @@ import numpy as np
 
 from .palette.kit import MARK, backplate_box, item_box, metrics
 from .motion import Cam
-from .plan import A
+from .plan import A, AR
 from .runtime import plane_hom
 
 
@@ -390,3 +390,27 @@ def resolve(scene, speaker_layout=None):
                         else 0.5 + (n + pivot[coord] - 0.5) * scale - pivot[coord] + A(g.get(offset, 0), f, origin)
                     )
                 layer[key] = values[0] if min(values) == max(values) else values
+
+    # Keep etched footage recognizable and its overlapping titles legible. Bound the
+    # line treatment to an open band between the final text and cited source regions.
+    for effect in scene["items"]:
+        if effect.get("k") != "flash" or effect.get("mode") != "line":
+            continue
+        lo, hi = effect["f"]
+        curves = []
+        for f in range(lo, hi):
+            left, top, right, bottom = AR(effect.get("rect"), f, lo) or [0.,0.,1.,1.]
+            exclusions = list(fixed.get(f, []))
+            exclusions += [frame_box(layer, f) for layer in active.get(f, [])]
+            intervals = sorted((max(top,t-.015), min(bottom,b+.015)) for l,t,r,b in exclusions
+                               if left < r and l < right and top < b+.015 and t-.015 < bottom)
+            gaps, start = [], top
+            for t,b in intervals:
+                if start < t:
+                    gaps.append((start,t))
+                start = max(start,b)
+            gaps.append((start,bottom))
+            t,b = max(gaps, key=lambda span: span[1]-span[0])
+            curves.append([left,t,right,b])
+        if curves:
+            effect["rect"] = curves[0] if all(c==curves[0] for c in curves) else curves

@@ -36,7 +36,10 @@ RANK_SYSTEM = """You choose which videos a footage researcher should open. For e
 The actual subject identity is binding. Suggested example papers, films or angles in must_show are an editorial wish list, not an exclusive source whitelist. Do not reject another authentic original demonstration of the same category and era merely because it was not among those examples. Specific named people, systems and events still need that exact identity. Numerical edit quotas and earlier acquisition failures are not visual facts.
 
 Read the spoken clauses alongside the visual brief. Rank sources by their connection to
-the particular event or artifact in those clauses. A channel interviewing an investor identifies
+the particular event or artifact in those clauses. For one demonstration of a capability,
+rank the primary source most likely to show the specific action and its visible result; leave
+equivalent publisher demos in the search results. Keep sources showing different physical
+steps, scales, or other distinct evidence that advances the spoken account. A channel interviewing an investor identifies
 its guest. A first-party deal announcement can document a completed round. Return the sources that
 support the specific claim or directly illustrate it; a subject can have an empty result.
 
@@ -95,7 +98,7 @@ def plan(lines, named, about="", budget_s=90.0):
             lns.append(dict(i=ln["i"], show=str(ln.get("show") or ""), subjects=[x for x in ln.get("subjects") or [] if x in names]))
     assigned = {row["i"]: row["subjects"] for row in lns}
     for subject in subs:
-        claims = [dict(words=line["say"], depiction=line["visual"]) for line in lines
+        claims = [dict(words=line["say"], depiction=line["visual"], **({"single_action":True} if line.get("single_action") else {})) for line in lines
                   if line.get("visual") and (subject["name"] in assigned.get(line["i"], [])
                                              or subject["name"] in (line.get("pictures") or []))]
         if claims:
@@ -111,6 +114,7 @@ def rank(subjects, hits, per=3, budget_s=60.0):
                 f"{h.get('views') or '?'} views | {h['where']}" for hi, h in enumerate(hits.get(si) or [])]
         if rows:
             clauses = "".join(f"\n  Spoken: {claim['words']} | Depiction: {claim['depiction']}"
+                              + (" (one continuous action)" if claim.get("single_action") else "")
                               for claim in s.get("claims", []))
             blocks.append(f"Subject {si}: {s['name']} (must show: {s['must_show']}){clauses}\n" + "\n".join(rows))
     if not blocks:

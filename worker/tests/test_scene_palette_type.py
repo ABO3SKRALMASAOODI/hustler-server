@@ -729,3 +729,23 @@ def test_documentary_name_without_identity_keeps_the_words_in_the_caption(tmp_pa
     assert log[0]["done"]
     assert not any(it["k"] == "word" for it in mine(out, "campus"))
     assert out["said"] == scene["said"]
+
+
+def test_line_treatment_leaves_the_verified_source_label_and_title_clear(tmp_path):
+    from scene import text_layout
+    from scene.plan import AR
+    from scene.palette.kit import item_box
+    scene = film(tmp_path)
+    title = dict(k="word",id="network",f=[12,22],role="big",t="NETWORKING",v="dsp",
+                 x=.5,y=.12,align="c",ink="#ffffff")
+    source = dict(k="card",id="aisle",pic="plate",f=[12,22],x=.5,y=.5,w=1.,h=.4,
+                  source_ink=[[0.,.62,1.,.68]])
+    effect = dict(k="flash",id="ink",f=[12,22],mode="line",a=1.)
+    scene["items"] += [title, source, effect]
+    text_layout.resolve(scene)
+    for f in range(*title["f"]):
+        rect = AR(effect.get("rect"),f,12) or [0,0,1,1]
+        box = item_box(title,scene["voices"],*scene["frame"],f)
+        assert rect[3]<=box[1] or rect[1]>=box[3]
+        assert rect[3]<=.62 or rect[1]>=.68
+        assert rect[3]-rect[1]>.1

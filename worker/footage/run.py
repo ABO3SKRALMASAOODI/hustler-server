@@ -306,7 +306,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             need = [dict(ln, show=(shows.get(ln["i"]) or {}).get("show")) for ln in lines
                     if sub["name"] in ((shows.get(ln["i"]) or {}).get("subjects") or []) or sub["name"] in (ln.get("pictures") or [])] or \
                    [dict(ln, show=(shows.get(ln["i"]) or {}).get("show")) for ln in lines]
-            local = [dict(title=s["title"], channel=s.get("channel"), transcript=s.get("transcript")) for s in mine]
+            local = [dict(url=s["url"], title=s["title"], channel=s.get("channel"), transcript=s.get("transcript")) for s in mine]
             try:
                 ms, mu = look.moments(sub, need, local)
             except Exception as e:  # noqa: BLE001 no reading: the shots alone
@@ -327,7 +327,21 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 for t, jpg in sorted(fr.items()):
                     cands.append(dict(src=k, t=t, jpg=jpg, said=look.said_at(s.get("transcript"), t), source=s["key"]))
             try:
-                checked, lu = look.check(sub, need, cands, local, work)
+                if len(need) == 1 and need[0].get("single_action") and ms:
+                    # First look at the actual action the transcript reader located. Broaden
+                    # to the rest of the scout if that sheet cannot clearly show the clause.
+                    def proximity(c):
+                        return min((abs(c["t"]-m["t"]) for m in ms if m["src"] == c["src"]), default=float("inf"))
+                    ordered = sorted(cands, key=proximity)
+                    n = look.BRIEF_PER_SHEET
+                    checked, lu = look.check(sub, need, ordered[:n], local, work)
+                    if len(ordered) > n and not any(c["clean"] and c["ok"] and c["grade"] >= 4
+                                                    and need[0]["i"] in c["lines"] for c in checked):
+                        extra, cost = look.check(sub, need, ordered[n:], local, work)
+                        checked += extra
+                        lu += cost
+                else:
+                    checked, lu = look.check(sub, need, cands, local, work)
             except Exception as e:  # noqa: BLE001 unchecked is never cut
                 checked, lu = [], 0.0
                 log(f"look for {sub['name']} failed: {str(e)[:120]}")
@@ -345,7 +359,8 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             if sp.startswith("sheet_"):
                 shutil.copyfile(os.path.join(work, sp), os.path.join(out_dir, "sheets", sp))
         good = [c for c in pool_frames if c["ok"] and c["clean"] and c["grade"] >= 3]
-        log(f"look: {len(pool_frames)} frames checked, {len(good)} pass")
+        reused = sum(bool(c.get("look_reused")) for c in pool_frames)
+        log(f"look: {len(pool_frames)-reused} frames checked, {reused} reused, {len(good)} pass")
         look.dump([{k: v for k, v in c.items() if k not in ("jpg",)} for c in pool_frames], os.path.join(out_dir, "looked.json"))
         # 6. assign clips to lines: the best frame for each slot, its window inside its shot never
         #    overlapping a window already cut (a long interview take can carry several lines)
@@ -557,7 +572,8 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                    **({"voices_tried": voices_tried} if voices_tried is not None else {}),
                    **({"voices_pending": voice.PENDING} if os.path.exists(os.path.join(out_dir, voice.PENDING)) else {}),
                    counts=dict(lines=len(out_lines), lines_with_footage=sum(1 for r in out_lines if r["clips"]),
-                               clips=sum(len(r["clips"]) for r in out_lines), frames_checked=len(pool_frames), frames_passed=len(good),
+                               clips=sum(len(r["clips"]) for r in out_lines), frames_checked=len(pool_frames)-reused,
+                               frames_reused=reused, frames_passed=len(good),
                                sources_opened=len(live), sources_tried=len(sources)),
                    credits=[dict(line=r["i"], url=c["source"]["url"], channel=c["source"]["channel"], title=c["source"]["title"],
                                  time_range=c["time_range"]) for r in out_lines for c in r["clips"]]
@@ -670,6 +686,8 @@ def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict
     for ln in lines:
         dur = _line_dur(ln)
         n, win_s = line_shots(dur, shot_s, line_max)
+        if ln.get("single_action") is True:
+            n, win_s = 1, dur
         if ln.get("want_n"):
             n = min(n, int(ln["want_n"]))
         names = set((shows.get(ln["i"]) or {}).get("subjects") or []) | set(ln.get("pictures") or [])
@@ -688,7 +706,7 @@ def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict
             if shot[1] - shot[0] < min_len:
                 continue
             mo = ((motion_of or {}).get(c["source"]) or {}).get(tuple(shot)) if motion_of is not None else None
-            w = cut.window(shot, c["t"], win_s, peak=(mo or {}).get("peak")) if mo else cut.window(shot, c["t"], win_s)
+            w = cut.window(shot, c["t"], win_s, peak=(mo or {}).get("peak")) if mo and not ln.get("single_action") else cut.window(shot, c["t"], win_s)
             if any(w[0] < b + 0.3 and a < w[1] + 0.3 for a, b in taken.get(c["source"], [])):
                 continue
             if ln["i"] in c["lines"]:
@@ -709,6 +727,8 @@ def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict
                 score -= 2.0            # the same take twice in one line reads as one picture held
             score -= 0.8 * shot_uses.get((c["source"], shot[0]), 0)
             key = (1 if (mo or {}).get("p90", 0.0) >= motion.FLOOR else 0, score) if motion_of is not None else score
+            if ln.get("single_action") is True:
+                key = (score, min(win_s, w[1]-w[0]), (mo or {}).get("p90", 0.))
             if best_score is None or key > best_score:
                 best = dict(c, shot=shot, window=w, **({"motion_p90": round(float(mo["p90"]), 3)} if mo else {}))
                 best_score = key
@@ -748,7 +768,7 @@ def lines_of(script):
     out = []
     for k, s in enumerate(sc.get("segments") or []):
         ln = dict(i=int(s.get("i", k)), say=s.get("say"), pictures=s.get("pictures") or [], dur=s.get("dur"), pause_after=s.get("pause_after"))
-        for key in ("see", "era", "beat", "visual"):  # the writer's picture brief, when the script carries one
+        for key in ("see", "era", "beat", "visual", "single_action"):  # the writer's picture brief, when the script carries one
             if s.get(key) is not None:
                 ln[key] = s[key]
         out.append(ln)

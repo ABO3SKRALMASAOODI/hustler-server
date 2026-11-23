@@ -660,3 +660,37 @@ def test_plan_reads_the_retained_demo_for_a_competitive_comparison(monkeypatch):
     got, _ = plan.plan([dict(i=4, say="They compete with Excel", visual="The spreadsheet demo", pictures=["Claude Sheets"])],
                        [dict(name="Claude Sheets", video_sources=[demo])])
     assert [s["name"] for s in got["subjects"]] == ["Claude Sheets"]
+
+
+def test_demonstration_stays_on_the_best_checked_action_and_physical_examples_stay_distinct():
+    from footage import run
+    lines, _, _ = run.lines_of(dict(segments=[
+        dict(say="writing code",dur=3.7,visual="agent edits file",single_action=True),
+        dict(say="building the cluster",dur=4,visual="install racks and connect cables")]))
+    sources = {k:dict(shots=[(0.,12.)]) for k in ["agent","cursor","rack","cable"]}
+    good = [_good(k,5.,[0 if i<2 else 1],grade=g)
+            for i,(k,g) in enumerate([("cursor",3),("agent",5),("rack",5),("cable",5)])]
+    motion = {k:{(0.,12.):dict(p90=4 if k=="cursor" else 1,peak=10.)} for k in sources}
+    picks = run.assign(lines,good,sources,{}, {}, shot_s=1.15, strict=True, motion_of=motion)
+    assert [(p["source"],p["window"]) for p in picks[0]["picks"]] == [("agent",(3.5,6.5))]
+    assert {p["source"] for p in picks[1]["picks"]} == {"rack","cable"}
+
+
+def test_scout_reuses_identical_checked_pixels_only_on_the_same_brief(monkeypatch,tmp_path):
+    import json
+    from PIL import Image
+    jpg = tmp_path/"frame.jpg"
+    Image.new("RGB",(32,18)).save(jpg)
+    calls = []
+    def answer(*args,**kw):
+        calls.append(1)
+        return json.dumps(dict(cells=[dict(n=1,ok=True,grade=5,clean=True,lines=[0])])),0.
+    monkeypatch.setattr(look.ask,"ask",answer)
+    monkeypatch.setenv("FOOTAGE_KEEP_SOURCES",str(tmp_path/"originals"))
+    subject = dict(name="Coding",must_show="editing")
+    cell = dict(src=0,t=2.,jpg=str(jpg),said="file")
+    source = [dict(url="original",title="Demo",channel="Publisher")]
+    def read(words):
+        return look.check(subject,[dict(i=0,say=words)],[cell],source,str(tmp_path))[0][0]
+    assert read("edit")["ok"] and read("edit")["look_reused"]
+    assert read("test")["ok"] and len(calls)==2

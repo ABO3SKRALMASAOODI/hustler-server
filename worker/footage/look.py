@@ -1,7 +1,10 @@
 """Finding the moments: a model reads each source's transcript for where it speaks of a line's thing,
 then a vision check (gpt-6-sol, low) looks at numbered frames from those moments and from the source's
 shots and keeps only what plainly shows what the line says."""
+import hashlib
 import json
+from pathlib import Path
+import tempfile
 import os
 
 from PIL import Image, ImageDraw, ImageFont
@@ -190,6 +193,58 @@ def sheet(cells, path, cell=(CELL_W, CELL_H)):
 
 
 def check(subject, lines, cands, sources, work, budget_s=120.0):
+    """Reuse the exact reader decision across supply passes. Different clauses still get a reading."""
+    keep = os.environ.get("FOOTAGE_KEEP_SOURCES")
+    if not keep:
+        return _check(subject, lines, cands, sources, work, budget_s)
+    folder = Path(keep) / "looks"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return _check(subject, lines, cands, sources, work, budget_s)
+    brief = [LOOK_SYSTEM, LOOK_BRIEF, os.environ.get("FOOTAGE_LOOK_ITSELF"), LOOK_ITSELF,
+             subject["name"], subject["must_show"], _listing(lines)]
+    saved, pending, keys, sheets = {}, {}, [], {}
+    for c in cands:
+        src = sources[c["src"]]
+        identity = [brief, src.get("url"), src["title"], src.get("channel"), c["t"], c.get("said")]
+        key = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode() + Path(c["jpg"]).read_bytes()).hexdigest()
+        keys.append(key)
+        if key not in saved and key not in pending:
+            try:
+                verdict = json.loads((folder / key).read_text())
+                if not isinstance(verdict, dict) or not verdict.get("answered"):
+                    raise ValueError("incomplete cached look")
+                saved[key] = verdict
+            except (OSError, ValueError):
+                pending[key] = c
+    cost = 0.
+    if pending:
+        fresh, cost = _check(subject, lines, list(pending.values()), sources, work, budget_s)
+        for key, row in zip(pending, fresh):
+            verdict = {k:v for k,v in row.items() if k not in pending[key] and k != "sheet"}
+            saved[key] = verdict
+            if row.get("sheet"):
+                sheets[key] = row["sheet"]
+            if row.get("answered"):
+                try:
+                    with tempfile.NamedTemporaryFile("w", dir=folder, delete=False) as tmp:
+                        json.dump(verdict, tmp)
+                    os.replace(tmp.name, folder / key)
+                except OSError:
+                    pass  # The current call still has its verified result.
+    result, new = [], set(pending)
+    for candidate, key in zip(cands, keys):
+        if key in saved:
+            row = dict(candidate, **saved[key], look_reused=key not in new)
+            if key in sheets:
+                row["sheet"] = sheets[key]
+            result.append(row)
+            new.discard(key)
+    return result, cost
+
+
+def _check(subject, lines, cands, sources, work, budget_s=120.0):
     """cands: [{src, t, jpg, said}] -> (the same with ok, clean, grade, lines, shows, x; usd).
     Lines carrying a writer's brief (see or visual): the listing names each
     line's brief, the model also answers per line it gives a cell (version_ok, time_ok, exact_thing, LOOK_BRIEF), a
@@ -212,8 +267,10 @@ def check(subject, lines, cands, sources, work, budget_s=120.0):
         g, images, first = [], [], 0
         for k, cells in enumerate(groups[gi]):
             si = gi * SHEETS_PER_CALL + k
+            samples = [(c["src"], c["t"]) for c in cells]
+            sheet_id = hashlib.sha256(str(samples).encode()).hexdigest()[:10]
             sp = sheet([(first + j + 1, c["jpg"]) for j, c in enumerate(cells)],
-                       os.path.join(work, f"sheet_{_slug(subject['name'])}_{si}.jpg"),
+                       os.path.join(work, f"sheet_{_slug(subject['name'])}_{si}_{sheet_id}.jpg"),
                        **({"cell": (BRIEF_CELL_W, BRIEF_CELL_H)} if brief or contextual else {}))
             g += [dict(c, _sheet=sp) for c in cells]
             images += [{"type": "text", "text": f"Sheet {k + 1}: cells {first + 1} to {first + len(cells)}"}, ask.image_block(sp)]
@@ -252,7 +309,7 @@ def check(subject, lines, cands, sources, work, budget_s=120.0):
                         checks[lc["line"]] = all(lc.get(k) is True for k in ("version_ok", "time_ok", "exact_thing"))
                 extra = dict(lines_offered=got_lines)
                 got_lines = [n for n in got_lines if checks.get(n) is True]
-            out.append(dict(c, ok=v.get("ok") is True, clean=v.get("clean") is not False, trim=[round(t, 3) for t in trim], grade=int(v.get("grade") or 0) if str(v.get("grade") or "0").isdigit() else 0,
+            out.append(dict(c, answered=isinstance(v.get("ok"), bool), ok=v.get("ok") is True, clean=v.get("clean") is not False, trim=[round(t, 3) for t in trim], grade=int(v.get("grade") or 0) if str(v.get("grade") or "0").isdigit() else 0,
                             lines=got_lines, shows=str(v.get("shows") or "")[:80], x=round(x, 3), sheet=os.path.basename(sp), **extra))
         return out, usd
     res, usd = [], 0.0
