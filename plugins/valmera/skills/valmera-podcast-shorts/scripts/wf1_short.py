@@ -179,6 +179,7 @@ def supply(ctx, script):
     if os.path.exists(pk):
         prior = json.load(open(pk))
         current = ((prior['pack'].get('coverage') or {}).get('contract') == wf1_coverage.CONTRACT
+                   and prior['pack']['coverage'].get('story') == wf1_coverage.story_context(script)
                    and prior['pack'].get('alignment_contract')==wf1_alignment.CONTRACT)
         if current and prior['pack'].get('platform_walled'):
             # A wall left this short waiting: the exact sources YouTube refused are fetched again (nothing is searched
@@ -219,7 +220,7 @@ def supply(ctx, script):
     import wf1_source_frame
     frames = wf1_source_frame.samples(src, idx.get("shots"), dur, sup_dir, PX.FF)
     coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm(), named=script.get('named'),
-                                 off_camera=off_camera(cuts, words), frames=frames)
+                                 off_camera=off_camera(cuts, words), frames=frames, story=wf1_coverage.story_context(script))
     coverage['claims'] = script.get('claims') or []
     original = coverage.get('source_reading') or {}
     coverage['windows'] = [w for i,w in enumerate(coverage['windows']) if i not in original.get('replaces',[])]
@@ -239,7 +240,7 @@ def supply(ctx, script):
         research.setdefault(window['name'],[]).append(window['must_show'])
     import wf1_primary_sources
     originals=wf1_primary_sources.retained(sup_dir)
-    fscript = dict(title=footage_title(script.get('title'), who),
+    fscript = dict(title=footage_title(script.get('title'), who, coverage),
                    segments=[dict(say=s['say'], pictures=[s['name']], visual=s['must_show']) for s in windows],
                    named=[dict(name=name,must_show=' '.join(requirements),
                                video_sources=originals.get(name,[]),
@@ -329,14 +330,17 @@ WALL_BACKOFF_S = (120, 300)
 WALL_RESUME_S = (0,)
 
 
-def footage_title(title, who):
+def footage_title(title, who, coverage=None):
     """What the footage engine is told the film is. The current interview take is on screen already, so it is never a
     cutaway; the speaker's own filmed past (a livestream, a keynote, an event he took part in) is archive like any
     other and is wanted when the words tell of it."""
+    story = (coverage or {}).get("story") or {}
+    meaning = story.get("meaning") or story.get("brief")
+    context = f" Story: {meaning}. Acquire only the supplied external windows." if meaning else ""
     return (f"{title}. A podcast clip; its own interview take is on screen already, so never show this conversation; "
             f"show what he talks about as it was then. When he tells of something he did himself (a livestream, a "
             f"keynote, his training, an event he took part in), that filmed moment of him then is archive and is "
-            f"wanted. Who is in it: {who}")
+            f"wanted. Who is in it: {who}{context}")
 
 
 def refused_rows(foot):
@@ -416,7 +420,7 @@ def reopened_footage(ctx, script, pack, opened):
     for n in dict.fromkeys(windows[i]['name'] for i in wanted):
         named.append(dict(name=n, must_show=' '.join(dict.fromkeys(windows[i]['must_show'] for i in wanted if windows[i]['name'] == n)),
                           video_sources=kept.get(n) or every, video_searches=[], **{'is': 'thing'}))
-    fscript = dict(title=footage_title(script.get('title'), str(coverage.get('context') or '')[:400]),
+    fscript = dict(title=footage_title(script.get('title'), str(coverage.get('context') or '')[:400], coverage),
                    segments=[dict(i=i, say=w['say'], pictures=[w['name']], visual=w['must_show']) for i, w in enumerate(windows)],
                    named=named)
     name = (f"footage-v{coverage['contract']}-{FOOTAGE_PIXELS}-reopened-"
@@ -718,6 +722,8 @@ def direction_of(ctx, script, pack):
     d["pictures"] = ids
     if d.get("by") == "model":
         refs = {pid for ask in d.get("asks", []) for pid in ask.get("pics", [])}
+        refs.update(pic for beat in d.get("beats", []) for side in ("before", "after")
+                    if (pic := (beat.get("sound_partner") or {}).get(side)) and pic != "take")
         if not refs.issubset(ids):
             return d
         used = {ids[pid] for pid in refs}
@@ -987,7 +993,7 @@ def refill(ctx, script, pack, shortage):
     prior = [os.path.join(ctx.supply,n,'footage.json') for n in os.listdir(ctx.supply)
              if n.startswith('footage') and os.path.isfile(os.path.join(ctx.supply,n,'footage.json'))]
     subjects = {windows[i]['name']:windows[i]['must_show'] for i in wanted}
-    fscript = dict(title=script['title']+' — supplementary documentary coverage. Prefer original institutional or company films with visible action; avoid influencer promotions and unrelated banners.',
+    fscript = dict(title=footage_title(script['title'], coverage.get('context') or '', coverage)+' — supplementary documentary coverage. Prefer original institutional or company films with visible action; avoid influencer promotions and unrelated banners.',
                    segments=[dict(i=i,say=w['say'],pictures=[w['name']],visual=w['must_show']) for i,w in enumerate(windows)],
                    named=[dict(name=n,must_show=show,video_sources=primary.get(n,[]),video_searches=list(dict.fromkeys(q for w in windows if w['name']==n for q in w.get('video_searches',[]))),**{'is':'thing'}) for n,show in subjects.items()])
     if rescout:name+='-'+hashlib.sha256(json.dumps(fscript,sort_keys=True).encode()).hexdigest()[:12]
@@ -1081,7 +1087,7 @@ def descend(ctx, script, pack, missing):
     subjects = {}
     for i in lower:
         subjects.setdefault(windows[i]['name'], []).append(windows[i]['must_show'])
-    fscript = dict(title=footage_title(script.get('title'), str(pack['coverage'].get('context') or '')[:400]),
+    fscript = dict(title=footage_title(script.get('title'), str(pack['coverage'].get('context') or '')[:400], pack['coverage']),
                    segments=[dict(i=i, say=w['say'], pictures=[w['name']], visual=w['must_show']) for i, w in enumerate(windows)],
                    named=[dict(name=n, must_show=' '.join(dict.fromkeys(shows)), video_sources=[],
                                video_searches=list(dict.fromkeys(q for i in lower if windows[i]['name'] == n for q in windows[i].get('video_searches', []))),
@@ -1131,6 +1137,7 @@ def score(ctx, script):
     import wf1_coverage, wf1_alignment
     pack = wf3.load_pack(ctx)
     if ((pack.get('coverage') or {}).get('contract') != wf1_coverage.CONTRACT
+            or pack['coverage'].get('story') != wf1_coverage.story_context(script)
             or pack.get('alignment_contract')!=wf1_alignment.CONTRACT
             or pack.get('platform_walled')):
         supply(ctx,script)
@@ -1295,7 +1302,7 @@ def _render_review(ctx, rd, sc):
 
 
 def render_revision(sc):
-    files=[sc.get('l1'),sc.get('l1_audio')]
+    files=list(dict.fromkeys([sc.get('l1'),sc.get('l1_audio'),sc.get('composed_l1')]))
     if not files[0]:return None
     digest=hashlib.sha256()
     for path in files:
@@ -1334,6 +1341,51 @@ def invalidate_render(ctx):
         if os.path.exists(path):os.remove(path)
 
 
+def prepare_picture_mix(ctx, sc):
+    """Use the very same composed scene for the programme mix and the picture renderer."""
+    if not sc.get("l1"):
+        return
+    path = sc["l1"]
+    with open(path) as handle:
+        base = json.load(handle)
+    if "story_cues" not in base:
+        return
+    F._engines()
+    from score import sound as sound_engine
+    scene_path = chain.lay_devices(ctx, path)
+    with open(scene_path) as handle:
+        scene = json.load(handle)
+    if scene_path == path and (base.get("devices") or base.get("alien")):
+        # This attempt drew the plain picture. Receipts from the earlier layout
+        # in the score cannot describe it.
+        scene.pop("composed_events", None)
+        scene.pop("device_log", None)
+        scene.pop("device_events", None)
+    scene["picture_bound_sound"] = True
+    bindings = sound_engine.story_partners(scene)
+    report = base.get("sound_design") or {}
+    sounds = base.get("sound") or []
+    if report.get("picture_bindings") != bindings:
+        fresh, revised = F.replan_sound(scene, wf3.load_pack(ctx))
+        if revised.get("fault") and report.get("replan"):
+            revised["replan"] = report["replan"]
+        report = revised
+        sounds = [s for s in sounds if s.get("device")] + fresh
+    # A resumed score can still have an unbound hit in its audio sidecar.
+    sc["beats"]["sound_design"] = report
+    for target in dict.fromkeys([path, scene_path, sc.get("l1_audio")]):
+        if not target:
+            continue
+        with open(target) as handle:
+            doc = json.load(handle)
+        if doc.get("sound") != sounds or doc.get("sound_design") != report:
+            doc.update(sound=sounds, sound_design=report)
+            with open(target+".part","w") as handle:
+                json.dump(doc,handle,ensure_ascii=False)
+            os.replace(target+".part",target)
+    sc["composed_l1"] = scene_path
+
+
 def render(ctx, script, sc):
     """The product repairs rejected placements before branding and music, never a delivered film."""
     history_path = os.path.join(ctx.supply, "render_reviews.json")
@@ -1357,6 +1409,7 @@ def render(ctx, script, sc):
         json.dump(sc,open(os.path.join(ctx.run_dir,'score.json'),'w'),indent=1)
         invalidate_render(ctx)
     while True:
+        prepare_picture_mix(ctx, sc)
         revision=render_revision(sc)
         marker=os.path.join(ctx.supply,'render_revision.json')
         previous=json.load(open(marker)) if os.path.exists(marker) else None

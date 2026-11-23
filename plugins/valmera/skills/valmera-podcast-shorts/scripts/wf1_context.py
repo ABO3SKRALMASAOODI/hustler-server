@@ -65,12 +65,13 @@ def read_quotations(references, work):
 
 def research(coverage,work,llm):
     import writer
-    data=dict(context=coverage.get('context'),words=coverage['words'],
+    data=dict(context=coverage.get('context'),story=coverage.get('story'),comparisons=coverage.get('comparisons'),words=coverage['words'],
               claims=coverage.get('claims') or [], subjects=[dict(i=i,name=w['name'],say=w['say']) for i,w in enumerate(coverage['windows'])])
+    from wf1_coverage import research_names
     if coverage.get('named'):
         # The script stage's resolved referents (script.named): 'Alex' starts as Alexandr Wang, the livestream
         # event is a subject from the start. Research confirms and sources them; it never discards them unread.
-        data['resolved_referents']=coverage['named']
+        data['resolved_referents']=research_names(coverage)
     key=hashlib.sha256(json.dumps([2,data],sort_keys=True).encode()).hexdigest()[:16]
     os.makedirs(work,exist_ok=True);path=os.path.join(work,key+'.json')
     if os.path.exists(path):return json.load(open(path))
@@ -78,6 +79,7 @@ def research(coverage,work,llm):
     prompt='''Research the factual referents in this podcast passage before its documentary pictures are acquired.
 Use web search and primary sources. Return JSON {"references":[{"windows":[integer],"referent":str,
 "finding":str,"sources":[{"url":str,"publisher":str,"supports":str}],"depiction_options":[str]}],"unresolved":[str]}.
+Research only the supplied external windows. Comparisons are editorial context for the speaker graphic or original insert.
 resolved_referents, when present, are the people, companies and events the script stage resolved from
 the whole moment, each with the event-level picture it needs: start from them, find their primary
 sources and filmed records (including the speaker's own filmed past when he tells of it: a livestream,

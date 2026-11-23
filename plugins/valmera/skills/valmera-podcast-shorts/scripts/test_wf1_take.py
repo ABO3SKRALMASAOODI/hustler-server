@@ -341,3 +341,37 @@ def test_authored_interview_layout_preserves_source_corners(tmp_path, quiet_engi
     assert sum(it["f"][1]-it["f"][0] for it in cards) == 4*30 + film.LEAD_F
     assert all(r["url"]=="interview-url" for r in beats["coverage"]["authored_source"])
     assert any(it.get("pic","").startswith("own:") and it["k"]=="shot" for it in scene["items"])
+
+
+def test_m09_comparison_is_one_speaker_graphic_and_the_archive_keeps_its_words(tmp_path, quiet_engines):
+    import json
+    from types import SimpleNamespace
+    import wf1_coverage as coverage
+    import wf1_display
+
+    words = "Imagine another 500 horsepower in your Ford Explorer it could rip the chassis off. Databricks started doing dashboards.".split()
+    words = [dict(w=w, start=.2+i*.37, end=.53+i*.37, seg=int(i>=14)) for i,w in enumerate(words)]
+    script = dict(title="500 Extra Horsepower", idea=dict(why="Imagined horsepower illustrates unused capacity."),
+                  direction="Land on Databricks dashboards.", segments=[dict(say=" ".join(w["w"] for w in words if w["seg"]==i),
+                                                                            pictures=[]) for i in (0,1)])
+    compare = dict(first=0,last=13,premise="More power?",consequence="Same chassis")
+    named = [dict(name=name,must_show=brief) for name,brief in
+             [("Ford Explorer","An SUV"),("Databricks","Original dashboard demonstration")]]
+    def ask(prompt, content, **kw):
+        assert json.loads(content)["story"]["meaning"] == script["idea"]["why"]
+        return json.dumps(dict(comparisons=[compare], entities=[dict(name="Ford Explorer",word_ids=[6,7])],
+                               windows=[dict(first=a,last=b,external=True,**n) for (a,b),n in zip([(0,13),(14,17)],named)])), {}
+    pack = _sup(tmp_path, cuts_two_shot())
+    pack["words"] = dict(words=words, duration=7.)
+    plan = coverage.plan(words,script["title"],str(tmp_path),SimpleNamespace(ask=ask,json_block=json.loads),
+                         named=named,story=coverage.story_context(script))
+    pack["coverage"] = plan
+    assert [(w["name"],w["first"],w["last"]) for w in plan["windows"]] == [("Databricks",14,17)]
+    assert [r["name"] for r in coverage.research_names(plan)] == ["Databricks"]
+    assert wf1_display.editorial(SimpleNamespace(args={}),script,pack)["comparisons"] == [compare]
+    # No new search on a missing archive while exercising the ordinary score composer.
+    scene, beats = film.build(script,pack,"footage-cut",dict(coverage_final=True))
+    graphic, = beats["display_facts"]
+    assert graphic["analogy"] and graphic["last"] == 13
+    assert {"MORE POWER?", "SAME CHASSIS"}.issubset({i.get("t","").upper() for i in scene["items"]})
+    assert coverage.outside_comparisons(plan["windows"][0],0,17,plan) == (14,17)

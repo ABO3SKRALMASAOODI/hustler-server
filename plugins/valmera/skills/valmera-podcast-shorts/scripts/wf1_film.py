@@ -819,7 +819,15 @@ def build(script, sup, style_id, direction=None):
     import wf1_display
     reading_spans = []
     timed_facts = []
-    for page in d.get("display_facts") or []:
+    pages = list(d.get("display_facts") or [])
+    for comparison in coverage.get("comparisons") or []:
+        competing = [p for p in pages if p["first"] <= comparison["last"] and comparison["first"] <= p["last"]]
+        if any(f.get("chain") for p in competing for f in p["facts"]):
+            continue
+        pages = [p for p in pages if p not in competing]
+        pages.append(dict(first=comparison["first"], last=comparison["last"], facts=[
+            dict(relation=comparison["premise"], value=comparison["consequence"], source={})], analogy=True))
+    for page in pages:
         a = word_frame(page["first"])
         b = min(f_end, Clock.f(clock.words[page["last"]]["t1"]))
         next_word = word_frame(page["last"] + 1)
@@ -841,9 +849,17 @@ def build(script, sup, style_id, direction=None):
 
     # A retained Director can predate the source reading. The original takes its word's
     # visual slot, while continuous rhythm direction still spans the film.
-    if source_rows and dr:
-        dr = dict(dr,asks=[ask for ask in dr.get('asks',[]) if ask['dev']=='contour' or not
-                      on_evidence(word_frame(ask['at']['w']), (word_frame((ask.get('until') or ask['at'])['w']) or 0)+1)])
+    comparison_spans = [(word_frame(c["first"]), Clock.f(clock.words[c["last"]]["t1"]))
+                        for c in coverage.get("comparisons") or []]
+    if (source_rows or comparison_spans) and dr:
+        def separate_ask(ask):
+            a = word_frame(ask['at']['w'])
+            b = (word_frame((ask.get('until') or ask['at'])['w']) or a or 0) + 1
+            if a is None:
+                return False
+            return (not any(a < hi and lo < b for lo,hi in comparison_spans)
+                    and (ask['dev'] == 'contour' or not on_evidence(a,b)))
+        dr = dict(dr,asks=[ask for ask in dr.get('asks',[]) if separate_ask(ask)])
 
     def seg_span(i):
         return (seg_f[i], min(Clock.f(clock.segs[i][1]) + 6, f_end)) if 0 <= i < nseg else (None, None)
@@ -1551,8 +1567,9 @@ def build(script, sup, style_id, direction=None):
                          for b in (dr.get("beats") or []) if isinstance(b, dict) and isinstance(b.get("w"), int)
                          and b.get("role") in ("hook", "turn", "payoff", "close") and word_frame(b["w"]) is not None]
     l1["workflow_text_layout"] = True
+    l1["picture_bound_sound"] = True
     l1["story_cues"] = (d["retained_story_cues"] if "retained_story_cues" in d
-                        else _director().sound_cues(dr, word_frame))
+                        else _director().sound_cues(dr, word_frame, picture_keys={pid: keys.get(path, path) for pid,path in (dr.get("pictures") or {}).items()}))
     if devices:
         l1["devices"] = devices
     l1 = F.engines_finish(l1, sup, stress, drive_ids, meta, dict(d, look_pictures=look_pics),

@@ -447,6 +447,9 @@ def repair(d, sentences, words, names=(), seed=0):
         accent = {"sound": cue, "sound_reason": b["sound_reason"]} if (
             cue in ("air", "rise", "sub", "impact", "tick") and isinstance(b.get("sound_reason"), str)
             and b["sound_reason"].strip()) else {}
+        if accent and isinstance(b.get("sound_partner"), dict):
+            accent["sound_partner"] = {k:v for k,v in b["sound_partner"].items()
+                                       if k in ("before", "after", "device", "text") and isinstance(v,str) and v}
         beats.append(dict(role=role, **accent, energy=b.get("energy") if b.get("energy") in ENERGIES else "brisk", **a))
     sections = []
     last = len(words) - 1
@@ -951,9 +954,20 @@ def words_to_frames(row, fields, frame_of, end_of):
     return got
 
 
-def sound_cues(d, word_frame):
-    return [dict(f=int(word_frame(b["w"])), role=b["role"], sound=b["sound"], why=b["sound_reason"])
-            for b in d.get("beats", []) if b.get("sound") and word_frame(b["w"]) is not None]
+def sound_cues(d, word_frame, picture_keys=None):
+    cues = []
+    for i, beat in enumerate(d.get("beats") or []):
+        if not beat.get("sound") or word_frame(beat["w"]) is None:
+            continue
+        cue = dict(f=int(word_frame(beat["w"])), role=beat["role"], sound=beat["sound"], why=beat["sound_reason"])
+        if picture_keys is not None:
+            partner = dict(beat.get("sound_partner") or {})
+            for side in ("before", "after"):
+                if side in partner:
+                    partner[side] = picture_keys.get(partner[side], partner[side])
+            cue.update(beat=i, partner=partner)
+        cues.append(cue)
+    return cues
 
 
 def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):

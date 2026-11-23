@@ -333,3 +333,11 @@ def test_only_the_directors_explicit_accent_reaches_the_word_clock():
     ]), sentences, words)
     assert DR.sound_cues(result, lambda w: 11*w) == [
         dict(f=33, role="turn", sound="air", why="the reveal replaces the rehearsal")]
+
+
+def test_m09_sound_partner_tracks_pictures_from_sheet_to_scene():
+    sentences, words = DR.numbered(SENTENCES, rows())
+    result, _ = DR.repair(dict(beats=[dict(w=3,role="contrast",sound="impact",sound_reason="Underbody reveal",
+                                     sound_partner=dict(before="P7",after="P4",device="slice"))]),sentences,words)
+    cue, = DR.sound_cues(result,lambda w:347, picture_keys={"P7":"explorer","P4":"chassis"})
+    assert cue["beat"] == 0 and cue["partner"] == dict(before="explorer",after="chassis",device="slice")

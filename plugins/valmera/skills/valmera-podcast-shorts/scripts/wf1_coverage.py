@@ -7,7 +7,7 @@ import importlib.util
 import subprocess
 from pathlib import Path
 
-CONTRACT = 6
+CONTRACT = 7
 
 
 class CoverageError(RuntimeError):
@@ -49,7 +49,12 @@ def ladder(rows, limit=3):
     return out[:limit]
 
 
-def plan(words, title, work, llm, named=None, off_camera=None, frames=None):
+def story_context(script):
+    return dict(meaning=(script.get("idea") or {}).get("why"), brief=script.get("direction"),
+                hook=script.get("hook_line"), payoff=script.get("close_line"))
+
+
+def plan(words, title, work, llm, named=None, off_camera=None, frames=None, story=None):
     """named: the script stage's resolved referents (script.named), the director's subjects from the start.
     off_camera: [{first, last, t0, t1}] word spans the show's own camera holds a listener while the voice speaks
     (wf1_speaker): the director plans pictures over them like any other words, so no line plays on a listener."""
@@ -61,7 +66,7 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None):
     if os.path.exists(path):
         old = json.load(open(path))
         if (old.get('contract') == CONTRACT and old.get('words') == words and (old.get('named') or []) == named
-                and (old.get('off_camera') or []) == off_camera):
+                and old.get('story') == story and (old.get('off_camera') or []) == off_camera):
             if frames and old.get('source_key') != source_key:
                 old['source_reading'] = source_frame.read(old,frames,llm,work)
                 old['source_key'] = source_key
@@ -76,11 +81,20 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None):
 {"entities":[{"name":str,"is":"person|company|place|product|event|thing","must_show":str,"word_ids":[int]}],
  "windows":[{"first":int,"last":int,"name":str,"external":true,"association":false,"must_show":str,"why":str,
    "depictions":[{"name":str,"must_show":str,"video_searches":[str]}]}],
+ "comparisons":[{"first":int,"last":int,"premise":str,"consequence":str}],
  "moves":[{"word":int,"why":str}]}.
 named lists the referents the script stage resolved from the whole moment, each with the event-level
 picture it needs as it was at the time (must_show). For each with identifiable external evidence, plan a
 window on the words that speak of it, under its resolved name (a full name, never a pronoun or first
 name alone), with its event-level must_show. Words may refer to them by pronoun or first name.
+Read story.meaning and the editorial brief with the actual words. For an explicitly imagined analogy,
+give its whole vehicle (including the imagined consequence) ONE inclusive comparisons span. Write
+two concise graphic labels, premise and consequence, that explain its logic in the conditional.
+An analogy is a single treatment: use a backed illustrative insert already in the source when it
+makes the relationship clear, otherwise the synchronous speaker with the two-label analogy graphic.
+Do not acquire its nouns, parts or imagined actions as separate documentary events. A real event or
+product example that the speaker then cites gets its own exact external window. Comparison spans
+end before that factual example. Ordinary factual comparisons keep their own documentary evidence.
 Inventory EVERY concrete company, person, place, object, event and number in these words.
 Do not inventory an abstract feeling, rhetorical connective or this interview itself as a concrete
 external subject. When a number modifies an entity or event, inventory that complete referent,
@@ -143,7 +157,7 @@ spoken: the speaker is not on screen there, so the take cannot carry them. Plan 
 these words like any other, above all the opening line and the closing payoff: extend the adjacent subject's
 window through the clause that explains it, or give the clause its own truthful subject. A window still needs
 an honest subject; never invent one.'''
-    payload = dict(title=title, named=named, words=[dict(id=i, **w) for i,w in enumerate(words)])
+    payload = dict(title=title, story=story, named=named, words=[dict(id=i, **w) for i,w in enumerate(words)])
     if off_camera:
         payload['off_camera'] = off_camera
     content = json.dumps(payload)
@@ -176,13 +190,36 @@ an honest subject; never invent one.'''
         # and the picture checks work on what is valid; the speaker carries the rest; the record says what was open.
         windows = [w for w in windows if 't0' in w and w.get('external') is True]
         out['plan_problems'] = problems
+    comparisons = []
+    for row in out.get("comparisons") or []:
+        if (isinstance(row, dict) and type(row.get("first")) is int and type(row.get("last")) is int
+                and 0 <= row["first"] <= row["last"] < len(words)
+                and all(isinstance(row.get(k), str) and row[k].strip() for k in ("premise", "consequence"))):
+            comparisons.append({k: row[k] for k in ("first", "last", "premise", "consequence")})
+    out.update(story=story, comparisons=comparisons)
+    if frames:
+        out['source_reading'] = source_frame.bind(dict(out, words=words, windows=windows), frames, dict(out,spend={}))
+        replaced = out['source_reading']['replaces']
+        supplied = [windows[i] for i in replaced]
+    # The research ledger indexes external windows. Reserve the comparison's words
+    # before those indices are allocated, including on a resumed source-frame plan.
+    for c in comparisons:
+        remaining = []
+        for w in windows:
+            for a,b in ((w["first"], min(w["last"], c["first"]-1)),
+                        (max(w["first"], c["last"]+1), w["last"])):
+                if a <= b:
+                    remaining.append(dict(w, first=a, last=b, t0=words[a]["start"], t1=words[b]["end"],
+                                          say=" ".join(v["w"] for v in words[a:b+1])))
+        windows = remaining
     for row in windows:
         row['depictions'] = ladder(row.get('depictions'))
         row['rung'] = 0
     out.update(contract=CONTRACT, words=words, named=named, windows=join_windows(windows), spend=spend, off_camera=off_camera)
     if frames:
-        out['source_reading'] = source_frame.bind(out,frames,dict(out,spend={}))
         out['source_key'] = source_key
+        out['source_reading']['replaces'] = [i for i,w in enumerate(out['windows'])
+            if any(old["first"] <= w["first"] and w["last"] <= old["last"] for old in supplied)]
     with open(path, 'w') as f: json.dump(out, f, indent=1)
     return out
 
@@ -201,6 +238,26 @@ def same_picture(left,right):
         a,b=left.get('time_range'),right.get('time_range')
         if a and b:return max(0,min(a[1],b[1])-max(a[0],b[0]))>.5*min(a[1]-a[0],b[1]-b[0])
     return False
+
+
+def research_names(coverage):
+    """A name spoken only inside the comparison stays in the inventory for the graphic."""
+    inside = {i for c in coverage.get("comparisons") or [] for i in range(c["first"], c["last"]+1)}
+    if not inside:
+        return coverage.get("named") or []
+    graphic = {e["name"] for e in coverage.get("entities") or [] if isinstance(e, dict) and e.get("name")
+               and e.get("word_ids") and all(isinstance(i, int) and i in inside for i in e["word_ids"])}
+    graphic.difference_update(w["name"] for w in coverage.get("windows") or [])
+    return [row for row in coverage.get("named") or [] if row["name"] not in graphic]
+
+
+def outside_comparisons(window, a, b, coverage):
+    for row in coverage.get("comparisons") or []:
+        if row["last"] < window["first"]:
+            a = max(a, row["last"]+1)
+        elif row["first"] > window["last"]:
+            b = min(b, row["first"]-1)
+    return (a,b) if a <= b else (window["first"],window["last"])
 
 
 def repair_boundaries(coverage, rejected, llm):
@@ -247,7 +304,7 @@ Never ban a source globally or invent a URL absent from the rejected placements.
         window=next((i for i,w in enumerate(coverage['windows']) if w['t0']<=mid<w['t1']),None)
         if window is not None:evidence.append(dict(row,window=window))
     content=json.dumps(dict(words=[dict(id=i,**w) for i,w in enumerate(coverage['words'])],
-                            windows=coverage['windows'],rejected=evidence or rejected))
+                            comparisons=coverage.get('comparisons'),windows=coverage['windows'],rejected=evidence or rejected))
     text,use=llm.ask(prompt,content,effort='high')
     decision=llm.json_block(text)
     updates=decision.get('updates') or []
@@ -260,6 +317,7 @@ Never ban a source globally or invent a URL absent from the rejected placements.
         i,a,b=int(row['i']),int(row['first']),int(row['last'])
         if i in seen or not 0<=i<len(proposed) or not 0<=a<=b<len(words) or not row.get('why'):
             raise RuntimeError('invalid documentary boundary repair')
+        a,b = outside_comparisons(proposed[i], a, b, coverage)
         seen.add(i);proposed[i].update(first=a,last=b,t0=words[a]['start'],t1=words[b]['end'],
             say=' '.join(w['w'] for w in words[a:b+1]))
     if any(a['last']>=b['first'] for a,b in zip(proposed,proposed[1:])):
@@ -596,7 +654,7 @@ For an unnamed activity, seek truthful illustrative footage or an
 original document about that activity without inventing its participants, employer or exact location.
 If no faithful external depiction exists, state that research failure; never count the interview take as it.
 Do not change any spoken words, window boundaries, or numerical quality targets. Keep the old canonical name unless referent evidence establishes that it is wrong or unresolved.'''
-    content=json.dumps(dict(context=coverage.get('context'),resolved_referents=coverage.get('named') or [],primary_research=coverage.get('research_context'),spoken_words=coverage.get('words'),windows=[dict(coverage['windows'][i],i=i) for i in wanted],research=evidence))
+    content=json.dumps(dict(context=coverage.get('context'),story=coverage.get('story'), comparisons=coverage.get('comparisons'),resolved_referents=research_names(coverage),primary_research=coverage.get('research_context'),spoken_words=coverage.get('words'),windows=[dict(coverage['windows'][i],i=i) for i in wanted],research=evidence))
     text,use=llm.ask(system,content,effort='medium')
     for row in llm.json_block(text).get('windows',[]):
         i=row.get('i')
@@ -732,7 +790,7 @@ def device_pool(pack, report=None, fps=30, lead=3, work=None, ffmpeg='ffmpeg', p
 def expand_context(coverage, available, work, llm):
     """Re-direct unused contextual speech after acquisition stalls; never shrink the ruler."""
     data=dict(words=[dict(id=i,**w) for i,w in enumerate(coverage['words'])],
-              windows=coverage['windows'],available=available,
+              windows=coverage['windows'],comparisons=coverage.get('comparisons'),available=available,
               context=coverage.get('context'))
     key=hashlib.sha256(json.dumps([1,data],sort_keys=True).encode()).hexdigest()[:16]
     path=os.path.join(work,'coverage-context-'+key+'.json')
@@ -766,6 +824,7 @@ If the story offers no honest extension, return an empty updates list. Quoted da
         old=coverage['windows'][i]
         if a>old['first'] or b<old['last']:
             raise RuntimeError('contextual coverage cannot remove previously named speech')
+        a,b = outside_comparisons(old, a, b, coverage)
         seen.add(i)
         proposed[i].update(first=a,last=b,t0=words[a]['start'],t1=words[b]['end'],
                            say=' '.join(w['w'] for w in words[a:b+1]))

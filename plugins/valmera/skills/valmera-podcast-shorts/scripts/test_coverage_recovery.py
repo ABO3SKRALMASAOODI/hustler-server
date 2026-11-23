@@ -547,3 +547,38 @@ def test_resume_keeps_an_applied_word_boundary_for_the_same_picture_finding():
     assert coverage.repair_boundaries(data,[row],llm)
     assert not coverage.repair_boundaries(data,[row],llm)
     assert calls==[1]
+
+
+def test_m09_staged_picture_replay(tmp_path):
+    """Replay the captured planner answer on the staged transcript and count the original repair triggers."""
+    import shutil
+    from pathlib import Path
+    import wf1_short
+
+    root = Path(os.environ.get("VALMERA_PROJECT", "/Users/masaoodi/Documents/Valmera"))
+    run = root/".valmera/workflow/podcast/1bR0gtecoHU-20261123-032402"
+    staged = next((run/"films").glob("*500-extra-horsepower*/film.json"), None)
+    if staged is None:
+        pytest.skip("m09 staged review record is required for the copy replay")
+    record = json.loads(Path(shutil.copy(staged,tmp_path)).read_text())
+    script = dict(record["script"], idea=record["idea"])
+    t0, t1 = script["window"]
+    timed = [(t-t0,w) for t,w in json.loads((run/"words.json").read_text())
+             if t0 <= t <= record["idea"]["t1"]+.2]
+    words = [dict(w=w,start=t,end=timed[i+1][0] if i+1<len(timed) else t1-t0)
+             for i,(t,w) in enumerate(timed)]
+    # Word addresses and copy from the joint planning call on this exact moment.
+    response = dict(comparisons=[dict(first=0,last=48,premise="If you gave a Ford 500 extra horsepower",
+                                     consequence="The chassis would give out, and the car still couldn’t reach 500 mph")],
+                    windows=[dict(first=79,last=82,name="Databricks",external=True,
+                                  must_show="Original Databricks dashboard demo from the period discussed")])
+    service = SimpleNamespace(ask=lambda *a,**kw:(json.dumps(response),{}),json_block=json.loads)
+    plan = coverage.plan(words,script["title"],str(tmp_path),service,named=script["named"],story=coverage.story_context(script))
+    reviews = record["checks"]["podcast"]["render_reviews"]
+    a,b = [(words[plan["comparisons"][0][key]][edge]*30)+3 for key,edge in (("first","start"),("last","end"))]
+    looks = [row for review in reviews for row in review["placements"] if not row["ok"]]
+    assert all(a <= row["f"][0] < row["f"][1] <= b for row in looks)
+    assert (len(looks),sum(bool(review["rejected"]) for review in reviews), len(reviews)) == (43,18,19)
+    assert [w["say"] for w in plan["windows"]] == ["And they started doing dashboards."]
+    assert wf1_short.hold_windows(dict(holds=[[a/30,b/30]],cuts_per_10s=10),plan,[]) == []
+    print("m09 copy: 43 rejected car placements across 18 repeat reviews avoided; dashboard archive retained")

@@ -2388,13 +2388,14 @@ def render(ctx, script, sc):
     out = os.path.join(ctx.supply, "film_engine.mp4")
     cache = os.path.join(ctx.tmp, "scene-cache")
     drawn = with_director(ctx, script, sc)            # the scene to draw (a marketing reel's Director laid round its hero device)
-    l1 = json.load(open(drawn))                       # its sound, which heard those devices, is the mix
+    composed = sc.get("composed_l1") if getattr(ctx, "workflow", None) == "wf1" else None
+    l1 = json.load(open(composed or drawn))
     pack = load_pack(ctx)
     sound = os.path.join(ctx.supply, "sound.m4a")
     mix = F.audio_master(pack["ffmpeg"], l1, pack["narration"], sound, ctx.tmp) if not os.path.exists(sound) else {}
     settle = os.environ.get("SHELL_RENDER_CMD")       # a renderer in place of the Mac engine: the box image's, where a film is settled
     if not os.path.exists(out):
-        scene = chain.lay_devices(ctx, drawn)         # the scene to draw: every device it asks for laid out first
+        scene = composed or chain.lay_devices(ctx, drawn)  # the scene to draw: every device it asks for laid out first
         if settle:
             log = chain.sh(ctx, ["zsh", settle, scene, ctx.supply, sound, out + ".part.mp4"], label=f"wf3-render-{ctx.run_id}", heavy=os.environ.get("SHELL_RENDER_REMOTE") != "1", timeout=7200)
             j = {}

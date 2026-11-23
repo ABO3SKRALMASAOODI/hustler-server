@@ -28,6 +28,12 @@ these asks; ordinary display is for other spoken phrases. The interview and capt
 A fixed amount lands whole. Only for a measured progression the story actually follows, use a
 counter with one fact and include progression: {"from": number, "to": number} in that fact, with
 both endpoints supported by the source, and give the counter its matching fmt and unit.
+For each optional sound beat give sound_partner with the dependencies its reason names: before and
+after are exact contact-sheet picture IDs at a substitution (use "take" for the speaker), device is the requested device on
+this beat, text is the exact line for a display landing. Include both picture IDs when the change is
+from one illustration into another, even if a device also participates. Omit unused fields.
+comparisons already have a speaker graphic with the premise and consequence (or the source insert).
+Keep other illustration, display and device asks for the factual beats outside those word spans.
 For a qualitative comparison in the interview, the coverage notes say what each side means and
 whether it is hypothetical. When it helps, use one compact staircase with both labels on the same
 seat, each entering on its own spoken cue and standing together through the question. A direction
@@ -58,7 +64,7 @@ def editorial(ctx, script, pack):
                 reading = src.get("supports") or ref.get("finding")
                 if reading and reading not in evidence["supports"]:
                     evidence["supports"].append(reading)
-    return dict(claims=script.get("claims") or [], episode_start=(script.get("window") or [0])[0],
+    return dict(comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=script.get("claims") or [], episode_start=(script.get("window") or [0])[0],
                 sources=sources, source_inserts=[{k:r[k] for k in ('first','last','shows')}
                                                for r in (coverage.get('source_reading') or {}).get('inserts',[])], coverage=[{k: row[k] for k in ("name", "must_show", "word_ids") if k in row}
                                           for row in coverage.get("entities", [])], speakers=moment.get("names"), moment=moment.get("why"),

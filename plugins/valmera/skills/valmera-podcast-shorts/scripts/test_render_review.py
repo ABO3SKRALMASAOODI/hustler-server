@@ -757,3 +757,34 @@ def test_full_source_archive_checks_its_spoken_boundary_before_trying_another_cr
     wf._rebuild_rejected(ctx,{},dict(beats=dict(pictures=[pic])),dict(placements=[finding]),defer=True)
     assert notes == [finding]
     assert json.loads((tmp_path/"render_rejected.json").read_text())[0]["fault"]=="contradiction"
+
+
+def test_m09_final_mix_uses_composed_picture_and_repairs_resumed_audio(tmp_path, monkeypatch):
+    from score import sound
+    from types import SimpleNamespace
+    cue = dict(f=347, role="contrast", beat=4, sound="impact", why="Explorer to underbody",
+               partner=dict(before="explorer",after="chassis"))
+    picture = dict(f=347,kind="picture",id="chassis",before="explorer",after="chassis")
+    stale = dict(id="accent0",s="mx_hit_2148",picture_event=picture,event_f=347)
+    base = dict(dur_f=400,fps=30,items=[dict(k="shot",pic=key,id=key,f=span)
+               for key,span in [("explorer",[0,347]),("chassis",[347,400])]],
+               story_cues=[cue],picture_bound_sound=True,sound=[stale],sound_design=dict(picture_bindings=[picture]))
+    assert sound.story_partners(base) == [picture]
+    src, audio, drawn = (tmp_path/name for name in ("l1.json","audio.json","composed.json"))
+    src.write_text(json.dumps(base))
+    audio.write_text(json.dumps(dict(base, spine=["interview"], music_marks={"payoff_s":21})))
+    drawn.write_text(json.dumps(dict(base,items=[dict(k="shot",id="host",pic="main",f=[0,400])])))
+    monkeypatch.setattr(wf.chain,"lay_devices",lambda ctx,path:str(drawn))
+    monkeypatch.setattr(wf.wf3,"load_pack",lambda ctx:{})
+    def replan(doc,pack):
+        assert sound.story_partners(doc) == [None]
+        return [],dict(placed=[],picture_bindings=[None])
+    monkeypatch.setattr(wf.F,"replan_sound",replan)
+    sc = dict(l1=str(src), l1_audio=str(audio), beats={})
+    wf.prepare_picture_mix(SimpleNamespace(),sc)
+    assert sc["composed_l1"] == str(drawn)
+    for path in (src,audio,drawn):
+        doc = json.loads(path.read_text())
+        assert doc["sound"] == [] and doc["sound_design"] == sc["beats"]["sound_design"]
+    assert json.loads(audio.read_text())["spine"] == ["interview"]
+    assert json.loads(audio.read_text())["music_marks"] == {"payoff_s":21}

@@ -614,14 +614,14 @@ def hear_devices(ctx, l1, beats, replan, name="l1_heard.json"):
     except Exception as e:  # noqa: BLE001 - the film keeps its sound
         ctx.log(f"sound on the devices skipped: {str(e)[:300]}")
         return dict(fault=str(e)[:300])
-    if not ev and not l1.get("story_landings"):  # nothing landed that the sound could hear (a worker without the palette): the first plan stands
+    if not ev and not l1.get("story_landings") and not l1.get("picture_bound_sound"):  # nothing landed that the sound could hear (a worker without the palette): the first plan stands
         return dict(events=0)
     l1["device_events"] = ev
     if beats is not None:
         beats["device_events"] = ev
         beats["events"] = sorted(set(int(f) for f in beats.get("events") or []) | {int(e["f"]) for e in ev})
     try:
-        sounds, rep = replan(l1)
+        sounds, rep = replan(composed if l1.get("picture_bound_sound") else l1)
     except Exception as e:  # noqa: BLE001
         sounds, rep = [], {"fault": repr(e)[:300]}
     if rep.get("fault"):
