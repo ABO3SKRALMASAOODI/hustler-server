@@ -393,3 +393,13 @@ def test_a_podcast_cutaway_clip_moves_like_a_picture_and_only_the_take_is_eased(
         assert tid in by and len([i for i in items if i["id"].split(".")[0] == tid]) == 1     # the take is eased, never cut
         w = [c[2] - c[0] for c in by[tid]["crop"]]
         assert abs(math.log(w[0] / w[-1])) / ((by[tid]["f"][1] - by[tid]["f"][0]) / FPS) < 0.03
+
+
+def test_archival_figure_uses_the_reading_area_on_a_phone():
+    from scene.motion import document_figure
+    crop = [.481,.003,.998,.927]
+    box = document_figure(crop,(1104,874),(1080,1920))
+    w,h = box[2]-box[0],box[3]-box[1]
+    assert w > .6 and h > .48
+    assert .13 <= box[1] < box[3] <= .80
+    assert abs(w*1080/(h*1920) - .517*1104/(.924*874)) < 1e-4

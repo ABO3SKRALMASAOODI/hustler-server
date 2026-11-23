@@ -41,6 +41,11 @@ def fit_panel(crop, source_size, canvas_size, seat, align_y=.5):
     return [x, y, x + width, y + height]
 
 
+def document_figure(crop, source_size, canvas_size, bottom=.79):
+    """Give the selected figure one reading area between the credit and the spoken caption or card."""
+    return fit_panel(crop, source_size, canvas_size, [.055,.15,.945,bottom])
+
+
 class Cam:
     """One picture's camera: what crops it can give a frame of this shape."""
 
