@@ -175,3 +175,34 @@ def test_the_film_facts_carry_its_lines_and_a_chapter_gets_its_own():
     f = MF.facts("podcast", marks, brief="About: Mark Cuban.", mood="reflective", lines=LINES)
     assert f["lines"][1] == (12.0, "then it stopped being about basketball") and "Mood: reflective" in f["brief"]
     assert "lines" not in MF.facts("podcast", marks)
+
+
+def test_risk_debate_reaches_the_pick_when_evidence_cards_own_the_captions():
+    # The two quote cards carry the opening hypothetical and the speaker's own
+    # estimate. Only the intervening dry delivery is on the ordinary cap track.
+    phrases = ["A 10% chance that 7 billion people die", "it makes you seem credible", "for me that risk is close to zero"]
+    said = [[word, start+j*6, start+(j+1)*6, seg] for seg,(start,line) in enumerate(zip([0,225,555],phrases))
+            for j,word in enumerate(line.split())]
+    captions = [dict(k="word",v="cap",t=w,f=[a,b]) for w,a,b,seg in said if seg==1]
+    lines = MF.lines_of(dict(fps=30, said=said, items=captions, workflow_text_layout=True))
+    assert lines == list(zip([0.,7.5,18.5],phrases))
+
+
+def test_ranking_receives_the_stakes_and_range_despite_the_hosts_dry_delivery():
+    lines = [(0., "A 10% chance that 7 billion people die"), (7.5, "it makes you seem credible"),
+             (18.5, "for me that risk is close to zero")]
+    reading = "Mass casualties are hypothetical; dry skepticism gives way to a personal answer. Leave the answer exposed."
+    calls=[]
+    def model(system,user,schema):
+        calls.append((system,user,schema))
+        return dict(turn_s=7.5,payoff_s=18.5,close_s=None,mood="quiet, questioning",tone=reading,arc={})
+    got=MF.story_marks(lines,22.3,model)
+    assert "tone" in calls[0][2]["required"] and got["tone"]==reading
+    film=MF.facts("podcast",dict(_marks(),tone=got["tone"]),lines=lines,mood=got["mood"])
+    rows=[_described("mk-647","Ironic clarinet and double bass.","Even dynamics."),
+          _described("quiet","Spare, unresolved strings.","Low opening, modest rise.")]
+    def rank(system,user,schema):
+        calls.append((system,user,schema))
+        return dict(order=[2,1],why="Space for the guest's answer.")
+    MF.story_rank(film, rows, rank)
+    assert reading in calls[-1][1] and all(line in calls[-1][1] for _,line in lines)
