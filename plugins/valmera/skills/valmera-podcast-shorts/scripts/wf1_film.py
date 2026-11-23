@@ -1084,6 +1084,7 @@ def build(script, sup, style_id, direction=None):
             kw["look"] = "mono_silver"
         P.card([f0, f1], key, [x0, y0, x1, y1], **kw)
         note(f0, f1, kind, name, rec, "window")
+        P.pictures[-1]["source_crop"] = kw["crop"]
 
     def bleed(f0, f1, kind, name, rec, key):
         source_ink = clipped_source_ink(rec) if kind == "clip" else []

@@ -710,8 +710,11 @@ def seat_brand_words(l1):
     import l1pass
     moved = []
     # Device words also take the brand seat; the general safe rectangle includes the mark.
+    words = [it for it in l1["items"] if it["k"] == "word"]
+    if not words:
+        return moved
     ruler = F.Ruler(l1["voices"])
-    for word in (it for it in l1["items"] if it["k"] == "word"):
+    for word in words:
         x, y, size = (F._rest(word.get(k, v)) for k, v in (("x", 0), ("y", 0), ("s", 1)))
         right = x + ruler.width(word["v"], word["t"]) * size / F.W
         top = y - ruler.cap(word["v"]) * size / F.H
@@ -1292,7 +1295,10 @@ def render(ctx, script, sc):
                     and sc['beats'].get('caption_contract')!=7)
     if rejected_plan or stale_captions:
         if history and rejected_plan:
-            _repair_window_boundaries(ctx,[r for r in history[-1]['placements'] if not r['ok'] and r.get('fault')!='reframe'])
+            pictures = sc.get("beats", {}).get("pictures", [])
+            _repair_window_boundaries(ctx, [r for r in history[-1]["placements"] if not r["ok"]
+                and (r.get("fault") != "reframe" or
+                     (0 <= r["id"] < len(pictures) and not can_widen_source(pictures[r["id"]])) )])
         previous_spend=sc.get('spend',[])
         rebuilt=score(ctx,script)
         rebuilt['spend']=previous_spend+[u for u in rebuilt.get('spend',[]) if u not in previous_spend]
@@ -1556,6 +1562,10 @@ def _repair_window_boundaries(ctx, rejected):
     json.dump(pack['coverage'],open(os.path.join(ctx.supply,'coverage.json'),'w'),indent=1)
 
 
+def can_widen_source(picture):
+    return picture.get("source_crop") != [0,0,1,1] and not picture.get("reframed")
+
+
 def _rebuild_rejected(ctx, script, sc, report, defer=False):
     """Repair what the composed review found, where it found it, and rebuild. Returns True when the film was rebuilt.
 
@@ -1570,6 +1580,7 @@ def _rebuild_rejected(ctx, script, sc, report, defer=False):
     previous = current_rejections(ctx.supply)
     before = {(r.get("window"), r.get("origin") or r.get("path"), r.get("fault")) for r in previous}
     added = []
+    boundary_findings = []
 
     def has(key):
         return key in before or any((a["window"], a["path"], a["fault"]) == key for a in added)
@@ -1578,7 +1589,9 @@ def _rebuild_rejected(ctx, script, sc, report, defer=False):
             continue
         p = pics[r["id"]]
         window, origin = p.get("window"), p.get("origin") or p["path"]
-        if r.get("fault", "reframe") == "reframe" and not has((window, origin, "reframe")):
+        # If the whole checked source is already on screen, widening its crop is
+        # a no-op. Review the source and clause together before spending another render.
+        if r.get("fault", "reframe") == "reframe" and can_widen_source(p) and not has((window, origin, "reframe")):
             step = (window, origin, "reframe")
         elif not has((window, origin, "contradiction")):
             step = (window, origin, "contradiction")
@@ -1586,8 +1599,11 @@ def _rebuild_rejected(ctx, script, sc, report, defer=False):
             step = (window, None, "speaker")
         else:
             continue
+        if step[2] != "reframe":
+            boundary_findings.append(r)
+        timing = {k:p[k] for k in ("f","clause_t") if p.get(k)}
         added.append(dict(window=step[0], path=step[1], fault=step[2], placed=p["path"],
-                          f=p.get("f"),clause_t=p.get("clause_t"),reason=str(r.get("reason") or "")[:240]))
+                          reason=str(r.get("reason") or "")[:240], **timing))
     if not added:
         ctx.log("composed picture check: every finding has had each repair; the film is delivered with them on record")
         return False
@@ -1600,8 +1616,7 @@ def _rebuild_rejected(ctx, script, sc, report, defer=False):
             f"{sum(a['fault'] == 'speaker' for a in added)} given to the speaker")
     # A contradiction that comes from a window running into the next subject's words is a timing fault: the director
     # moves that boundary. Reframes need no boundary.
-    contradictions = [r for r in report["placements"] if not r.get("ok") and r.get("fault") != "reframe"]
-    _repair_window_boundaries(ctx, contradictions)
+    _repair_window_boundaries(ctx, boundary_findings)
     if not defer:
         _rescore(ctx,script,sc)
     return True

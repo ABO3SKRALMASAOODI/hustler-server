@@ -193,7 +193,9 @@ Repair an existing window's word boundary when archival pictures enter before th
 spoken, continue past it, or arrive too late. A public talk about a named institution may document
 the institution; if it currently sits on a speaker recalling their reasoning or a private consensus,
 start the archive at the first word of the actual institution reference and leave the recollection
-on the synchronized interview. Use the supplied exact frame and word evidence. Move the
+on the synchronized interview. A dated conference recording can identify its lab. End its window at the
+last word that it documents when the speaker moves on to a recalled ranking, a private claim or a
+different year, and carry that qualification on the speaker. Use the supplied exact frame and word evidence. Move the
 adjacent boundary too when needed. Retain every subject and the original speech; do not rename,
 remove or merge windows. Do not repair an incorrect source identity, unreadable picture, cropped
 face, or factual/source contradiction by moving its time. Those assets must still be replaced.

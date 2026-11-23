@@ -746,3 +746,14 @@ def test_changed_window_rechecks_candidate_rejected_on_earlier_words(tmp_path):
     (tmp_path/"render_rejected.json").write_text(json.dumps(rows))
     (tmp_path/"pack.json").write_text(json.dumps(dict(pack=dict(coverage=dict(windows=[dict(t0=9.34,t1=14.)])))))
     assert wf.current_rejections(str(tmp_path))==[rows[1]]
+
+
+def test_full_source_archive_checks_its_spoken_boundary_before_trying_another_crop(tmp_path,monkeypatch):
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda msg:None)
+    notes=[]
+    monkeypatch.setattr(wf,"_repair_window_boundaries",lambda ctx,rows:notes.extend(rows))
+    finding=dict(id=0,ok=False,f=[343,372],fault="reframe",reason="The source itself ends halfway through its diagram")
+    pic=dict(path="berkeley.mp4",source="uc",window=0,f=[343,372],mode="window",source_crop=[0,0,1,1],clause_t=[9.34,13.34])
+    wf._rebuild_rejected(ctx,{},dict(beats=dict(pictures=[pic])),dict(placements=[finding]),defer=True)
+    assert notes == [finding]
+    assert json.loads((tmp_path/"render_rejected.json").read_text())[0]["fault"]=="contradiction"
