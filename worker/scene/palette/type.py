@@ -315,7 +315,11 @@ def name(l1, work, ask, sense=None):
         rows.insert(0, (title, "title"))
     vb = K.voice(font, 100, track=-1, shadow=0.5)
     bigt = next(t for t, k in rows if k == "big")
-    vb = K.fit(vb, bigt, float(o.get("width", 0.84 if layout != "left" else 0.76)) * W, cap_px=float(o.get("cap", 0.13)) * H)
+    cap_px = float(o.get("cap", 0.13)) * H
+    if evidence and evidence in l1.get("interview_credits", []):
+        caption_px = (l1["voices"].get("cap") or {}).get("px", .035 * H)
+        cap_px = min(cap_px, caption_px * 1.2)
+    vb = K.fit(vb, bigt, float(o.get("width", 0.84 if layout != "left" else 0.76)) * W, cap_px=cap_px)
     vt = K.mono(max(K.FLOOR_PX + 2, min(46.0, round(vb["px"] * 0.30 / K.SCALE, 1))))
     vs = K.voice(font, max(K.px(K.FLOOR_PX + 10), round(vb["px"] * 0.42, 1)), track=4, shadow=0.5)
     vv = {"big": vb, "title": vt, "small": vs}

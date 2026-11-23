@@ -226,6 +226,16 @@ def resolve(scene, speaker_layout=None):
         lo, hi = it["f"]
         boxes = {}
         display_on_take = it.get("role") == "big" and any(f in faces for f in range(lo, hi))
+        if it.get("role") == "cap" and "layers" in it:
+            # Fit the whole spoken page once, including accent overshoot and stroke.
+            # A page crossing a picture cut keeps the same scale on both shots.
+            extents = it["boxes"].values()
+            left, right = min(b[0] for b in extents), max(b[2] for b in extents)
+            if left < .03 or right > .97:
+                scale = min(1., .94 / max(right-left, 1e-6))
+                x = max(.03-(.5+(left-.5)*scale), min(0., .97-(.5+(right-.5)*scale)))
+                centre_y = (min(b[1] for b in extents)+max(b[3] for b in extents))/2
+                it.update(s=scale, x=x, y=(centre_y-.5)*(1-scale))
         if display_on_take:
             # Measure the moving ink, including the overshoot of a palette word.
             # Leave an editorial margin on both sides of a full-width headline.
