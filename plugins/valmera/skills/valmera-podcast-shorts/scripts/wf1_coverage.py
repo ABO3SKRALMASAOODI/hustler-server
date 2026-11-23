@@ -54,7 +54,7 @@ def story_context(script):
                 hook=script.get("hook_line"), payoff=script.get("close_line"))
 
 
-def plan(words, title, work, llm, named=None, off_camera=None, frames=None, story=None):
+def plan(words, title, work, llm, named=None, off_camera=None, frames=None, story=None, speaking_turns=None):
     """named: the script stage's resolved referents (script.named), the director's subjects from the start.
     off_camera: [{first, last, t0, t1}] word spans the show's own camera holds a listener while the voice speaks
     (wf1_speaker): the director plans pictures over them like any other words, so no line plays on a listener."""
@@ -66,7 +66,7 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None, stor
     if os.path.exists(path):
         old = json.load(open(path))
         if (old.get('contract') == CONTRACT and old.get('words') == words and (old.get('named') or []) == named
-                and old.get('story') == story and (old.get('off_camera') or []) == off_camera):
+                and old.get('story') == story and old.get('speaking_turns') == speaking_turns and (old.get('off_camera') or []) == off_camera):
             if frames and old.get('source_key') != source_key:
                 old['source_reading'] = source_frame.read(old,frames,llm,work)
                 old['source_key'] = source_key
@@ -157,7 +157,7 @@ spoken: the speaker is not on screen there, so the take cannot carry them. Plan 
 these words like any other, above all the opening line and the closing payoff: extend the adjacent subject's
 window through the clause that explains it, or give the clause its own truthful subject. A window still needs
 an honest subject; never invent one.'''
-    payload = dict(title=title, story=story, named=named, words=[dict(id=i, **w) for i,w in enumerate(words)])
+    payload = dict(title=title, story=story, speaking_turns=speaking_turns, named=named, words=[dict(id=i, **w) for i,w in enumerate(words)])
     if off_camera:
         payload['off_camera'] = off_camera
     content = json.dumps(payload)
@@ -196,14 +196,12 @@ an honest subject; never invent one.'''
                 and 0 <= row["first"] <= row["last"] < len(words)
                 and all(isinstance(row.get(k), str) and row[k].strip() for k in ("premise", "consequence"))):
             comparisons.append({k: row[k] for k in ("first", "last", "premise", "consequence")})
-    out.update(story=story, comparisons=comparisons)
+    out.update(story=story, comparisons=comparisons, speaking_turns=speaking_turns)
     if frames:
         out['source_reading'] = source_frame.bind(dict(out, words=words, windows=windows), frames, dict(out,spend={}))
-        replaced = out['source_reading']['replaces']
-        supplied = [windows[i] for i in replaced]
-    # The research ledger indexes external windows. Reserve the comparison's words
-    # before those indices are allocated, including on a resumed source-frame plan.
-    for c in comparisons:
+    # Reserve locally directed words before assigning indices to external research windows.
+    local = out.get('source_reading') or {}
+    for c in [*comparisons, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
         remaining = []
         for w in windows:
             for a,b in ((w["first"], min(w["last"], c["first"]-1)),
@@ -218,8 +216,7 @@ an honest subject; never invent one.'''
     out.update(contract=CONTRACT, words=words, named=named, windows=join_windows(windows), spend=spend, off_camera=off_camera)
     if frames:
         out['source_key'] = source_key
-        out['source_reading']['replaces'] = [i for i,w in enumerate(out['windows'])
-            if any(old["first"] <= w["first"] and w["last"] <= old["last"] for old in supplied)]
+        out['source_reading']['replaces'] = []
     with open(path, 'w') as f: json.dump(out, f, indent=1)
     return out
 

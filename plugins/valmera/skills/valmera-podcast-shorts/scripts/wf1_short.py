@@ -220,7 +220,8 @@ def supply(ctx, script):
     import wf1_source_frame
     frames = wf1_source_frame.samples(src, idx.get("shots"), dur, sup_dir, PX.FF)
     coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm(), named=script.get('named'),
-                                 off_camera=off_camera(cuts, words), frames=frames, story=wf1_coverage.story_context(script))
+                                 off_camera=off_camera(cuts, words), frames=frames, story=wf1_coverage.story_context(script),
+                                 speaking_turns=local_turns(script))
     coverage['claims'] = script.get('claims') or []
     original = coverage.get('source_reading') or {}
     coverage['windows'] = [w for i,w in enumerate(coverage['windows']) if i not in original.get('replaces',[])]
@@ -674,6 +675,12 @@ def director_pictures(pack, most=36):
                             label=str(r.get("shows") or r.get("title") or name)[:60], faces=len(r.get("faces") or [])))
     out = out[:most]
     return out, {p["id"]: p["src"] for p in out}
+
+
+def local_turns(script):
+    start = script['window'][0]
+    return [dict(speaker=t['speaker'], start=round(t['start']-start,3), end=round(t['end']-start,3))
+            for t in script.get('speaking_turns') or []]
 
 
 def direction_of(ctx, script, pack):
@@ -1147,20 +1154,18 @@ def score(ctx, script):
     coverage = pack['coverage']
     # A resumed supply already has its word plan and candidates. Keep their window
     # indices and read only the original take when the pack predates source framing.
-    if 'authored_shots' not in (coverage.get('source_reading') or {}) and os.path.isfile(os.path.join(ctx.supply,'index.json')):
+    previous = coverage.get('source_reading') or {}
+    needs_source = 'authored_shots' not in previous or (previous.get('inserts') and 'speaker_inserts' not in previous)
+    if needs_source and os.path.isfile(os.path.join(ctx.supply,'index.json')):
         import wf1_source_frame
         idx = json.load(open(os.path.join(ctx.supply,'index.json')))
         take = pack['take']
         frames = wf1_source_frame.samples(take['path'],idx['shots'],take['dur'],ctx.supply,pack['ffmpeg'])
+        coverage['speaking_turns'] = local_turns(script)
         reading = wf1_source_frame.read(coverage,frames,_llm(),ctx.supply)
-        previous = coverage.get('source_reading')
-        if previous is not None:
-            # This pack's chart placements already index its final windows.
-            coverage['source_reading'] = dict(previous, authored_shots=reading['authored_shots'])
-        else:
-            coverage['source_reading'] = reading
-            for i in reading['replaces']:
-                coverage['windows'][i]['on_take'] = True
+        coverage['source_reading'] = reading
+        for i in reading['replaces']:
+            coverage['windows'][i]['on_take'] = True
         refresh = True
     if pack.get('blank_frame_contract')!=1:
         for row in pack.get('footage',[]):
@@ -1400,8 +1405,8 @@ def render(ctx, script, sc):
         if history and rejected_plan:
             pictures = sc.get("beats", {}).get("pictures", [])
             _repair_window_boundaries(ctx, [r for r in history[-1]["placements"] if not r["ok"]
-                and (r.get("fault") != "reframe" or
-                     (0 <= r["id"] < len(pictures) and not can_widen_source(pictures[r["id"]])) )])
+                and 0 <= r["id"] < len(pictures) and pictures[r["id"]].get("mode") != "source-insert"
+                and (r.get("fault") != "reframe" or not can_widen_source(pictures[r["id"]]))])
         previous_spend=sc.get('spend',[])
         rebuilt=score(ctx,script)
         rebuilt['spend']=previous_spend+[u for u in rebuilt.get('spend',[]) if u not in previous_spend]
@@ -1642,7 +1647,7 @@ def unrepaired(picture, found):
             if r.get("window") is not None and r.get("window") == picture.get("window"):
                 return True
             continue
-        if (r.get("origin") or r.get("path")) not in own or r.get("window") not in (None, picture.get("window")):
+        if (r.get("origin") or r.get("path")) not in own or r.get("window") not in (None, picture.get("source_slot") or picture.get("window")):
             continue
         if r.get("fault") != "reframe" or not picture.get("reframed"):
             return True
@@ -1695,7 +1700,7 @@ def _rebuild_rejected(ctx, script, sc, report, defer=False):
         if r.get("ok"):
             continue
         p = pics[r["id"]]
-        window, origin = p.get("window"), p.get("origin") or p["path"]
+        window, origin = p.get("source_slot") or p.get("window"), p.get("origin") or p["path"]
         # If the whole checked source is already on screen, widening its crop is
         # a no-op. Review the source and clause together before spending another render.
         if r.get("fault", "reframe") == "reframe" and can_widen_source(p) and not has((window, origin, "reframe")):
@@ -1706,7 +1711,7 @@ def _rebuild_rejected(ctx, script, sc, report, defer=False):
             step = (window, None, "speaker")
         else:
             continue
-        if step[2] != "reframe":
+        if step[2] != "reframe" and p.get("mode") != "source-insert":
             boundary_findings.append(r)
         timing = {k:p[k] for k in ("f","clause_t") if p.get(k)}
         added.append(dict(window=step[0], path=step[1], fault=step[2], placed=p["path"],

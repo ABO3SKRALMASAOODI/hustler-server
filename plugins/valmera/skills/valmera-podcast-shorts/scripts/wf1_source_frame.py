@@ -21,7 +21,22 @@ enclosing the actual document, plot title, legend and BOTH labeled axes. Include
 tile is the normalized rectangle of the live PRESENTING speaker in that frame if visibly clear,
 else null. Do not interpret sample numbers as measured values. Never infer a cost chart from an
 output-only chart. Leave guesses, unrelated visuals and ordinary conversational shots on the speaker.
-Return to the speaker between distinct chart clauses where the explanation can stand on its own.
+Plan the whole screen-share passage together. Return source_panels: [{frame,box,shows}] for
+reusable clean original views, and presenter_tiles: [{frame,box}] for each visible speaker.
+Choose a frame without an obstructing pointer, tooltip or webcam over the evidence. Keep one
+panel per distinct artifact state. In source_inserts reference its zero-based panel index on
+every clause that reads or compares it, including adjacent clauses and later returns.
+When the opening introduces a chart, establish the full clean panel showing its title, scope and units
+on the lead-in before going closer. Include every row name, its complete value and some reading clearance.
+The optional box on a panel insert is a detail in full-frame coordinates: fit the named rows with
+their labels, values and relevant units. Omit box to show the overview. Use the clean panel
+even if the live pointer obscures that same row. A changed value or scroll needs its own view.
+For the live tile above each insert give speaker (index into presenter_tiles) for the person
+speaking those words. As the conversation turns from evidence to interpretation, personal
+reaction, jokes or a repeated promise, plan speaker_inserts: [{first,last,speaker}] through
+those clauses with the synchronous speaker. Split on changes of speaker or layout. Use the
+speaking turns when supplied. Return to the rows on words they actually document. Keep
+conditional estimates and other survey years distinct from the measured rows.
 Exclude external search windows for evidence already supplied by the take. For an existing plan
 return replaces: [indices of its external windows served by these source inserts]. Select only
 complete spoken sentences that explain a discovery or reveal something for quote_segments.
@@ -88,7 +103,12 @@ def read(coverage, frames, llm, work):
     words = coverage['words']
     windows = coverage['windows']
     brief = dict(words=[[i,w.get('seg'),w['w'],w['start']] for i,w in enumerate(words)],
-                 named=coverage.get('named'), windows=[{k:w.get(k) for k in ('first','last','must_show')} for w in windows])
+                 named=coverage.get('named'), story=coverage.get('story'), windows=[{k:w.get(k) for k in ('first','last','must_show')} for w in windows])
+    brief['speaking_turns'] = coverage.get('speaking_turns') or []
+    by_time = {f['t']:i for i,f in enumerate(frames)}
+    brief['previous_views'] = [dict(frame=by_time[r['t']], box=r['box'], shows=r.get('shows'))
+                               for r in (coverage.get('source_reading') or {}).get('inserts', [])
+                               if r['t'] in by_time]
     identity = [signature(frames), brief]
     key = hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
     record = Path(work) / ('source-reading-' + key[:20] + '.json')
@@ -110,22 +130,74 @@ def bind(coverage, frames, result):
         if (isinstance(value,list) and len(value)==4 and all(type(v) in (int,float) and math.isfinite(v) for v in value)
                 and 0 <= value[0] < value[2] <= 1 and 0 <= value[1] < value[3] <= 1):
             return value
+    def catalog(key):
+        regions = {}
+        for i, row in enumerate(result.get(key) or []):
+            if not isinstance(row, dict):
+                continue
+            n = row.get('frame')
+            bounds = box(row.get('box'))
+            if type(n) is int and 0 <= n < len(frames) and bounds:
+                regions[i] = dict(frames[n], box=bounds, shows=row.get('shows'))
+        return regions
+
+    panels, tiles = catalog('source_panels'), catalog('presenter_tiles')
+    speakers = []
+    def addresses(row):
+        if isinstance(row, dict):
+            a,b = row.get('first'), row.get('last')
+            return type(a) is int and type(b) is int and 0 <= a <= b < len(words)
+
+    def reference(row, key, catalog):
+        i = row.get(key)
+        return catalog.get(i) if type(i) is int else None
+
+    def in_shot(row, shot):
+        selected = [i for i in range(row['first'],row['last']+1)
+                    if shot[0] <= (words[i]['start']+words[i]['end'])/2 < shot[1]]
+        if selected:
+            return dict(row, first=selected[0], last=selected[-1])
+
+    for row in result.get('speaker_inserts') or []:
+        if addresses(row) and (tile := reference(row, 'speaker', tiles)):
+            row = in_shot(row, tile['shot'])
+            if not row:
+                continue
+            speakers.append(dict(first=row['first'], last=row['last'], tile=tile['box'], shot=tile['shot']))
     for row in result.get('source_inserts') or []:
-        if not isinstance(row,dict):
+        if not addresses(row):
             continue
-        a,b,n = (row.get(k) for k in ('first','last','frame'))
-        bounds = box(row.get('box'))
-        if not (all(type(v) is int for v in (a,b,n)) and 0<=a<=b<len(words) and 0<=n<len(frames) and bounds):
-            continue
-        frame = frames[n]
+        panel = reference(row, 'panel', panels)
+        if panel:
+            frame = panel
+            row = in_shot(row, panel['shot'])
+            if not row:
+                continue
+            outer = panel['box']
+            bounds = box(row.get('box'))
+            if not bounds or not (outer[0]<=bounds[0]<bounds[2]<=outer[2] and outer[1]<=bounds[1]<bounds[3]<=outer[3]):
+                bounds = outer
+        else:
+            n = row.get('frame')
+            bounds = box(row.get('box'))
+            if not (type(n) is int and 0<=n<len(frames) and bounds):
+                continue
+            frame = frames[n]
+        tile = reference(row, 'speaker', tiles)
         with Image.open(frame['path']) as im:
             w,h=im.size
-        inserts.append(dict(frame,first=a,last=b,box=bounds,tile=box(row.get('tile')),shows=row.get('shows'),w=w,h=h))
-    replaces = [i for i in result.get('replaces') or [] if type(i) is int and 0<=i<len(windows)
-                and any(r['first']<=windows[i]['last'] and windows[i]['first']<=r['last'] for r in inserts)]
+        inserts.append(dict(frame, first=row['first'], last=row['last'], box=bounds,
+                            tile=tile['box'] if tile else box(row.get('tile')),
+                            tile_shot=tile['shot'] if tile else frame['shot'],
+                            shows=row.get('shows') or frame.get('shows'), w=w, h=h,
+                            **(dict(panel_box=panel['box']) if panel else {})))
+    # A retained pack already indexes its external windows. Only a fully covered
+    # window can be retired without losing research on a different adjacent clause.
+    covered = {i for row in inserts + speakers for i in range(row['first'],row['last']+1)}
+    replaces = [i for i,w in enumerate(windows) if all(j in covered for j in range(w['first'],w['last']+1))]
     authored = sorted({tuple(frames[i]['shot']) for i in result.get('authored_frames') or []
                        if type(i) is int and 0 <= i < len(frames)})
-    return dict(authored_shots=[list(span) for span in authored], inserts=sorted(inserts,key=lambda r:r['first']),replaces=replaces,
+    return dict(speaker_inserts=speakers, authored_shots=[list(span) for span in authored], inserts=sorted(inserts,key=lambda r:r['first']),replaces=replaces,
                 quote_segments=result.get('quote_segments') or [],spend=result.get('spend') or {})
 
 
@@ -138,7 +210,8 @@ def presenter_crop(inserts, faces, src, aspect):
     mid = sum(src)/2
     for rec in sorted(inserts,key=lambda r:abs(r['t']-mid)):
         tile = rec.get('tile')
-        if not tile or src[0]<rec['shot'][0]-.04 or src[1]>rec['shot'][1]+.04:
+        shot = rec.get('tile_shot', rec['shot'])
+        if not tile or src[0]<shot[0]-.04 or src[1]>shot[1]+.04:
             continue
         l,t,r,b = tile
         if l<=face[0]<face[2]<=r and t<=face[1]<face[3]<=b:
@@ -149,14 +222,27 @@ def presenter_crop(inserts, faces, src, aspect):
     return None
 
 
-def presenter_card(plan, span, take_key, dest, tile, crop, src, work, ffmpeg, **style):
+def shared_presenter_region(reading):
+    """Adjacent webcam tiles can share one lossless decode of the camera column."""
+    tiles = {tuple(r['tile']) for r in reading.get('inserts', []) + reading.get('speaker_inserts', [])
+             if r.get('tile')}
+    if not tiles:
+        return None
+    left,top,right,bottom = zip(*tiles)
+    region = [min(left),min(top),max(right),max(bottom)]
+    area = (region[2]-region[0])*(region[3]-region[1])
+    return region if area <= sum((r-l)*(b-t) for l,t,r,b in tiles)+1e-8 else None
+
+
+def presenter_card(plan, span, take_key, dest, tile, crop, src, work, ffmpeg, decode_region=None, **style):
     """Decode just the webcam pixels for live panels. The source clock stays intact."""
     take = plan.assets[take_key]
     pw, ph = take['w'], take['h']
     # Even outward bounds preserve the source's chroma grid. The card still
     # uses the exact verified rectangle inside this lossless intermediate.
-    x,y = [2*math.floor(v*n/2) for v,n in zip(tile[:2],(pw,ph))]
-    right,bottom = [min(n,2*math.ceil(v*n/2)) for v,n in zip(tile[2:],(pw,ph))]
+    region = decode_region or tile
+    x,y = [2*math.floor(v*n/2) for v,n in zip(region[:2],(pw,ph))]
+    right,bottom = [min(n,2*math.ceil(v*n/2)) for v,n in zip(region[2:],(pw,ph))]
     w,h = right-x,bottom-y
     key = take_key
     if work and Path(take['path']).is_file() and w>=2 and h>=2:
@@ -186,24 +272,27 @@ def presenter_card(plan, span, take_key, dest, tile, crop, src, work, ffmpeg, **
     plan.card(span,key,dest,crop=crop,src=src,**style)
 
 
-def compose(plan, span, rec, key, take_key, src, width, height, work, ffmpeg):
+def compose(plan, span, rec, key, take_key, src, width, height, work, ffmpeg, decode_region=None, report=False):
     """A pixel-preserving document and the synchronous presenter, clear of the caption seat."""
-    l,t,r,b = rec['box']
-    aspect = rec['w']*(r-l)/(rec['h']*(b-t))
-    w = min(1., .53*height/width*aspect)
-    h = w*width/height/aspect
+    from scene.motion import fit_panel
     tile = rec.get('tile')
-    live = tile and rec['shot'][0] <= src[0]+.04 and src[1] <= rec['shot'][1]+.04
-    bottom = .79 if live else .55+h/2
-    top = bottom-h
+    shot = rec.get('tile_shot', rec['shot'])
+    live = tile and shot[0] <= src[0]+.04 and src[1] <= shot[1]+.04
+    size = rec['w'], rec['h']
+    canvas = width, height
+    if report:
+        seat = [0,.15 if live else .03,1,.40]
+    else:
+        seat = [0,.26,1,.79] if live else [0,.12,1,.82]
+    rect = fit_panel(rec['box'], size, canvas, seat,
+                     align_y=1. if live else .5)
     plan.page(span,'#151A20',grain=0)
     if live:
-        l,t,r,b = tile
-        # The entire tile height is retained. Trim its sides symmetrically to fill the upper panel.
-        panel_h = min(top, (b-t)*rec['h']/((r-l)*rec['w'])*width/height*1.55)
-        tile_width = min(r-l, (b-t)*rec['h']/rec['w']*width/(panel_h*height))
-        centre = (l+r)/2
-        presenter_card(plan,span,take_key,[0,top-panel_h,1,top],tile,
-                       [centre-tile_width/2,t,centre+tile_width/2,b],src,work,ffmpeg)
-    rect = [(1-w)/2,top,(1+w)/2,bottom]
-    plan.card(span,key,rect,crop=rec['box'],source_ink=[rect],caption_baseline=min(.90,bottom+.08))
+        dest = fit_panel(tile, size, canvas, [0.,0.,1.,rect[1]], align_y=1.)
+        # Centre the pair as a single composition when a short row leaves spare height.
+        shift = max(0., dest[1]-.04)/2
+        for panel in (rect,dest):
+            panel[1] -= shift
+            panel[3] -= shift
+        presenter_card(plan,span,take_key,dest,tile,tile,src,work,ffmpeg,decode_region)
+    plan.card(span,key,rect,crop=rec['box'],source_ink=[rect],caption_baseline=min(.90,rect[3]+.08))

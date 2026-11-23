@@ -794,22 +794,55 @@ def build(script, sup, style_id, direction=None):
 
     # Bind source pictures to the very same spread word clock used by captions.
     reading = coverage.get('source_reading') or {}
+    from wf1_source_frame import shared_presenter_region
+    decode_region = shared_presenter_region(reading)
     source_rows = []
-    for rec in reading.get('inserts', []):
+    speakers = []
+    sequence = reading.get('inserts', []) + reading.get('speaker_inserts', [])
+    starts = {rec['first'] for rec in sequence}
+    def source_span(rec, live):
         a = word_frame(rec['first'])
         b = min(f_end, Clock.f(clock.words[rec['last']]['t1']))
+        if rec['last']+1 in starts:
+            b = word_frame(rec['last']+1)
+        elif rec['last'] == len(clock.words)-1 and live:
+            b = f_end
+        if live:
+            lo,hi = rec['shot']
+            a = max(a, round(lo*FPS)+LEAD_F if lo>0 else 0)
+            b = min(b, round(hi*FPS)+LEAD_F)
+        return a,b
+
+    for rec in reading.get('speaker_inserts', []):
+        a,b = source_span(rec, True)
+        if b > a:
+            speakers.append((a,b,rec['tile']))
+    for rec in reading.get('inserts', []):
+        a,b = source_span(rec, 'panel_box' in rec)
+        slot = f"source:{rec['first']}-{rec['last']}"
         if source_rows:
             a = max(a, source_rows[-1][1])
-        if b <= a or (None,rec['path']) in rejected_pairs:
+        if b <= a:
             continue
-        if (None,rec['path']) in reframes:
+        if (slot,rec['path']) in rejected_pairs or (None,rec['path']) in rejected_pairs:
+            if rec.get('tile'):
+                lo,hi = rec.get('tile_shot',rec['shot'])
+                first = max(a, round(lo*FPS)+LEAD_F if lo>0 else 0)
+                last = min(b, round(hi*FPS)+LEAD_F)
+                if first < last:
+                    speakers.append((first,last,rec['tile']))
+            continue
+        if (slot,rec['path']) in reframes or (None,rec['path']) in reframes:
             left,top,right,bottom = rec['box']
             dx,dy = (right-left)*.07,(bottom-top)*.07
-            rec = dict(rec,box=[max(0.,left-dx),max(0.,top-dy),min(1.,right+dx),min(1.,bottom+dy)],reframe=True)
+            wide = rec.get('panel_box')
+            if not wide or wide == rec['box']:
+                wide = [max(0.,left-dx),max(0.,top-dy),min(1.,right+dx),min(1.,bottom+dy)]
+            rec = dict(rec,box=wide,reframe=True)
         name = rec['shows'] or 'Interview screen share'
         source = dict(url=script.get('source_url'),title=name,channel=script.get('source_credit'),
                       time_s=round(script.get('source_start',0)+rec['t'],3),box=rec['box'])
-        source_rows.append([a,b,'photo',name,dict(rec,provider='interview-frame',source=source,page=source['url'],
+        source_rows.append([a,b,'photo',name,dict(rec,provider='interview-frame',source_slot=slot,source=source,page=source['url'],
                             clause=' '.join(w['w'] for w in clock.words[rec['first']:rec['last']+1]),
                             clause_t=[coverage['words'][rec['first']]['start'],coverage['words'][rec['last']]['end']])])
     source_spans = [r[:2] for r in source_rows]
@@ -833,7 +866,14 @@ def build(script, sup, style_id, direction=None):
         next_word = word_frame(page["last"] + 1)
         if next_word is not None:
             b = min(b, next_word)
-        if b > a and not on_evidence(a,b):
+        facts = page["facts"]
+        # A speaker-led explanation already carries its report in voice and captions.
+        # A quotation from an original or a qualified estimate has its own evidentiary work.
+        qualified = any((f.get("chain") or {}).get("stance") in wf1_display.ESTIMATE_LABELS or
+                        (f.get("chain") or {}).get("original") for f in facts)
+        narrated = all(f.get("chain") and not f.get("relation") for f in facts)
+        on_presenter = any(lo <= a and b <= hi for lo,hi,_ in speakers)
+        if b > a and (qualified or not (on_evidence(a,b) or (on_presenter and narrated))):
             timed_facts.append((a,b,page))
     # Retained directions can predate the claims chain. A dense attributed block
     # still gets a reading interval, with all its authored copy and provenance.
@@ -955,7 +995,8 @@ def build(script, sup, style_id, direction=None):
     look_pics = [take["still"]] if take.get("still") else []
     tcuts = [pc["f"][0] for pc in pieces[1:]]          # the take's own cuts and its cuts between speakers, in film frames
     from wf1_coverage import speaker_moves, move_frame
-    resolved_moves,move_spend=speaker_moves(coverage,ins,f_end,tcuts,sup['work'])
+    composed_spans = [r[:2] for r in ins] + [[lo,hi] for lo,hi,_ in speakers]
+    resolved_moves,move_spend=speaker_moves(coverage,composed_spans,f_end,tcuts,sup['work'])
     signal_moves = stress_moves(coverage.get('unresolved_holds'), stress)
     d['band']['motivated_frames']=sorted({move_frame(coverage,m,FPS,LEAD_F) for m in resolved_moves} | set(signal_moves))
     placement_report['spend']+=move_spend
@@ -1064,12 +1105,24 @@ def build(script, sup, style_id, direction=None):
         authored = reading.get("authored_shots", [])
         layout_edges = [round(t*FPS)+LEAD_F for shot in authored for t in shot]
         layout_edges.extend(f for span in report_spans for f in span)
+        layout_edges.extend(f for lo,hi,_ in speakers for f in (lo,hi))
         edges = sorted({a, b, *(f for f in layout_edges if a < f < b), *[c for c in tcuts + joins + list(panel) if a+3 <= c <= b-3],
                         *(f for span in stacks for f in span[:2] if a < f < b)})
         for fa, fb in zip(edges, edges[1:]):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
             on_report = any(lo <= fa < hi for lo,hi in report_spans)
+            tile = next((tile for lo,hi,tile in speakers if lo <= fa < hi), None)
+            if tile:
+                from scene.motion import fit_panel
+                from wf1_source_frame import presenter_card
+                seat = [0,.04,1,.48] if on_report else [0,.08,1,.82]
+                dest = fit_panel(tile,(take['w'],take['h']),(W,H),seat)
+                P.page([fa,fb],"#151A20",grain=0)
+                presenter_card(P,[fa,fb],pieces[k]['key'],dest,tile,tile,[t0,t1],
+                               sup['work'],sup['ffmpeg'],decode_region,presenter_insert=True,source_ink=[dest],caption_baseline=.87)
+                cut_pts.append(fa)
+                continue
             if on_report or any(start <= (t0+t1)/2 < end for start,end in authored):
                 # The source cut is already a composition. Fit all panels and both original
                 # credit corners together, with an independent ground for the caption.
@@ -1123,7 +1176,7 @@ def build(script, sup, style_id, direction=None):
                     # Use the verified webcam tile on the explanation, then cut back to the document.
                     P.page([fa,fb],"#151A20",grain=0)
                     presenter_card(P,[fa,fb],pieces[k]['key'],[0,0,1,height],tile,crop,[t0,t1],
-                                   sup['work'],sup['ffmpeg'],source_ink=[[0,0,1,height]],caption_baseline=.87)
+                                   sup['work'],sup['ffmpeg'],decode_region,source_ink=[[0,0,1,height]],caption_baseline=.87)
                     cut_pts.append(fa)
                     continue
             kw = dict(grade=dict(TAKE_PAST)) if any(s0 <= fa < s1 for s0, s1 in take_past) else {}
@@ -1262,8 +1315,8 @@ def build(script, sup, style_id, direction=None):
         """One readable print at a time; prior UI/document detail cannot occlude it."""
         for q, k in enumerate(run):
             f0, f1, kind, name, rec = ins[k]
-            if kind == "clip":
-                continue                                     # moving footage fills the phone (bleed)
+            if kind == "clip" or rec.get('provider') == 'interview-frame':
+                continue                                     # composed in its own layout below
             key = keys[rec["path"]]
             bed_of(f0, f1, key, kind, rec, is_mono(f0))
             aspect = float(rec.get("w") or W)/float(rec.get("h") or H)
@@ -1295,10 +1348,13 @@ def build(script, sup, style_id, direction=None):
             if rec.get('provider') == 'interview-frame':
                 from wf1_source_frame import compose
                 key = keys[rec["path"]]
-                src = [max(0,(f-LEAD_F)/FPS) for f in (f0,f1)]
-                compose(P,[f0,f1],rec,key,pieces[0]["key"],src,W,H,sup["work"],sup["ffmpeg"])
+                edges = sorted({f0,f1,*(f for span in report_spans for f in span if f0<f<f1)})
+                for fa,fb in zip(edges,edges[1:]):
+                    src = [max(0,(f-LEAD_F)/FPS) for f in (fa,fb)]
+                    compose(P,[fa,fb],rec,key,pieces[0]["key"],src,W,H,sup["work"],sup["ffmpeg"],decode_region,
+                            report=any(lo<=fa<hi for lo,hi in report_spans))
                 note(f0,f1,kind,name,rec,"source-insert")
-                P.pictures[-1]["source_crop"] = rec["box"]
+                P.pictures[-1].update(source_crop=rec["box"],source_slot=rec["source_slot"])
             elif lay == "bleed" or kind == "clip":
                 bleed(f0, f1, kind, name, rec, keys[rec["path"]])
             elif lay == "window":

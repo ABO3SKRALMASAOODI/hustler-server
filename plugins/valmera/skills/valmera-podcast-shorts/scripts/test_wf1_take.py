@@ -375,3 +375,62 @@ def test_m09_comparison_is_one_speaker_graphic_and_the_archive_keeps_its_words(t
     assert graphic["analogy"] and graphic["last"] == 13
     assert {"MORE POWER?", "SAME CHASSIS"}.issubset({i.get("t","").upper() for i in scene["items"]})
     assert coverage.outside_comparisons(plan["windows"][0],0,17,plan) == (14,17)
+
+
+def test_adjacent_survey_rows_reuse_clean_panel_then_show_live_speaker(tmp_path, quiet_engines, monkeypatch):
+    from PIL import Image
+    import wf1_coverage
+    import wf1_source_frame as source
+
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *args: ([], []))
+    pack = _sup(tmp_path, [])
+    words = pack["coverage"]["words"]
+    for w,text in zip(words, "FY27 culture survey Work-Life Blend 60% Action is 66% Each year I promise it could be 30% instead".split(), strict=True):
+        w["w"] = text
+    path = str(tmp_path / "survey.png")
+    Image.new("RGB", (1920, 1080)).save(path)
+    frames = [dict(path=path, t=2., shot=[0., 7.])]
+    overview = [.45, .30, .86, .75]
+    blend, action = [.50, .64, .85, .74], [.49, .60, .85, .73]
+    tile = [.79, .21, 1., .43]
+    result = dict(source_panels=[dict(frame=0, box=overview)], presenter_tiles=[dict(frame=0, box=tile)],
+                  source_inserts=[dict(first=0,last=2,panel=0,speaker=0,shows="FY27 favorability"),
+                                  dict(first=3,last=5,panel=0,box=blend,speaker=0,shows="Work & Life Blend 60%"),
+                                  dict(first=6,last=8,panel=0,box=action,speaker=0,shows="Action 66%")],
+                  speaker_inserts=[dict(first=9,last=17,speaker=0)], authored_frames=[0])
+    pack["coverage"]["source_reading"] = source.bind(pack["coverage"], frames, result)
+    script = dict(source_credit="Interview", source_start=100, source_url="interview-url",
+                  segments=[dict(say=" ".join(w["w"] for w in words if w["seg"]==i),pictures=[]) for i in (0,1)])
+    claim = dict(speaker="Guest", report="The promise recurs")
+    pages = [dict(first=10,last=12,facts=[dict(value=claim["report"],chain=claim,source={})]),
+             dict(first=14,last=17,facts=[dict(value="Possibly lower",chain=dict(claim,stance="personal_estimate"),
+                                               attribution="Guest",source={})])]
+    scene, beats = film.build(script, pack, "window", dict(coverage_final=True, display_facts=pages))
+    rows = [p for p in beats["pictures"] if p["mode"]=="source-insert"]
+    assert [r["source_crop"] for r in rows] == [overview, blend, action]
+    assert [r["clause"] for r in rows] == ["FY27 culture survey", "Work-Life Blend 60%", "Action is 66%"]
+    assert all(a["f"][1]==b["f"][0] for a,b in zip(rows,rows[1:]))
+    assert len({r["pic"] for r in rows})==1
+    for row in rows:
+        assert row["source_evidence"]["time_s"]==102
+        assert any(it.get("src") and it["f"]==row["f"] for it in scene["items"])
+    assert any(it.get("presenter_insert") and it["crop"]==tile for it in scene["items"])
+    assert [p["facts"][0]["value"] for p in beats["display_facts"]] == ["Possibly lower"]
+    assert source.shared_presenter_region(pack["coverage"]["source_reading"]) == tile
+    repaired, report = film.build(script, pack, "window", dict(coverage_final=True,
+        reframe=[dict(window=rows[1]["source_slot"], path=path)]))
+    assert [p["source_crop"] for p in report["pictures"]] == [overview, overview, action]
+    assert [p["reframed"] for p in report["pictures"]] == [False, True, False]
+    assert repaired["dur_f"] == scene["dur_f"]
+    late = dict(frames[0],shot=[4.,7.])
+    unrelated = source.bind(pack["coverage"], [late], result)
+    assert unrelated["inserts"] == []
+    # The same coverage call owns acquisition. Leave the first subsequent external
+    # subject in research when an external window overlaps its locally served lead-in.
+    import json
+    from types import SimpleNamespace
+    answer = dict(result, speaker_inserts=[], windows=[dict(first=5, last=12, name="Survey follow-up",
+                  external=True, must_show="The follow-up event")])
+    llm = SimpleNamespace(ask=lambda *a,**k:(json.dumps(answer),{}), json_block=json.loads)
+    plan = wf1_coverage.plan(words, "Survey", str(tmp_path), llm, frames=frames)
+    assert [(w["first"],w["last"]) for w in plan["windows"]] == [(9,12)]
