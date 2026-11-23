@@ -570,6 +570,7 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
         pins = []
         for prior in sorted(priorities, key=lambda item: (item.get("motion_ok") is not True,
                                                           -item.get("fit", 0) if window.get("single_action") else 0,
+                                                          not bool(item.get("attribution") or item.get("attribution_text")) if window.get("single_action") else False,
                                                           item["f"])):
             if pins and window.get("single_action"):
                 break
@@ -675,7 +676,8 @@ def action_holds(rows, coverage, fps=30, lead=3, detail=None):
     out = list(rows)
     for i, choices in actions.items():
         best = max(choices, key=lambda r: (r[4].get("fit",0), r[4].get("verified_motion") is True,
-                                           bool(r[4].get("action_box")), r[4].get("grade",0)))
+                                           bool(r[4].get("action_box")), r[4].get("grade",0),
+                                           bool(r[4].get("attribution"))))
         if detail:
             best[4].update(detail(best, True))
         a = min(r[0] for r in choices)

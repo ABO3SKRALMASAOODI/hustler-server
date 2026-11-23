@@ -617,9 +617,9 @@ def test_verified_action_uses_its_real_clock_and_keeps_the_next_physical_cut():
         name = f"shot-{a}"
         return [a,b,"clip",name,dict(window=window, path=name, fit=fit, src=[0,(b-a)/30],
                                      verified_motion=True, placed_motion_p90=2)]
-    first, best, racks = clip(3,33,0,7),clip(33,69,0,9),clip(105,153,1,9)
-    best[4]["action_box"] = [.1,.2,.3,.5]
-    rows = coverage.action_holds([first,best,racks],plan)
+    first, best, racks = clip(3,33,0,9),clip(33,69,0,9),clip(105,153,1,9)
+    best[4]["attribution"] = "WeatherService +29"
+    rows = coverage.action_holds([first,best,racks],plan,detail=lambda *_: {"action_box":[.1,.2,.3,.5]})
     assert rows[0][:4] == [3,105,"clip",best[3]]
     assert rows[0][4]["action_end"] == 39
     assert rows[1] == racks
