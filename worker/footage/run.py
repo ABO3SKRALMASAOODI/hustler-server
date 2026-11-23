@@ -768,7 +768,7 @@ def lines_of(script):
     out = []
     for k, s in enumerate(sc.get("segments") or []):
         ln = dict(i=int(s.get("i", k)), say=s.get("say"), pictures=s.get("pictures") or [], dur=s.get("dur"), pause_after=s.get("pause_after"))
-        for key in ("see", "era", "beat", "visual", "single_action"):  # the writer's picture brief, when the script carries one
+        for key in ("see", "era", "beat", "visual", "claim", "single_action"):  # the writer's picture brief, when the script carries one
             if s.get(key) is not None:
                 ln[key] = s[key]
         out.append(ln)

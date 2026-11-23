@@ -14,6 +14,7 @@ Use the supplied product demos for the actions they actually show. Retained orig
 candidates for those actions. A speaker's concern or competitive verdict is documented by the
 interview. A comparison alone adds no new archive subject. Search for a different source only
 for a distinct factual depiction the supplied evidence cannot cover.
+Use the parent claim to resolve a short comparative clause. Look for the documented operation itself when a named example illustrates a category.
 Search for evidence of the actual line, including the role it attributes to the people shown.
 For an unnamed participant look for first-party records of the named company and event, never
 other people doing similar work. If there is no traceable event, return no external subject for
@@ -55,6 +56,7 @@ Answer with one JSON object only: {"keep":[{"s":subject number,"h":result number
 def plan(lines, named, about="", budget_s=90.0):
     """({"subjects": [...], "lines": [...]}, usd)."""
     rows = [f"{ln['i']}. {ln['say']}" + (f"   [writer's pictures: {', '.join(ln.get('pictures') or [])}]" if ln.get("pictures") else "")
+            + (f"   [parent claim: {ln['claim']}]" if ln.get('claim') else '')
             + (f"   [documentary depiction requirements: {ln['visual']}]" if ln.get('visual') else '')
             + (f"   [see: {json.dumps([dict(thing=x.get('thing'), as_of=x.get('as_of'), moment=x.get('moment')) for x in ln['see'] if isinstance(x, dict)], ensure_ascii=False)}]"
                if ln.get("see") else "")
@@ -98,7 +100,7 @@ def plan(lines, named, about="", budget_s=90.0):
             lns.append(dict(i=ln["i"], show=str(ln.get("show") or ""), subjects=[x for x in ln.get("subjects") or [] if x in names]))
     assigned = {row["i"]: row["subjects"] for row in lns}
     for subject in subs:
-        claims = [dict(words=line["say"], depiction=line["visual"], **({"single_action":True} if line.get("single_action") else {})) for line in lines
+        claims = [dict(words=line["say"], depiction=line["visual"], **({"claim":line["claim"]} if line.get("claim") else {}), **({"single_action":True} if line.get("single_action") else {})) for line in lines
                   if line.get("visual") and (subject["name"] in assigned.get(line["i"], [])
                                              or subject["name"] in (line.get("pictures") or []))]
         if claims:
@@ -114,6 +116,7 @@ def rank(subjects, hits, per=3, budget_s=60.0):
                 f"{h.get('views') or '?'} views | {h['where']}" for hi, h in enumerate(hits.get(si) or [])]
         if rows:
             clauses = "".join(f"\n  Spoken: {claim['words']} | Depiction: {claim['depiction']}"
+                              + (f" | Parent claim: {claim['claim']}" if claim.get("claim") else "")
                               + (" (one continuous action)" if claim.get("single_action") else "")
                               for claim in s.get("claims", []))
             blocks.append(f"Subject {si}: {s['name']} (must show: {s['must_show']}){clauses}\n" + "\n".join(rows))

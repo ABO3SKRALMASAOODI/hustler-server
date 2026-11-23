@@ -45,7 +45,7 @@ SHEETS_PER_CALL = max(1, int(os.environ.get("FOOTAGE_SHEETS_PER_CALL", "4")))
 
 LOOK_BRIEF = """
 
-The film's lines carry a picture brief ("see" or documentary depiction requirements). Use the spoken words to resolve the referent and its role. A request for a campus setting can be met by the actual campus without documenting a private conversation. For every line a cell carries (each number in its "lines"), also return one entry in "line_checks": {"line": line number, "version_ok": bool, "time_ok": bool, "exact_thing": bool}, meaning:
+The film's lines carry a picture brief ("see" or documentary depiction requirements). Use the parent claim with the spoken words to resolve the referent and its role. Match the operation the example demonstrates. A shared number or era by itself does not show that operation. A request for a campus setting can be met by the actual campus without documenting a private conversation. For every line a cell carries (each number in its "lines"), also return one entry in "line_checks": {"line": line number, "version_ok": bool, "time_ok": bool, "exact_thing": bool}, meaning:
 - "exact_thing": the frame shows the very thing the line is about (that person, that film, that product, that place, or the work itself), not a lookalike, a sequel or another film, a namesake, a toy, sculpture, ride or museum version, a fan remake.
 - "time_ok": false only when the frame plainly shows another time than the line means (a later building, a later film's characters, a person decades away from the moment the line tells); true when a viewer cannot tell.
 - "version_ok": false only when the line's words set one version against another and the frame plainly is the other one (a test reel under words about the finished film, the finished film under words about an early version, a later model); when the words only name the work, any version of it carries them.
@@ -70,6 +70,7 @@ def _brief_text(ln):
 
 def _listing(lines):
     return "\n".join(f"{ln['i']}. {ln['say']}  (show: {ln.get('show') or '-'})" + _brief_text(ln)
+                     + (f"  [parent claim: {ln['claim']}]" if ln.get('claim') else '')
                      + (f"  [documentary depiction requirements: {ln['visual']}]" if ln.get('visual') else '') for ln in lines)
 
 

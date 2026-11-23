@@ -694,3 +694,24 @@ def test_scout_reuses_identical_checked_pixels_only_on_the_same_brief(monkeypatc
         return look.check(subject,[dict(i=0,say=words)],[cell],source,str(tmp_path))[0][0]
     assert read("edit")["ok"] and read("edit")["look_reused"]
     assert read("test")["ok"] and len(calls)==2
+
+
+def test_example_search_and_rank_keep_the_parent_claim(monkeypatch):
+    from footage import look, plan, run
+    import json
+    claim = "Companies still depend on applications developed decades ago."
+    window = dict(i=0, say="Some have been around for a century.", pictures=["Legacy applications"],
+                  visual="Application compatibility documentation", claim=claim)
+    calls = []
+    def ask(system, content, role, **kwargs):
+        calls.append(content)
+        if role == "footage_plan":
+            return json.dumps(dict(subjects=[dict(name="Legacy applications")],
+                                   lines=[dict(i=0,subjects=["Legacy applications"])])), 0
+        return '{"keep":[]}', 0
+    monkeypatch.setattr(plan.ask, "ask", ask)
+    lines, named, title = run.lines_of(dict(segments=[window]))
+    planned, _ = plan.plan(lines, named, title)
+    plan.rank(planned["subjects"], {0:[dict(title="Century of manufacturing",where="youtube")]})
+    assert claim in look._listing(lines)
+    assert len(calls) == 2 and all(claim in content for content in calls)
