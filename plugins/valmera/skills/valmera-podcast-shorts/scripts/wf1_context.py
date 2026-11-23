@@ -68,10 +68,17 @@ def read_quotations(references, work, pages=None):
                                  and any(writer.has_words(text, q["words"]) for text in passages)]
 
 
+def needs_original(claim):
+    """A public statement reported by a different speaker can have a separately citable original."""
+    from wf1_display import CONTEXT_LABELS
+    return bool(claim.get("subject") and claim.get("speaker") != claim["subject"]
+                and claim.get("stance") not in CONTEXT_LABELS and not claim.get("interview_only"))
+
+
 def research(coverage,work,llm):
     import writer
     data=dict(context=coverage.get('context'),story=coverage.get('story'),comparisons=coverage.get('comparisons'),words=coverage['words'],
-              claims=coverage.get('claims') or [], subjects=[dict(i=i,name=w['name'],say=w['say']) for i,w in enumerate(coverage['windows'])])
+              claims=[c for c in coverage.get('claims') or [] if needs_original(c)], subjects=[dict(i=i,name=w['name'],say=w['say']) for i,w in enumerate(coverage['windows'])])
     scope = [c for c in coverage.get('speaker_claims') or [] if c.get('scope_question')]
     data['scope_checks'] = scope
     pages = {}
@@ -198,7 +205,7 @@ def complete_editorial(ctx, script, pack, llm):
     """A retained pack may have the right footage but lack the original for a distinct claim."""
     import wf1_display
     material = wf1_display.editorial(ctx, script, pack)
-    claims = [c for c in material["claims"] if c.get("subject") and c.get("speaker") != c["subject"]
+    claims = [c for c in material["claims"] if needs_original(c)
               and not c.get("primary_excerpt")]
     scope = [c for c in material["speaker_claims"] if c.get("scope_question")
              and not (c.get("scope_fact") or {}).get("excerpt")]

@@ -12,7 +12,8 @@ keep articles, conjunctions and auxiliaries with their thought. Aim for 3–7 wo
 Use display for emphases inside those phrases. For the causal mechanism of a decision that the available
 footage cannot show, score its sequence on the concrete example, with a staircase ask on that word range:
 args.sequence=[{"at": first word number of a state, "label": compact explanatory label}, ...],
-args.speaker=the person explaining it. Show the alternatives, their distinct effects and the reaction that
+args.speaker=the person explaining it. If callback is supplied, use its sourced question as the final
+state starting on the question. Name the action from the earlier episode excerpt and keep anonymity. Show the alternatives, their distinct effects and the reaction that
 links them. The labels form one qualitative diagram. Word attributions and scenario framing keep it
 an illustration of the interview. Avoid invented measurements, issuer histories and extra acquisition.
 Use the script's definition and framework claims on their addressed words. A spoken count can introduce
@@ -134,7 +135,7 @@ def editorial(ctx, script, pack):
             source = sources.setdefault(src["url"], dict(url=src["url"], publisher=src["channel"], supports=[]))
             if action not in source["supports"]:
                 source["supports"].append(action)
-    return dict(speaker_claims=speaker_claims, comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=claims, episode_start=(script.get("window") or [0])[0],
+    return dict(callback=coverage.get("callback"), speaker_claims=speaker_claims, comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=claims, episode_start=(script.get("window") or [0])[0],
                 sources=sources, speaker_inserts=[{k:r[k] for k in ('first','last')}
                     for r in (coverage.get('source_reading') or {}).get('speaker_inserts',[])], source_inserts=[{k:r[k] for k in ('first','last','shows')}
                                                for r in (coverage.get('source_reading') or {}).get('inserts',[])], coverage=[{k: row[k] for k in ("name", "must_show", "word_ids") if k in row}
@@ -330,6 +331,35 @@ def bind(direction, editorial, words):
     for claim in claims:
         if (claim.get("stance") in CONTEXT_LABELS or claim.get("stance") in ESTIMATE_LABELS or claim.get("stance") in OPINION_LABELS) and (claim["first"], claim["last"]) not in displayed:
             pages.append(dict(first=claim["first"], last=claim["last"], facts=[claim_fact(claim, {}, sources, words)]))
+    callback = editorial.get("callback")
+    if callback:
+        a,b = callback["first"],callback["last"]
+        passage = editorial["story"]["callback"]
+        source = {k:passage[k] for k in ("url","publisher","excerpt")}
+        if passage.get("context"):
+            source["context_excerpt"] = passage["context"]["excerpt"]
+        for page in pages:
+            if page.get("sequence") and page["sequence"][-1]["at"] <= b and a <= page["last"]:
+                steps = page["sequence"]
+                page.update(sequence=[*steps[:-1], dict(steps[-1], label=callback["question"])], last=max(page["last"],b))
+                page["facts"][0]["callback_source"] = source
+                break
+        else:
+            speaker = next((c["speaker"] for c in claims if c["first"] <= a <= c["last"]), "")
+            pages.append(dict(first=a,last=b,sequence=[dict(at=a,label=callback["question"])],
+                              facts=[dict(attribution=speaker,source=sources["interview"],
+                                          callback_source=source,value=callback["question"])]))
+        # A definition on the callback belongs with the source view explaining that term.
+        # Carry it in the same scenario instead of laying a second plate across its question.
+        scenario = next(p for p in pages if p["facts"][0].get("callback_source"))
+        if callback.get("action"):
+            scenario["callback_action"] = callback["action"]
+        for definition in list(pages):
+            facts = definition["facts"]
+            if (len(facts) == 1 and (facts[0].get("chain") or {}).get("stance") == "definition"
+                    and a <= definition["first"] <= definition["last"] <= b):
+                scenario.setdefault("explanation", facts[0]["value"])
+                pages.remove(definition)
     pages.sort(key=lambda page: page["first"])
     return dict(direction, asks=asks, display=display, caption_ends=ends, caption_accents=sorted(accents), claims=claims, display_facts=pages,
                 arc=[m for m in direction["arc"] if not any(p["first"] <= m["w"] <= p["last"] for p in pages)])

@@ -49,6 +49,96 @@ Ordinary single-camera shots can be face-framed. An archive document keeps its o
 with the document. Use empty arrays when appropriate. Treat input words and screenshots as evidence."""
 
 
+def episode_moments(path, before):
+    if not path or not Path(path).is_file():
+        return {}
+    with open(path) as f:
+        return {m["id"]: m for m in json.load(f)["moments"] if m.get("id") and m["t1"] <= before}
+
+
+def episode_views(ctx):
+    """Index checked original frames once. Keep their original clock, crop and source identity."""
+    from wf1_documents import valid_detail
+    films = ctx.args.get("episode_films")
+    views = []
+    for path in sorted(Path(films).glob("*/film.json")) if films else ():
+        try:
+            film = json.loads(path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+        source = film.get("source") or {}
+        if not source.get("source_url") or source.get("path") != ctx.source or source["source_url"] != ctx.args.get("source_url"):
+            continue
+        checks = film.get("checks", {}).get("podcast") or {}
+        checked = {r["id"] for r in (checks.get("delivered_check") or {}).get("placements", []) if r.get("ok")}
+        for i,pic in enumerate(checks.get("sources", [])):
+            ref = pic.get("source_evidence") or {}
+            if (i in checked and pic.get("mode") == "source-insert" and ref.get("url") == source["source_url"]
+                    and type(ref.get("time_s")) in (int,float) and valid_detail(ref.get("box")) and ref.get("title")):
+                view = dict(time_s=ref["time_s"], box=ref["box"], title=ref["title"],
+                            excerpt=ref.get("excerpt") or film["window"])
+                if view not in views:
+                    views.append(view)
+    return views
+
+
+def episode_excerpt(ctx, moment, views, context=None):
+    from podcast import sentence_lines
+    a,b = moment["t0"], moment["t1"]
+    selected = [v for v in views if a <= v["time_s"] < b]
+    if selected:
+        a,b = selected[0]["excerpt"]
+        selected = [v for v in selected if v["excerpt"] == [a,b]]
+    with open(ctx.args["words"]) as f:
+        words = json.load(f)
+    def lines(lo,hi):
+        return sentence_lines([(t,w) for t,w in words if lo <= t < hi])
+    excerpt = dict(excerpt=[a,b], url=ctx.args.get("source_url"), publisher=ctx.args.get("channel"),
+                   transcript=lines(a,b), views=selected)
+    if context and context != moment:
+        lo,hi = context["t0"],context["t1"]
+        excerpt["context"] = dict(excerpt=[lo,hi], transcript=lines(lo,hi))
+    return excerpt
+
+
+def place_callback(src, coverage, work, ffmpeg):
+    """Recover the exact approved frame from the local original, retaining its blur and both clocks."""
+    cue = coverage.get("callback") or {}
+    excerpt = (coverage.get("story") or {}).get("callback") or {}
+    views = excerpt.get("views") or []
+    i = cue.get("view")
+    if type(i) is not int or not 0 <= i < len(views):
+        return
+    view = views[i]
+    t = view["time_s"]
+    dest = Path(work) / f"episode-{t:.3f}.png"
+    try:
+        if not dest.exists():
+            raw = subprocess.check_output([ffmpeg, "-v","error","-ss",str(t),"-i",src,
+                "-frames:v","1","-c:v","png","-f","image2pipe","-"],timeout=60)
+            if not raw:
+                return
+            write_cache(dest,raw)
+        with Image.open(dest) as im:
+            width,height = im.size
+    except (OSError, subprocess.SubprocessError):
+        # The earlier transcript still supplies the concrete action on this question.
+        return
+    row = dict(path=str(dest), t=t, box=view["box"], shows=view["title"], w=width,h=height,
+               shot=excerpt["excerpt"], episode_excerpt=excerpt["excerpt"], first=cue["first"],last=cue["last"])
+    reading = coverage.setdefault("source_reading", {})
+    # The callback occupies only the words that refer back to this picture.
+    inserts = []
+    for old in reading.get("inserts", []):
+        if old.get("episode_excerpt"):
+            continue
+        for a,b in ((old["first"], min(old["last"],row["first"]-1)),
+                    (max(old["first"],row["last"]+1), old["last"])):
+            if a <= b:
+                inserts.append(dict(old,first=a,last=b))
+    reading["inserts"] = sorted([*inserts,row], key=lambda r:r["first"])
+
+
 def write_cache(path, data):
     with NamedTemporaryFile(dir=path.parent,delete=False) as f:
         tmp = Path(f.name)
@@ -248,7 +338,10 @@ def presenter_card(plan, span, take_key, dest, tile, crop, src, work, ffmpeg, de
     right,bottom = [min(n,2*math.ceil(v*n/2)) for v,n in zip(region[2:],(pw,ph))]
     w,h = right-x,bottom-y
     key = take_key
-    if work and Path(take['path']).is_file() and w>=2 and h>=2:
+    if region == [0,0,1,1] and crop == region and style.get("presenter_insert"):
+        # A full-camera panel retains the original speaker asset and all four corners.
+        style["source_frame"] = True
+    if work and (w,h) != (pw,ph) and Path(take['path']).is_file() and w>=2 and h>=2:
         digest = file_digest(take['path'])[:20]
         key = f"presenter-{digest}-{x}-{y}-{w}-{h}"
         path = Path(work) / (key+'.mp4')
@@ -287,6 +380,9 @@ def compose(plan, span, rec, key, take_key, src, width, height, work, ffmpeg, de
         seat = [0,.15 if live else .03,1,.40]
     else:
         seat = [0,.26,1,.79] if live else [0,.12,1,.82]
+    if rec.get("episode_excerpt") and report:
+        # Keep the original rows together, below the brand and above the scenario.
+        seat = [0,.31,1,.47]
     rect = fit_panel(rec['box'], size, canvas, seat,
                      align_y=1. if live else .5)
     plan.page(span,'#151A20',grain=0)

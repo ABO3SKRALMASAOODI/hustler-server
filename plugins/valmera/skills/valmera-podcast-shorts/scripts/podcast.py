@@ -687,7 +687,7 @@ def build_short(run, m, fetched, pod, tries=3):
     if run.route_out.is_set():
         return dict(id=m["id"], ok=False, error=f"{ROUTE_OUT}: not started")
     info = fetched["info"]
-    args = dict(moment=m, words=run.p("words.json"), style=m["style"], music_ledger=run.p("music_used.json"),      # no two shorts of a run play one track
+    args = dict(moment=m, episode_moments=run.p("moments.json"), episode_films=run.p("films"), words=run.p("words.json"), style=m["style"], music_ledger=run.p("music_used.json"),      # no two shorts of a run play one track
                 delivered_ledger="off",                  # an inner short; podcast.py records the podcast's one folder
                 identity=(f"Speaker: {pod.get('speaker') or ''}. Host: {pod.get('host') or ''}. Show: {pod.get('show') or ''} "
                           f"({pod.get('year') or ''}).\n" + identity_text(info))[:1800],
@@ -809,7 +809,11 @@ def _sources_md(pod_line, rows):
             tr = tuple(p.get("time_range") or ())
             evidence = p.get("source_evidence") or {}
             subject = p.get("name_super") or p.get("attribution") or evidence.get("title") or p.get("name")
-            if p.get("kind") == "clip":
+            if evidence.get("excerpt") and p.get("mode") == "source-insert":
+                lo,hi = evidence["excerpt"]
+                out.append(f"- Interview demonstration | {subject} | {evidence.get('channel')} | {p['source']} | "
+                           f"{lo}–{hi} s of the episode | frame at {evidence['time_s']} s | {at}")
+            elif p.get("kind") == "clip":
                 c = by_clip.get((p.get("source"), tr)) or by_page.get(p.get("source")) or {}
                 seen.add((p.get("source"), tr))
                 span = f"{tr[0]:.1f}-{tr[1]:.1f} s of the source" if len(tr) == 2 else ""
@@ -821,6 +825,14 @@ def _sources_md(pod_line, rows):
         episode_url = episode.get("source_url") if isinstance(episode, dict) else episode
         for page in (ch.get("podcast") or {}).get("display_facts") or []:
             for fact in page.get("facts", []):
+                callback = fact.get("callback_source")
+                if callback:
+                    lo,hi = callback["excerpt"]
+                    out.append(f"- Earlier interview passage | {(page.get('sequence') or [{}])[-1].get('label')} | "
+                               f"{callback.get('publisher')} | {callback.get('url')} | {lo}–{hi} s of the episode")
+                    if callback.get("context_excerpt"):
+                        ca,cb = callback["context_excerpt"]
+                        out.append(f"- Interview explanation | {callback.get('publisher')} | {callback.get('url')} | {ca}–{cb} s of the episode")
                 excerpt = fact.get("excerpt") or (fact.get("chain") or {}).get("original") or {}
                 body = excerpt.get("words") or fact.get("statement") or " ".join(str(fact[k]) for k in
                     ("qualifier","value","relation") if fact.get(k))

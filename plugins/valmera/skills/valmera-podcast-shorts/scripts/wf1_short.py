@@ -123,7 +123,7 @@ def script(ctx, ideas_out):
     system += '\n\nReturn JSON only: {"in": seconds (0.15-0.3 s before the first word), "out": seconds (0.3-0.8 s after the last word; the clip is 18-55 s), "title": the film\'s title in at most five words, a headline a stranger stops for, written from the words between your in and out only: it promises nothing the clip does not deliver (a count or a list it names is whole inside the clip), "hook_line": the exact words heard first, "close_line": the exact last words, "speakers": number of people heard, "named": [the real people, companies, places, products and events this clip names or plainly points to, that a camera has filmed; each {"name": its usual English name, "is": person|company|place|product|event|thing, "must_show": one plain sentence on what footage of it must visibly show, as it was at the time he speaks of}; never this conversation itself, which is on screen already; when he tells of something he did himself, that filmed moment of him (a livestream, a keynote, his training, an event he took part in) is an event to name like any other], "brief": two sentences on the story and its mood, for the editor who chooses the music}.'
     system += (" Attribute concerns and competitive characterizations to the speaker in the brief. "
                "Separate demonstrated capabilities from predicted outcomes. Include claims for any nested speech or forecast: [{start,end,speaker,subject,event,report}]. "
-               "Use absolute episode seconds bounding just that claim. speaker is the person actually heard "
+               "Set interview_only=true for private reported conversations whose only source is this speaker. Use absolute episode seconds bounding just that claim. speaker is the person actually heard "
                "(use The host or The guest when the name is uncertain); subject is whose statement is described "
                "(the same person for a firsthand forecast). event names the original occasion if known. "
                "report is a short card line (aim for 6–12 words). A separate byline names the reporter: omit that "
@@ -150,6 +150,16 @@ def script(ctx, ideas_out):
                f"Measured length: {float(idea['t1']) - float(idea['t0']):.1f} s\n\n")
     content = f"# The moment\n{json.dumps(idea, ensure_ascii=False)}\n\n{anchors}# Who is in it\n{str((ctx.args or {}).get('identity') or '')[:1500]}\n\n# Words near the moment: seconds word\n" + ' '.join((f'{t:.2f} {w}' for (t, w) in near))
     content += "\n\n# Surrounding interview for meaning only, outside the edit\n" + "\n".join(surrounding)
+    from wf1_source_frame import episode_moments, episode_views
+    earlier = episode_moments(ctx.args.get("episode_moments"), start)
+    views = episode_views(ctx) if earlier else []
+    if earlier:
+        system += (" When the payoff refers back to work demonstrated earlier in this interview, return "
+                   "callback_id from the episode index for the specific demonstration that supplies its meaning. "
+                   "Prefer the passage with the verified view of the work itself; if a different passage explains its "
+                   "mechanism, also return callback_context_id. Preserve source anonymization. Keep the question in the current voice. Omit callback_id for an independent payoff.")
+        content += "\nEarlier passages (id, title, account):\n" + json.dumps(
+            [[key, m["title"], m.get("why"), [v["title"] for v in views if m["t0"] <= v["time_s"] < m["t1"]]] for key, m in earlier.items()], ensure_ascii=False)
     llm = _llm()
     spend, s, note = [], {}, ""
     for _ in range(2 if os.environ.get('CODEX_PROXY_LOCAL') == '1' else 3):
@@ -179,7 +189,10 @@ def script(ctx, ideas_out):
         s.update({"in": round(max(float(idea["t0"]) - 0.2, 0.0), 2), "out": round(float(idea["t1"]) + 0.5, 2)})
     t0, t1 = float(s["in"]), float(s["out"])
     named = [r for r in s.get("named") or [] if isinstance(r, dict) and r.get("name")]
-    return dict(title=s.get("title") or idea.get("title"), style=reg, window=[round(t0, 2), round(t1, 2)], source=ctx.source,
+    from wf1_source_frame import episode_excerpt
+    selected = earlier.get(str(s.get("callback_id")))
+    callback = episode_excerpt(ctx, selected, views, earlier.get(str(s.get("callback_context_id")))) if selected else None
+    return dict(**({"callback": callback} if callback else {}), title=s.get("title") or idea.get("title"), style=reg, window=[round(t0, 2), round(t1, 2)], source=ctx.source,
                 hook_line=s.get("hook_line") or idea.get("hook"), close_line=s.get("close_line") or idea.get("payoff"),
                 speaking_turns=[t for t in s.get("speaking_turns") or [] if isinstance(t, dict)],
                 claims=[c for c in s.get("claims") or [] if isinstance(c, dict)],
@@ -244,6 +257,7 @@ def supply(ctx, script):
     coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm(), named=script.get('named'),
                                  off_camera=off_camera(cuts, words), frames=frames, story=wf1_coverage.story_context(script),
                                  speaking_turns=local_turns(script))
+    wf1_source_frame.place_callback(ctx.source, coverage, sup_dir, PX.FF)
     coverage['claims'] = script.get('claims') or []
     original = coverage.get('source_reading') or {}
     coverage['windows'] = [w for i,w in enumerate(coverage['windows']) if i not in original.get('replaces',[])]
@@ -784,16 +798,22 @@ def seat_brand_words(l1):
         return moved
     ruler = F.Ruler(l1["voices"])
     shifts = {}
+    def group_of(word):
+        if word.get("text_group"):
+            return ("graphic", word["text_group"])
+        if "chunk" in word:
+            return ("caption", word["chunk"])
+        return ("word", word["id"])
     for word in words:
         x, y, size = (F._rest(word.get(k, v)) for k, v in (("x", 0), ("y", 0), ("s", 1)))
         right = x + ruler.width(word["v"], word["t"]) * size / F.W
         top = y - ruler.cap(word["v"]) * size / F.H
         left, upper, end, bottom = F.MARK
         if x < end and right > left and top < bottom and y > upper:
-            group = word.get("chunk") or word["id"]
+            group = group_of(word)
             shifts[group] = max(shifts.get(group, 0), bottom + .008 - top)
     for word in words:
-        dy = shifts.get(word.get("chunk") or word["id"])
+        dy = shifts.get(group_of(word))
         if dy:
             word["y"] = l1pass._shift(word["y"], dy)
             moved.append(dict(id=word["id"], dy=dy))

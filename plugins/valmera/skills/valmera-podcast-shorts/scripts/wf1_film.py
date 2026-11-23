@@ -837,6 +837,8 @@ def build(script, sup, style_id, direction=None):
             speakers.append((a,b,rec['tile']))
     for rec in reading.get('inserts', []):
         a,b = source_span(rec, 'panel_box' in rec)
+        if rec.get("episode_excerpt") and rec["last"] == len(clock.words)-1:
+            b = f_end
         slot = f"source:{rec['first']}-{rec['last']}"
         if source_rows:
             a = max(a, source_rows[-1][1])
@@ -860,6 +862,10 @@ def build(script, sup, style_id, direction=None):
         name = rec['shows'] or 'Interview screen share'
         source = dict(url=script.get('source_url'),title=name,channel=script.get('source_credit'),
                       time_s=round(script.get('source_start',0)+rec['t'],3),box=rec['box'])
+        if rec.get("episode_excerpt"):
+            excerpt = coverage["story"]["callback"]
+            source.update(time_s=rec["t"], excerpt=rec["episode_excerpt"], transcript=excerpt["transcript"],
+                          action=coverage["callback"].get("action"))
         source_rows.append([a,b,'photo',name,dict(rec,provider='interview-frame',source_slot=slot,source=source,page=source['url'],
                             clause=' '.join(w['w'] for w in clock.words[rec['first']:rec['last']+1]),
                             clause_t=[coverage['words'][rec['first']]['start'],coverage['words'][rec['last']]['end']])])
@@ -887,6 +893,21 @@ def build(script, sup, style_id, direction=None):
             steps = [step for step in page["sequence"] if lo <= step["at"] < hi]
             if len(steps) >= 2 and all(lo > p["last"] or hi <= p["first"] for p in overlaps):
                 pages.append(dict(page, first=steps[0]["at"], last=hi-1, sequence=steps))
+    # The attributed scenario identifies its speaker throughout its visible interval.
+    # Keep any part of the separate byline still needed on an adjacent clause.
+    scenarios = [p for p in pages if p.get("sequence")]
+    for page in list(pages):
+        facts = page["facts"]
+        if len(facts) != 1 or (facts[0].get("chain") or {}).get("stance") not in wf1_display.OPINION_LABELS:
+            continue
+        spans = [(page["first"], page["last"])]
+        for scenario in scenarios:
+            if facts[0].get("attribution") == scenario["facts"][0].get("attribution"):
+                spans = [(a,b) for lo,hi in spans for a,b in
+                         ((lo,min(hi,scenario["first"]-1)),(max(lo,scenario["last"]+1),hi)) if a<=b]
+        if spans != [(page["first"], page["last"])]:
+            pages.remove(page)
+            pages.extend(dict(page,first=a,last=b) for a,b in spans)
     pages.sort(key=lambda p: p["first"])
     for comparison in coverage.get("comparisons") or []:
         competing = [p for p in pages if p["first"] <= comparison["last"] and comparison["first"] <= p["last"]]
@@ -907,6 +928,8 @@ def build(script, sup, style_id, direction=None):
         if next_word is not None:
             b = min(b, next_word)
         facts = page["facts"]
+        if page.get("sequence") and facts[0].get("callback_source") and page["last"] == len(clock.words)-1:
+            b = f_end
         # A speaker-led explanation already carries its report in voice and captions.
         # A quotation from an original or a qualified estimate has its own evidentiary work.
         qualified = page.get("sequence") or any((f.get("chain") or {}).get("stance") in wf1_display.CONTEXT_LABELS or f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
@@ -1065,7 +1088,12 @@ def build(script, sup, style_id, direction=None):
     tcuts = [pc["f"][0] for pc in pieces[1:]]          # the take's own cuts and its cuts between speakers, in film frames
     from wf1_coverage import speaker_moves, move_frame
     composed_spans = [r[:2] for r in ins] + [[lo,hi] for lo,hi,_ in speakers] + [list(span) for span in source_pages]
-    resolved_moves,move_spend=speaker_moves(coverage,composed_spans,f_end,tcuts,sup['work'])
+    if (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
+            and any(r[4].get("episode_excerpt") for r in ins)):
+        # Both the local demo and the remaining camera passages landed on their directed words.
+        resolved_moves,move_spend = coverage.get("moves", []), []
+    else:
+        resolved_moves,move_spend=speaker_moves(coverage,composed_spans,f_end,tcuts,sup['work'])
     signal_moves = stress_moves(coverage.get('unresolved_holds'), stress)
     d['band']['motivated_frames']=sorted({move_frame(coverage,m,FPS,LEAD_F) for m in resolved_moves} | set(signal_moves))
     placement_report['spend']+=move_spend
@@ -1261,7 +1289,7 @@ def build(script, sup, style_id, direction=None):
             # A landscape single already in close-up cannot fit shoulders and gestures in
             # the portrait cover. Keep the camera's own composition in a fitted live panel.
             cover = min(1., (W/H) / (info["pw"]/info["ph"]))
-            if (cover < .65 and not active_panel and not reading.get("inserts") and pieces[k]["who"] == "speaker" and
+            if (cover < .65 and not active_panel and not any(not r.get("episode_excerpt") for r in reading.get("inserts", [])) and pieces[k]["who"] == "speaker" and
                     any(face[2] > .82*cover for face in info["faces"])):
                 from scene.motion import fit_panel
                 face = max(info["faces"], key=lambda f:f[2]*f[3])
@@ -1555,6 +1583,11 @@ def build(script, sup, style_id, direction=None):
                     src = [max(0,(f-LEAD_F)/FPS) for f in (fa,fb)]
                     compose(P,[fa,fb],rec,key,pieces[0]["key"],src,W,H,sup["work"],sup["ffmpeg"],decode_region,
                             report=any(lo<=fa<hi for lo,hi in report_spans))
+                if rec.get("episode_excerpt"):
+                    lo,hi = rec["episode_excerpt"]
+                    credit = " · ".join(filter(None,(rec["source"]["channel"], f"{lo}–{hi} s")))
+                    action = rec["source"].get("action") or ""
+                    wf1_display.reading_card(P, [f0,f1], "", action, credit, pal, centre=.248, group="episode-credit")
                 note(f0,f1,kind,name,rec,"source-insert")
                 P.pictures[-1].update(source_crop=rec["box"],source_slot=rec["source_slot"])
             elif rec.get("provider") == "primary-document":
@@ -1668,8 +1701,14 @@ def build(script, sup, style_id, direction=None):
             for i,(start,end) in enumerate(zip(cue,cue[1:])):
                 if start >= end:
                     continue
+                footer = fact["source"].get("publisher") or ""
+                if i == len(steps)-1:
+                    footer = page.get("explanation") or footer
+                    if page.get("callback_action") and not any(lo < end and start < hi and rec.get("episode_excerpt")
+                                                              for lo,hi,_,_,rec in source_rows):
+                        footer = page["callback_action"]
                 wf1_display.reading_card(P, [start,end], "", fact["attribution"]+" · Scenario",
-                                         fact["source"].get("publisher") or "", pal, centre=.605,
+                                         footer, pal, centre=.605,
                                          steps=[(s["label"],j==i) for j,s in enumerate(steps)])
                 P.events.append(start)
             fact_pages.append(dict(page, f=[a,b]))

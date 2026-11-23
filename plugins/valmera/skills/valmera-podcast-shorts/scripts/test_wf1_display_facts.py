@@ -458,3 +458,77 @@ def test_checkpoint_extracts_missing_forecast_from_author_page_and_keeps_scope(t
     assert evidence["claims"][0]["primary_excerpt"]["quote"] == passage
     assert evidence["speaker_claims"][0]["scope_fact"]["excerpt"]["sha256"] == "retained"
     assert not wf1_context.complete_editorial(ctx,script,pack,llm)
+
+
+def test_m21_heard_estimate_and_earlier_demo_share_the_scene(tmp_path, quiet_engines, monkeypatch):
+    import wf1_alignment as alignment
+    import wf1_display as display
+    import wf1_source_frame as source
+    from PIL import Image
+    from scene import text_layout
+    from scene.palette import kit
+    from test_wf1_take import _sup
+
+    pack = _sup(tmp_path, [])
+    words = pack["coverage"]["words"]
+    for row,token in zip(words, "GDP might take decades if we cannot record meetings how could it do what Genie showed us then".split(), strict=True):
+        row["w"] = token
+    speaker = "The guest"
+    claim = dict(start=100.,end=101.45,speaker=speaker,subject=speaker,stance="personal_estimate",
+                 report="Economic output could change over about a decade.")
+    script = dict(window=[100.,107.], claims=[claim], source="episode", source_url=INTERVIEW,
+                  source_credit="All-In", hook_line="GDP might take decades", close_line="showed us then",
+                  segments=[dict(say=" ".join(w["w"] for w in words if w["seg"]==s),pictures=[]) for s in (0,1)])
+    heard = [dict(w=w["w"],t0=w["start"],t1=w["end"]) for w in words]
+    heard[-1].update(t0=8.1,t1=8.4)
+    idx = dict(video=dict(duration=9),words=heard,sentences=[dict(id="s1",wi0=0,wi1=17,t0=.1,t1=6.5,text="")],shots=[])
+    (tmp_path/"source.mp4").write_bytes(b"take")
+    answer = dict(first=0,last=17, claim_edits=[dict(claim=0,first=3,last=3,report="Economic output could change over {heard}.")])
+    llm = SimpleNamespace(ask=lambda *a,**k:(json.dumps(answer),{}),json_block=json.loads)
+    ctx = SimpleNamespace(run_dir=str(tmp_path),supply=str(tmp_path),args=dict(source_url=INTERVIEW,channel="All-In"))
+    def cut(ctx,src,start,end,out,**kw):
+        from pathlib import Path
+        assert 100 <= start < 100.1
+        Path(out).write_bytes(b"cut")
+    chain = SimpleNamespace(cut=cut,brand=SimpleNamespace(probe=lambda _:dict(dur=7)),shots_of=lambda *a:[])
+    alignment.reconcile(ctx,script,idx,[],llm,chain)
+    assert claim["heard"] == "decades" and claim["report"].endswith("over decades.")
+
+    excerpt = dict(excerpt=[15.,30.],transcript=["[15–30] Compare the survey scores."],url=INTERVIEW,publisher="All-In",
+        views=[dict(time_s=21.5,box=[.3,.4,.7,.6],title="Genie compares anonymous survey scores")])
+    Image.new("RGB",(1920,1080)).save(tmp_path/"episode-21.500.png")
+    callback = dict(first=9,last=17,view=0,action="Genie compared survey scores.",question="How could AI analyze a meeting it cannot hear?")
+    pack["coverage"].update(story=dict(callback=excerpt),callback=callback,speaker_claims=[
+        dict(first=4,last=17,stance="concern",speaker=speaker,report="The AI lacks meeting context.")])
+    source.place_callback("episode",pack["coverage"],tmp_path,"ffmpeg")
+    direction = display.bind(dict(arc=[],asks=[dict(dev="staircase",at=dict(w=4),until=dict(w=17),
+        args=dict(sequence=[dict(at=4,label="No meeting record"),dict(at=9,label="Do that work?")]))]),
+        display.editorial(ctx,script,pack),heard)
+    monkeypatch.setattr(wf1_coverage,"speaker_moves",lambda *a:([],[]))
+    scene,beats = wf.wf1_film.build(script,pack,"window",dict(direction,coverage_final=True))
+    evidence, = beats["pictures"]
+    assert evidence["source_evidence"]["time_s"] == 21.5 and evidence["f"][1] == beats["dur_f"]
+    assert evidence["source_crop"] == excerpt["views"][0]["box"]
+    caption = " ".join(i["t"] for i in scene["items"] if str(i.get("text_group","")).startswith("episode-credit"))
+    assert callback["action"] in caption and "All-In · 15.0–30.0 s" in caption
+    # If one line crosses the watermark, the credit and the action move as one.
+    block = [i for i in scene["items"] if str(i.get("text_group","")).startswith("episode-credit")]
+    for i,row in enumerate(block):
+        row.update(x=.53, y=.16+i*.06)
+    before = [row["y"] for row in block]
+    wf.seat_brand_words(scene)
+    offsets = [round(row["y"]-y,5) for row,y in zip(block,before)]
+    assert offsets[0] > 0 and len(set(offsets)) == 1
+    pages = beats["display_facts"]
+    assert [p["facts"][0]["value"] for p in pages] == [claim["report"],"No meeting record"]
+    assert pages[-1]["sequence"][-1]["label"] == callback["question"]
+    assert pages[-1]["facts"][0]["callback_source"]["excerpt"] == [15.,30.]
+    # Accented captions crossing from the face to the evidence retain one fitted size.
+    caption = dict(k="word",id="cue",chunk=1,role="cap",f=[0,4],t="the organization-specific context",
+                   v="cap",x=.5,y=.86,align="c",ink="#ffffff",s=1.1)
+    scene.update(items=[caption], frame=[1080,1920])
+    scene["voices"]["cap"].update(px=115)
+    text_layout.resolve(scene)
+    for frame in range(4):
+        box = kit.item_box(caption,scene["voices"],1080,1920,frame)
+        assert .029 <= box[0] and box[2] <= .971
