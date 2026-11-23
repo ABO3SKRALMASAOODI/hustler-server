@@ -239,8 +239,12 @@ def test_followup_picture_scope_receives_the_selection_conversation(monkeypatch)
 
     def observe(ctx, name, schema, system, content, **kw):
         assert name == 'identify_picture_subjects'
-        assert json.loads(content) == {'request': 'Northern Lights', 'conversation': history}
+        scope = json.loads(content)
+        assert scope == {'request': 'Northern Lights', 'conversation': history,
+                         'available_soundtrack_titles': ['Northern Lights'],
+                         'resolved_asks': ['Use the selected track.']}
         return {'pictures': [], 'spoken_categories': []}, {}
 
     monkeypatch.setattr(asks, '_call', observe)
-    assert required_broll.record(NS(request_contract_history=history), {'asks': []}, 'Northern Lights') == []
+    ledger = {'asks': [{'want': 'Use the selected track.'}], 'soundtrack_options': ['Northern Lights']}
+    assert required_broll.record(NS(request_contract_history=history), ledger, 'Northern Lights') == []
