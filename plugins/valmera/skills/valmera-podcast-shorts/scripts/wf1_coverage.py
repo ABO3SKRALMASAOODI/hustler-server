@@ -7,7 +7,7 @@ import importlib.util
 import subprocess
 from pathlib import Path
 
-CONTRACT = 7
+CONTRACT = 8
 
 
 class CoverageError(RuntimeError):
@@ -51,7 +51,8 @@ def ladder(rows, limit=3):
 
 def story_context(script):
     return dict(meaning=(script.get("idea") or {}).get("why"), brief=script.get("direction"),
-                hook=script.get("hook_line"), payoff=script.get("close_line"))
+                hook=script.get("hook_line"), payoff=script.get("close_line"), claims=script.get("claims") or [],
+                episode_start=(script.get("window") or [0])[0])
 
 
 def plan(words, title, work, llm, named=None, off_camera=None, frames=None, story=None, speaking_turns=None):
@@ -82,19 +83,31 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None, stor
  "windows":[{"first":int,"last":int,"name":str,"external":true,"association":false,"must_show":str,"why":str,
    "depictions":[{"name":str,"must_show":str,"video_searches":[str]}]}],
  "comparisons":[{"first":int,"last":int,"premise":str,"consequence":str}],
+ "speaker_claims":[{"first":int,"last":int,"speaker":str,"stance":"concern|characterization","report":str,"scope_question":str}],
  "moves":[{"word":int,"why":str}]}.
 named lists the referents the script stage resolved from the whole moment, each with the event-level
 picture it needs as it was at the time (must_show). For each with identifiable external evidence, plan a
 window on the words that speak of it, under its resolved name (a full name, never a pronoun or first
 name alone), with its event-level must_show. Words may refer to them by pronoun or first name.
-Read story.meaning and the editorial brief with the actual words. For an explicitly imagined analogy,
+Read story.claims, story.meaning and the editorial brief with the actual words. For an explicitly imagined analogy,
 give its whole vehicle (including the imagined consequence) ONE inclusive comparisons span. Write
 two concise graphic labels, premise and consequence, that explain its logic in the conditional.
 An analogy is a single treatment: use a backed illustrative insert already in the source when it
 makes the relationship clear, otherwise the synchronous speaker with the two-label analogy graphic.
 Do not acquire its nouns, parts or imagined actions as separate documentary events. A real event or
 product example that the speaker then cites gets its own exact external window. Comparison spans
-end before that factual example. Ordinary factual comparisons keep their own documentary evidence.
+end before that factual example. For a competitive comparison, show the actual capability on its own words.
+Group the demonstrated actions into their factual window. The synchronous interview is primary
+evidence for the speaker's concern or competitive characterization. Map just that judgment in
+speaker_claims. Include its conditional premise: naming the platforms to which a concern applies
+is part of that same thought. Mark the particular concern or loaded verdict that would sound like the film's own
+claim when set in type. Give one short indirect report for the whole judgment, keeping the speaker's
+qualifications and the named products. Leave ordinary connective commentary and restatements in
+the running interview. Estimates already identified in story.claims keep their own treatment.
+Let a product demo play across the factual release example, including an estimated cadence.
+A later opinion about the same products needs no further archive search. If a documented policy
+or partnership materially qualifies it, give the precise scope_question for a text citation.
+Otherwise omit scope_question. Keep the real demo or partnership on its own factual clause.
 Inventory EVERY concrete company, person, place, object, event and number in these words.
 Do not inventory an abstract feeling, rhetorical connective or this interview itself as a concrete
 external subject. When a number modifies an entity or event, inventory that complete referent,
@@ -133,9 +146,6 @@ for precise technical claims; never fabricate them.
 Describe fetchable REAL footage: company product/demo/sign/building, actual place, actual archive,
 document or an attributed scientific visualization. Never substitute a stranger for a named person,
 a generic boardroom for a company, a galaxy for the solar system, or a later event for an earlier one.
-For abstract or hypothetical claims show a truthful concrete illustration/document and explicitly
-say what it DOES NOT establish. A campus can illustrate studying there without claiming it records
-the particular conversation. Do not invent evidence of an unfilmed event or hypothetical number.
 Leave abstract claims on the original take with a rhetorical move or a designed graphic, unless
 a primary artifact carries the actual claim. Keep associations out of documentary source searches.
 Keep the opening audio and captions intact. External pictures may begin on the very first word;
@@ -196,12 +206,31 @@ an honest subject; never invent one.'''
                 and 0 <= row["first"] <= row["last"] < len(words)
                 and all(isinstance(row.get(k), str) and row[k].strip() for k in ("premise", "consequence"))):
             comparisons.append({k: row[k] for k in ("first", "last", "premise", "consequence")})
-    out.update(story=story, comparisons=comparisons, speaking_turns=speaking_turns)
+    speaker_claims = [c for c in out.get("speaker_claims") or [] if isinstance(c, dict)
+                      and type(c.get("first")) is int and type(c.get("last")) is int
+                      and 0 <= c["first"] <= c["last"] < len(words)
+                      and c.get("stance") in ("concern", "characterization")
+                      and all(isinstance(c.get(k), str) and c[k].strip() for k in ("speaker", "report"))]
+    # Restore the full, timed first-person claim when the picture reading addresses only its conclusion.
+    # Its conditional lead-in names the parties the concern applies to, not another filmed event.
+    for claim in speaker_claims:
+        if claim["stance"] != "concern":
+            continue
+        for original in (story or {}).get("claims") or []:
+            if (original.get("speaker") != claim["speaker"] or original.get("subject") != claim["speaker"]
+                    or original.get("stance") or not all(type(original.get(k)) in (int, float) for k in ("start", "end"))):
+                continue
+            origin = story.get("episode_start", 0)
+            ids = [i for i, w in enumerate(words) if original["start"] <= origin + (w["start"] + w["end"])/2 < original["end"]]
+            if ids and ids[0] <= claim["first"] <= claim["last"] <= ids[-1]:
+                claim.update(first=ids[0], last=ids[-1])
+                break
+    out.update(story=story, comparisons=comparisons, speaker_claims=speaker_claims, speaking_turns=speaking_turns)
     if frames:
         out['source_reading'] = source_frame.bind(dict(out, words=words, windows=windows), frames, dict(out,spend={}))
     # Reserve locally directed words before assigning indices to external research windows.
     local = out.get('source_reading') or {}
-    for c in [*comparisons, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
+    for c in [*speaker_claims, *comparisons, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
         remaining = []
         for w in windows:
             for a,b in ((w["first"], min(w["last"], c["first"]-1)),
@@ -239,7 +268,8 @@ def same_picture(left,right):
 
 def research_names(coverage):
     """A name spoken only inside the comparison stays in the inventory for the graphic."""
-    inside = {i for c in coverage.get("comparisons") or [] for i in range(c["first"], c["last"]+1)}
+    local = (coverage.get("comparisons") or []) + (coverage.get("speaker_claims") or [])
+    inside = {i for c in local for i in range(c["first"], c["last"]+1)}
     if not inside:
         return coverage.get("named") or []
     graphic = {e["name"] for e in coverage.get("entities") or [] if isinstance(e, dict) and e.get("name")
@@ -249,7 +279,7 @@ def research_names(coverage):
 
 
 def outside_comparisons(window, a, b, coverage):
-    for row in coverage.get("comparisons") or []:
+    for row in (coverage.get("comparisons") or []) + (coverage.get("speaker_claims") or []):
         if row["last"] < window["first"]:
             a = max(a, row["last"]+1)
         elif row["first"] > window["last"]:

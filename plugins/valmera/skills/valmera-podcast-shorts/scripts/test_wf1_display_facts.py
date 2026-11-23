@@ -225,3 +225,95 @@ def test_retained_multi_fact_estimate_pages_keep_the_qualifications(tmp_path, mo
         copy = " ".join(it["t"] for it in rows if it["f"][0] <= frame < it["f"][1])
         assert all(part in copy for part in (fact["qualifier"], fact["value"], fact["attribution"], source["publisher"]))
         assert not any(it.get("role") == "cap" and it["f"][0] <= frame < it["f"][1] for it in scene["items"])
+
+
+def test_comparison_evidence_keeps_the_scope_and_researches_only_the_demo(tmp_path, monkeypatch):
+    import wf1_context
+    import wf1_display
+    import writer
+
+    clauses = ["Their data might train the next model.", "The two partners previewed Claude in Excel.",
+               "The demo edits a spreadsheet.", "Basically an Excel killer. They're killing Photoshop."]
+    words = [dict(w=w, seg=s) for s, clause in enumerate(clauses) for w in clause.split()]
+    for i, w in enumerate(words):
+        w.update(start=i * .3, end=(i + 1) * .3)
+    def span(s):
+        ids = [i for i, w in enumerate(words) if w["seg"] == s]
+        return dict(first=ids[0], last=ids[-1])
+
+    opinion = dict(speaker="Jason Calacanis", stance="characterization",
+                   report="He sees Anthropic challenging Excel and Photoshop.", **span(3))
+    concern = dict(speaker=opinion["speaker"], stance="concern", report="Customer data might train future models.",
+                   scope_question="Which commercial inputs and outputs are used by default?", **span(0))
+    evidence = [dict(name="Provider policies", first=0, last=span(0)["last"]),
+                dict(name="Microsoft partnership", **span(1)),
+                dict(name="Claude Sheets", first=span(2)["first"], last=span(3)["last"])]
+    answer = dict(speaker_claims=[dict(concern, first=2), opinion], windows=[dict(r, external=True, must_show=r["name"]) for r in evidence])
+    prompts = []
+    def direct(prompt, content, **kw):
+        prompts.append(prompt)
+        return json.dumps(answer), {}
+    coverage = wf1_coverage.plan(words, "Partners and competitors", tmp_path,
+                                 SimpleNamespace(ask=direct, json_block=json.loads),
+                                 story=dict(episode_start=500,claims=[dict(speaker=concern["speaker"],subject=concern["speaker"],
+                                            start=500,end=500+words[concern["last"]]["end"])]))
+    assert [(w["name"], w["say"]) for w in coverage["windows"]] == [
+        ("Microsoft partnership", clauses[1]), ("Claude Sheets", clauses[2])]
+    assert "speaker_claims" in prompts[0] and "scope_question" in prompts[0]
+    assert wf1_coverage.outside_comparisons(coverage["windows"][-1], span(2)["first"], len(words)-1, coverage)[1] == span(2)["last"]
+    policies = [dict(url="policy-a",publisher="Anthropic",supports="Commercial data excluded by default; opted-in data may train."),
+                dict(url="policy-b",publisher="OpenAI",supports="Business and API data excluded from training by default.")]
+    def research(system, content, **kwargs):
+        part = json.loads(content)
+        assert part["scope_checks"] == [concern]
+        assert [s["name"] for s in part["subjects"]] == ["Microsoft partnership", "Claude Sheets"]
+        return json.dumps(dict(references=[dict(windows=[], sources=policies)])), {}
+    monkeypatch.setattr(writer, "ask_openai", research)
+    refs = wf1_context.research(coverage, tmp_path/"research", SimpleNamespace(openai_key=lambda: None, json_block=json.loads))
+    editorial = wf1_display.editorial(SimpleNamespace(args=dict(source_url=INTERVIEW)), {},
+                                       dict(coverage=coverage, referent_research=refs, footage=[dict(clips=[
+                                           dict(source=dict(url="demo",channel="Claude"),shows="Editing spreadsheet cells")])]))
+    assert editorial["sources"]["demo"] == dict(url="demo", publisher="Claude", supports=["Editing spreadsheet cells"])
+    scope = "Business and API data stay out of training by default."
+    fact = dict(source="policy-a", also_sources=["policy-b"], statement=scope)
+    direction = dict(arc=[], asks=[dict(dev="typewriter", at=dict(w=1), until=dict(w=2), args=dict(facts=[fact]))])
+    bound = wf1_display.bind(direction, editorial, [dict(w, t0=w["start"], t1=w["end"]) for w in words])
+    opening, close = bound["display_facts"]
+    assert (opening["first"],opening["last"]) == (concern["first"],concern["last"])
+    scope_fact, = opening["facts"]
+    assert scope_fact["perspective"] == dict(speaker=concern["speaker"], stance="concern", report=concern["report"], interview=INTERVIEW)
+    assert scope_fact["statement"] == scope and [s["url"] for s in scope_fact["supporting_sources"]] == ["policy-a","policy-b"]
+    assert close["facts"][0]["attribution"] == opinion["speaker"] and close["facts"][0]["value"] == opinion["report"]
+    assert close["facts"][0]["source"]["url"] == INTERVIEW
+    # The writer can choose a live camera with no type ask. Keep the scoped text from the primary reading.
+    refs["references"][0].update(scope_for=0, statement=scope)
+    editorial = wf1_display.editorial(SimpleNamespace(args=dict(source_url=INTERVIEW)), {},
+                                       dict(coverage=coverage, referent_research=refs))
+    retained = wf1_display.bind(dict(asks=[],arc=[]), editorial, [])
+    assert retained["display_facts"][0]["facts"] == [scope_fact]
+    # A second window for an already illustrated subject can still need its own source.
+    by_line = {0:["Claude Sheets"], 1:["Microsoft"], 2:["Microsoft"], 3:["Unseen"]}
+    footage = [dict(i=0,clips=[dict(source={"url":"demo"})]),dict(i=1,clips=[dict(source={"url":"ignite"})]),
+               dict(i=2,clips=[dict(source={"url":"blank"},dull=True)])]
+    assert wf.photo_subjects(footage, by_line) == {"Microsoft","Unseen"}
+
+
+def test_spoken_verdict_keeps_the_speaker_captions_and_byline(tmp_path, quiet_engines, monkeypatch):
+    from test_wf1_take import _sup, cuts_two_shot
+    import wf1_display
+    pack = _sup(tmp_path, cuts_two_shot())
+    words = pack["words"]["words"]
+    for w, token in zip(words[12:], "basically an Excel killer killing Photoshop".split()):
+        w["w"] = token
+    claim = dict(first=12,last=17,speaker="The host",stance="characterization",report="Sees rivals to Excel and Photoshop.")
+    pack["coverage"]["speaker_claims"] = [claim]
+    script = dict(segments=[dict(say=" ".join(w["w"] for w in words if w["seg"] == i),pictures=[]) for i in (0,1)])
+    direction = wf1_display.bind(dict(asks=[],arc=[]),dict(sources={"interview":dict(url=INTERVIEW)},speaker_claims=[claim]), [])
+    direction.update(turn_seg=1, coverage_final=True, display=[dict(seg=1,text="Excel killer",role="payoff")])
+    monkeypatch.setattr(wf1_coverage,"speaker_moves",lambda *args: ([],[]))
+    scene, beats = wf.wf1_film.build(script,pack,"prints",direction)
+    credit, = [i for i in scene["items"] if i.get("t") == "The host · Opinion"]
+    a,b = credit["f"]
+    assert any(i["k"]=="shot" and i["f"][0]<b and a<i["f"][1] for i in scene["items"])
+    assert any(i.get("role")=="cap" and i["f"][0]<b and a<i["f"][1] for i in scene["items"])
+    assert not any(row["text"] == "Excel killer" for row in beats["display"])

@@ -116,7 +116,8 @@ def script(ctx, ideas_out):
               "the clip opens on the hook sentence's first content word and closes on the payoff's last word; one continuous "
               "window, never an interior stretch that loses either.")
     system += '\n\nReturn JSON only: {"in": seconds (0.15-0.3 s before the first word), "out": seconds (0.3-0.8 s after the last word; the clip is 18-55 s), "title": the film\'s title in at most five words, a headline a stranger stops for, written from the words between your in and out only: it promises nothing the clip does not deliver (a count or a list it names is whole inside the clip), "hook_line": the exact words heard first, "close_line": the exact last words, "speakers": number of people heard, "named": [the real people, companies, places, products and events this clip names or plainly points to, that a camera has filmed; each {"name": its usual English name, "is": person|company|place|product|event|thing, "must_show": one plain sentence on what footage of it must visibly show, as it was at the time he speaks of}; never this conversation itself, which is on screen already; when he tells of something he did himself, that filmed moment of him (a livestream, a keynote, his training, an event he took part in) is an event to name like any other], "brief": two sentences on the story and its mood, for the editor who chooses the music}.'
-    system += (" Include claims for any nested speech or forecast: [{start,end,speaker,subject,event,report}]. "
+    system += (" Attribute concerns and competitive characterizations to the speaker in the brief. "
+               "Separate demonstrated capabilities from predicted outcomes. Include claims for any nested speech or forecast: [{start,end,speaker,subject,event,report}]. "
                "Use absolute episode seconds bounding just that claim. speaker is the person actually heard "
                "(use The host or The guest when the name is uncertain); subject is whose statement is described "
                "(the same person for a firsthand forecast). event names the original occasion if known. "
@@ -237,7 +238,7 @@ def supply(ctx, script):
     coverage['context']=who
     import wf1_context
     primary_direction = (wf1_context.direct(coverage, os.path.join(sup_dir, 'referent-research'), _llm())
-                         if coverage['windows'] else dict(references={}, spend=[]))
+                         if coverage['windows'] or any(c.get('scope_question') for c in coverage.get('speaker_claims', [])) else dict(references={}, spend=[]))
     windows = coverage['windows']
     # Inventory records what was said; windows specify what can truthfully be photographed.
     # Passing the inventory back as search subjects resurrects unnamed people and isolated dates.
@@ -290,8 +291,9 @@ def supply(ctx, script):
         ctx.log(f"footage: {foot['counts']['clips']} clips on {foot['counts']['lines_with_footage']} of {foot['counts']['lines']} sentences; "
                 f"subjects {[s['name'] for s in subjects]}")
     # photographs of the same things, for the sentences the footage left bare
+    bare = photo_subjects(pack["footage"], by_line)
     named = [dict(name=s["name"], searches=[s["name"]], must_show=s.get("must_show") or s["name"], **{"is": s.get("kind") or "thing"})
-             for s in subjects if any(s["name"] in v for v in by_line.values())]
+             for s in subjects if s["name"] in bare]
     if named:
         sys.modules.pop("llm", None)                           # the worker's own llm answers its picture check
         try:
@@ -386,6 +388,13 @@ def wall_state(ctx, pack):
                 seen.add(row["url"])
                 rows.append(row)
     return dict(sources=n, refused=rows, since=time.time())
+
+
+def photo_subjects(footage, by_line):
+    """Seek fallback photos only for a window without a usable sourced clip."""
+    covered = {int(row["i"]) for row in footage if any(c.get("source") and not c.get("dull")
+                                                       for c in row["clips"])}
+    return {name for i, names in by_line.items() if i not in covered for name in names}
 
 
 def has_footage(pack):

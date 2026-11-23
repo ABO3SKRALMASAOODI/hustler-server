@@ -872,7 +872,7 @@ def build(script, sup, style_id, direction=None):
     pages = list(d.get("display_facts") or [])
     for comparison in coverage.get("comparisons") or []:
         competing = [p for p in pages if p["first"] <= comparison["last"] and comparison["first"] <= p["last"]]
-        if any(f.get("chain") for p in competing for f in p["facts"]):
+        if any(f.get("chain") or f.get("perspective") for p in competing for f in p["facts"]):
             continue
         pages = [p for p in pages if p not in competing]
         pages.append(dict(first=comparison["first"], last=comparison["last"], facts=[
@@ -890,7 +890,8 @@ def build(script, sup, style_id, direction=None):
         facts = page["facts"]
         # A speaker-led explanation already carries its report in voice and captions.
         # A quotation from an original or a qualified estimate has its own evidentiary work.
-        qualified = any((f.get("chain") or {}).get("stance") in wf1_display.ESTIMATE_LABELS or
+        qualified = any(f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
+                        (f.get("chain") or {}).get("stance") in wf1_display.ESTIMATE_LABELS or
                         (f.get("chain") or {}).get("original") for f in facts)
         narrated = all(f.get("chain") and not f.get("relation") for f in facts)
         on_presenter = (any(lo <= a and b <= hi for lo,hi,_ in speakers)
@@ -899,7 +900,12 @@ def build(script, sup, style_id, direction=None):
             timed_facts.append((a,b,page))
     # Retained directions can predate the claims chain. A dense attributed block
     # still gets a reading interval, with all its authored copy and provenance.
+    def opinion_byline(facts):
+        return len(facts) == 1 and (facts[0].get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS
+
     def needs_reading_page(facts):
+        if opinion_byline(facts):
+            return False
         if any(f.get("chain") or wf1_display.source_statement(f, script.get("source_url")) for f in facts):
             return True
         if not any(f.get("attribution") for f in facts):
@@ -912,7 +918,7 @@ def build(script, sup, style_id, direction=None):
     # A retained Director can predate the source reading. The original takes its word's
     # visual slot, while continuous rhythm direction still spans the film.
     comparison_spans = [(word_frame(c["first"]), Clock.f(clock.words[c["last"]]["t1"]))
-                        for c in coverage.get("comparisons") or []]
+                        for c in (coverage.get("comparisons") or []) + (coverage.get("speaker_claims") or [])]
     if (source_rows or comparison_spans) and dr:
         def separate_ask(ask):
             a = word_frame(ask['at']['w'])
@@ -1562,11 +1568,21 @@ def build(script, sup, style_id, direction=None):
     # An attributed claim carries the reading on the ground below its source picture.
     fact_pages = []
     for a, b, page in timed_facts:
+        facts = page["facts"]
+        if opinion_byline(facts):
+            # The synchronous voice and captions carry the qualified words. Only identify their owner.
+            claim = facts[0]["chain"]
+            byline = claim["speaker"] + " · " + wf1_display.OPINION_LABELS[claim["stance"]]
+            voice = f"opinion_credit{a}"
+            P.voices[voice] = dict(P.voices["cap"], px=P.R.fit_px("cap", byline, .82*W, 48), track=0)
+            P.word([a,b], byline, voice, .5, cap_y - .09, pal["ink"], align="c", role="graphic", z=8,
+                   stroke=dict(w=4, c=DARK_INK), contrast_shadow=True, fact_type=True)
+            fact_pages.append(dict(page, f=[a,b]))
+            continue
         if (a, b) in report_spans:
-            facts = page["facts"]
             for i, fact in enumerate(facts):
                 claim = fact.get("chain") or {}
-                label = wf1_display.ESTIMATE_LABELS.get(claim.get("stance"))
+                label = wf1_display.ESTIMATE_LABELS.get(claim.get("stance")) or wf1_display.OPINION_LABELS.get(claim.get("stance"))
                 speaker = fact.get("attribution") or ""
                 source = fact["source"].get("publisher") or fact["source"].get("url") or ""
                 body = str(fact["value"])
@@ -1579,6 +1595,9 @@ def build(script, sup, style_id, direction=None):
                     stamp = date or (value if not fact.get("statement") and value not in statement else "")
                     citation = " · ".join(dict.fromkeys(filter(None, (speaker, fact["source"].get("author"), source, stamp))))
                     speaker = ""
+                    if perspective := fact.get("perspective"):
+                        label = perspective["speaker"] + " · " + wf1_display.OPINION_LABELS[perspective["stance"]]
+                        citation = " · ".join(dict.fromkeys(s.get("publisher") or s["url"] for s in fact["supporting_sources"]))
                 elif claim:
                     citation = " · ".join(filter(None, (speaker if label else None, source, fact.get("relation"))))
                 else:

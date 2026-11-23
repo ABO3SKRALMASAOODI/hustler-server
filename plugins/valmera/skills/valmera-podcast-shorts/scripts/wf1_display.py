@@ -10,7 +10,13 @@ For each date, amount, target or estimate worth displaying, put facts in its typ
 "qualifier": their qualifying words}]. For supporting citations also write fact.statement, a single short
 standalone sentence of about 8–12 words carrying the point and its qualification. Put an event year in that statement when
 it matters. Put the publication date separately in fact.publication_date only when documented.
-Keep attribution, original date/value, literal quotation and relation in their own fields.
+speaker_claims are the word-addressed opinions of the person on camera. For a sourced qualification
+to a concern, put a facts ask on those words with fact.statement giving the applicable product,
+default and material exception in one readable cue. Use fact.source for the primary URL and
+fact.also_sources for other providers whose policies support that same wording. The byline
+identifies whose concern we hear. Let the demos show what the tools do and the partnership
+citation show how the companies work together. Keep the speaker and their qualification on a
+competitive verdict. A bare editorial slogan loses both. Keep attribution, original date/value, literal quotation and relation in their own fields.
 For a forecast or reported speech carry the claims chain from the brief. The speaker is the voice heard;
 the subject may be someone else. Put a facts ask on the claim. If the brief lacks a chain, include
 args.claim={speaker,subject,event,report} from this passage, with a short qualified indirect sentence.
@@ -60,6 +66,7 @@ def editorial(ctx, script, pack):
     research = pack.get("referent_research") or coverage.get("research_context") or {}
     sources = {"interview": dict(url=args.get("source_url"), publisher=args.get("channel"),
                                  supports=["The speaker's own account in the numbered passage."])}
+    speaker_claims = [dict(c) for c in coverage.get("speaker_claims") or []]
     for ref in research.get("references") or []:
         for src in ref.get("sources") or []:
             if isinstance(src, dict) and src.get("url"):
@@ -76,7 +83,25 @@ def editorial(ctx, script, pack):
                 reading = src.get("supports") or ref.get("finding")
                 if reading and reading not in evidence["supports"]:
                     evidence["supports"].append(reading)
-    return dict(comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=script.get("claims") or [], episode_start=(script.get("window") or [0])[0],
+        # The same source reader can supply the scoped line when direction chooses the live camera.
+        statement = ref.get("statement")
+        if isinstance(statement, str) and statement.strip() and type(ref.get("scope_for")) is int:
+            urls = [s["url"] for s in ref.get("sources") or [] if isinstance(s, dict) and s.get("url") in sources]
+            for claim in speaker_claims:
+                if urls and claim["first"] == ref["scope_for"] and claim.get("scope_question"):
+                    claim["scope_fact"] = dict(source=urls[0], also_sources=urls[1:], statement=statement)
+    # The footage reader has already described these exact clips. Credit its observed action
+    # to the published demo, alongside the separate policy and announcement sources.
+    for line in pack.get("footage") or []:
+        for clip in line.get("clips") or []:
+            src = clip.get("source") or {}
+            action = clip.get("shows")
+            if clip.get("dull") or not isinstance(src, dict) or not (src.get("url") and src.get("channel") and action):
+                continue
+            source = sources.setdefault(src["url"], dict(url=src["url"], publisher=src["channel"], supports=[]))
+            if action not in source["supports"]:
+                source["supports"].append(action)
+    return dict(speaker_claims=speaker_claims, comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=script.get("claims") or [], episode_start=(script.get("window") or [0])[0],
                 sources=sources, speaker_inserts=[{k:r[k] for k in ('first','last')}
                     for r in (coverage.get('source_reading') or {}).get('speaker_inserts',[])], source_inserts=[{k:r[k] for k in ('first','last','shows')}
                                                for r in (coverage.get('source_reading') or {}).get('inserts',[])], coverage=[{k: row[k] for k in ("name", "must_show", "word_ids") if k in row}
@@ -95,9 +120,11 @@ def claim_windows(editorial, words):
                if claim["start"] <= origin + (w["t0"] + w["t1"]) / 2 < claim["end"]]
         if ids and all(isinstance(claim.get(k), str) and claim[k].strip() for k in ("speaker", "report")):
             spans.append(dict(claim, first=ids[0], last=ids[-1]))
-    return spans
+    # The picture director has aligned these narrower judgments to the final word clock.
+    return list(editorial.get("speaker_claims") or []) + spans
 
 
+OPINION_LABELS = {"concern": "Concern", "characterization": "Opinion"}
 ESTIMATE_LABELS = {"discussed_estimate": "Estimate under discussion", "personal_estimate": "Personal estimate"}
 
 
@@ -105,8 +132,23 @@ def claim_fact(claim, fact, sources, words):
     """Use the original witness's exact statement or the reporting speaker's qualified account."""
     interview = sources["interview"]
     chain = dict(claim, interview=interview.get("url"))
+    # A jointly sourced qualification is already bound to these words by the primary reader.
+    if claim.get("scope_fact"):
+        fact = claim["scope_fact"]
     key = fact.get("source")
     source = sources.get(key) if isinstance(key, str) else None
+    if claim.get("stance") in OPINION_LABELS:
+        statement = fact.get("statement")
+        if source and source != interview and isinstance(statement, str) and statement.strip():
+            supporting = [source]
+            for url in fact.get("also_sources") or []:
+                other = sources.get(url) if isinstance(url, str) else None
+                if other and other != interview and other not in supporting:
+                    supporting.append(other)
+            return dict(statement=statement, value=statement, source=source, supporting_sources=supporting,
+                        perspective=dict(speaker=claim["speaker"], stance=claim["stance"],
+                                         report=claim["report"], interview=interview.get("url")))
+        return dict(source=interview, attribution=claim["speaker"], value=claim["report"], chain=chain)
     selected = fact.get("quote")
     for q in (source or {}).get("quotations", []):
         if (selected == q["words"] and str(claim.get("subject")).casefold() == q["speaker"].casefold()
@@ -148,8 +190,8 @@ def bind(direction, editorial, words):
                 candidates = [f for f in args.get("facts") or [] if isinstance(f, dict)]
                 selected = next((f for f in candidates if f.get("quote")), candidates[0] if candidates else {})
                 item = claim_fact(claim, selected, sources, words)
-                # Exact evidence takes its whole sourced clause, including the speaker's qualification.
-                exact = item["chain"].get("original") or (selected.get("quote") and item.get("relation"))
+                exact = (claim.get("stance") in OPINION_LABELS or (item.get("chain") or {}).get("original")
+                         or (selected.get("quote") and item.get("relation")))
                 start = claim["first"] if exact else max(first, claim["first"])
                 end = claim["last"] if exact or "until" not in ask else min(last, claim["last"])
                 pages.append(dict(first=start, last=end, facts=[item]))
@@ -191,7 +233,7 @@ def bind(direction, editorial, words):
             asks.append(ask)
     # A qualification belongs on screen even when the Director uses a picture on that beat.
     for claim in claims:
-        if claim.get("stance") in ESTIMATE_LABELS and (claim["first"], claim["last"]) not in displayed:
+        if (claim.get("stance") in ESTIMATE_LABELS or claim.get("stance") in OPINION_LABELS) and (claim["first"], claim["last"]) not in displayed:
             pages.append(dict(first=claim["first"], last=claim["last"], facts=[claim_fact(claim, {}, sources, words)]))
     pages.sort(key=lambda page: page["first"])
     return dict(direction, asks=asks, claims=claims, display_facts=pages,
