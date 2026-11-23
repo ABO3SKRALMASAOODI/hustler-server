@@ -137,9 +137,9 @@ def test_resume_rebuilds_caption_pagination_before_reusing_render(tmp_path,monke
     ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda _:None)
     (tmp_path/'film_engine.mp4').write_bytes(b'old caption omission')
     sc=dict(beats=dict(pictures=[],caption_lines=4),spend=[])
-    monkeypatch.setattr(wf,'score',lambda *a:dict(beats=dict(pictures=[],caption_lines=4,caption_contract=9),spend=[]))
+    monkeypatch.setattr(wf,'score',lambda *a:dict(beats=dict(pictures=[],caption_lines=4,caption_contract=wf.wf1_film.CAPTION_CONTRACT),spend=[]))
     def render(ctx,script,score):
-        assert score['beats']['caption_contract']==9
+        assert score['beats']['caption_contract']==wf.wf1_film.CAPTION_CONTRACT
         assert not (tmp_path/'film_engine.mp4').exists()
         return dict(film='complete-captions.mp4')
     monkeypatch.setattr(wf.wf3,'render',render)

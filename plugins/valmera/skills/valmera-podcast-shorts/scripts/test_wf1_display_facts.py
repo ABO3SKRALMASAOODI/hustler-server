@@ -317,3 +317,34 @@ def test_spoken_verdict_keeps_the_speaker_captions_and_byline(tmp_path, quiet_en
     assert any(i["k"]=="shot" and i["f"][0]<b and a<i["f"][1] for i in scene["items"])
     assert any(i.get("role")=="cap" and i["f"][0]<b and a<i["f"][1] for i in scene["items"])
     assert not any(row["text"] == "Excel killer" for row in beats["display"])
+
+
+def test_public_listing_phrase_ownership_and_interview_diagram():
+    import wf1_display
+    tokens = "We will go public. We are going to be public. Too much up and down. Stock is down then stock is up.".split()
+    words = [dict(w=t, t0=i/4, t1=(i+1)/4, seg=0) for i,t in enumerate(tokens)]
+    direction = dict(arc=[], caption_ends=[3,9,14,17,21], display=[dict(seg=0,text="will go public.")], asks=[
+        dict(dev="staircase",at={"w":12},until={"w":14},args={"lines":["UP","DOWN."]}),
+        dict(dev="staircase",at={"w":15},until={"w":21},args={"sequence":[
+            dict(at=15,label="Price falls"),dict(at=19,label="Price rises")], "speaker":"Ali Ghodsi"})])
+    material_ = dict(sources={"interview":{"url":INTERVIEW,"publisher":"All-In Podcast"}}, speakers=["Ali Ghodsi"])
+    result = wf1_display.bind(direction, material_, words)
+    assert result["asks"] == [] and result["display"] == []
+    assert set(result["caption_accents"]) >= {1,12}
+    page, = result["display_facts"]
+    assert page["sequence"] == direction["asks"][1]["args"]["sequence"]
+    assert page["facts"][0]["attribution"] == "Ali Ghodsi"
+    assert page["facts"][0]["source"]["url"] == INTERVIEW
+    clock = wf.F.Clock(dict(words=[dict(w=w["w"],start=w["t0"],end=w["t1"]) for w in words],
+                            duration=words[-1]["t1"]), {"segments":[{}]})
+    plan = wf.F.Plan({"cap":dict(font="InterDisplay-Bold.ttf",px=58,track=0)}, {})
+    wf.F.caption_build(plan, clock, "cap", .68, phrase_ends=result["caption_ends"],
+                       accents=result["caption_accents"], accent_ink="#7FE3FF")
+    expected = ["We will go public.", "We are going to be public.", "Too much up and down.",
+                "Stock is down", "then stock is up."]
+    assert [it["t"] for it in plan.items] == expected
+    for i,it in enumerate(plan.items):
+        for frame in range(*it["f"]):
+            assert [w["t"] for w in plan.items if w["f"][0] <= frame < w["f"][1]] == [expected[i]]
+        if i:
+            assert plan.items[i-1]["f"][1] == it["f"][0]

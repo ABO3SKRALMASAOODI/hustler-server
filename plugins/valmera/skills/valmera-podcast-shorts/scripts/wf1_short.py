@@ -1149,7 +1149,7 @@ def descend(ctx, script, pack, missing):
 
 def film_direction(d):
     """Carry the Director's authored fields into the picture and sound composers."""
-    knobs = {k: d.get(k) for k in ("display", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
+    knobs = {k: d.get(k) for k in ("display", "caption_ends", "caption_accents", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
     if d.get("beats") or d.get("sections") or d.get("asks"):
         knobs["director"] = {k: d.get(k) for k in ("beats", "sections", "asks", "arc", "pictures", "by", "seed")}
     return knobs
@@ -1442,7 +1442,7 @@ def render(ctx, script, sc):
     found=current_rejections(ctx.supply)
     rejected_plan=any(unrepaired(p,found) for p in sc.get('beats',{}).get('pictures',[]))
     stale_captions=('caption_lines' in sc.get('beats',{})
-                    and sc['beats'].get('caption_contract')!=9)
+                    and sc['beats'].get('caption_contract')!=wf1_film.CAPTION_CONTRACT)
     if rejected_plan or stale_captions:
         if history and rejected_plan:
             pictures = sc.get("beats", {}).get("pictures", [])

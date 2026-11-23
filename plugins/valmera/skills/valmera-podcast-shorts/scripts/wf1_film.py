@@ -40,6 +40,7 @@ for _p in (os.path.join(SKILLS, "_shell"), os.path.join(SKILLS, "valmera-stories
 import film as F  # noqa: E402
 
 FPS, W, H, LEAD_F = F.FPS, F.W, F.H, F.LEAD_F
+CAPTION_CONTRACT = 10
 Clock, r4, smooth = F.Clock, F.r4, F.smooth
 
 WALL = "YouTube is refusing this Mac as a bot"       # the words a short stops with when its footage could not be fetched for that reason
@@ -149,9 +150,7 @@ def ink_by_ground(items, voices, bright):
             if any(s0 <= fa < s1 for s0, s1 in bright):
                 n["ink"] = "#0B0A09"
                 n["stroke"] = dict(w=float((it.get("stroke") or {}).get("w", 1.6)), c="#F6F1E7")
-                if it.get("role") == "cap":
-                    n["v"] = "capd"
-                elif it["v"] in voices:
+                if it["v"] in voices:
                     voices.setdefault(it["v"] + "d", dict(voices[it["v"]], shadow={"a": 0.0, "blur": 0.0}))
                     n["v"] = it["v"] + "d"
             out.append(n)
@@ -872,7 +871,8 @@ def build(script, sup, style_id, direction=None):
     pages = list(d.get("display_facts") or [])
     for comparison in coverage.get("comparisons") or []:
         competing = [p for p in pages if p["first"] <= comparison["last"] and comparison["first"] <= p["last"]]
-        if any(f.get("chain") or f.get("perspective") for p in competing for f in p["facts"]):
+        if any(p.get("sequence") or any(f.get("chain") or f.get("perspective") for f in p["facts"])
+               for p in competing):
             continue
         pages = [p for p in pages if p not in competing]
         pages.append(dict(first=comparison["first"], last=comparison["last"], facts=[
@@ -890,13 +890,15 @@ def build(script, sup, style_id, direction=None):
         facts = page["facts"]
         # A speaker-led explanation already carries its report in voice and captions.
         # A quotation from an original or a qualified estimate has its own evidentiary work.
-        qualified = any(f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
+        qualified = page.get("sequence") or any(f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
                         (f.get("chain") or {}).get("stance") in wf1_display.ESTIMATE_LABELS or
                         (f.get("chain") or {}).get("original") for f in facts)
         narrated = all(f.get("chain") and not f.get("relation") for f in facts)
         on_presenter = (any(lo <= a and b <= hi for lo,hi,_ in speakers)
                         or any(lo < b and a < hi for lo,hi in live_spans))
-        if b > a and (qualified or not (on_evidence(a,b) or (on_presenter and narrated))):
+        own_account = d.get("caption_ends") and all(
+            f.get("chain") and f["chain"].get("speaker") == f["chain"].get("subject") for f in facts)
+        if b > a and (qualified or not (on_evidence(a,b) or ((on_presenter or own_account) and narrated))):
             timed_facts.append((a,b,page))
     # Retained directions can predate the claims chain. A dense attributed block
     # still gets a reading interval, with all its authored copy and provenance.
@@ -913,12 +915,13 @@ def build(script, sup, style_id, direction=None):
         rows = wf1_display.typeset(facts, P.R, DISPLAY_W * W, str.upper if st["upper"] else str)
         return len(rows) > 4
 
-    report_spans = [(a, b) for a, b, page in timed_facts if needs_reading_page(page["facts"])]
+    report_spans = [(a, b) for a, b, page in timed_facts if page.get("sequence") or needs_reading_page(page["facts"])]
 
     # A retained Director can predate the source reading. The original takes its word's
     # visual slot, while continuous rhythm direction still spans the film.
     comparison_spans = [(word_frame(c["first"]), Clock.f(clock.words[c["last"]]["t1"]))
                         for c in (coverage.get("comparisons") or []) + (coverage.get("speaker_claims") or [])]
+    comparison_spans.extend((a,b) for a,b,page in timed_facts if page.get("sequence"))
     if (source_rows or comparison_spans) and dr:
         def separate_ask(ask):
             a = word_frame(ask['at']['w'])
@@ -1569,6 +1572,19 @@ def build(script, sup, style_id, direction=None):
     fact_pages = []
     for a, b, page in timed_facts:
         facts = page["facts"]
+        if page.get("sequence"):
+            fact = facts[0]
+            steps = page["sequence"]
+            cue = [a] + [word_frame(step["at"]) for step in steps[1:]] + [b]
+            for i,(start,end) in enumerate(zip(cue,cue[1:])):
+                if start >= end:
+                    continue
+                wf1_display.reading_card(P, [start,end], "", fact["attribution"]+" · Scenario",
+                                         fact["source"].get("publisher") or "", pal, centre=.605,
+                                         steps=[(s["label"],j==i) for j,s in enumerate(steps)])
+                P.events.append(start)
+            fact_pages.append(dict(page, f=[a,b]))
+            continue
         if opinion_byline(facts):
             # The synchronous voice and captions carry the qualified words. Only identify their owner.
             claim = facts[0]["chain"]
@@ -1746,7 +1762,8 @@ def build(script, sup, style_id, direction=None):
         for n, r_ in enumerate(rows):
             P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat", name_picture=pic)
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
-                            hold=reading_spans, omit=omit)
+                            hold=reading_spans, omit=omit, phrase_ends=d.get("caption_ends") or (),
+                            accents=d.get("caption_accents") or (), accent_ink=pal["accent"])
     for word in P.items:
         if word.get("role") == "cap":
             word["chunk"] = f'caption-{word["f"][1]}'
@@ -1855,7 +1872,7 @@ def build(script, sup, style_id, direction=None):
                  events=sorted(set(P.events) | set(cut_pts) | set(changes) | {it["f"][0] for it in l1["items"] if it["k"] == "card"}
                                | {e["f"] for e in dev_events if 0 <= e["f"] < f_end}),
                  device_events=dev_events,
-                 pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=9, display=[dict(f=[a, b], text=t) for a, b, t in shown],
+                 pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=CAPTION_CONTRACT, display=[dict(f=[a, b], text=t) for a, b, t in shown],
                  display_facts=fact_pages,
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t, pic=pic) for a, b, t, pic in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),

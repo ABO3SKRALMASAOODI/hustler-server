@@ -538,7 +538,10 @@ def repair(d, sentences, words, names=(), seed=0):
     turn = d.get("turn_seg") if isinstance(d.get("turn_seg"), int) and 0 <= d["turn_seg"] < nseg else None
     if payoff is not None and turn is not None and turn >= payoff:
         turn = None
+    ends = d.get("caption_ends")
+    caption_ends = sorted({i for i in ends if type(i) is int and 0 <= i < len(words)}) if isinstance(ends, list) else []
     return dict(contract=CONTRACT, beats=beats, sections=sections, asks=asks, display=display[:6],
+                caption_ends=caption_ends,
                 past_segs=[int(i) for i in d.get("past_segs") or [] if isinstance(i, int) and 0 <= i < nseg],
                 payoff_seg=payoff, turn_seg=payoff, story_turn_seg=turn,
                 arc=arc, why=str(d.get("why") or "")[:400]), rep

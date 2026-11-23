@@ -2452,7 +2452,7 @@ def caption_contrast(film, l1, ffmpeg):
     on a median over 0.6, or dark ink on one under 0.4, is a caption that does not read (TASTE P4, h3)."""
     import subprocess
     import numpy as np
-    caps = [i for i in l1["items"] if i["k"] == "word" and i["v"] in ("cap", "capd") and i["t"].strip() not in (".",)]
+    caps = [i for i in l1["items"] if i["k"] == "word" and (i["v"] in ("cap", "capd") or i["v"].startswith("cap-phrase-")) and i["t"].strip() not in (".",)]
     bad, rows = 0, 0
     try:
         Rl = F.Ruler(l1["voices"])
@@ -2476,7 +2476,8 @@ def caption_contrast(film, l1, ffmpeg):
             continue
         med = float(np.median(band))
         rows += 1
-        if (it["v"] == "cap" and med > 0.6) or (it["v"] == "capd" and med < 0.4):
+        dark = it["v"].endswith("d")
+        if (not dark and med > 0.6) or (dark and med < 0.4):
             bad += 1
     return dict(captions_sampled=rows, unreadable=bad, ok=rows == 0 or bad / rows <= 0.05)
 

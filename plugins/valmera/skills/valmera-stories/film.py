@@ -401,7 +401,9 @@ def caption_track(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), z=0, ink_f
     """Captions at one seat for the whole film (TASTE P1), centred, a few words at a time. ink_for(a, b, box) may
     return (voice, ink) for a chunk from what is measured under it (TASTE P4: flip the ink before anything else)."""
     ph = clock.phrases()
+    base_voice = v
     for i, (t0, t1, text, ws) in enumerate(ph):
+        v = phrase_voices.get(id(ws[0]), base_voice)
         a, b = Clock.f(t0) - 1, Clock.f(t1)
         if i + 1 < len(ph):
             b = min(b, Clock.f(ph[i + 1][0]) - 1)       # one chunk at a time, never two on the seat
@@ -838,7 +840,7 @@ def pin_voices(timeline, voices):
 # ----------------------------------------------------------------- captions that ink word by word; display words
 
 def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z=0, max_chars=22, max_words=4, late=2, script=None, ink_lag_s=None,
-                  omit=()):
+                  omit=(), phrase_ends=(), accents=(), accent_ink=None):
     """Captions at one seat for the whole film (TASTE P1), the way the reference stories set them: a line is laid out
     centred as it will stand, and each word is inked on its own spoken word, where it will stay; the line leaves at
     once when the next begins. `hold`: [(f0, f1)] when a display word has the seat and the caption yields to it.
@@ -864,9 +866,60 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
                 continue
             fit.append((t0, t1, text, ws))
         ph = fit
+    phrase_voices = {}
+    if phrase_ends and clock.words:
+        # The director supplies boundaries, never replacement copy. Keep the address of
+        # each occurrence even when successive phrases have exactly the same lettering.
+        boundaries = {i for i in phrase_ends if type(i) is int and 0 <= i < len(clock.words)}
+        boundaries.add(len(clock.words)-1)
+        # A reading card can return the seat halfway through an authored phrase.
+        for lo, hi in hold:
+            for frame in (lo, hi):
+                left = [i for i,w in enumerate(clock.words) if Clock.f(w["t0"])-1 < frame]
+                if left:
+                    boundaries.add(left[-1])
+        ph, start = [], 0
+        width = 2*(RAIL_X-.5)*W
+        def fit(words):
+            return P.R.fit_px(v, " ".join(w["w"] for w in words), width, P.voices[v]["px"])
+
+        pending = []
+        for end in sorted(boundaries):
+            group = pending + clock.words[start:end+1]
+            pending = []
+            start = end+1
+            # A short lead-in inside one utterance can share its successor's
+            # page. Keep sentence ends, pauses and explicit card handoffs.
+            if start < len(clock.words) and group[-1]["seg"] == clock.words[start]["seg"]:
+                next_end = min(n for n in boundaries if n > end)
+                following = clock.words[start:next_end+1]
+                next_on = following[0]["t0"]
+                if (next_on-group[0]["t0"] < .7 and next_on-group[-1]["t1"] < .3
+                        and not group[-1]["w"].endswith((".", "?", "!"))
+                        and not any(Clock.f(group[0]["t0"])-1 < f <= Clock.f(next_on) for span in hold for f in span)
+                        and fit(group+following) >= 42):
+                    pending = group
+                    continue
+            while group:
+                count = len(group)
+                size = fit(group)
+                while count > 1 and size < 42:
+                    count = (count+1)//2
+                    size = fit(group[:count])
+                ws, group = group[:count], group[count:]
+                if size < P.voices[v]["px"]:
+                    vk = f"{v}-phrase-{int(size)}"
+                    P.voices[vk] = dict(P.voices[v], px=size)
+                    phrase_voices[id(ws[0])] = vk
+                ph.append((ws[0]["t0"], ws[-1]["t1"], " ".join(w["w"] for w in ws), ws))
+        ph = [(a, min(ph[i+1][0], b+.55) if i+1 < len(ph) else b+.25, t, ws)
+              for i,(a,b,t,ws) in enumerate(ph)]
     ph = ph or clock.phrases(max_chars=max_chars, max_words=max_words)
+    accented = {id(clock.words[i]) for i in accents if 0 <= i < len(clock.words)}
     n_lines, next_open = 0, 0
+    base_voice = v
     for i, (t0, t1, text, ws) in enumerate(ph):
+        v = phrase_voices.get(id(ws[0]), base_voice)
         a, b = (Clock.f(t0) - 1, Clock.f(t1)) if lag is None else (Clock.f(t0) + lag, Clock.f(t1) + lag)
         if i + 1 < len(ph):
             b = min(b, Clock.f(ph[i + 1][0]) + (lag if lag is not None else 0) - 1)       # one line at a time, never two on the seat
@@ -889,6 +942,13 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
                  if (first == a or Clock.f(w.get("t1", w["t0"])) > first) and id(w) not in gone]
         if not pairs:
             continue
+        page_ink = ink
+        if phrase_ends:
+            # One measured glyph run shares the normal caption seat and handoff. A
+            # credit or ground change can move it without separating its words.
+            if accent_ink and any(id(w) in accented for w,_ in pairs):
+                page_ink = accent_ink
+            pairs = [(pairs[0][0], " ".join(t for _,t in pairs))]
         # Ink delay must never erase a short word at a page boundary. Let the
         # completed line read for six frames, then open the next line. This is
         # timing-only pagination: no word is rewritten, repeated or singled out
@@ -914,7 +974,7 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
                 continue
             P.cap_lags.append(on - Clock.f(w["t0"]))
             x = x_left + (P.R.width(v, " ".join(toks[:j]) + " x") - P.R.width(v, "x")) / W if j else x_left
-            P.word([on, b], token, v, x, y, ink, 1.0, note=False, z=z, role="cap", stroke=dict(w=1.6, c="#0B0A09"))
+            P.word([on, b], token, v, x, y, page_ink, 1.0, note=False, z=z, role="cap", stroke=dict(w=1.6, c="#0B0A09"))
         next_open = b
         n_lines += 1
     return n_lines

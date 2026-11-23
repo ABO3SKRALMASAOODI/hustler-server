@@ -4,6 +4,17 @@ import string
 
 
 WRITING = """Write the factual type for this passage from the attached source readings and editorial brief.
+Also return caption_ends, the inclusive numbered last word of every short, complete spoken reading unit,
+in order through the final word. Each appears whole on the phone. Group repeated clauses separately;
+keep articles, conjunctions and auxiliaries with their thought. Aim for 3–7 words and about 28 characters.
+Use display for emphases inside those phrases. For the causal mechanism of a decision that the available
+footage cannot show, score its sequence on the concrete example, with a staircase ask on that word range:
+args.sequence=[{"at": first word number of a state, "label": compact explanatory label}, ...],
+args.speaker=the person explaining it. Show the alternatives, their distinct effects and the reaction that
+links them. The labels form one qualitative diagram. Word attributions and scenario framing keep it
+an illustration of the interview. Avoid invented measurements, issuer histories and extra acquisition.
+Use separate captions for the literal speech. A visual change to the camera or a paraphrased pull quote
+alone cannot explain a changing relationship.
 For each date, amount, target or estimate worth displaying, put facts in its type ask's args:
 "facts":[{"source": a URL from sources (or "interview"), "relation": short event/meaning,
 "value": the date or amount with its units, "attribution": the actual speaker for an estimate,
@@ -171,6 +182,30 @@ def bind(direction, editorial, words):
     sources = editorial["sources"]
     pages, asks = [], []
     claims = claim_windows(editorial, words)
+    accents = set()
+    ends = direction.get("caption_ends") or []
+    if not ends and direction.get("by") == "signal":
+        ends = [i for i,w in enumerate(words) if i+1 == len(words) or words[i+1]["seg"] != w["seg"]]
+    whole = bool(ends)
+    display = []
+    def literal_ids(copy, ids):
+        # Word identity within the addressed occurrence, preserving repeated phrases.
+        tokens = [s.casefold().strip(string.punctuation) for s in copy.split()]
+        remaining = iter(ids)
+        matched = []
+        for token in tokens:
+            i = next((i for i in remaining if words[i]["w"].casefold().strip(string.punctuation) == token), None)
+            if i is None:
+                return []
+            matched.append(i)
+        return matched
+
+    for row in direction.get("display") or []:
+        ids = literal_ids(row["text"], [i for i,w in enumerate(words) if w["seg"] == row["seg"]]) if whole else []
+        if ids and not row.get("perform"):
+            accents.update(ids)
+        else:
+            display.append(row)
     displayed = set()
     for ask in direction["asks"]:
         args = ask["args"]
@@ -178,6 +213,32 @@ def bind(direction, editorial, words):
         first = ask["at"]["w"]
         last = (ask.get("until") or ask["at"])["w"]
         claim = next((c for c in claims if c["first"] <= last and first <= c["last"]), None)
+        sequence = []
+        proposed = args.get("sequence")
+        for step in proposed if isinstance(proposed, list) else ():
+            if (isinstance(step, dict) and type(step.get("at")) is int and first <= step["at"] <= last
+                    and isinstance(step.get("label"), str) and step["label"].strip()
+                    and (not sequence or sequence[-1]["at"] < step["at"])):
+                sequence.append(dict(at=step["at"], label=step["label"].strip()))
+        if len(sequence) >= 2:
+            speaker = (claim or {}).get("speaker") or args.get("speaker") or "Speaker"
+            pages.append(dict(first=first, last=last, sequence=sequence, facts=[
+                dict(attribution=speaker, source=sources["interview"], value=sequence[0]["label"])]))
+            continue
+        if whole and not (args.get("facts") or args.get("claim")) and ask["dev"] in (
+                "lamp", "verb", "staircase", "brackets", "typewriter"):
+            lines = [line.get("t", "") if isinstance(line, dict) else str(line) for line in args.get("lines") or []]
+            text = " ".join(lines) or str(args.get("t") or "")
+            ids = literal_ids(text, range(first, min(len(words), max(last+1,first+len(text.split())))))
+            if not ids and text:
+                # A payoff can be addressed on its final stressed word.
+                earlier = range(max(0, first-len(text.split())+1), last+1)
+                ids = literal_ids(text, earlier)
+                if ids and ids[-1] < first:
+                    ids = []
+            if ids:
+                accents.update(ids)
+                continue
         local = args.get("claim")
         if not claim and isinstance(local, dict) and all(isinstance(local.get(k), str) and local[k].strip()
                                                          for k in ("speaker", "report")):
@@ -219,6 +280,9 @@ def bind(direction, editorial, words):
             last = max(i for i, w in enumerate(words) if w["seg"] == words[first]["seg"])
         if not facts and (args.get("facts") or ask["dev"] == "counter"):
             # An unbound number can still land as the actual spoken phrase.
+            if whole:
+                accents.update(range(first,last+1))
+                continue
             quote = " ".join(w["w"] for w in words[first:last+1])
             facts = [dict(source=sources["interview"], value=quote)]
         if facts:
@@ -236,7 +300,7 @@ def bind(direction, editorial, words):
         if (claim.get("stance") in ESTIMATE_LABELS or claim.get("stance") in OPINION_LABELS) and (claim["first"], claim["last"]) not in displayed:
             pages.append(dict(first=claim["first"], last=claim["last"], facts=[claim_fact(claim, {}, sources, words)]))
     pages.sort(key=lambda page: page["first"])
-    return dict(direction, asks=asks, claims=claims, display_facts=pages,
+    return dict(direction, asks=asks, display=display, caption_ends=ends, caption_accents=sorted(accents), claims=claims, display_facts=pages,
                 arc=[m for m in direction["arc"] if not any(p["first"] <= m["w"] <= p["last"] for p in pages)])
 
 
@@ -297,12 +361,17 @@ def source_statement(fact, interview):
     return None
 
 
-def reading_card(plan, span, body, byline, source, palette, *, centre=.64, max_height=.303, group="quote"):
+def reading_card(plan, span, body, byline, source, palette, *, centre=.64, max_height=.303, group="quote", steps=()):
     """One stable reading surface. Page the body at its reading size, with its credit on every page."""
     from film import W, H
     plan.voices["quote_body"] = dict(plan.voices["dsp"], px=65, track=0, shadow={"a": 0})
     plan.voices["quote_credit"] = dict(plan.voices["cap"], px=48, track=0, shadow={"a": 0})
     left, width = .08, .76*W
+    if steps:
+        # The states share a fixed rail; the active node changes on its word
+        # without rewrapping or recentering the surrounding labels.
+        width -= .05*W
+        plan.voices["sequence_label"] = dict(plan.voices["cap"], px=55, track=0)
 
     def wrap(text, voice):
         rows = []
@@ -325,22 +394,26 @@ def reading_card(plan, span, body, byline, source, palette, *, centre=.64, max_h
     header = wrap(byline, "quote_credit")
     footer = wrap(source, "quote_credit")
     body_rows = wrap(body, "quote_body")
-    def measure(text, voice, colour):
+    def measure(text, voice, colour, node=None):
         style = plan.voices[voice]
         quads = plan.R.T.Face.of(style).quads(text,style["px"],style["track"])
         top = min((q[2] for q in quads),default=0)
         bottom = max((q[4] for q in quads),default=0)
-        return text,voice,colour,top,bottom
+        return text,voice,colour,top,bottom,node
 
     credit = "quote_credit"
     head = [measure(row,credit,palette["accent"]) for row in header]
     foot = [measure(row,credit,palette["accent"]) for row in footer]
     body = [measure(row,"quote_body",palette["ink"]) for row in body_rows]
+    for label, active in steps:
+        for i, line in enumerate(wrap(label, "sequence_label")):
+            node = ("●" if active else "○") if i == 0 else None
+            body.append(measure(line, "sequence_label", palette["accent"] if active else palette["ink"], node))
     # Seat the shaped ink, including descenders. Each page repeats the evidence
     # credit; its share of the interval follows the number of words on that page.
     gap = 26
     def height(rows):
-        return sum(bottom-top for _,_,_,top,bottom in rows) + gap*(len(rows)-1)
+        return sum(bottom-top for _,_,_,top,bottom,_ in rows) + gap*(len(rows)-1)
 
     pages = []
     for row in body:
@@ -359,7 +432,11 @@ def reading_card(plan, span, body, byline, source, palette, *, centre=.64, max_h
         b = start+round((end-start)*elapsed/total)
         rows = head+page+foot
         y = centre*H-height(rows)/2
-        for row,voice,colour,top,bottom in rows:
-            plan.word([a,b],row,voice,left,(y-top)/H,colour,role="graphic",z=8,fact_type=True,
-                      text_group=f"{group}-{a}",note=False)
+        for row,voice,colour,top,bottom,node in rows:
+            baseline = (y-top)/H
+            attrs = dict(role="graphic", z=8, fact_type=True, text_group=f"{group}-{a}", note=False)
+            if node:
+                plan.word([a,b],node,credit,left,baseline,colour,**attrs)
+            x = left + .05 if voice == "sequence_label" else left
+            plan.word([a,b],row,voice,x,baseline,colour,**attrs)
             y += bottom-top+gap
