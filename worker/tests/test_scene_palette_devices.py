@@ -228,3 +228,19 @@ def test_a_field_written_in_another_shape_is_read_never_a_stop(tmp_path):
     out, log = palette.apply(l1, str(tmp_path), [{"dev": "paper", "id": "p", "f": [0, 30], "args": {"ink": "#2B2118", "c": "#E9D8A6"}}])
     assert log[0]["landed"] == "paper" and not log[0]["tried"], log
     assert [i for i in out["items"] if i.get("mode") == "paper"][0]["c"] == "#E9D8A6"
+
+
+def test_pip_crossing_a_checked_portrait_keeps_its_credit(tmp_path, monkeypatch):
+    from scene.palette import layout, picks
+    source = dict(k="card", id="photo", pic="summit", f=[30,55], x=.5, y=.4, w=.92, h=.34,
+                  source_ink=[[.04,.23,.96,.57]], crop=[0,0,1,1], s=1)
+    l1 = scene_of([source], 100)
+    l1["documentary_cuts"] = [dict(pic="summit", f=[30,55])]
+    # No external spans the entire device. The picker supplies the synchronous interview.
+    main = picks.Pic("main", "take.mp4", "video", 1920, 1080, 4)
+    monkeypatch.setattr(picks, "pictures", lambda *args, **kw: [main])
+    out = layout.pip(l1, str(tmp_path), dict(id="split-fallback",f=[33,66]))
+    item, = out["items"]
+    assert item["id"] == source["id"] and item["pic"] == source["pic"]
+    assert item["f"] == [30,55] and item["crop"] == source["crop"]
+    assert item["s"][:3] == [1,1,1] and item["s"][3] < item["s"][-1] == 1

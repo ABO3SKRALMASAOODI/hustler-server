@@ -492,6 +492,23 @@ def pip(l1, work, ask, sense_=None, pool=None):
         return {"skip": "no join and no picture for a window"}
     pic = pics[0]
     a, z = K.span(l1, args, default_s=1.2, least=8)
+    # A request may cross the end of a checked source. The pool then offers
+    # the synchronous take. Land the inset on the existing documentary card
+    # instead of covering its subject and detaching its identifying super.
+    if K.is_take(pic.aid):
+        checked = {row.get("pic") for row in l1.get("documentary_cuts", []) if row["f"][0] <= a < row["f"][1]}
+        window = next((it for it in l1["items"] if it["k"] == "card" and it.get("pic") in checked
+                       and it.get("source_ink") and it["f"][0] <= a < it["f"][1]), None)
+        if window:
+            from ..plan import A
+            lo, hi = window["f"]
+            arrival = K.decel(min(8, z-a, hi-a))
+            scale = [A(window.get("s", 1), f, lo) for f in range(lo, hi)]
+            for i, progress in enumerate(arrival, a-lo):
+                scale[i] *= .9 + .1*progress
+            return {"items": [dict(window, s=scale)],
+                    "events": [{"f": a, "what": "source window settles", "kind": "pop", "strength": .45}],
+                    "log": {"inset": window["pic"]}}
     m = z - a
     rng = K.rng_of(l1, args)
     w_ = 0.5
