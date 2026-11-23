@@ -129,16 +129,25 @@ def recorded_detail(path, literal):
         return [max(0,l-dx), max(0,t-dy), min(1,r+dx), min(1,b+dy)]
 
 
+def screen_credit(record):
+    """Short publication credit; document URL and full authorship travel with the source record."""
+    doc = record.get("document") or {}
+    if doc.get("publication"):
+        return doc["publication"]
+    host = urlparse(doc.get("url") or "").hostname
+    return host.removeprefix("www.") if host else record.get("credit")
+
+
 def acquire(windows,work,llm,sources=None):
     import writer
     from PIL import Image
     os.makedirs(work,exist_ok=True)
-    key=hashlib.sha256(json.dumps([5,windows,[(r.get("url"),r.get("sha256")) for r in sources or []]],sort_keys=True).encode()).hexdigest()[:16]
+    key=hashlib.sha256(json.dumps([6,windows,[(r.get("url"),r.get("sha256")) for r in sources or []]],sort_keys=True).encode()).hexdigest()[:16]
     record=os.path.join(work,key+'.json')
     if os.path.exists(record):return json.load(open(record))
     llm.openai_key()
     system='''Research authentic primary-source documentary artifacts for the supplied spoken passages.
-Use web search to verify exact public sources. Return JSON {"documents":[{"window":integer,"kind":"pdf|image|page","url":HTTPS artifact URL,"page_url":primary source page,"title":str,"author":str,"why":str}]}.
+Use web search to verify exact public sources. Return JSON {"documents":[{"window":integer,"kind":"pdf|image|page","url":HTTPS artifact URL,"page_url":primary source page,"title":str,"author":full author credit,"publication":compact venue and year as printed on the artifact,"why":str}]}.
 Find real source papers, original institutional diagrams, maps, company records or archival documents
 that accurately depict the named subject. An authentic scientific diagram is useful for a theory;
 it must not imply that a hypothetical phenomenon has been observed. Do not invent a document,
@@ -198,7 +207,7 @@ need unambiguous visible attribution. Empty crops when no relevant readable sect
                 if min(im.size)<120:continue
                 crop_id=hashlib.sha256(json.dumps(box).encode()).hexdigest()[:12]
                 path=os.path.join(folder,f'page-{page+1}-{crop_id}.jpg');im.save(path,quality=95)
-                rec=dict(name=window['name'],path=path,w=im.width,h=im.height,faces=[],provider='primary-document',title=item['title'],credit=item.get('author'),licence="source document, not licensed (owner's decision)",page=item.get('page_url') or url,url=url,shows=crop.get('shows'),document=dict(url=url,sha256=digest,page=page+1,box=box))
+                rec=dict(name=window['name'],path=path,w=im.width,h=im.height,faces=[],provider='primary-document',title=item['title'],credit=item.get('author'),licence="source document, not licensed (owner's decision)",page=item.get('page_url') or url,url=url,shows=crop.get('shows'),document=dict(url=url,sha256=digest,page=page+1,box=box,publication=item.get("publication")))
                 if valid_detail(crop.get('detail')):
                     rec['document']['detail'] = crop['detail']
                 result['pictures'].setdefault(window['name'],[]).append(rec)

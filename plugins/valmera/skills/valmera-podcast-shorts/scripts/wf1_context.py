@@ -120,8 +120,10 @@ host's question and the cited author's published prediction are separate. For a 
 choose a single readable clause that directly answers the question and keep only sources
 that substantiate that clause. Search primary sources for missing evidence. Return JSON {"references":[{"windows":[integer],"referent":str,
 "finding":str,"sources":[{"url":str,"publisher":str,"supports":str}],"depiction_options":[str]}],"unresolved":[str]}.
-Research the supplied picture windows and scope_checks. For a scope check, use first-party
-the applicable original policy, regulator explainer or announcement. Identify the applicable products, default, exceptions and date.
+Research the supplied picture windows and scope_checks. For a recalled historical trend, use contemporary
+records to say what happened, when and to whom. Some documented early users can qualify a recollection
+about wider adoption. For policy scope use the original policy, regulator explainer or announcement.
+Identify the applicable products, default, exceptions and date.
 Return a reference with empty windows and no depiction_options. Include scope_for (the supplied
 first word ID) and statement (one short readable line with the default and its scope or exception).
 Attach the primary sources that substantiate that wording together. It feeds the source cue only.

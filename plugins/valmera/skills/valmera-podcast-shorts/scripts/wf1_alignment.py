@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 
-CONTRACT=5
+CONTRACT=6
 # Source kept after the close's last word: the breath the short holds before its end card. The 28 reference reels'
 # sound ends 1.17 s after the last word (p50); the brand finish falls the sound over that breath and the card's
 # 0.3 s join lands after it, never over the word (19 Nov rating: the card dissolved over 'really bad.', 'wrong.',
@@ -79,9 +79,12 @@ def transform(index, decision, spellings=None, keep_window=False, opening=(), wi
     if opening:
         a=max(-window_start, opening[0]['t0']-.06)
     b=min(duration,float(words[last]['t1'])+.12)
+    # The hearing editor addresses the complete closing sentence when an independent aside follows.
+    close_first = decision.get('close_first')
+    resolved_close = type(close_first) is int and first <= close_first <= last and 18 <= b-a <= 55
     if keep_window:
         first,last,a,b=0,len(words)-1,0.,duration
-    elif (a>2 and not opening and decision.get('hook_last') is None) or duration-b>2 or b-a<8:
+    elif (a>2 and not opening and decision.get('hook_last') is None) or (duration-b>2 and not resolved_close) or b-a<8:
         raise ValueError('alignment cannot rewrite the selected story window')
     fixed={}
     for row in decision.get('corrections') or []:
@@ -214,7 +217,8 @@ def apply_decision(index, content, decision, aligned):
     offset = content['window_start']
     opening = source_opening(decision, content['source_captions'], index, offset)
     hook_last = decision.get('hook_last')
-    keep_window = aligned and not opening and hook_last is None
+    shorter_close = decision.get('close_first') is not None and decision['last'] < len(index['words'])-1
+    keep_window = aligned and not opening and hook_last is None and not shorter_close
     spellings = term_spellings(decision, content, index['words'], offset)
     out, bounds = transform(index, decision, spellings, keep_window=keep_window,
                             opening=opening, window_start=offset)
@@ -237,13 +241,13 @@ def reconcile(ctx,script,index,source_words,llm,chain):
     prior=index.get('alignment') or {}
     script_path = os.path.join(ctx.run_dir,'script.json')
     if prior.get('contract')==CONTRACT and prior.get('source_sha256')==digest:
-        saved = {k:prior[k] for k in ('window','hook_line','claims','direction') if k in prior}
+        saved = {k:prior[k] for k in ('window','hook_line','close_line','claims','direction') if k in prior}
         if any(script.get(k) != v for k,v in saved.items()):
             script.update(saved)
             with open(script_path,'w') as f:json.dump(script,f,indent=1)
         return index,False
     aligned = prior.get('source_sha256') == digest and bool(prior.get('window'))
-    content=dict(names=script.get('names') or [], hook=script['hook_line'],close=script['close_line'],
+    content=dict(story=(script.get('idea') or {}).get('why'), title=script.get('title'), names=script.get('names') or [], hook=script['hook_line'],close=script['close_line'],
                  source_captions=source_words, window_start=(prior['window'] if aligned else script['window'])[0],
                  timed_hearing=[dict(id=i,**w) for i,w in enumerate(index['words'])])
     system = """Edit the opening and closing boundaries of a continuous spoken take. The script's hook and close
@@ -251,7 +255,10 @@ come from rough episode captions. The other transcript is an independent hearing
 Return JSON with first and last (inclusive timed_hearing IDs), corrections, terms and why. Keep the entire
 continuous story through the actual closing words, including qualifications, repetitions and interior hesitations.
 Use the closest matching passage in episode time (window_start + hearing time). Never move the ending to
-compensate for an interior ASR difference. Keep a genuinely spoken, useful lead-in.
+compensate for an interior ASR difference. The draft close is a candidate. If the heard take has a complete
+decision or emotional resolution followed by an independent aside, end on the resolution and give close_first,
+the first hearing ID of its complete closing sentence. Preserve all qualifications on that thought and the
+18–55 second programme. Otherwise keep the draft close. Keep a genuinely spoken, useful lead-in.
 
 When the hearing begins with a complete thought and the rough hook prefixes it with an abandoned start,
 OPEN ON THE COMPLETE THOUGHT. Leave the abandoned words out of BOTH the cut and captions, even when the
@@ -320,6 +327,10 @@ direction with the same style and music direction and corrected wording."""
         claim.update(report=edit["report"].replace("{heard}", heard), heard=heard)
     if content["claims"] and isinstance(decision.get("direction"), str) and decision["direction"].strip():
         script["direction"] = decision["direction"]
+    first_close = decision.get("close_first")
+    if type(first_close) is int and decision["first"] <= first_close <= decision["last"]:
+        start_close = index["words"][first_close]["t0"] - a
+        script["close_line"] = " ".join(w["w"] for w in out["words"] if w["t0"] >= start_close-.0001)
     if hook is not None:
         script['hook_line'] = hook
     with open(cached+'.tmp','w') as f:json.dump(answer,f,indent=1)
@@ -343,7 +354,7 @@ direction with the same style and music direction and corrected wording."""
                           source_window=original,window=script['window'],decision=decision,spend=answer['spend'])
     if hook is not None:
         out['alignment']['hook_line'] = hook
-    out["alignment"].update({k:script[k] for k in ("claims","direction") if k in script})
+    out["alignment"].update({k:script[k] for k in ("claims","direction","close_line") if k in script})
     session=os.path.join(ctx.supply,'session.json')
     if os.path.exists(session):
         record=json.load(open(session))

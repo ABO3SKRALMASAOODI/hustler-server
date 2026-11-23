@@ -893,21 +893,51 @@ def build(script, sup, style_id, direction=None):
             steps = [step for step in page["sequence"] if lo <= step["at"] < hi]
             if len(steps) >= 2 and all(lo > p["last"] or hi <= p["first"] for p in overlaps):
                 pages.append(dict(page, first=steps[0]["at"], last=hi-1, sequence=steps))
+    # Hold the final dated record long enough to read into the same founder's
+    # closing memory, then return to their face without repeating the byline.
+    for history in list(pages):
+        if history.get("sequence_kind") != "history":
+            continue
+        owner = history["facts"][0]
+        steps = history["sequence"]
+        if steps[-1]["source"] == owner["source"] or not any(s["source"] == owner["source"] for s in steps):
+            continue
+        tail = next((p for p in pages if p["first"] == history["last"] + 1
+                     and p["last"] == len(clock.words) - 1 and len(p["facts"]) == 1
+                     and (p["facts"][0].get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS
+                     and p["facts"][0].get("attribution") == owner.get("attribution")), None)
+        if not tail or any(p is not tail and p["last"] >= tail["first"] for p in pages):
+            continue
+        release = clock.words[steps[-1]["at"]]["t0"] + 2.0
+        end = next((i for i in range(history["last"], tail["last"]) if clock.words[i]["t1"] >= release), None)
+        if end is not None:
+            pages[pages.index(history)] = dict(history, last=end)
+            pages.remove(tail)
     # The attributed scenario identifies its speaker throughout its visible interval.
     # Keep any part of the separate byline still needed on an adjacent clause.
-    scenarios = [p for p in pages if p.get("sequence")]
+    credits = [(p, p["facts"][0].get("attribution")) for p in pages if p.get("sequence")]
+    credits.extend((p, f["perspective"]["speaker"]) for p in evidence for f in p["facts"] if f.get("perspective"))
     for page in list(pages):
         facts = page["facts"]
         if len(facts) != 1 or (facts[0].get("chain") or {}).get("stance") not in wf1_display.OPINION_LABELS:
             continue
         spans = [(page["first"], page["last"])]
-        for scenario in scenarios:
-            if facts[0].get("attribution") == scenario["facts"][0].get("attribution"):
+        for panel, owner in credits:
+            if facts[0].get("attribution") == owner:
                 spans = [(a,b) for lo,hi in spans for a,b in
-                         ((lo,min(hi,scenario["first"]-1)),(max(lo,scenario["last"]+1),hi)) if a<=b]
+                         ((lo,min(hi,panel["first"]-1)),(max(lo,panel["last"]+1),hi)) if a<=b]
         if spans != [(page["first"], page["last"])]:
             pages.remove(page)
             pages.extend(dict(page,first=a,last=b) for a,b in spans)
+    # After the last documented event, the founder can deliver the resolution in their own voice.
+    # Leave a closing state up when it brings additional evidence or explains a hypothetical.
+    for n,page in enumerate(pages):
+        if page.get("sequence_kind") != "history" or page["last"] != len(clock.words)-1:
+            continue
+        steps = page["sequence"]
+        interview = page["facts"][0]["source"]
+        if len(steps)>1 and steps[-1]["source"] == interview and any(s["source"] != interview for s in steps[:-1]):
+            pages[n] = dict(page, last=steps[-1]["at"]-1, sequence=steps[:-1])
     pages.sort(key=lambda p: p["first"])
     for comparison in coverage.get("comparisons") or []:
         competing = [p for p in pages if p["first"] <= comparison["last"] and comparison["first"] <= p["last"]]
@@ -1472,7 +1502,8 @@ def build(script, sup, style_id, direction=None):
         size = (rec["w"], rec["h"])
         literal = rec.get("attribution") or ""
         detail = (rec.get("document") or {}).get("detail")
-        if not valid_detail(detail):
+        figure = valid_detail(detail)
+        if not figure:
             detail = recorded_detail(rec["path"], literal)
         P.page(span, "#171B23", "#0D1015", grain=.018)
 
@@ -1481,28 +1512,23 @@ def build(script, sup, style_id, direction=None):
             P.card(during, key, box, crop=crop, source_ink=[box], caption_baseline=.88, **kw)
 
         full = [0., 0., 1., 1.]
-        if detail or literal:
-            context = [.055, .198, .945, .30]
-            reading = span
-            # A broad UI or diagram needs its full overview before the enlarged detail.
-            overview = fit_panel(full, size, (W, H), context)
-            if overview[2] - overview[0] < .6 and f1-f0 >= 18:
-                reveal = f0 + round((f1-f0)*.4)
-                view(full, [.055, .198, .945, .50], [f0, reveal])
-                reading = [reveal, f1]
-            view(full, context, reading)
-            if detail:
-                # Older raster UI headings can be only a few dozen pixels wide.
-                # Enlarge their ink without blowing a low-resolution label up to screen width.
-                half = min(.445, (detail[2]-detail[0])*size[0] / 360)
-                view(detail, [.5-half, .31, .5+half, .50], reading, document_excerpt=True)
-            else:
-                # The already-read label also works on machines without local text recognition.
-                wf1_display.reading_card(P, reading, literal, "", "", pal, centre=.40, max_height=.15, group="excerpt")
+        if figure:
+            from scene.motion import document_figure
+            below = .50 if any(lo < f1 and f0 < hi for lo,hi in report_spans) else .79
+            box = document_figure(detail, size, (W,H), bottom=below)
+            P.card(span, key, box, crop=detail, source_ink=[box], caption_baseline=.88, document_excerpt=True)
+        elif detail:
+            # Legacy OCR supplies the heading alone. Keep the artifact that gives that label meaning.
+            view(full, [.055,.15,.945,.30], span)
+            half = min(.445,(detail[2]-detail[0])*size[0]/360)
+            view(detail,[.5-half,.31,.5+half,.50],span,document_excerpt=True)
+        elif literal:
+            view(full, [.055, .16, .945, .37], span)
+            wf1_display.reading_card(P, span, literal, "", "", pal, centre=.43, max_height=.13, group="excerpt")
         else:
             view(full, [.055, .198, .945, .48], span)
         note(f0, f1, kind, name, rec, "document")
-        P.pictures[-1].update(source_crop=full, document=rec.get("document"), excerpt_crop=detail)
+        P.pictures[-1].update(source_crop=detail if figure else full, document=rec.get("document"), excerpt_crop=detail)
 
     def bleed(f0, f1, kind, name, rec, key):
         source_ink = clipped_source_ink(rec) if kind == "clip" else []
@@ -1600,16 +1626,21 @@ def build(script, sup, style_id, direction=None):
             cut_pts.append(f0)
             P.events.append(f0)
             label = rec.get("name_super") or (rec.get("attribution") if d.get("labels") else None)
+            archive_credit = (d.get("archive_credits") or {}).get(rec["path"])
+            if archive_credit:
+                P.pictures[-1]["archive_credit"] = archive_credit
             if rec.get("provider") == "primary-document":
                 # The figure and the supporting statement may have different sources.
                 urls = {url for url in (rec.get("page"), rec.get("url")) if url}
                 credited = [(a, b) for a, b, page in timed_facts
                             if any(fact["source"].get("url") in urls for fact in page["facts"])]
-                if rec.get("credit"):
+                from wf1_documents import screen_credit
+                credit = archive_credit["label"] if archive_credit else screen_credit(rec)
+                if credit:
                     intervals, _ = _director().hold_take([ins[k]], credited, min_f=14)
-                    labels.extend((lo, hi, rec["credit"], keys[rec["path"]]) for lo, hi, *_ in intervals)
+                    labels.extend((lo, hi, credit, keys[rec["path"]]) for lo, hi, *_ in intervals)
                 continue
-            event=archive_event(rec)
+            event=archive_credit["label"] if archive_credit else archive_event(rec)
             if event:
                 label=" · ".join(s for s in (rec.get("name_super"),event) if s)
                 labels.append((f0,f1,label,keys[rec["path"]]))
@@ -1707,9 +1738,16 @@ def build(script, sup, style_id, direction=None):
                     if page.get("callback_action") and not any(lo < end and start < hi and rec.get("episode_excerpt")
                                                               for lo,hi,_,_,rec in source_rows):
                         footer = page["callback_action"]
-                wf1_display.reading_card(P, [start,end], "", fact["attribution"]+" · Scenario",
+                heading = fact["attribution"]+" · Scenario"
+                if page.get("sequence_kind") == "history":
+                    source = steps[i]["source"]
+                    heading = "Timeline"
+                    footer = (fact["attribution"]+" · Recollection" if source == fact["source"]
+                              else source.get("publisher") or source["url"])
+                wf1_display.reading_card(P, [start,end], "", heading,
                                          footer, pal, centre=.605,
-                                         steps=[(s["label"],j==i) for j,s in enumerate(steps)])
+                                         steps=[(s["label"],j==i) for j,s in enumerate(steps)
+                                                if page.get("sequence_kind") != "history" or j==i])
                 P.events.append(start)
             fact_pages.append(dict(page, f=[a,b]))
             continue
@@ -1754,8 +1792,10 @@ def build(script, sup, style_id, direction=None):
                     citation = " · ".join(dict.fromkeys(filter(None, (speaker, fact["source"].get("author"), source, stamp))))
                     speaker = ""
                     if fact.get("perspective"):
-                        label = ""
-                        citation = " · ".join(dict.fromkeys(s.get("publisher") or s["url"] for s in fact["supporting_sources"]))
+                        label = source
+                        others = [s.get("publisher") or s["url"] for s in fact.get("supporting_sources", [])
+                                  if s.get("url") != fact["source"].get("url")]
+                        citation = " · ".join(dict.fromkeys(filter(None, (fact["source"].get("author"), date, *others))))
                 elif claim:
                     citation = " · ".join(filter(None, (speaker if label else None, source, fact.get("relation"))))
                 else:
@@ -1763,6 +1803,11 @@ def build(script, sup, style_id, direction=None):
                     citation = source
                 span = [a + round((b - a) * k / len(facts)) for k in (i, i + 1)]
                 if (a,b) in source_pages:
+                    perspective = fact.get("perspective")
+                    if perspective:
+                        wf1_display.reading_card(P, span, "", perspective["speaker"]+" · Recollection"
+                            if perspective["stance"] == "recollection" else perspective["speaker"]+" · Interview",
+                            "", pal, centre=.735, max_height=.08, group="interview-credit")
                     wf1_display.reading_card(P, span, body, label or speaker, citation, pal,
                                              centre=.44, max_height=.55)
                 else:

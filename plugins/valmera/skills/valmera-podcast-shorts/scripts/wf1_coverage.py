@@ -91,7 +91,7 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None, stor
  "windows":[{"first":int,"last":int,"name":str,"external":true,"association":false,"must_show":str,"why":str,
    "depictions":[{"name":str,"must_show":str,"video_searches":[str]}]}],
  "comparisons":[{"first":int,"last":int,"premise":str,"consequence":str}],
- "speaker_claims":[{"first":int,"last":int,"speaker":str,"stance":"concern|characterization","report":str,"scope_question":str}],
+ "speaker_claims":[{"first":int,"last":int,"speaker":str,"stance":"concern|characterization|recollection","report":str,"scope_question":str}],
  "moves":[{"word":int,"why":str}]}.
 named lists the referents the script stage resolved from the whole moment, each with the event-level
 picture it needs as it was at the time (must_show). For each with identifiable external evidence, plan a
@@ -108,7 +108,7 @@ end before that factual example. For a competitive comparison, show the actual c
 Group the demonstrated actions into their factual window. The synchronous interview is primary
 evidence for the speaker's concern or competitive characterization. Map just that judgment in
 speaker_claims. Include its conditional premise: naming the platforms to which a concern applies
-is part of that same thought. Mark the particular concern or loaded verdict that would sound like the film's own
+is part of that same thought. Use recollection for memories about adoption or motive; keep their scope and ask for contemporary evidence when it qualifies the memory. Mark the particular concern or loaded verdict that would sound like the film's own
 claim when set in type. Give one short indirect report for the whole judgment, keeping the speaker's
 qualifications and the named products. Leave ordinary connective commentary and restatements in
 the running interview. Estimates already identified in story.claims keep their own treatment.
@@ -234,7 +234,7 @@ an honest subject; never invent one.'''
     speaker_claims = [c for c in out.get("speaker_claims") or [] if isinstance(c, dict)
                       and type(c.get("first")) is int and type(c.get("last")) is int
                       and 0 <= c["first"] <= c["last"] < len(words)
-                      and c.get("stance") in ("concern", "characterization")
+                      and c.get("stance") in ("concern", "characterization", "recollection")
                       and all(isinstance(c.get(k), str) and c[k].strip() for k in ("speaker", "report"))]
     # Restore the full, timed first-person claim when the picture reading addresses only its conclusion.
     # Its conditional lead-in names the parties the concern applies to, not another filmed event.
@@ -540,6 +540,22 @@ def camera_remainder(window):
             and treatment.get("clause") == window.get("say"))
 
 
+def excerpt_catalog(footage, pictures):
+    """The actual cut files and document crops already in supply, addressable by their bytes."""
+    from placement_check import file_digest
+    rows = [("clip", c.get("subject") or "", c) for clips in footage.values() for c in clips]
+    rows.extend(("photo", name, rec) for name, records in pictures.items() for rec in records
+                if rec.get("document"))
+    catalog = {}
+    for kind, name, rec in rows:
+        url = (rec.get("source") or {}).get("url") or rec.get("page")
+        if not url or rec.get("dull") or not os.path.isfile(rec.get("path") or ""):
+            continue
+        digest = file_digest(rec["path"])
+        catalog[(rec["path"], digest)] = (kind, name, rec)
+    return catalog
+
+
 def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=None, originals=None, cut_dir=None, ffmpeg=None):
     """Only the semantic window can place a picture; a sentence start cannot. The candidates of a window go in the order
     the picture check ranked them for that clause (fits[(window, path)], best first), then moving footage first; each
@@ -556,6 +572,7 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
             url=(c.get('source') or {}).get('url')
             if url and c.get('time_range') and len(c['time_range'])==2:
                 taken.setdefault(url,[]).append(tuple(c['time_range']))
+    library = excerpt_catalog(footage,pictures) if any(w.get("reuse_excerpt") for w in coverage["windows"]) else {}
     used, out = [], []
     for i, window in enumerate(coverage['windows']):
         if window.get('on_take'):
@@ -582,6 +599,10 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
                     os.path.isfile(candidate["path"]) and
                     file_digest(candidate["path"]) == prior["sha256"]):
                 candidates.append(("clip", candidate.get("subject") or window["name"], candidate))
+        reference = window.get("reuse_excerpt") or {}
+        chosen = library.get((reference.get("path"), reference.get("sha256")))
+        if chosen:
+            candidates.insert(0, chosen)
         blocked={r['source'] for r in coverage.get('blocked_sources',[]) if r['window']==i}
         pool=[row for row in candidates if not is_rejected(rejected,i,row[2])
               and ((row[2].get('source') or {}).get('url') or row[2].get('page')) not in blocked]
@@ -646,10 +667,13 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
         for row in pool:
             if is_rejected(rejected,i,row[2]):continue
             if not any(same_picture(row[2],old) for old in used+[r[2] for r in distinct]):distinct.append(row)
-        # A later reference may return to the same authentic evidence, never to the same interval of it: a fresh
-        # interval of the kept original, checked on this window's words, or nothing (the ladder and the gap fill).
+        # Only an explicitly selected return may repeat the exact excerpt on new words.
+        returned = any(row[4]["path"] == reference.get("path") for row in pins)
         for a,b in gaps:
             candidates = [r for r in distinct if not any(same_picture(r[2], old) for old in used)]
+            if chosen and not returned and chosen in pool:
+                candidates = [chosen] + [r for r in candidates if not same_picture(r[2],chosen[2])]
+                returned = True
             if not candidates or (pins and i in coverage.get("motion_windows", []) and
                                   not any(r[0] == "clip" for r in candidates)):
                 # Start beside the moving witness that passed on these words; the new slice
@@ -685,7 +709,10 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
                 out.append([pos,end,kind,name,dict(rec, window=i, illustration=window['must_show'], clause=window.get('say'),
                                                         clause_t=[window['t0'],window['t1']],
                                                         **({'association':window['must_show']} if window.get('association') is True else {}))])
-                used.append(rec); pos=end
+                # A return must not consume the ordinary slot of a distinct later proof.
+                if not chosen or rec["path"] != chosen[2]["path"]:
+                    used.append(rec)
+                pos=end
     out.sort(key=lambda row: row[0])
     return out
 
@@ -778,6 +805,11 @@ def repair_requirements(coverage, wanted, evidence, llm):
     """A director corrects over-specific research constraints without changing spoken facts or timing."""
     system='''Direct documentary acquisition requirements using primary research and any previous failures.
 Return JSON {"windows":[{"i":integer,"name":resolved subject name,"referent_evidence":str,"must_show":str,"video_searches":[str]}]}.
+In research.excerpts each id is an existing exact clip or original document crop, with its observed
+content and provenance. Return reuse_id for a change of emphasis that THIS excerpt already depicts well,
+even across different subject labels. Use a dated lab talk to show the lab's work or a legible detail of the
+same paper on the mechanism. A separate event, product, date, user or action needs its own direct proof.
+Omit reuse_id for a new depiction, a merely similar subject, or a mismatch in the actual delivery finding.
 Composed-frame rejections are evidence that an earlier depiction brief may have been too broad.
 A different interview in which a founder tells a similar story is not footage of the event being
 told. Search the actual named artifact, contemporaneous primary document or recorded occasion. When an
@@ -823,7 +855,12 @@ For an unnamed activity, seek truthful illustrative footage or an
 original document about that activity without inventing its participants, employer or exact location.
 If no faithful external depiction exists, state that research failure; never count the interview take as it.
 Do not change any spoken words, window boundaries, or numerical quality targets. Keep the old canonical name unless referent evidence establishes that it is wrong or unresolved.'''
-    content=json.dumps(dict(context=coverage.get('context'),story=coverage.get('story'), comparisons=coverage.get('comparisons'),resolved_referents=research_names(coverage),primary_research=coverage.get('research_context'),spoken_words=coverage.get('words'),windows=[dict(coverage['windows'][i],i=i) for i in wanted],research=evidence))
+    research = dict(evidence)
+    if "excerpts" in research:
+        # The director selects by number; filesystem paths and byte hashes stay local.
+        research["excerpts"] = [{k:v for k,v in item.items() if k not in ("path","sha256")}
+                                for item in research["excerpts"]]
+    content=json.dumps(dict(context=coverage.get('context'),story=coverage.get('story'), comparisons=coverage.get('comparisons'),resolved_referents=research_names(coverage),primary_research=coverage.get('research_context'),spoken_words=coverage.get('words'),windows=[dict(coverage['windows'][i],i=i) for i in wanted],research=research))
     text,use=llm.ask(system,content,effort='medium')
     for row in llm.json_block(text).get('windows',[]):
         i=row.get('i')
@@ -833,7 +870,12 @@ Do not change any spoken words, window boundaries, or numerical quality targets.
             if not row.get('referent_evidence'):continue
             window.setdefault('original_name',window['name'])
             window.update(name=row['name'],subjects=[row['name']],referent_evidence=row['referent_evidence'])
-        coverage['windows'][i].update(must_show=row['must_show'],video_searches=row.get('video_searches') or [])
+        window.update(must_show=row['must_show'],video_searches=row.get('video_searches') or [])
+        window.pop("reuse_excerpt", None)
+        candidates = evidence.get("excerpts") or []
+        selected = row.get("reuse_id")
+        if type(selected) is int and 0 <= selected < len(candidates):
+            window["reuse_excerpt"] = {k:candidates[selected][k] for k in ("path","sha256")}
     return use
 
 

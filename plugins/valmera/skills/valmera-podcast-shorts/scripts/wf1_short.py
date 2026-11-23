@@ -118,8 +118,11 @@ def script(ctx, ideas_out):
               "into the exact clip for a vertical short. You cut on word edges, start on the first word of the thought (no "
               "throat-clearing, no 'and', 'so', 'yeah' when the next word can open), and end on the payoff with a breath "
               "of tail. The clip must stand alone for a stranger who never saw the episode. The moment's anchors are measured: "
-              "the clip opens on the hook sentence's first content word and closes on the payoff's last word; one continuous "
-              "window, never an interior stretch that loses either.")
+              "the clip opens on the hook sentence's first content word. Resolve the story on the heard decision, "
+              "consequence or emotional landing. If the suggested payoff starts another subject or restates the "
+              "backdrop after the decision, end on the last complete sentence that delivers this story. "
+              "Keep qualifications that change its meaning. Choose one continuous "
+              "window and quote its exact closing words.")
     system += '\n\nReturn JSON only: {"in": seconds (0.15-0.3 s before the first word), "out": seconds (0.3-0.8 s after the last word; the clip is 18-55 s), "title": the film\'s title in at most five words, a headline a stranger stops for, written from the words between your in and out only: it promises nothing the clip does not deliver (a count or a list it names is whole inside the clip), "hook_line": the exact words heard first, "close_line": the exact last words, "speakers": number of people heard, "named": [the real people, companies, places, products and events this clip names or plainly points to, that a camera has filmed; each {"name": its usual English name, "is": person|company|place|product|event|thing, "must_show": one plain sentence on what footage of it must visibly show, as it was at the time he speaks of}; never this conversation itself, which is on screen already; when he tells of something he did himself, that filmed moment of him (a livestream, a keynote, his training, an event he took part in) is an event to name like any other], "brief": two sentences on the story and its mood, for the editor who chooses the music}.'
     system += (" Attribute concerns and competitive characterizations to the speaker in the brief. "
                "Separate demonstrated capabilities from predicted outcomes. Include claims for any nested speech or forecast: [{start,end,speaker,subject,event,report}]. "
@@ -146,7 +149,7 @@ def script(ctx, ideas_out):
                "the full expansion and meaning in the estimate's report. Budget about three spoken seconds for an eight-word definition; adjacent words can carry its reading. Keep a repeated numerical challenge together. Use nonoverlapping claim intervals. "
                "Attribute hypothetical quantities, keeping the demo's actual action distinct from the estimate.")
     anchors = (f"# The moment's anchors, measured on the words\nThe hook opens at {float(idea['t0']):.2f} s: {idea.get('hook') or ''}\n"
-               f"The payoff closes at {float(idea['t1']):.2f} s: {idea.get('payoff') or ''}\n"
+               f"Candidate closing boundary at {float(idea['t1']):.2f} s: {idea.get('payoff') or ''}\n"
                f"Measured length: {float(idea['t1']) - float(idea['t0']):.1f} s\n\n")
     content = f"# The moment\n{json.dumps(idea, ensure_ascii=False)}\n\n{anchors}# Who is in it\n{str((ctx.args or {}).get('identity') or '')[:1500]}\n\n# Words near the moment: seconds word\n" + ' '.join((f'{t:.2f} {w}' for (t, w) in near))
     content += "\n\n# Surrounding interview for meaning only, outside the edit\n" + "\n".join(surrounding)
@@ -707,7 +710,7 @@ def director_pictures(pack, most=36):
                 continue
             seen.add(p)
             out.append(dict(id=f"P{len(out)}", path=c.get("still") or p, src=p, kind="clip", seg=int(ln.get("i", 0)),
-                            label=str(c.get("shows") or c.get("subject") or "")[:60], motion=_num(c.get("motion_p90")),
+                            archive_source=c.get("source"), label=str(c.get("shows") or c.get("subject") or "")[:60], motion=_num(c.get("motion_p90")),
                             faces=len(c.get("faces") or []), luma=_num(c.get("luma"))))
     for name, recs in (pack.get("pictures") or {}).items():
         for r in recs:
@@ -716,6 +719,8 @@ def director_pictures(pack, most=36):
                 continue
             seen.add(p)
             out.append(dict(id=f"P{len(out)}", path=p, src=p, kind="document" if r.get("provider") == "primary-document" else "photo",
+                            archive_source=(dict(url=r.get("page"),title=r.get("title"),document=r["document"])
+                                            if r.get("document") else None),
                             label=str(r.get("shows") or r.get("title") or name)[:60], faces=len(r.get("faces") or [])))
     out = out[:most]
     return out, {p["id"]: p["src"] for p in out}
@@ -749,6 +754,8 @@ def direction_of(ctx, script, pack):
     from placement_check import file_digest
     import wf1_display
     editorial = dict(writing=wf1_display.WRITING, material=wf1_display.editorial(ctx, script, pack))
+    archive = {pic["id"]:pic["archive_source"] for pic in pics if pic.get("archive_source")}
+    editorial["material"]["archive_pictures"] = archive
     intent = hashlib.sha256(json.dumps([DR.CONTRACT,editorial,rows,stress,st,script.get("title"),script.get("direction"),
                                          script.get("hook_line"),script.get("close_line"),take.get("cuts")],
                                         sort_keys=True).encode()).hexdigest()
@@ -770,6 +777,16 @@ def direction_of(ctx, script, pack):
                   workflow="podcast short", dur_s=dur, title=(script or {}).get("title"), hook=(script or {}).get("hook_line"),
                   payoff=(script or {}).get("close_line"), editorial=editorial, ask=llm.ask, log=getattr(ctx, "log", None))
     d = wf1_display.bind(d, editorial["material"], rows)
+    sources = editorial["material"]["sources"]
+    credits = {}
+    for credit in d.get("archive_credits") or []:
+        if not isinstance(credit, dict):
+            continue
+        picture, source, label = (credit.get(k) for k in ("picture","source","label"))
+        if (isinstance(picture, str) and picture in archive and isinstance(source, str)
+                and source in sources and source != "interview" and isinstance(label,str) and label.strip()):
+            credits[ids[picture]] = dict(label=label.strip(), source=sources[source])
+    d["archive_credits"] = credits
     d["pictures"] = ids
     if d.get("by") == "model":
         refs = {pid for ask in d.get("asks", []) for pid in ask.get("pics", [])}
@@ -940,15 +957,33 @@ def refill(ctx, script, pack, shortage):
         pack['referent_research']=found
         pack.setdefault('research_spend',[]).extend(found['spend'])
     coverage['research_context']=pack['referent_research']
-    if pack.get('research_revision',0)<7:
-        # What was found, never why a check said no: rejection reasons handed to the director came back as exclusions in
-        # the brief (19 Nov m04, m05), and every brief rewrite re-judged pictures already approved. The brief stays a
-        # search brief; the picture check chooses among what the search finds.
-        evidence=dict(available=[dict(i=r['i'],clips=[dict(subject=c.get('subject'),shows=c.get('shows'),source=c.get('source')) for c in r['clips']]) for r in pack['footage']])
-        usage=wf1_coverage.repair_requirements(coverage,wanted,evidence,_llm())
-        pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=7
-        stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
-        with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
+    # The same director who revises a missing depiction can select a specific local witness.
+    # Remember which clauses got that read. A failed local placement resumes ordinary acquisition.
+    read = pack.setdefault("excerpt_briefs", [])
+    catalog = wf1_coverage.excerpt_catalog({r["i"]:r["clips"] for r in pack["footage"]},pack["pictures"])
+    inventory = hashlib.sha256(json.dumps(sorted(catalog)).encode()).hexdigest()
+    def brief(i):
+        return [i,windows[i]["say"],windows[i]["must_show"],inventory]
+    unread = [i for i in wanted if brief(i) not in read]
+    if unread and (catalog or pack.get("research_revision",0) < 7):
+        excerpts = [dict(id=i,path=path,sha256=digest,kind=kind,subject=name,shows=rec.get("shows"),
+                         source=rec.get("source") or rec.get("page"),seconds=rec.get("time_range"),
+                         document=rec.get("document"))
+                    for i,((path,digest),(kind,name,rec)) in enumerate(catalog.items())]
+        evidence = dict(excerpts=excerpts, measurements=shortage)
+        usage = wf1_coverage.repair_requirements(coverage,unread,evidence,_llm())
+        pack.setdefault("research_spend",[]).append(usage)
+        pack["research_revision"] = 7
+        read.extend(brief(i) for i in unread)
+        local = [i for i in unread if windows[i].get("reuse_excerpt")]
+        save_pack(ctx,pack)
+        if local:
+            ctx.log(f"returning original excerpts to windows {local} for placement")
+            wanted = [i for i in wanted if i not in local]
+            if not wanted:
+                return
+            shortage = dict(shortage, **{k:[i for i in shortage.get(k, []) if i in wanted]
+                                         for k in ("weak_windows","missing_windows")})
     added=0
     # A still cannot repair a motion deficit. Preserve existing documentary
     # evidence, but spend this recovery pass on moving originals first.
@@ -1135,6 +1170,7 @@ def descend(ctx, script, pack, missing):
         k = int(w.get('rung') or 0)
         step = w['depictions'][k]
         w.setdefault('ladder', []).append(dict(name=w['name'], must_show=w['must_show']))
+        w.pop("reuse_excerpt", None)
         w.update(name=step['name'], must_show=step['must_show'], video_searches=list(step.get('video_searches') or []),
                  subjects=[step['name']], rung=k + 1)
     save_pack(ctx, pack)
@@ -1187,7 +1223,7 @@ def descend(ctx, script, pack, missing):
 
 def film_direction(d):
     """Carry the Director's authored fields into the picture and sound composers."""
-    knobs = {k: d.get(k) for k in ("display", "caption_ends", "caption_accents", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
+    knobs = {k: d.get(k) for k in ("display", "archive_credits", "caption_ends", "caption_accents", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
     if d.get("beats") or d.get("sections") or d.get("asks"):
         knobs["director"] = {k: d.get(k) for k in ("beats", "sections", "asks", "arc", "pictures", "by", "seed")}
     return knobs

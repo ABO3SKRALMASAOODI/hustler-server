@@ -455,7 +455,7 @@ SELECT_SYSTEM = (
     "of the people, actions and places he describes. Read through the answer to distinguish the actual members of a list from illustrations of one member. In why, state exactly which the window pays off and unpack shorthand from the conversation.")
 
 
-SELECT_CONTRACT = '\n\nWalk the whole transcript in order and return every moment that clears the bar: a stranger stops within two seconds, stays to the end, and leaves with something. Grade each moment on its own. There is no target number, no minimum and no maximum: a weak hour gives few, a strong one many. A moment must stand alone without the episode, open on its hook in its first sentence, end on its payoff, run 18 to 55 seconds, and be about at least one real thing a camera has filmed (a person, company, product, place or event, named or plainly meant), because the film shows real footage of what is said. A strong opinion, confession, prediction, number or funny exchange about real things is a moment like a story is. Only talk with nothing real in it at all is left out. Moments never overlap.\n\nNever quote the transcript in your answer: give seconds, and the code reads the words itself. Return JSON only: {"podcast": {"speaker": the main guest\'s full name, "host": the host\'s name or "", "show": the show\'s name or "", "year": the year it was recorded, "short_title": the episode in at most eight words}, "moments": [each {"title": a plain title in at most six words, "t0": the start second of the sentence the hook opens (from its line), "t1": the end second of the sentence the payoff closes (from its line), "why": why a stranger watches to the end, "speakers": how many people speak in it, "names": the people heard or named, "shows": the real filmed things a picture can show for it, most important first, "styles": [{"id": a style id from the list, "why": what in this moment that style needs}] best fit first, at least two, "hook_score": 1-10, "payoff_score": 1-10, "story_score": 1-10, "strength": 1-10 overall}], "left_out": [every other candidate you weighed and left out, each {"t0": seconds, "title": title, "why": the reason}]}'
+SELECT_CONTRACT = '\n\nWalk the whole transcript in order and return every moment that clears the bar: a stranger stops within two seconds, stays to the end, and leaves with something. Grade each moment on its own. There is no target number, no minimum and no maximum: a weak hour gives few, a strong one many. A moment must stand alone without the episode, open on its hook in its first sentence, end on the words that resolve its central story before a digression, preserving every material qualification, run 18 to 55 seconds, and be about at least one real thing a camera has filmed (a person, company, product, place or event, named or plainly meant), because the film shows real footage of what is said. A strong opinion, confession, prediction, number or funny exchange about real things is a moment like a story is. Only talk with nothing real in it at all is left out. Moments never overlap.\n\nNever quote the transcript in your answer: give seconds, and the code reads the words itself. Return JSON only: {"podcast": {"speaker": the main guest\'s full name, "host": the host\'s name or "", "show": the show\'s name or "", "year": the year it was recorded, "short_title": the episode in at most eight words}, "moments": [each {"title": a plain title in at most six words, "t0": the start second of the sentence the hook opens (from its line), "t1": the end second of the sentence the payoff closes (from its line), "why": why a stranger watches to the end, "speakers": how many people speak in it, "names": the people heard or named, "shows": the real filmed things a picture can show for it, most important first, "styles": [{"id": a style id from the list, "why": what in this moment that style needs}] best fit first, at least two, "hook_score": 1-10, "payoff_score": 1-10, "story_score": 1-10, "strength": 1-10 overall}], "left_out": [every other candidate you weighed and left out, each {"t0": seconds, "title": title, "why": the reason}]}'
 
 
 def line_at(lines, t, edge):
@@ -809,10 +809,19 @@ def _sources_md(pod_line, rows):
             tr = tuple(p.get("time_range") or ())
             evidence = p.get("source_evidence") or {}
             subject = p.get("name_super") or p.get("attribution") or evidence.get("title") or p.get("name")
+            archive_credit = p.get("archive_credit")
+            if archive_credit:
+                out.append(f"- Archive credit | {archive_credit['label']} | {archive_credit['source']['url']} | {at}")
             if evidence.get("excerpt") and p.get("mode") == "source-insert":
                 lo,hi = evidence["excerpt"]
                 out.append(f"- Interview demonstration | {subject} | {evidence.get('channel')} | {p['source']} | "
                            f"{lo}–{hi} s of the episode | frame at {evidence['time_s']} s | {at}")
+            elif p.get("document"):
+                doc = p["document"]
+                c = by_page.get(p.get("source")) or {}
+                fields = (evidence.get("title") or c.get("title"), c.get("credit") or evidence.get("channel"),
+                          doc.get("publication"), doc.get("url"), f"page {doc['page']}", subject, at)
+                out.append("- Document | " + " | ".join(dict.fromkeys(filter(None,fields))))
             elif p.get("kind") == "clip":
                 c = by_clip.get((p.get("source"), tr)) or by_page.get(p.get("source")) or {}
                 seen.add((p.get("source"), tr))
@@ -824,7 +833,16 @@ def _sources_md(pod_line, rows):
         episode = f.get("source") or {}
         episode_url = episode.get("source_url") if isinstance(episode, dict) else episode
         for page in (ch.get("podcast") or {}).get("display_facts") or []:
+            if page.get("sequence_kind") == "history":
+                for step in page["sequence"]:
+                    source = step["source"]
+                    owner = page["facts"][0].get("attribution") if source.get("url") == episode_url else source.get("publisher")
+                    out.append("- Timeline | " + " | ".join(filter(None,(step["label"],owner,source.get("url")))))
             for fact in page.get("facts", []):
+                viewpoint = fact.get("perspective")
+                if viewpoint:
+                    out.append("- Interview account | " + " | ".join(filter(None, (viewpoint["speaker"],
+                               viewpoint["report"], viewpoint.get("interview")))))
                 callback = fact.get("callback_source")
                 if callback:
                     lo,hi = callback["excerpt"]

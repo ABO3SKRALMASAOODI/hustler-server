@@ -4,6 +4,10 @@ import string
 
 
 WRITING = """Write the factual type for this passage from the attached source readings and editorial brief.
+For dated archive in archive_pictures, return archive_credits:[{picture: the supplied picture ID,
+source: the supporting URL in sources, label: compact original venue or event and its year}].
+Date the pictured edition or occasion from the primary reading. The publication date of a later
+account does not date its pictures. Credit a paper by venue and year; its full authors are in sources.
 Use the original author’s dated words for a reported forecast. Keep their scope and uncertainty.
 A sourced explanation owns its clause; use a scenario on separate words only when it adds a distinct point.
 Also return caption_ends, the inclusive numbered last word of every short, complete spoken reading unit,
@@ -12,7 +16,12 @@ keep articles, conjunctions and auxiliaries with their thought. Aim for 3–7 wo
 Use display for emphases inside those phrases. For the causal mechanism of a decision that the available
 footage cannot show, score its sequence on the concrete example, with a staircase ask on that word range:
 args.sequence=[{"at": first word number of a state, "label": compact explanatory label}, ...],
-args.speaker=the person explaining it. If callback is supplied, use its sourced question as the final
+args.speaker=the person explaining it. When recounting real events, set args.sequence_kind="history".
+Use this same plate as a documentary timeline: give each step a source key from sources ("interview"
+for remembered motives and impressions, a primary record for a dated event). Write the scope in the label:
+a team's experience seeking wider adoption can coexist with documented early users. Keep production use
+with its dated institutional source. Focus the sequence on the decision and use dated original images
+where they show the research. Preserve "scenario" for an illustrative or hypothetical sequence. If callback is supplied, use its sourced question as the final
 state starting on the question. Name the action from the earlier episode excerpt and keep anonymity. Show the alternatives, their distinct effects and the reaction that
 links them. The labels form one qualitative diagram. Word attributions and scenario framing keep it
 an illustration of the interview. Avoid invented measurements, issuer histories and extra acquisition.
@@ -159,7 +168,7 @@ def claim_windows(editorial, words):
 
 
 CONTEXT_LABELS = {"framework": "Framework", "definition": "Definition"}
-OPINION_LABELS = {"concern": "Concern", "characterization": "Opinion"}
+OPINION_LABELS = {"concern": "Concern", "characterization": "Opinion", "recollection": "Recollection"}
 ESTIMATE_LABELS = {"discussed_estimate": "Estimate under discussion", "personal_estimate": "Personal estimate"}
 
 
@@ -251,10 +260,15 @@ def bind(direction, editorial, words):
             if (isinstance(step, dict) and type(step.get("at")) is int and first <= step["at"] <= last
                     and isinstance(step.get("label"), str) and step["label"].strip()
                     and (not sequence or sequence[-1]["at"] < step["at"])):
-                sequence.append(dict(at=step["at"], label=step["label"].strip()))
+                state = dict(at=step["at"], label=step["label"].strip())
+                if args.get("sequence_kind") == "history":
+                    key = step.get("source")
+                    state["source"] = sources.get(key, sources["interview"]) if isinstance(key, str) else sources["interview"]
+                sequence.append(state)
         if len(sequence) >= 2:
             speaker = (claim or {}).get("speaker") or args.get("speaker") or "Speaker"
-            pages.append(dict(first=first, last=last, sequence=sequence, facts=[
+            pages.append(dict(first=first, last=last, sequence=sequence,
+                              **({"sequence_kind":"history"} if args.get("sequence_kind") == "history" else {}), facts=[
                 dict(attribution=speaker, source=sources["interview"], value=sequence[0]["label"])]))
             continue
         if whole and not (args.get("facts") or args.get("claim")) and ask["dev"] in (
@@ -283,7 +297,7 @@ def bind(direction, editorial, words):
                 candidates = [f for f in args.get("facts") or [] if isinstance(f, dict)]
                 selected = next((f for f in candidates if f.get("quote")), candidates[0] if candidates else {})
                 item = claim_fact(claim, selected, sources, words)
-                exact = (claim.get("stance") in CONTEXT_LABELS or claim.get("stance") in OPINION_LABELS or (item.get("chain") or {}).get("original")
+                exact = (claim.get("stance") in ESTIMATE_LABELS or claim.get("stance") in CONTEXT_LABELS or claim.get("stance") in OPINION_LABELS or (item.get("chain") or {}).get("original")
                          or (selected.get("quote") and item.get("relation")))
                 start = claim["first"] if exact else max(first, claim["first"])
                 end = claim["last"] if exact or "until" not in ask else min(last, claim["last"])
