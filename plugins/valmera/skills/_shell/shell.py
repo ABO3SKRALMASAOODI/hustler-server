@@ -271,6 +271,9 @@ def deliver(ctx, state, out_root, results):
                               fell_back=sum(1 for r in dlog or [] if r.get("fallback")),
                               sections=(ddir or {}).get("sections"), log=dlog,
                               measure=jload(os.path.join(ctx.supply, "devices_measure.json"), None))
+    if ctx.workflow == "wf4":
+        import wf4_sources
+        wf4_sources.write(part, ctx.supply, results)
     jsave(os.path.join(part, "film.json"), rec)
     if row:                                      # the rename and the ledger row together, under the ledger's lock
         DL.deliver_once(row, commit=lambda: os.rename(part, final_dir))

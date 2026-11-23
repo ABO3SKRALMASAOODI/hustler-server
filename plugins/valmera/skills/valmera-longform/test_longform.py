@@ -132,3 +132,64 @@ def test_among_ideas_with_enough_footage_the_story_decides(monkeypatch):
     # footage still breaks a near tie
     ideas[0]["strength"] = 9
     assert wf4.ideas(Ctx())["ideas"][0]["id"] == "i1"
+
+
+def test_cli_topic_reaches_both_screenplay_writers_after_checkpoint(tmp_path, monkeypatch):
+    import archive_script
+    import importlib.util
+    import openai_budget
+    import wf4
+    from pathlib import Path
+
+    topic = "Make a 12–20 minute documentary on the AI breakthroughs of November 2026."
+    spec = importlib.util.spec_from_file_location("wf4_entry", Path(HERE) / "run.py")
+    entry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(entry)
+    monkeypatch.setenv("OPENAI_API_KEY", "unused-test-key")
+    monkeypatch.setattr(entry, "load", lambda name: wf4)
+    monkeypatch.setattr(entry.shell, "load_workflow", entry.load)
+    monkeypatch.setattr(openai_budget, "raise_if_stopped", lambda **kw: None)
+    monkeypatch.setattr(entry.shell.chain, "use_sound_set", lambda: None)
+    card = dict(id="ledger", name="Ledger", look="archive")
+    pick = dict(style="ledger", title="A discovery", supply=dict(ok=True))
+    monkeypatch.setattr(wf4, "ideas", lambda ctx: dict(ideas=[pick]))
+    monkeypatch.setattr(wf4, "able_cards", lambda ctx: [card])
+    root = tmp_path / "state"
+    cli = [str(spec.origin), "--state-root", str(root)]
+    monkeypatch.setattr(sys, "argv", cli + ["--topic", topic, "--args", '{"ear":false,"remake":true}',
+                                            "--out", str(tmp_path / "out"), "--until", "ideas"])
+    assert entry.main() == 0
+    run, = (root / "work").iterdir()
+    state = json.loads((run / "run.json").read_text())
+    assert state["args"]["line"] == topic
+
+    (run / "dossier.json").write_text(json.dumps(dict(dossier=dict(facts=[]), verify=dict(verified=25, total=25))))
+    draft = dict(title="A discovery", chapters=[], segments=[dict(say="A discovery.", facts=[],
+                 visual_beats=[dict(word_start=0, archive_ids=["v1"])])])
+    prompts = {}
+    def write(system, content, **kw):
+        prompts[kw["what"]] = content
+        return json.dumps(draft), {}
+
+    monkeypatch.setattr(wf4.story.writer, "ask_web", write)
+    monkeypatch.setattr(wf4.story, "check_script", lambda *a: dict(ok=True, words=1, segments=1, problems=[]))
+    monkeypatch.setattr(sys, "argv", [cli[0], "run", *cli[1:], "--resume", run.name, "--until", "script"])
+    assert entry.main() == 0
+    script = json.loads((run / "script.json").read_text())
+    ctx = entry.shell.Ctx(str(run), state, str(root))
+    archive = Path(ctx.supply) / "archive-script"
+    archive.mkdir(parents=True)
+    (archive / "additional-facts.json").write_text('{"facts":[]}')
+    def conform(system, content, **kw):
+        prompts[kw["what"]] = content
+        if kw["what"] == "WF4 conformed screenplay fact audit":
+            return '{"faithful":true}', {}
+        return json.dumps(dict(script=draft, why="fixture")), dict(stop="completed")
+
+    monkeypatch.setattr(wf4.story.writer, "ask", conform)
+    clip = dict(seconds=3, source=dict(title="Lab tape"))
+    archive_script.propose(ctx, script, [dict(id="v1", usable=True, visible="equipment", form="video",
+                                              real_moving_footage=True, clip=clip, limitations=[])])
+    for stage in ("write", "WF4 archive-conformed screenplay"):
+        assert topic in prompts[stage]
+    assert wf4.story.production_brief(None) == ""

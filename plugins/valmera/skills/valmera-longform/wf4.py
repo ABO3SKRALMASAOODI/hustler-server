@@ -88,7 +88,7 @@ def script(ctx, ideas_out):
         raise RuntimeError(f"only {drep['verified']} facts verified; a long film needs at least 25")
     notes, sc, rep = ctx.args.get("notes"), None, None
     for attempt in range(3):
-        sc, use = story.write(pick, dos, card, voices=card.get("voice"), notes=notes)
+        sc, use = story.write(pick, dos, card, voices=card.get("voice"), notes=notes, line=ctx.args.get("line"))
         spend.append(dict(stage="script", attempt=attempt, **use))
         rep = story.check_script(sc, dos)
         json.dump(dict(script=sc, check=rep), open(os.path.join(ctx.run_dir, f"script_attempt{attempt}.json"), "w"), ensure_ascii=False, indent=1)

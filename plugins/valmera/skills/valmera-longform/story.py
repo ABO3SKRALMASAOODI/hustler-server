@@ -94,7 +94,8 @@ def find_ideas(card, avoid=(), line=None, n=6, effort="high", delivered=""):
                "sentence, \"protagonist\": who the story follows and what they want, \"question\": the one dramatic question "
                "the film answers last, \"stakes\": what is lost, and for whom, if they fail, \"story\": the story in plain sentences, with consequences as well as figures, \"chapters\": [chapters arising from the story, "
                "{\"title\": two to four words, \"question\": the question the chapter opens}], \"turn\": the turn, \"payoff\": the "
-               "payoff with its figure, \"ledger\": [two to four {\"label\": the stake, \"start\": its value at the start, \"end\": "
+               "payoff with its figure, \"arc\": {\"setup\": one sentence opening the central question, \"escalation\": one sentence "
+               "on how the stakes rise, \"payoff\": one sentence answering the question}, \"ledger\": [two to four {\"label\": the stake, \"start\": its value at the start, \"end\": "
                "its value at the end}], \"named\": [twelve to twenty {\"name\": usual English name, \"is\": person|place|machine|"
                "building|document|event|thing, \"searches\": one to three archive video and original interview searches, most specific first, "
                "\"must_show\": what a picture must visibly show to count}], \"sources\": [URLs you read], \"strength\": 1-10, how strongly the STORY holds a viewer for ten minutes "
@@ -157,10 +158,18 @@ DESIGN_KINDS = (
     '{"kind": "quote", "text": a sentence a person in the story said or wrote, copied from a fact\'s quote, "who": name, "fact": id}')
 
 
-def write(idea, dos, card, voices=None, notes=None, effort="high"):
+def production_brief(line):
+    if not line:
+        return ""
+    return ("\n\n# Production brief\n" + line +
+            "\nUse the requested running time when specified. Budget the narration for that range at about "
+            "175 spoken words per minute, allowing time for archive inserts. Otherwise use the default form.")
+
+
+def write(idea, dos, card, voices=None, notes=None, effort="high", line=None):
     voices = voices or card.get("voice") or ["sage", "iris"]
     facts = [dict(id=f["id"], claim=f.get("claim"), quote=f.get("quote"), year=f.get("year")) for f in dos.get("facts") or []]
-    system = ("You are the writer and voice director of Valmera's long-form workflow. You write a 10-20 minute narration "
+    system = ("You are the writer and voice director of Valmera's long-form workflow. By default you write a 10-20 minute narration "
               "spoken by a synthetic narrator over real archive pictures and designed maps, documents and diagrams. Every "
               "statement of fact comes from the dossier's verified facts; you never add a fact, a figure or a date that is not "
               "in them, and you never round or dramatise beyond them. When citing an X post, paper or direct quotation choose design kind document or quote and its exact fact id. Choose the canonical status URL or actual paper PDF. You direct the actor too: pace, energy, melody, emphasis "
@@ -206,6 +215,7 @@ def write(idea, dos, card, voices=None, notes=None, effort="high"):
                f"# Documents\n{json.dumps(dos.get('documents') or [], ensure_ascii=False)}\n\n"
                f"# Voices\n{json.dumps({k: VOICES[k] for k in voices if k in VOICES})}\n\n") +
                (f"# Notes from the last attempt (fix every one)\n{notes}\n\n" if notes else ""))
+    content += production_brief(line)
     text, use = writer.ask_web(system, content, effort=effort, max_tokens=64000, searches=0, fetches=0, what="write")
     return writer.json_block(text), use
 

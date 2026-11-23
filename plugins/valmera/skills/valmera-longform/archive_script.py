@@ -96,7 +96,8 @@ def propose(ctx,script,catalogue):
                 'The old script is a research draft, not a structure to preserve. Its long repeated explanations and multiple endings must go. '
                 'Tell it as a story, not an explainer: '+story.STORY_SHAPE+' '
                 'The idea names its protagonist, dramatic question and stakes; keep them at the centre. Never add filler or turn the film into an archive inventory. '
-                'The final film must last 10–20 minutes. Write 1900–2200 spoken words in 55–90 complete-sentence segments, with a hook in the first ten seconds and a real turn in each story chapter. '
+                'Default to 10–20 minutes and 1900–2200 spoken words. A running time in the production brief takes precedence. '
+                'Write in 55–90 complete-sentence segments, with a hook in the first ten seconds and a real turn in each story chapter. '
                 'Each chapter comes from this story. Do not announce a question mechanically at every chapter or repeatedly explain what the audience will understand. '
                 'Use the actual available moving archive for most of the picture time, with original illustrations and cited records only where they genuinely explain an unfilmed event. '
                 'A picture may supply truthful context without visibly proving an invisible cause or motive; never imply that it depicts the wrong person, action, hardware, era or repair state. '
@@ -108,7 +109,8 @@ def propose(ctx,script,catalogue):
                 'Write for the ear (the narrator reads only the words and punctuation; every full stop is a falling end): '+story.EAR+' '
                 'Return JSON {script:{title,promise,names:[proper nouns],chapters:[{id,title,question,turn,music_mood,pace}], '
                 'testimony_purpose:string,segments:[{chapter,say,beat:"hook"|"promise"|"setup"|"loop"|"turn"|"low"|"payoff"|"close", '
-                'facts:[verified fact IDs],pictures:[named subjects],design:null,pace:"slow"|"steady"|"brisk",melody:"falling"|"rising"|"level"|"wide", '
+                'facts:[verified fact IDs],pictures:[named subjects],design:null or a cited document {kind:"document",fact,title,mark} '
+                'or quotation {kind:"quote",fact,who,text} to show the original on the line invoking it,pace:"slow"|"steady"|"brisk",melody:"falling"|"rising"|"level"|"wide", '
                 'emphasis:[one or two spoken words],pause_after:0.22,direction:string, '
                 'visual_beats:[{word_start:zero-based whitespace-word index in this say,archive_ids:[catalogue IDs in intended order],label:optional truthful source-context label}]}]},why:string}. '
                 'Every segment begins with a visual beat at word_start 0. Introduce a new beat when the pictured subject changes. '
@@ -116,8 +118,8 @@ def propose(ctx,script,catalogue):
                 'Use unique actual source intervals, not new crops of one still. Prefer the moving clips when they fit. A label clarifies a verified source, never manufactures its identity. '
                 'Keep archive_ids as literal catalogue IDs. Do not invent them. A segment facts list must support all its factual claims. '
                 'Return the full revised script, not editing notes.',
-                json.dumps(dict(idea={k:script.get('idea_full',{}).get(k) for k in ('title','protagonist','question','stakes','hook','turn','payoff')},
-                                old_script=old_script,facts=dossier['facts'],archive=material,editorial_review=critique,repair_notes=notes)),
+                json.dumps(dict(idea={k:script.get('idea_full',{}).get(k) for k in ('title','protagonist','question','stakes','hook','turn','payoff','arc')},
+                                old_script=old_script,facts=dossier['facts'],archive=material,editorial_review=critique,repair_notes=notes)) + story.production_brief(ctx.args.get('line')),
                 effort='high',max_tokens=36000,what='WF4 archive-conformed screenplay')
             C.save(root/f'response-{attempt}.json',dict(text=text,usage=use))
             if use.get('stop')!='completed':raise ValueError('archive screenplay response incomplete; preserved for diagnosis')
