@@ -817,6 +817,27 @@ def _sources_md(pod_line, rows):
             else:
                 c = by_page.get(p.get("source")) or {}
                 out.append(f"- Photograph ({subject}): {c.get('title') or c.get('name')} | {c.get('credit')} | {c.get('licence')} | {p.get('source')} | {at}")
+        episode = f.get("source") or {}
+        episode_url = episode.get("source_url") if isinstance(episode, dict) else episode
+        for page in (ch.get("podcast") or {}).get("display_facts") or []:
+            for fact in page.get("facts", []):
+                excerpt = fact.get("excerpt") or (fact.get("chain") or {}).get("original") or {}
+                body = excerpt.get("words") or fact.get("statement") or " ".join(str(fact[k]) for k in
+                    ("qualifier","value","relation") if fact.get(k))
+                sources = [fact.get("source") or {}]
+                if not excerpt:
+                    sources.extend(fact.get("supporting_sources") or [])
+                urls = set()
+                for source in sources:
+                    url = source.get("url")
+                    if not url or url in urls or url == episode_url:
+                        continue
+                    urls.add(url)
+                    fields = [body, excerpt.get("speaker") or source.get("author"), source.get("publisher"),
+                              excerpt.get("event"), source.get("publication_date"), excerpt.get("locator"), url]
+                    if page.get("f"):
+                        fields.append(f"shown at {page['f'][0]/30:.1f}-{page['f'][1]/30:.1f} s")
+                    out.append("- Editorial evidence | " + " | ".join(dict.fromkeys(filter(None,fields))))
         spare = [c for k, c in by_clip.items() if k not in seen]
         if spare:
             out.append(f"- Found and not used: {len(spare)} more clips from " + ", ".join(sorted({str(c.get('page')) for c in spare})))

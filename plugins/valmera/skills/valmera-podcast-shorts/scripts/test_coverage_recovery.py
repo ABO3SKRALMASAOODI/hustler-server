@@ -625,3 +625,25 @@ def test_verified_action_uses_its_real_clock_and_keeps_the_next_physical_cut():
     assert rows[1] == racks
     report = coverage.require_coverage(rows,plan,5,final=True)
     assert report["moving_seconds"] == (36+48)/30
+
+
+def test_research_only_the_distinct_missing_proof(tmp_path):
+    import hashlib
+    import wf1_short as wf
+    patient = tmp_path / "patient.mp4"
+    patient.write_bytes(b"checked clip")
+    (tmp_path/"sources").mkdir()
+    (tmp_path/"sources/manifest.json").write_text(json.dumps([dict(url="publisher",path=str(patient))]))
+    def window(i):
+        return dict(first=i*5,last=i*5+4,t0=i*2.,t1=i*2.+2,say=str(i))
+    windows = [window(i) for i in range(3)]
+    witness = dict(motion_ok=True,path=str(patient),sha256=hashlib.sha256(patient.read_bytes()).hexdigest(),
+                   source="publisher",clause="2",clause_t=[4.,6.])
+    pack = dict(coverage=dict(windows=windows, passed_placements={"2":[witness]}))
+    beats = dict(display_facts=[dict(first=0,last=4,facts=[dict(excerpt={"words":"source text"})])])
+    assert wf.retained_repairs(str(tmp_path),pack,beats,[0,1,2]) == ([1],[2])
+    assert wf.retained_repairs(str(tmp_path),pack,beats,[2]) == ([2],[])
+    # The earlier 12.43 s hold had only stills on screen. The retrieved patient clip
+    # still goes through the regular placement check before its first composed verdict.
+    pack = dict(coverage=dict(windows=windows), footage=[dict(i=2,clips=[dict(path=str(patient),motion_p90=3)])])
+    assert wf.retained_repairs(str(tmp_path),pack,beats,[0,1,2]) == ([1],[2])

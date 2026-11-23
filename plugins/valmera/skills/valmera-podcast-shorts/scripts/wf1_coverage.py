@@ -630,8 +630,16 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
         # A later reference may return to the same authentic evidence, never to the same interval of it: a fresh
         # interval of the kept original, checked on this window's words, or nothing (the ladder and the gap fill).
         for a,b in gaps:
-            candidates=[r for r in distinct if not any(same_picture(r[2], old) for old in used)] or fresh_interval(pool,taken,originals,cut_dir,max(.5,min(1.4,(b-a)/fps))+2/fps,ffmpeg,
-                                                  skip={p for j,p in rejected if j==i})
+            candidates = [r for r in distinct if not any(same_picture(r[2], old) for old in used)]
+            if not candidates or (pins and i in coverage.get("motion_windows", []) and
+                                  not any(r[0] == "clip" for r in candidates)):
+                # Start beside the moving witness that passed on these words; the new slice
+                # goes through the same placement and composed-frame checks as any clip.
+                witnesses = [(kind,name,rec) for _,_,kind,name,rec in reversed(pins) if kind == "clip" and
+                             any(p.get("motion_ok") and p["path"] == rec["path"] for p in priorities)]
+                length = min(3. if witnesses else 1.4, max(.5,(b-a)/fps)) + 2/fps
+                candidates = fresh_interval(witnesses or pool, taken, originals, cut_dir, length, ffmpeg,
+                                            skip={p for j,p in rejected if j==i}) or candidates
             wanted = max(1, math.ceil((b-a)/fps*.8))
             if window.get("single_action"):
                 candidates = candidates[:1]

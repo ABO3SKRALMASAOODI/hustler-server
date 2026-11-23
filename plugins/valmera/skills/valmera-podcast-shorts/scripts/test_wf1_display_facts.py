@@ -389,3 +389,72 @@ def test_dense_scenario_keeps_each_active_thought_with_its_credit():
                 assert all(.06 < x0 < x1 < .86 and .44 < y0 < y1 < .77 for x0, y0, x1, y1 in boxes)
                 assert not any(intersects(box, other, pad=0) for i, box in enumerate(boxes) for other in boxes[i+1:])
             assert plan.voices["sequence_label"]["px"] >= 54
+
+
+def test_m20_verified_author_and_review_own_their_reading_intervals(tmp_path, quiet_engines, monkeypatch):
+    import wf1_display as display
+    import podcast
+    ctx, script, pack = material(tmp_path)
+    essay = "I believe that AI could cure most major diseases in the next 5–10 years"
+    review = "The FDA review team has 30 days to review the original IND submission."
+    def source(url, author, title, date, words, locator):
+        return dict(url=url, publisher=author, publication_date=date, quotations=[
+            dict(speaker=author, event=title, locator=locator, words=words, url=url, sha256="verified")])
+    author = source("essay", "Dario Amodei", "We Must Pace the Frontier", "September 2026", essay, "Opening")
+    fda = source("fda", "FDA", "Step 3: Clinical Research", None, review, "Approval")
+    script.update(window=[0,38.14], source_url=INTERVIEW, claims=[
+        dict(start=0,end=6.1,stance="discussed_estimate",speaker="Jason Calacanis",subject="Dario Amodei",
+             report="Could cancer be cured in a decade?",event="November roadshow")])
+    concern = dict(first=42,last=57,speaker="Ali Ghodsi",stance="concern",report="Testing takes care.",
+                   scope_question="What does FDA review?")
+    pack["coverage"]["speaker_claims"] = [concern]
+    pack["referent_research"] = dict(references=[dict(claim_start=0,sources=[author]),
+        dict(scope_for=42,statement="FDA reviews the initial application.",sources=[fda])])
+    words = [dict(w, t0=w["start"], t1=w["end"]) for w in pack["words"]["words"]]
+    material_ = display.editorial(ctx, script, pack)
+    direction = display.bind(dict(arc=[],asks=[dict(dev="staircase",at=dict(w=48),until=dict(w=56),
+        args=dict(sequence=[dict(at=48,label="Can a trial begin?"),dict(at=53,label="Review")]))]),material_,words)
+    direction.update(coverage_final=True, turn_seg=4)
+    monkeypatch.setattr(wf1_coverage,"speaker_moves",lambda *a: ([],[]))
+    scene, beats = wf.wf1_film.build(script, pack, "prints", direction)
+    pages = beats["display_facts"]
+    assert [p["facts"][0]["source"]["url"] for p in pages] == ["essay","fda"]
+    for page, body, byline in zip(pages,[essay,review],["Dario Amodei","FDA"]):
+        a,b = page["f"]
+        ink = " ".join(i["t"] for i in scene["items"] if i.get("fact_type") and a<=i["f"][0]<b)
+        assert body in ink and byline in ink and "Concern" not in ink
+        assert all(i.get("pic")=="plate" for i in scene["items"] if i["k"] in ("shot","card")
+                   and i["f"][0]<b and a<i["f"][1])
+    assert "September 2026" in " ".join(i.get("t","") for i in scene["items"])
+    report = podcast._sources_md("episode", [dict(n=1,title="Forecast",style="prints",
+        film=dict(window=[0,38.14],checks=dict(podcast=dict(display_facts=pages))))])
+    assert all(t in report for t in (essay,"essay",review,"fda","September 2026"))
+
+
+def test_checkpoint_extracts_missing_forecast_from_author_page_and_keeps_scope(tmp_path, monkeypatch):
+    import wf1_context
+    import wf1_display
+    import writer
+    ctx, script, pack = material(tmp_path)
+    script["claims"] = [dict(start=0,end=6,speaker="Host",subject="Author",report="The host asks about a forecast.")]
+    pack["coverage"]["speaker_claims"] = [dict(first=42,last=57,speaker="Guest",stance="concern",
+                                                scope_question="What is reviewed?",report="The guest raises a concern.")]
+    scoped = dict(scope_for=42,statement="The regulator reviews the filing.",sources=[dict(url="scope",publisher="Agency",
+        quotations=[dict(speaker="Agency",event="Guide",locator="Review",words="We review the filing.",url="scope",sha256="retained")])])
+    article = dict(url="essay",author="Author",publication_date="2026",publisher="Author",supports="The author's forecast.")
+    pack["referent_research"] = dict(references=[scoped,dict(sources=[article])])
+    passage = "I believe the work could take five years."
+    monkeypatch.setattr(wf1_context,"original_passages",lambda url, work: ([passage],url,"checked"))
+    def extract(system, content, **options):
+        data = json.loads(content)
+        assert not data["scope_checks"] and options["searches"] == 0
+        assert any(s.get("primary_text")==passage for s in data["existing_sources"])
+        return json.dumps([dict(claim_start=0,sources=[dict(article,quotations=[
+            dict(speaker="Author",event="Essay",locator="Opening",words=passage)])])]), {}
+    monkeypatch.setattr(writer,"ask_openai",extract)
+    llm = SimpleNamespace(openai_key=lambda:None,json_block=json.loads)
+    assert wf1_context.complete_editorial(ctx,script,pack,llm)
+    evidence = wf1_display.editorial(ctx,script,pack)
+    assert evidence["claims"][0]["primary_excerpt"]["quote"] == passage
+    assert evidence["speaker_claims"][0]["scope_fact"]["excerpt"]["sha256"] == "retained"
+    assert not wf1_context.complete_editorial(ctx,script,pack,llm)

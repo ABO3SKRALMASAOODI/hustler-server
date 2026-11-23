@@ -4,6 +4,8 @@ import string
 
 
 WRITING = """Write the factual type for this passage from the attached source readings and editorial brief.
+Use the original author’s dated words for a reported forecast. Keep their scope and uncertainty.
+A sourced explanation owns its clause; use a scenario on separate words only when it adds a distinct point.
 Also return caption_ends, the inclusive numbered last word of every short, complete spoken reading unit,
 in order through the final word. Each appears whole on the phone. Group repeated clauses separately;
 keep articles, conjunctions and auxiliaries with their thought. Aim for 3–7 words and about 28 characters.
@@ -81,6 +83,7 @@ def editorial(ctx, script, pack):
     sources = {"interview": dict(url=args.get("source_url"), publisher=args.get("channel"),
                                  supports=["The speaker's own account in the numbered passage."])}
     speaker_claims = [dict(c) for c in coverage.get("speaker_claims") or []]
+    claims = [dict(c) for c in script.get("claims") or []]
     for ref in research.get("references") or []:
         for src in ref.get("sources") or []:
             if isinstance(src, dict) and src.get("url"):
@@ -97,13 +100,29 @@ def editorial(ctx, script, pack):
                 reading = src.get("supports") or ref.get("finding")
                 if reading and reading not in evidence["supports"]:
                     evidence["supports"].append(reading)
+        # The reader ties an original to this particular claim (an author can make many).
+        cited = [(src["url"], q) for src in ref.get("sources") or [] if isinstance(src, dict)
+                 and src.get("url") in sources for q in src.get("quotations") or []
+                 if q in sources[src["url"]].get("quotations", [])]
+        for claim in claims:
+            if ref.get("claim_start") is None or claim.get("start") != ref["claim_start"]:
+                continue
+            for url, q in cited:
+                if q["speaker"].casefold() == str(claim.get("subject")).casefold():
+                    claim.setdefault("primary_excerpt", dict(source=url, quote=q["words"]))
+                    break
         # The same source reader can supply the scoped line when direction chooses the live camera.
         statement = ref.get("statement")
         if isinstance(statement, str) and statement.strip() and type(ref.get("scope_for")) is int:
             urls = [s["url"] for s in ref.get("sources") or [] if isinstance(s, dict) and s.get("url") in sources]
             for claim in speaker_claims:
                 if urls and claim["first"] == ref["scope_for"] and claim.get("scope_question"):
-                    claim["scope_fact"] = dict(source=urls[0], also_sources=urls[1:], statement=statement)
+                    scoped = dict(source=urls[0], also_sources=urls[1:], statement=statement)
+                    if cited:
+                        url, excerpt = cited[0]
+                        scoped.update(source=url, also_sources=[u for u in urls if u != url], excerpt=excerpt)
+                    if scoped.get("excerpt") or not claim.get("scope_fact"):
+                        claim["scope_fact"] = scoped
     # The footage reader has already described these exact clips. Credit its observed action
     # to the published demo, alongside the separate policy and announcement sources.
     for line in pack.get("footage") or []:
@@ -115,7 +134,7 @@ def editorial(ctx, script, pack):
             source = sources.setdefault(src["url"], dict(url=src["url"], publisher=src["channel"], supports=[]))
             if action not in source["supports"]:
                 source["supports"].append(action)
-    return dict(speaker_claims=speaker_claims, comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=script.get("claims") or [], episode_start=(script.get("window") or [0])[0],
+    return dict(speaker_claims=speaker_claims, comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=claims, episode_start=(script.get("window") or [0])[0],
                 sources=sources, speaker_inserts=[{k:r[k] for k in ('first','last')}
                     for r in (coverage.get('source_reading') or {}).get('speaker_inserts',[])], source_inserts=[{k:r[k] for k in ('first','last','shows')}
                                                for r in (coverage.get('source_reading') or {}).get('inserts',[])], coverage=[{k: row[k] for k in ("name", "must_show", "word_ids") if k in row}
@@ -150,6 +169,8 @@ def claim_fact(claim, fact, sources, words):
     # A jointly sourced qualification is already bound to these words by the primary reader.
     if claim.get("scope_fact"):
         fact = claim["scope_fact"]
+    elif claim.get("primary_excerpt"):
+        fact = claim["primary_excerpt"]
     key = fact.get("source")
     source = sources.get(key) if isinstance(key, str) else None
     if claim.get("stance") in OPINION_LABELS:
@@ -160,7 +181,10 @@ def claim_fact(claim, fact, sources, words):
                 other = sources.get(url) if isinstance(url, str) else None
                 if other and other != interview and other not in supporting:
                     supporting.append(other)
+            excerpt = fact.get("excerpt")
+            verified = excerpt and excerpt in source.get("quotations", [])
             return dict(statement=statement, value=statement, source=source, supporting_sources=supporting,
+                        **({"excerpt": excerpt} if verified else {}),
                         perspective=dict(speaker=claim["speaker"], stance=claim["stance"],
                                          report=claim["report"], interview=interview.get("url")))
         return dict(source=interview, attribution=claim["speaker"], value=claim["report"], chain=chain)
@@ -169,8 +193,8 @@ def claim_fact(claim, fact, sources, words):
     selected = fact.get("quote")
     for q in (source or {}).get("quotations", []):
         if (selected == q["words"] and str(claim.get("subject")).casefold() == q["speaker"].casefold()
-                and (not claim.get("event") or str(claim["event"]).casefold() == q["event"].casefold())):
-            return dict(source=dict(source, url=q["url"]), attribution=q["speaker"], value="“"+q["words"]+"”",
+                and (claim.get("primary_excerpt") or not claim.get("event") or str(claim["event"]).casefold() == q["event"].casefold())):
+            return dict(source=dict(source, url=q["url"]), attribution=q["speaker"], excerpt=q, value="“"+q["words"]+"”",
                         relation=q["event"]+" · "+q["locator"], chain=dict(chain, original=q))
     speaker = claim["speaker"]
     # Interview quotes come from the word clock itself, including qualifications.

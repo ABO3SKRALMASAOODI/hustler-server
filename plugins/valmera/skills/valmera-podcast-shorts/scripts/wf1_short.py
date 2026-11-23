@@ -254,7 +254,7 @@ def supply(ctx, script):
     coverage['context']=who
     import wf1_context
     primary_direction = (wf1_context.direct(coverage, os.path.join(sup_dir, 'referent-research'), _llm())
-                         if coverage['windows'] or any(c.get('scope_question') for c in coverage.get('speaker_claims', [])) else dict(references={}, spend=[]))
+                         if coverage['windows'] or coverage['claims'] or any(c.get('scope_question') for c in coverage.get('speaker_claims', [])) else dict(references={}, spend=[]))
     windows = coverage['windows']
     # Inventory records what was said; windows specify what can truthfully be photographed.
     # Passing the inventory back as search subjects resurrects unnamed people and isolated dates.
@@ -1206,7 +1206,8 @@ def score(ctx, script):
         pack['blank_frame_contract']=1;refresh=True
     if pack.get('composed_requirement_windows') and pack.get('coverage_catalog_revision')!=1:
         pack['coverage_context_rescout_pending']=True;refresh=True
-    if refresh:
+    import wf1_context
+    if wf1_context.complete_editorial(ctx, script, pack, _llm()) or refresh:
         path=os.path.join(ctx.supply,'pack.json');stored=json.load(open(path));stored['pack']=pack
         with open(path,'w') as f:json.dump(stored,f,indent=1)
     if (ctx.args or {}).get('identity'):
@@ -1433,6 +1434,44 @@ def prepare_picture_mix(ctx, sc):
     sc["composed_l1"] = scene_path
 
 
+def retained_repairs(supply, pack, beats, wanted):
+    """Read a cited page on its words and recompose a checked moving witness before scouting its clause."""
+    from placement_check import file_digest
+    from wf1_coverage import originals_of
+    coverage = pack.get("coverage") or {}
+    windows = coverage.get("windows", [])
+    pages = [p for p in beats.get("display_facts", []) if any(
+        f.get("excerpt") or f.get("perspective") for f in p["facts"])]
+    local, missing = [], []
+    originals = originals_of(supply)
+    footage = {line["i"]:line["clips"] for line in pack.get("footage", [])}
+    shown = {p.get("origin") or p.get("path") for p in beats.get("pictures", [])}
+    for i in sorted(set(wanted)):
+        w = windows[i]
+        if any(p["first"] <= w.get("first", -1) and w.get("last", p["last"]+1) <= p["last"] for p in pages):
+            continue
+        tried = [i, w.get("first"), w.get("last")]
+        witnesses = coverage.get("passed_placements", {}).get(str(i), [])
+        if tried in pack.get("retained_motion_tried", []):
+            missing.append(i)
+            continue
+        unused = any(c["path"] not in shown and os.path.isfile(c["path"]) and not c.get("dull")
+                     and c.get("subject_motion") is not False and
+                     (c.get("subject_motion") or (c.get("motion_p90") or 0) >= 1)
+                     for c in footage.get(i, []))
+        if unused or any(
+                r.get("motion_ok") is True and r.get("clause_t") == [w["t0"],w["t1"]] and
+                r.get("clause") == w.get("say") and os.path.isfile(r["path"]) and
+                file_digest(r["path"]) == r.get("sha256") and
+                (r.get("source") in originals or any(pic.get("window")==i and not pic.get("verified_motion")
+                                                     for pic in beats.get("pictures", []))) for r in witnesses):
+            local.append(i)
+            pack.setdefault("retained_motion_tried", []).append(tried)
+        else:
+            missing.append(i)
+    return missing, local
+
+
 def repair_options(pack, wanted):
     """What a rescore can actually place after researching these windows."""
     from placement_check import file_digest
@@ -1512,6 +1551,11 @@ def render(ctx, script, sc):
                     if row.get("motion_ok") and identity not in identities:
                         rows.append(row)
                         identities.add(identity)
+            pending = pack.pop("pending_retained_motion", [])
+            if pending and report["moving_share"] < .6:
+                moving = {sc["beats"]["pictures"][r["id"]].get("window") for r in report["placements"]
+                          if r.get("ok") and r.get("motion_ok") is True}
+                sc["beats"].setdefault("research_windows", []).extend(i for i in pending if i not in moving)
             coverage["passed_placements"] = passed
             coverage.pop("motion_windows",None)
             save_pack(ctx,pack)
@@ -1523,14 +1567,26 @@ def render(ctx, script, sc):
         wanted = sc["beats"].pop("research_windows", [])
         if wanted:
             pack = wf3.load_pack(ctx)
+            requested = set(wanted)
+            wanted, local = retained_repairs(ctx.supply, pack, sc["beats"], wanted)
+            if local:
+                # Recheck these local revisions on rendered pixels before spending their research pass.
+                pack["holds_researched"] = False
+                pack["pending_retained_motion"] = local
+                pack["settled_hold_windows"] = sorted(set(pack.get("settled_hold_windows", [])) | (requested-set(local)))
+                cov = pack["coverage"]
+                cov["motion_windows"] = sorted(set(cov.get("motion_windows", [])) | set(local))
+                save_pack(ctx,pack)
+                changed = True
             before = repair_options(pack, wanted)
             shortage = dict(sc["beats"].get("coverage") or {})
             shortage.update(weak_windows=sorted(set(wanted)), real_seconds=report.get("real_seconds",0),
                             moving_seconds=report.get("moving_seconds",0),
                             required_moving_seconds=.6*report.get("real_seconds",0))
-            shortage.setdefault("missing_windows",[])
-            refill(ctx,script,pack,shortage)
-            save_pack(ctx,pack)
+            shortage["missing_windows"] = [i for i in shortage.get("missing_windows", []) if i in wanted]
+            if wanted:
+                refill(ctx,script,pack,shortage)
+                save_pack(ctx,pack)
             holds = before != repair_options(pack, wanted)
         if changed or holds:
             _rescore(ctx,script,sc)
@@ -1658,6 +1714,7 @@ def _rebuild_holds(ctx, script, sc, rd, defer=False):
         return False
     sc.setdefault("beats", {})["measured_before_research"] = measured
     weak = hold_windows(measured, pack.get("coverage") or {}, sc["beats"].get("pictures") or [])
+    weak = [i for i in weak if i not in pack.get("settled_hold_windows", [])]
     if not weak:
         return False
     pack["holds_researched"] = True
