@@ -1368,7 +1368,8 @@ def _render_review(ctx, rd, sc):
     script = dict(segments=[dict(say=ln["text"]) for ln in pack["lines"]])
     clock = F.Clock(pack["words"], script)
     l1 = json.load(open(sc.get("composed_l1") or sc["l1"]))
-    display = [it for it in l1["items"] if it.get("k") == "word" and it.get("role") in ("big", "stat")]      # the film's own type: display words and name supers
+    display = [it for it in l1["items"] if it.get("k") == "word"
+               and (it.get("role") in ("big", "stat") or it.get("fact_type"))]
     captions = [it for it in l1["items"] if it.get("k") == "word" and it.get("role") == "cap"]
     rows = []
     for p in sc["beats"].get("pictures") or []:
@@ -1380,7 +1381,7 @@ def _render_review(ctx, rd, sc):
             frames.update(f for edge in word["f"] for f in (edge-1,edge,edge+1) if a <= f < b)
         rows.append([a, b, "clip", p["name"], dict(path=rd["film"], src=[a/F.FPS,b/F.FPS],
                     check_times=[f/F.FPS for f in sorted(frames)], composed_fps=F.FPS, display_words=words, caption_words=caption_words,
-                    clause=p.get("clause"), clause_t=p.get("clause_t"),
+                    claim=p.get("claim"), example=p.get("example"), clause=p.get("clause"), clause_t=p.get("clause_t"),
                     source=p.get('source_evidence') or dict(url=p.get("source")))])
     # One look at the composed frames: what composing changed (a crop through a face, a subject outside the frame, a
     # display word or leftover text contradicting the picture; placement_check.COMPOSED). The picture's fit to its

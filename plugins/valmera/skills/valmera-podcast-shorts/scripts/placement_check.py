@@ -376,7 +376,7 @@ SYSTEM = (
     "source frame, lower thirds, wordmarks and signs included, and the last image is the phone-shaped slice the film "
     "shows full screen. "
     "For a remembered question or answer, the picture may show the storyteller, an attributed record of the actual exchange, or a source explaining the specific point. An unrelated demonstration casts other people in that exchange. For a broad opinion with no concrete visual referent, stay with the speaker. When the speaker names a real place or object in a figurative payoff, authentic footage of that named object illustrates its scale. It need not prove the prediction. Distinguish a literal visual referent from an unrelated example of the technology. Judge the clause in words; use context to resolve its meaning. "
-    "Ask which person, company, object, place or event these words refer to, including the role implied by "
+    "When the picture is an example, read its parent claim alongside the local words. The source must illustrate the relevant action on the relevant object; matching only an age, publisher or era cannot establish that relation. When labeled_example is present the film explicitly labels a scoped example on screen. Evaluate the artifact against that statement in the parent argument. It need not document every age in the adjacent speech. Never infer anything about the example's customers from the comparison. Use the story hook to resolve a dependent clause. Ask which person, company, object, place or event these words refer to, including the role implied by "
     "their action. Choose an external picture only when the visible frames and their source support that "
     "identification. A source title can describe an entire compilation; it does not identify each person in it. "
     "Use visible contextual evidence, primary records, signs and attributions; never compare faces. A lower "
@@ -613,6 +613,12 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         entry = dict(id=i, f=[a, b], name=name, words=spoken, context=context_of(script, clock, rec, a, b),
                      source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"))
         entry['source_evidence'] = provenance(rec, kind)
+        if rec.get("claim"):
+            entry["claim"] = rec["claim"]
+        elif script.get("hook_line"):
+            entry["story_hook"] = script["hook_line"]
+        if rec.get("example"):
+            entry["labeled_example"] = rec["example"]
         if rec.get("association"):
             entry["association"] = rec["association"]      # a picture of what the words mean, chosen as such
         if rec.get("display_words"):

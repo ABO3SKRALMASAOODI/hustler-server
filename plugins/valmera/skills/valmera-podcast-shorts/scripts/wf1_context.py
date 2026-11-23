@@ -7,7 +7,7 @@ import os
 def direct(coverage,work,llm):
     """Resolve the speaker's referents before spending downloads on generic substitutes."""
     import wf1_coverage
-    key=hashlib.sha256(json.dumps([3,coverage],sort_keys=True).encode()).hexdigest()[:16]
+    key=hashlib.sha256(json.dumps([4,coverage],sort_keys=True).encode()).hexdigest()[:16]
     os.makedirs(work,exist_ok=True);path=os.path.join(work,'direction-'+key+'.json')
     if os.path.exists(path):
         record=json.load(open(path))
@@ -78,7 +78,7 @@ def needs_original(claim):
 def research(coverage,work,llm):
     import writer
     data=dict(context=coverage.get('context'),story=coverage.get('story'),comparisons=coverage.get('comparisons'),words=coverage['words'],
-              claims=[c for c in coverage.get('claims') or [] if needs_original(c)], subjects=[dict(i=i,name=w['name'],say=w['say']) for i,w in enumerate(coverage['windows'])])
+              claims=[c for c in coverage.get('claims') or [] if needs_original(c)], subjects=[dict(i=i, **{k:w[k] for k in ("name","say","claim","must_show","why") if k in w}) for i,w in enumerate(coverage['windows'])])
     scope = [c for c in coverage.get('speaker_claims') or [] if c.get('scope_question')]
     data['scope_checks'] = scope
     pages = {}
@@ -120,6 +120,10 @@ host's question and the cited author's published prediction are separate. For a 
 choose a single readable clause that directly answers the question and keep only sources
 that substantiate that clause. Search primary sources for missing evidence. Return JSON {"references":[{"windows":[integer],"referent":str,
 "finding":str,"sources":[{"url":str,"publisher":str,"supports":str}],"depiction_options":[str]}],"unresolved":[str]}.
+Research each window in the service of the claim in the passage. Resolve it against story.hook and the whole
+spoken explanation when the initial visual brief substituted a neighboring fact. For an illustrative example
+find a first-party account of the operation itself, state exactly which applications or processes it covers and
+identify it as an example. For a program entry record the exact talk title, speaker and session date.
 Research the supplied picture windows and scope_checks. For a recalled historical trend, use contemporary
 records to say what happened, when and to whom. Some documented early users can qualify a recollection
 about wider adoption. For policy scope use the original policy, regulator explainer or announcement.
@@ -147,7 +151,9 @@ estimates a value. For a reported forecast find the publisher’s original capti
 dated writing on this prediction. Return claim_start (the exact claim.start) on its reference. If the
 writing is a separate occasion, give its own title, publication date and scope. Preserve modal words.
 For scope_checks also extract the shortest directly applicable span from the actual primary explainer,
-with the institution as speaker, page title as event and heading as locator. Use existing_sources
+with the institution as speaker, page title as event and heading as locator. For a program entry return
+program_entry:{title,speaker,date} on that scope reference, using the exact program title and human-readable
+session date. The program establishes the advertised talk; the interview establishes the speaker's recollection. Use existing_sources
 first. Each such reference and its sources address one claim. For verified first-party wording,
 attach quotations:[{speaker,event,locator,words}] to the original transcript source. Use its resolved URL, the
 actual event (use the claim’s event label when it is the same occasion), timestamp or page, and the complete verbatim qualified statement. A launch
@@ -210,7 +216,7 @@ def complete_editorial(ctx, script, pack, llm):
     claims = [c for c in material["claims"] if needs_original(c)
               and not c.get("primary_excerpt")]
     scope = [c for c in material["speaker_claims"] if c.get("scope_question")
-             and not (c.get("scope_fact") or {}).get("excerpt")]
+             and not any((c.get("scope_fact") or {}).get(k) for k in ("excerpt","program_entry"))]
     if not (claims or scope):
         return False
     targets = [[c.get("start"),c.get("subject"),c.get("report")] for c in claims] + [

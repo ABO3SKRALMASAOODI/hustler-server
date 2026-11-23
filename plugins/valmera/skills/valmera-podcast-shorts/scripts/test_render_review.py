@@ -599,12 +599,14 @@ def test_the_composed_frames_get_one_look_that_also_audits_transitions(tmp_path,
     """16 Nov cost lane: the transition audit used to be a second pass over the frames the first pass had just
     passed. One composed look now carries both; a rejection there still rebuilds the film."""
     import placement_check
-    l1=tmp_path/'l1.json';l1.write_text(json.dumps(dict(items=[dict(k='word',role='big',f=[10,20],t='SUN')])))
+    l1=tmp_path/'l1.json';l1.write_text(json.dumps(dict(items=[dict(k='word',role='big',f=[10,20],t='SUN'),
+        dict(k='word',role='graphic',fact_type='source_fact',f=[2,15],t='NASA · Example')])))
     monkeypatch.setattr(wf.wf3,'load_pack',lambda ctx:dict(lines=[dict(text='the Sun')],words=[],ffmpeg='ffmpeg'))
     monkeypatch.setattr(wf.F,'Clock',lambda words,script:None)
     passes=[]
     def check(rows,script,clock,work,ffmpeg,review='placement',**kw):
         passes.append((review,len(rows)))
+        assert rows[0][4]['display_words'][-1] == dict(f=[2,15],text='NASA · Example')
         return [],dict(rejected=1,accepted=len(rows)-1,spend=[{}],
                        placements=[dict(id=i,f=r[:2],ok=i!=1,reason='wrong era' if i==1 else 'fits',motion_ok=True) for i,r in enumerate(rows)])
     monkeypatch.setattr(placement_check,'check',check)

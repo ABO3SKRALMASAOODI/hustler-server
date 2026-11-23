@@ -18,6 +18,8 @@ class CoverageError(RuntimeError):
 
 def footage_segment(index, window):
     segment = dict(i=index, say=window["say"], pictures=[window["name"]], visual=window["must_show"])
+    if window.get("claim"):
+        segment["claim"] = window["claim"]
     if window.get("single_action") is True:
         segment["single_action"] = True
     return segment
@@ -28,6 +30,7 @@ def join_windows(windows):
     out = []
     for row in windows:
         if (out and row['name'] == out[-1]['name'] and row['must_show'] == out[-1]['must_show']
+                and row.get('claim') == out[-1].get('claim')
                 and row.get('single_action') == out[-1].get('single_action')
                 and row['first'] <= out[-1]['last'] + 1):
             prev = out[-1]
@@ -88,7 +91,7 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None, stor
             return old
     prompt = '''Direct documentary pictures for a spoken podcast clip. Return JSON:
 {"entities":[{"name":str,"is":"person|company|place|product|event|thing","must_show":str,"word_ids":[int]}],
- "windows":[{"first":int,"last":int,"name":str,"external":true,"association":false,"must_show":str,"why":str,
+ "windows":[{"first":int,"last":int,"name":str,"external":true,"association":false,"claim":str,"must_show":str,"why":str,
    "depictions":[{"name":str,"must_show":str,"video_searches":[str]}]}],
  "comparisons":[{"first":int,"last":int,"premise":str,"consequence":str}],
  "speaker_claims":[{"first":int,"last":int,"speaker":str,"stance":"concern|characterization|recollection","report":str,"scope_question":str}],
@@ -120,11 +123,17 @@ Let a product demo play across the factual release example, including an estimat
 A later opinion about the same products needs no further archive search. If a documented policy
 or partnership materially qualifies it, give the precise scope_question for a text citation.
 Otherwise omit scope_question. Keep the real demo or partnership on its own factual clause.
-Inventory EVERY concrete company, person, place, object, event and number in these words.
+Inventory the concrete entities and quantities actually named in the passage. An inventory entry need not become a new external window.
 Do not inventory an abstract feeling, rhetorical connective or this interview itself as a concrete
 external subject. When a number modifies an entity or event, inventory that complete referent,
 not an isolated numeral needing an unrelated picture. A date belongs to the event it dates.
 Plan nonoverlapping EXTERNAL picture windows using inclusive word IDs. Each window has one subject doing one attributed action. End the window when its role changes, even if its name stays the same.
+claim names the proposition this picture illustrates in the argument, including the object of the action.
+Read the hook and its follow-on scale comparison as one thought. When an age comparison about the
+organizations puts the age of their systems in context, extend the application example across both clauses.
+Document the continuing operation of the applications. A different company's centennial or a vendor's
+product-family anniversary would imply a different predicate. When the speaker names no customer, identify the
+example by its actual primary source and keep the scope local to that source.
 Open an institutional archive on the words naming or describing the institution itself. Keep a first-person lead-in, recalled consensus or private deliberation on the synchronous speaker until that referent is spoken.
 Use complete explanatory clauses, typically 2-5 seconds, not a separate window for each word.
 Where several publishers would only illustrate the same capability, give the window single_action=true
@@ -650,7 +659,7 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
         pins.sort(key=lambda row:row[0])
         for lo,hi,kind,name,rec in pins:
             out.append([lo,hi,kind,name,dict(rec,window=i,illustration=window["must_show"],clause=window.get("say"),
-                                            clause_t=[window["t0"], window["t1"]],
+                                            claim=window.get("claim"), example=window.get("example"), clause_t=[window["t0"], window["t1"]],
                                             **({"association":window["must_show"]} if window.get("association") else {}))])
         if pins and window.get("single_action"):
             continue
@@ -707,7 +716,7 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
                         measured = motion.of_shot(rec['path'],*rec['src'])
                         rec['placed_motion_p90'] = measured['p90']
                 out.append([pos,end,kind,name,dict(rec, window=i, illustration=window['must_show'], clause=window.get('say'),
-                                                        clause_t=[window['t0'],window['t1']],
+                                                        claim=window.get('claim'), example=window.get('example'), clause_t=[window['t0'],window['t1']],
                                                         **({'association':window['must_show']} if window.get('association') is True else {}))])
                 # A return must not consume the ordinary slot of a distinct later proof.
                 if not chosen or rec["path"] != chosen[2]["path"]:
@@ -804,10 +813,18 @@ def checked_proposals(coverage, footage, pictures, duration, checker, composed_s
 def repair_requirements(coverage, wanted, evidence, llm):
     """A director corrects over-specific research constraints without changing spoken facts or timing."""
     system='''Direct documentary acquisition requirements using primary research and any previous failures.
-Return JSON {"windows":[{"i":integer,"name":resolved subject name,"referent_evidence":str,"must_show":str,"video_searches":[str]}]}.
+Return JSON {"windows":[{"i":integer,"name":resolved subject name,"referent_evidence":str,"claim":str,"must_show":str,"video_searches":[str]}]}.
 In research.excerpts each id is an existing exact clip or original document crop, with its observed
 content and provenance. Return reuse_id for a change of emphasis that THIS excerpt already depicts well,
-even across different subject labels. Use a dated lab talk to show the lab's work or a legible detail of the
+even across different subject labels. Read the hook and local words together. Return claim with the
+actual proposition the example illustrates. Repair a retained window that used a true incidental fact
+as its subject. A specific company introduced by a previous researcher is an illustration, not a
+named entity in the speech. When it only demonstrates an adjacent scale comparison, carry the actual
+operational example through that window. For a primary source illustrating an unnamed category, return
+example:{source: exact primary_research URL, statement: roughly six to nine plain words about the documented case}.
+Keep the scope specific to the applications or activity the publisher describes. Name the actual object of
+the claim. Put source, page and standing qualifications in the research record. The on-screen line should
+read within the word interval; the film already labels its publisher and status as an example. Prefer the primary source that documents the relevant operation or process. Use a dated lab talk to show the lab's work or a legible detail of the
 same paper on the mechanism. A separate event, product, date, user or action needs its own direct proof.
 Omit reuse_id for a new depiction, a merely similar subject, or a mismatch in the actual delivery finding.
 Composed-frame rejections are evidence that an earlier depiction brief may have been too broad.
@@ -868,8 +885,13 @@ Do not change any spoken words, window boundaries, or numerical quality targets.
         window=coverage['windows'][i]
         if row['name']!=window['name']:
             if not row.get('referent_evidence'):continue
+            window.pop('example', None)
             window.setdefault('original_name',window['name'])
             window.update(name=row['name'],subjects=[row['name']],referent_evidence=row['referent_evidence'])
+        if isinstance(row.get("claim"), str) and row["claim"].strip():
+            window["claim"] = row["claim"].strip()
+        if isinstance(row.get("example"), dict):
+            window["example"] = row["example"]
         window.update(must_show=row['must_show'],video_searches=row.get('video_searches') or [])
         window.pop("reuse_excerpt", None)
         candidates = evidence.get("excerpts") or []

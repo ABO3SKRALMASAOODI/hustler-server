@@ -8,6 +8,11 @@ For dated archive in archive_pictures, return archive_credits:[{picture: the sup
 source: the supporting URL in sources, label: compact original venue or event and its year}].
 Date the pictured edition or occasion from the primary reading. The publication date of a later
 account does not date its pictures. Credit a paper by venue and year; its full authors are in sources.
+Use picture_windows to tie the source and the displayed fact to the same proposition. Label an
+unnamed category's sourced illustration explicitly as an example and state its documented scope.
+For an archive program use the exact talk title and event date beside the interview. For a sequence
+of real processes use sequence_kind="process". Give each step its supporting source and a compact,
+concrete action readable on its spoken cue. Distinguish a documented example from the speaker's words.
 Use the original author’s dated words for a reported forecast. Keep their scope and uncertainty.
 A sourced explanation owns its clause; use a scenario on separate words only when it adds a distinct point.
 Also return caption_ends, the inclusive numbered last word of every short, complete spoken reading unit,
@@ -128,10 +133,14 @@ def editorial(ctx, script, pack):
             for claim in speaker_claims:
                 if urls and claim["first"] == ref["scope_for"] and claim.get("scope_question"):
                     scoped = dict(source=urls[0], also_sources=urls[1:], statement=statement)
+                    entry = ref.get("program_entry")
+                    if isinstance(entry, dict) and all(isinstance(entry.get(k), str) and entry[k].strip()
+                                                       for k in ("title","speaker","date")):
+                        scoped["program_entry"] = {k:entry[k] for k in ("title","speaker","date")}
                     if cited:
                         url, excerpt = cited[0]
                         scoped.update(source=url, also_sources=[u for u in urls if u != url], excerpt=excerpt)
-                    if scoped.get("excerpt") or not claim.get("scope_fact"):
+                    if scoped.get("program_entry") or scoped.get("excerpt") or not claim.get("scope_fact"):
                         claim["scope_fact"] = scoped
     # The footage reader has already described these exact clips. Credit its observed action
     # to the published demo, alongside the separate policy and announcement sources.
@@ -145,7 +154,8 @@ def editorial(ctx, script, pack):
             if action not in source["supports"]:
                 source["supports"].append(action)
     return dict(callback=coverage.get("callback"), speaker_claims=speaker_claims, comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=claims, episode_start=(script.get("window") or [0])[0],
-                sources=sources, speaker_inserts=[{k:r[k] for k in ('first','last')}
+                sources=sources, picture_windows=[{k:w[k] for k in ("first","last","name","claim","must_show","example") if k in w}
+                                                  for w in coverage.get("windows", [])], speaker_inserts=[{k:r[k] for k in ('first','last')}
                     for r in (coverage.get('source_reading') or {}).get('speaker_inserts',[])], source_inserts=[{k:r[k] for k in ('first','last','shows')}
                                                for r in (coverage.get('source_reading') or {}).get('inserts',[])], coverage=[{k: row[k] for k in ("name", "must_show", "word_ids") if k in row}
                                           for row in coverage.get("entities", [])], speakers=moment.get("names"), moment=moment.get("why"),
@@ -194,6 +204,7 @@ def claim_fact(claim, fact, sources, words):
             excerpt = fact.get("excerpt")
             verified = excerpt and excerpt in source.get("quotations", [])
             return dict(statement=statement, value=statement, source=source, supporting_sources=supporting,
+                        **({"program_entry": fact["program_entry"]} if fact.get("program_entry") else {}),
                         **({"excerpt": excerpt} if verified else {}),
                         perspective=dict(speaker=claim["speaker"], stance=claim["stance"],
                                          report=claim["report"], interview=interview.get("url")))
@@ -261,18 +272,34 @@ def bind(direction, editorial, words):
                     and isinstance(step.get("label"), str) and step["label"].strip()
                     and (not sequence or sequence[-1]["at"] < step["at"])):
                 state = dict(at=step["at"], label=step["label"].strip())
-                if args.get("sequence_kind") == "history":
+                if args.get("sequence_kind") in ("history", "process"):
                     key = step.get("source")
                     state["source"] = sources.get(key, sources["interview"]) if isinstance(key, str) else sources["interview"]
                 sequence.append(state)
         if len(sequence) >= 2:
+            if args.get("sequence_kind") == "process" and ends:
+                # A caption reveals the whole phrase on its first word. Change the
+                # matching example with it, preserving distinct cues inside one phrase.
+                previous = first - 1
+                for state in sequence:
+                    phrase = max([first] + [n+1 for n in ends if first <= n < state["at"]])
+                    if phrase > previous:
+                        state["at"] = phrase
+                    previous = state["at"]
             speaker = (claim or {}).get("speaker") or args.get("speaker") or "Speaker"
             pages.append(dict(first=first, last=last, sequence=sequence,
-                              **({"sequence_kind":"history"} if args.get("sequence_kind") == "history" else {}), facts=[
+                              **({"sequence_kind":args["sequence_kind"]} if args.get("sequence_kind") in ("history","process") else {}), facts=[
                 dict(attribution=speaker, source=sources["interview"], value=sequence[0]["label"])]))
             continue
         if whole and not (args.get("facts") or args.get("claim")) and ask["dev"] in (
                 "lamp", "verb", "staircase", "brackets", "typewriter"):
+            rows = args.get("lines") or []
+            # A timed list is a performance on several cues, even when every label is spoken.
+            if (ask["dev"] == "staircase" and len(rows) >= 2 and
+                    all(isinstance(row, dict) and type(row.get("at")) is int for row in rows)
+                    and len({row["at"] for row in rows}) > 1):
+                asks.append(ask)
+                continue
             lines = [line.get("t", "") if isinstance(line, dict) else str(line) for line in args.get("lines") or []]
             text = " ".join(lines) or str(args.get("t") or "")
             ids = literal_ids(text, range(first, min(len(words), max(last+1,first+len(text.split())))))
@@ -311,8 +338,9 @@ def bind(direction, editorial, words):
             if key and key == sources["interview"].get("url"):
                 key = "interview"
             source = sources.get(key) if isinstance(key, str) else None
-            if source and isinstance(fact.get("value"), (str, int, float)) and str(fact["value"]).strip() and fact.get("relation"):
-                facts.append(dict(fact, source=source))
+            value = fact.get("value", fact.get("statement"))
+            if source and isinstance(value, (str, int, float)) and str(value).strip() and fact.get("relation"):
+                facts.append(dict(fact, source=source, value=value))
         progression = facts[0].get("progression") if len(facts) == 1 else None
         if ask["dev"] == "counter" and isinstance(progression, dict) and all(
                 type(progression.get(k)) in (int, float) and math.isfinite(progression[k]) for k in ("from", "to")):
@@ -374,6 +402,35 @@ def bind(direction, editorial, words):
                     and a <= definition["first"] <= definition["last"] <= b):
                 scenario.setdefault("explanation", facts[0]["value"])
                 pages.remove(definition)
+    # Research can correct the referent after a direction was scored. Replace the
+    # old factual cue on those words, retaining separate interview and timeline cues.
+    for window in editorial.get("picture_windows") or []:
+        example = window.get("example")
+        if not isinstance(example, dict):
+            continue
+        source = sources.get(example.get("source")) if isinstance(example.get("source"), str) else None
+        statement = example.get("statement")
+        if not source or not isinstance(statement, str) or not statement.strip():
+            continue
+        first, last = window["first"], window["last"]
+        retained = []
+        spans = [(first, last)]
+        for page in pages:
+            if page["last"] < first or last < page["first"]:
+                retained.append(page)
+                continue
+            if page.get("sequence") or any(f.get("chain") or f.get("perspective") for f in page["facts"]):
+                spans = [(a,b) for lo,hi in spans for a,b in
+                         ((lo,min(hi,page["first"]-1)),(max(lo,page["last"]+1),hi)) if a <= b]
+                retained.append(page)
+                continue
+            if page["first"] < first:
+                retained.append(dict(page, last=first-1))
+            if last < page["last"]:
+                retained.append(dict(page, first=last+1))
+        pages = retained
+        fact = dict(value=statement, statement=statement, relation="Example", source=source, example=True)
+        pages.extend(dict(first=a, last=b, facts=[fact]) for a,b in spans)
     pages.sort(key=lambda page: page["first"])
     return dict(direction, asks=asks, display=display, caption_ends=ends, caption_accents=sorted(accents), claims=claims, display_facts=pages,
                 arc=[m for m in direction["arc"] if not any(p["first"] <= m["w"] <= p["last"] for p in pages)])

@@ -408,7 +408,7 @@ def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, str
                 break
             for r in new:
                 r[4] = dict(r[4], window=i, gap_fill=True, illustration=window["must_show"],
-                            clause=window.get("say"), clause_t=[window["t0"], window["t1"]])
+                            claim=window.get("claim"), example=window.get("example"), clause=window.get("say"), clause_t=[window["t0"], window["t1"]])
             accepted, result = checker(new)
             for row in accepted:
                 if row[4]["path"] in composed_stills:
@@ -1154,6 +1154,10 @@ def build(script, sup, style_id, direction=None):
         other,cleared=DR.hold_take([row for row in ins if row[4].get('provider') != 'interview-frame'],pages,min_f=1,fps=FPS)
         ins=sorted(other+source_rows,key=lambda row:row[0])
         coverage_report["authored_pages"]=dict(spans=pages,cleared_f=cleared)
+    # A short program citation can share the live closing interview. Longer verbatim
+    # excerpts retain their dedicated reading surface.
+    live_citations = {(a,b) for a,b,p in timed_facts if p["last"] == len(clock.words)-1
+                      and all(f.get("perspective") and (f.get("program_entry") or not f.get("excerpt")) for f in p["facts"])}
     if source_pages:
         ins, _ = _director().hold_take(ins, source_pages, min_f=1, fps=FPS)
     # Reserve picture space for actual multi-line performances on the speaker.
@@ -1260,7 +1264,7 @@ def build(script, sup, style_id, direction=None):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
             on_report = any(lo <= fa < hi for lo,hi in report_spans)
-            if any(lo <= fa < hi for lo,hi in source_pages):
+            if any(lo <= fa < hi and (lo,hi) not in live_citations for lo,hi in source_pages):
                 P.page([fa,fb],"#14171B",grain=0)
                 cut_pts.append(fa)
                 continue
@@ -1398,7 +1402,7 @@ def build(script, sup, style_id, direction=None):
         origin = (rec.get("text_cleared") or {}).get("from_path") or rec["path"]
         P.pictures.append(dict(f=[f0, f1], visible_f=[f0, rec.get("audit_until", f1)], kind=kind, name=name, path=rec["path"], origin=origin,
                                shows=rec.get("shows"), mode=mode, pic=keys[rec["path"]], source_slice=rec.get("src"),
-                               window=rec.get("window"), clause=rec.get("clause"), clause_t=rec.get("clause_t"), fit=rec.get("fit"),
+                               window=rec.get("window"), claim=rec.get("claim"), example=rec.get("example"), clause=rec.get("clause"), clause_t=rec.get("clause_t"), fit=rec.get("fit"),
                                reframed=bool(rec.get("reframe")), attribution=rec.get("attribution"), name_super=rec.get("name_super"),
                                **{k:rec[k] for k in ("action_box","action_end","action_caption") if k in rec},
                                w=rec.get("w"), h=rec.get("h"), upscaled_from=rec.get("upscaled_from"), rung=rec.get("rung"),
@@ -1739,6 +1743,10 @@ def build(script, sup, style_id, direction=None):
                                                               for lo,hi,_,_,rec in source_rows):
                         footer = page["callback_action"]
                 heading = fact["attribution"]+" · Scenario"
+                if page.get("sequence_kind") == "process":
+                    heading = "Process examples"
+                    source = steps[i]["source"]
+                    footer = source.get("publisher") or source.get("url") or ""
                 if page.get("sequence_kind") == "history":
                     source = steps[i]["source"]
                     heading = "Timeline"
@@ -1747,7 +1755,7 @@ def build(script, sup, style_id, direction=None):
                 wf1_display.reading_card(P, [start,end], "", heading,
                                          footer, pal, centre=.605,
                                          steps=[(s["label"],j==i) for j,s in enumerate(steps)
-                                                if page.get("sequence_kind") != "history" or j==i])
+                                                if page.get("sequence_kind") not in ("history","process") or j==i])
                 P.events.append(start)
             fact_pages.append(dict(page, f=[a,b]))
             continue
@@ -1757,8 +1765,15 @@ def build(script, sup, style_id, direction=None):
             byline = claim["speaker"] + " · " + wf1_display.OPINION_LABELS[claim["stance"]]
             voice = f"opinion_credit{a}"
             P.voices[voice] = dict(P.voices["cap"], px=P.R.fit_px("cap", byline, .82*W, 48), track=0)
-            P.word([a,b], byline, voice, .5, cap_y - .09, pal["ink"], align="c", role="graphic", z=8,
-                   stroke=dict(w=4, c=DARK_INK), contrast_shadow=True, fact_type=True)
+            listeners = [(round(sp["t0"]*FPS)+LEAD_F, round(sp["t1"]*FPS)+LEAD_F)
+                         for shot in tshots for sp in shot.get("spans", []) if sp["who"] == "listener"]
+            listeners.extend((word_frame(r["first"]), Clock.f(clock.words[r["last"]]["t1"]))
+                             for r in reading.get("reactions", []))
+            edges = sorted({a,b, *(f for span in listeners for f in span if a < f < b)})
+            for start,end in zip(edges,edges[1:]):
+                credit = "Voice · " + claim["speaker"] if any(lo <= start < hi for lo,hi in listeners) else byline
+                P.word([start,end], credit, voice, .5, cap_y - .09, pal["ink"], align="c", role="graphic", z=8,
+                       stroke=dict(w=4, c=DARK_INK), contrast_shadow=True, fact_type=True)
             fact_pages.append(dict(page, f=[a,b]))
             continue
         if (a, b) in report_spans:
@@ -1770,7 +1785,15 @@ def build(script, sup, style_id, direction=None):
                 body = str(fact["value"])
                 statement = wf1_display.source_statement(fact, script.get("source_url"))
                 excerpt = fact.get("excerpt")
-                if excerpt:
+                if fact.get("program_entry"):
+                    entry = fact["program_entry"]
+                    body, label = entry["title"], source
+                    citation = "Talk by " + entry["speaker"] + " · " + entry["date"]
+                elif fact.get("example"):
+                    body = statement
+                    label = source + " · Example"
+                    citation = ""
+                elif excerpt:
                     body = "“" + excerpt["words"] + "”"
                     label = excerpt["speaker"]
                     date = fact["source"].get("publication_date")
@@ -1802,7 +1825,9 @@ def build(script, sup, style_id, direction=None):
                     body = " ".join(filter(None, (fact.get("qualifier"), body, fact.get("relation"))))
                     citation = source
                 span = [a + round((b - a) * k / len(facts)) for k in (i, i + 1)]
-                if (a,b) in source_pages:
+                if (a,b) in live_citations:
+                    wf1_display.reading_card(P, span, body, label or source, citation, pal, centre=.64)
+                elif (a,b) in source_pages:
                     perspective = fact.get("perspective")
                     if perspective:
                         wf1_display.reading_card(P, span, "", perspective["speaker"]+" · Recollection"

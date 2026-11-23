@@ -833,12 +833,16 @@ def _sources_md(pod_line, rows):
         episode = f.get("source") or {}
         episode_url = episode.get("source_url") if isinstance(episode, dict) else episode
         for page in (ch.get("podcast") or {}).get("display_facts") or []:
-            if page.get("sequence_kind") == "history":
+            if page.get("sequence_kind") in ("history", "process"):
+                kind = "Timeline" if page["sequence_kind"] == "history" else "Process example"
                 for step in page["sequence"]:
                     source = step["source"]
                     owner = page["facts"][0].get("attribution") if source.get("url") == episode_url else source.get("publisher")
-                    out.append("- Timeline | " + " | ".join(filter(None,(step["label"],owner,source.get("url")))))
+                    out.append(f"- {kind} | " + " | ".join(filter(None,(step["label"],owner,source.get("url")))))
             for fact in page.get("facts", []):
+                program = fact.get("program_entry")
+                if program:
+                    out.append("- Program | " + " | ".join((program["title"], program["speaker"], program["date"], fact["source"]["url"])))
                 viewpoint = fact.get("perspective")
                 if viewpoint:
                     out.append("- Interview account | " + " | ".join(filter(None, (viewpoint["speaker"],
