@@ -28,6 +28,19 @@ def r5(x):
     return round(float(x), 5)
 
 
+def fit_panel(crop, source_size, canvas_size, seat, align_y=.5):
+    """Fit an entire source region in a normalized destination, without cropping its edges."""
+    left, top, right, bottom = crop
+    aspect = (right - left) * source_size[0] / ((bottom - top) * source_size[1])
+    relative = aspect * canvas_size[1] / canvas_size[0]
+    left, top, right, bottom = seat
+    width = min(right - left, (bottom - top) * relative)
+    height = width / relative
+    x = (left + right - width) / 2
+    y = top + (bottom - top - height) * align_y
+    return [x, y, x + width, y + height]
+
+
 class Cam:
     """One picture's camera: what crops it can give a frame of this shape."""
 
