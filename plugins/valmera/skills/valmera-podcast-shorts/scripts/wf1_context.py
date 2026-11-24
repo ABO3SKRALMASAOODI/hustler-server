@@ -98,6 +98,10 @@ def needs_original(claim, coverage=None):
                 if (0 <= row["first"] <= row["last"] < len(words) and
                         words[row["first"]]["start"] <= middle < words[row["last"]]["end"]):
                     return False
+        argument = coverage.get("publication_argument")
+        if argument and claim.get("speaker") == argument["speaker"] and (
+                words[argument["first"]]["start"] <= middle <= words[argument["last"]]["end"]):
+            return False
         # A private outcome already assigned to this witness is complete on the interview.
         for cue in coverage.get("interview_cues") or []:
             a,b = cue.get("first"),cue.get("last")
@@ -130,6 +134,9 @@ def research(coverage,work,llm):
     import writer
     data=dict(context=coverage.get('context'),story=coverage.get('story'),comparisons=coverage.get('comparisons'),words=coverage['words'],
               claims=[c for c in coverage.get('claims') or [] if needs_original(c, coverage)], subjects=[dict(i=i, **{k:w[k] for k in ("name","say","claim","must_show","why") if k in w}) for i,w in enumerate(coverage['windows'])])
+    for subject, window in zip(data["subjects"], coverage["windows"]):
+        if window.get("medium") == "publisher_cover":
+            subject["medium"] = "publisher_cover"
     products = unplaced_products(coverage)
     scope = [c for c in coverage.get('speaker_claims') or [] if c.get('scope_question')]
     estimates = coverage.get('borrowed_estimates') or []
@@ -192,6 +199,11 @@ documents expected use of capital, select its actual sentence on the policy beat
 experience; leave undisclosed quantities open. Omit search commentary from display wording. Keep only sources
 that substantiate that clause. Search primary sources for missing evidence. Return JSON {"references":[{"windows":[integer],"referent":str,
 "finding":str,"sources":[{"url":str,"publisher":str,"supports":str}],"depiction_options":[str]}],"unresolved":[str]}.
+For a publisher_cover window, identify one relevant work, its author, publisher and edition year. Supply
+the publisher's publication or interview URL, the actual linked cover image URL as figure_url, the full book
+title as title and figure_title, author, publisher, publication_date, edition_url and hypothesis: a short
+paraphrase of the conditional concern supported by that publication. Match the cover ISBN to the cited edition;
+a publisher interview may now advertise a later edition. Use the original edition's jacket when it does.
 For borrowed_estimates, check the original study and material reassessments in the same research
 as its portrait or artifact. Return estimate_for (first word ID), statement (short quantitative
 estimate with its actual unit and uncertainty), credit (compact author/date citation, including the

@@ -307,7 +307,13 @@ def supply(ctx, script):
     demo = original.get("live_demo")
     if sources:
         coverage["existing_sources"] = sources
-    if (demo and sources and demo["first"] == 0 and demo["last"] == len(words)-1
+    from wf1_publication import retained_covers
+    retained = retained_covers(coverage, sources)
+    if retained and len(retained) == len(coverage["windows"]) and not (
+            coverage.get("borrowed_estimates") or any(wf1_context.needs_original(c,coverage) for c in coverage["claims"])
+            or any(c.get("scope_question") for c in coverage.get("speaker_claims",[]))):
+        primary_direction = dict(references=dict(references=retained),spend=[])
+    elif (demo and sources and demo["first"] == 0 and demo["last"] == len(words)-1
             and not coverage["windows"] and not coverage.get("borrowed_estimates")
             and not any(wf1_context.needs_original(c,coverage) for c in coverage["claims"])
             and not any(c.get("scope_question") for c in coverage.get("speaker_claims", []))):
@@ -322,8 +328,20 @@ def supply(ctx, script):
     import wf1_review_frame
     wf1_documents.linked_examples(pack, sup_dir)
     wf1_review_frame.add_reviews(pack, sup_dir, _llm())
-    # Keep the original window numbering for placement and recovery. Search only the windows still needing media.
-    video_windows = [i for i,w in enumerate(windows) if not w.get("reuse_excerpt")]
+    # A printed work can also be established by its dated publisher page. Try the
+    # ordinary document acquisition path if the direct jacket link wasn't usable.
+    unresolved_prints = [dict(w, i=i, context=dict(primary_research=pack["referent_research"]))
+                         for i,w in enumerate(windows) if w.get("medium") == "publisher_cover"
+                         and not w.get("reuse_excerpt")]
+    if unresolved_prints:
+        documents = wf1_documents.acquire(unresolved_prints, os.path.join(sup_dir,"primary-documents"), _llm())
+        pack.setdefault("document_research", []).append(documents)
+        for name, records in documents["pictures"].items():
+            pack["pictures"].setdefault(name, []).extend(records)
+        pack["credits"].extend(documents["credits"])
+    # Keep original window indices; a still publication goes down the print route.
+    video_windows = [i for i,w in enumerate(windows) if not w.get("reuse_excerpt")
+                     and w.get("medium") != "publisher_cover"]
     # Inventory records what was said; windows specify what can truthfully be photographed.
     # Passing the inventory back as search subjects resurrects unnamed people and isolated dates.
     research = {}
@@ -815,6 +833,17 @@ def direction_of(ctx, script, pack):
     import wf1_display
     editorial = dict(writing=wf1_display.WRITING, material=wf1_display.editorial(ctx, script, pack))
     import wf1_experiment
+    argument = (pack.get("coverage") or {}).get("publication_argument")
+    if argument:
+        editorial["material"]["publication_argument"] = argument
+        editorial["writing"] += (" The published work, synchronous personal reaction, fitted gesture, and open "
+            "inference diagram already have word-timed scenes. Give the original cover a clear reading breath. "
+            "The guest owns the closing graphic. Supply publication_copy:{present,question}. Present is a short "
+            "conditional paraphrase of how the people the guest describes interpret current change. Name whose "
+            "inference it is in the sentence. Question is the actual open logical question as a direct question, "
+            "connecting the observed change to the hypothetical outcome. Avoid restating that the guest has doubts, "
+            "and avoid generic words like dots or links when the two concrete ideas can be named. About 7–10 "
+            "words per line of copy. Omit event illustrations. Preserve first-person speech in voice and captions.")
     thought_facts = wf1_experiment.director_material(editorial["material"], rows)
     if thought_facts:
         prints, _ = wf1_experiment.materials(dict(thought_facts=thought_facts))
@@ -1337,7 +1366,7 @@ def descend(ctx, script, pack, missing):
 
 def film_direction(d):
     """Carry the Director's authored fields into the picture and sound composers."""
-    knobs = {k: d.get(k) for k in ("display", "model_phases", "principle_example", "reporting_example", "approval_example", "archive_credits", "archive_views", "caption_ends", "caption_accents", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
+    knobs = {k: d.get(k) for k in ("display", "publication_copy", "model_phases", "principle_example", "reporting_example", "approval_example", "archive_credits", "archive_views", "caption_ends", "caption_accents", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
     if d.get("beats") or d.get("sections") or d.get("asks"):
         knobs["director"] = {k: d.get(k) for k in ("beats", "sections", "asks", "arc", "pictures", "by", "seed")}
     return knobs
@@ -2379,9 +2408,10 @@ def check(ctx, rd, sc):
                       origin=p.get("origin"), name_super=p.get("name_super"), attribution=p.get("attribution"),
                       **({"archive_credit":p["archive_credit"]} if p.get("archive_credit") else {}),
                       pic=p.get("pic"), source_slice=p.get("source_slice"), source_evidence=p.get("source_evidence"),
-                      **({k:p[k] for k in ("document","source_crop","excerpt_crop") if k in p}
+                      **({k:p[k] for k in ("document","source_crop","excerpt_crop","publication") if k in p}
                          if p.get("mode") == "document" else {}))
                  for p in pics], labels=b.get("labels") or [],
+        **({"publication_argument":b["coverage"]["publication_argument"]} if (b.get("coverage") or {}).get("publication_argument") else {}),
         quoted_source=(b.get("coverage") or {}).get("quoted_source",[]),
         authored_source=(b.get("coverage") or {}).get("authored_source",[]),
         speaker_panels=(b.get("coverage") or {}).get("speaker_panels",[]))

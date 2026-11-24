@@ -126,8 +126,20 @@ for a dated issuer record. An issuer's ranking plan illustrates its stated choic
 episode. Avoid reenactments, cases, methods, simulated interfaces and autoplay for these concerns.
 Decide what would establish the spoken proposition before accepting a named item's draft must_show.
 If the interview uses the present activity as an example of a general principle, the recording can
-establish that example. A dramatization cited as an analogy gets one short film-example window. A named book cover is its
-own original, shown whole. When the speaker proposes checking a published principle against a decision,
+establish that example. A dramatization cited as an analogy gets one short film-example window. A book cited for its argument gets a single publisher_cover window (medium="publisher_cover") on the
+first spoken reference to the author's writing. Hold for a short complete phrase (3–5 seconds), using the
+resolved book title as name. The publisher's original cover identifies one relevant work even if the speaker
+speaks of several books. Author portraits, talks and repeat cover windows add nothing to that evidence.
+If the speaker then explains how someone might infer a future outcome from present observations and
+questions the missing steps, add publication_argument:{speaker,author,reaction,first,observation,gap,close,last,
+premise,present,question}. Indices are inclusive word IDs: reaction starts the personal admission (leave
+it on the speaker without a narrative label), first introduces the assumptions, observation begins the reading
+of present change, gap begins the implied leap, close starts the final qualification. last ends that thought.
+premise is the general conditional future concern (6–9 words), present is what the speaker says someone
+might infer from today's change (6–9 words), question names the uncertain connection in 4–7 words. Attribute
+each to its owner. Keep all these words on the recorded conversation or the missing-step graphic, including
+the off-camera qualification. Avoid examples of abuse, specifics or visualizations of attacks. Use no
+external windows for these phases. The book is never a quotation unless its actual text is verified. When the speaker proposes checking a published principle against a decision,
 research the principle and its exact wording, then keep the hypothetical on the take. The score
 composes its anonymous illustration. Other explanations of what someone COULD observe call for an episode_example.
 first..last cover the example and incidental category alternatives that illustrate the same principle.
@@ -425,6 +437,10 @@ an honest subject; never invent one.'''
         comparisons = out["comparisons"] = wf1_record.outside(comparisons, record)
         examples = out["episode_examples"] = wf1_record.outside(examples, record)
         speaker_claims = out["speaker_claims"] = wf1_record.outside(speaker_claims, record)
+    from wf1_publication import argument_of
+    argument = argument_of(out.pop("publication_argument", None), len(words))
+    if argument:
+        out["publication_argument"] = argument
     print_readings = [r for r in out.get("print_readings") or []
                       if isinstance(r,dict) and type(r.get("first")) is int and type(r.get("last")) is int
                       and 0 <= r["first"] <= r["last"] < len(words)]
@@ -462,7 +478,7 @@ an honest subject; never invent one.'''
             if ids:
                 project_intros.append(dict(first=ids[0],last=ids[-1]))
     demo = local.get("live_demo")
-    for c in [*([demo] if demo else []), *project_intros, *([record] if record else []), *routes, *print_readings, *([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
+    for c in [*([demo] if demo else []), *project_intros, *([dict(first=argument["reaction"], last=argument["last"])] if argument else []), *([record] if record else []), *routes, *print_readings, *([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
         remaining = []
         for w in windows:
             if c.get("stance") == "observation" and not c.get("scope_question"):

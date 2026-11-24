@@ -280,6 +280,15 @@ def linked_examples(pack, supply):
                     continue
             except Exception as exc:  # The ordinary acquisition path retries a missing capture.
                 pack.setdefault("document_research", []).append(dict(errors=[dict(window=i, error=str(exc)[:200])]))
+        publication = None
+        if window.get("medium") == "publisher_cover":
+            publication = next((src for ref in references if i in (ref.get("windows") or [])
+                                for src in ref.get("sources") or [] if src.get("figure_url")
+                                and all(src.get(k) for k in ("url","author","publisher","publication_date","figure_title"))), None)
+            if publication:
+                page = publication["url"]
+                example = window["example"] = dict(source=page, figure_url=publication["figure_url"],
+                    credit=f'{publication["publisher"]} · {publication["publication_date"]}')
         if not page:
             continue
         source = next((src for ref in references if i in (ref.get("windows") or [])
@@ -313,6 +322,9 @@ def linked_examples(pack, supply):
                        provider="primary-document", page=page, url=url, title=title, credit=source.get("publisher"),
                        licence="source document, not licensed (owner's decision)", shows=title,
                        document=dict(url=url, sha256=digest, page=1, box=[0,0,1,1], detail=[0,0,1,1]))
+            if publication:
+                rec["publication"] = {k: publication[k] for k in ("author","publisher","publication_date","figure_title","edition_url","hypothesis") if publication.get(k)}
+                rec["document"]["publication"] = example["credit"]
             pictures.setdefault(window["name"], []).append(rec)
             window["reuse_excerpt"] = dict(path=str(path), sha256=digest)
             pack.setdefault("credits", []).append(dict(kind="document", name=window["name"], title=title,

@@ -542,6 +542,7 @@ def repair(d, sentences, words, names=(), seed=0):
     caption_ends = sorted({i for i in ends if type(i) is int and 0 <= i < len(words)}) if isinstance(ends, list) else []
     return dict(contract=CONTRACT, beats=beats, sections=sections, asks=asks, display=display[:6],
                 caption_ends=caption_ends,
+                **({"publication_copy": d["publication_copy"]} if isinstance(d.get("publication_copy"),dict) else {}),
                 **({"thought_reading": d["thought_reading"]} if isinstance(d.get("thought_reading"),dict) else {}),
                 **({"model_phases": d["model_phases"]} if isinstance(d.get("model_phases"),list) else {}),
                 **({"reporting_example": d["reporting_example"]} if isinstance(d.get("reporting_example"),dict) else {}),

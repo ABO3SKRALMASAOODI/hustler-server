@@ -842,6 +842,13 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             return None
         return 0 if int(w) == 0 else max(Clock.f(clock.words[int(w)]["t0"]) - 1, 0)
 
+    from wf1_publication import argument_of, compose_notes
+    argument = argument_of(coverage.get("publication_argument"),len(clock.words))
+    if argument:
+        copy = d.get("publication_copy") or {}
+        argument = dict(argument, **{k:copy[k].strip() for k in ("present","question")
+                                     if isinstance(copy.get(k),str) and copy[k].strip()})
+    argument_end = (word_frame(argument["last"]+1) or f_end) if argument else None
     # Bind source pictures to the very same spread word clock used by captions.
     reading = coverage.get('source_reading') or {}
     from wf1_source_frame import shared_presenter_region
@@ -1136,6 +1143,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     keep.append(dict(page,first=first,last=last,demo_note=chain.get("term") or "Definition"))
                     break
         pages = keep + notes
+    if argument:
+        # This reading supplies the speaker's interpretation and leaves their personal
+        # reaction in the recorded voice. Preserve independent sources and excerpts.
+        pages = [p for p in pages if not (argument["reaction"] <= p["first"] <= p["last"] <= argument["last"]
+                 and all((f.get("chain") or {}).get("speaker") == argument["speaker"] and not f.get("excerpt")
+                         for f in p["facts"]))]
     import wf1_reporting
     reporting = wf1_reporting.example(d.get("reporting_example"), len(clock.words), coverage.get("interview_cues", []))
     reporting_span = None
@@ -1739,6 +1752,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         reactions = [(word_frame(r["first"]), Clock.f(clock.words[r["last"]]["t1"]))
                      for r in reading.get("reactions", [])]
         layout_edges = [round(t*FPS)+LEAD_F for shot in authored for t in shot]
+        if argument:
+            layout_edges.extend([word_frame(argument["first"]), word_frame(argument["close"]), argument_end])
         if record_span:
             layout_edges.extend((*record_span, word_frame(record["question"][0])))
         layout_edges.extend(f for start,end,_ in thought_spans for f in (start,end))
@@ -1781,6 +1796,18 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         for fa, fb in zip(edges, edges[1:]):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
+            if argument and word_frame(argument["first"]) <= fa < argument_end:
+                from scene.motion import fit_panel
+                caveat = fa >= word_frame(argument["close"])
+                rail = dict(source_ink=[[.12,.625,.88,.65]],caption_baseline=.88) if caveat else {}
+                P.page([fa,fb],"#14171B",grain=0,**rail)
+                if not caveat:
+                    full = [0,0,1,1]
+                    box = fit_panel(full,(take["w"],take["h"]),(W,H),[0,.12,1,.50])
+                    P.card([fa,fb],pieces[k]["key"],box,crop=full,src=[t0,t1],speaker_panel=True,
+                           source_ink=[box],caption_baseline=.88)
+                cut_pts.append(fa)
+                continue
             if tenure_span and tenure_span[0] <= fa < tenure_span[1]:
                 from scene.motion import fit_panel
                 full = [0.,0.,1.,1.]
@@ -2414,6 +2441,21 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             prints(run)
         for k in run:
             f0, f1, kind, name, rec = ins[k]
+            if rec.get("publication"):
+                from scene.motion import fit_panel
+                span = [f0,f1]
+                full = [0,0,1,1]
+                box = fit_panel(full,(rec["w"],rec["h"]),(W,H),[.055,.19,.945,.68])
+                P.page(span,"#14171B",grain=0)
+                P.card(span,keys[rec["path"]],box,crop=full,source_ink=[box],document_excerpt=True,caption_baseline=.88)
+                credit = rec["publication"]
+                wf1_display.reading_card(P,span,"","",credit["publisher"]+" · "+credit["publication_date"],
+                                         pal,centre=.72,max_height=.08,group="publication-credit")
+                note(f0,f1,kind,name,rec,"document")
+                P.pictures[-1].update(publication=credit,document=rec["document"],source_crop=full,selected_archive_view=True)
+                document_pics.add(keys[rec["path"]])
+                cut_pts.append(f0)
+                continue
             if rec.get("spoken_reading"):
                 span = [f0,f1]
                 wf1_evidence_reading.compose(P,span,keys[rec["path"]],rec,pal,(W,H))
@@ -2730,6 +2772,11 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                      max_height=.08,group="speaker-example")
         P.events.append(a)
     record_accent = None
+    if argument:
+        coverage_report["publication_argument"] = argument
+        publication = next((r[4]["publication"] for r in ins if
+                            (r[4].get("publication") or {}).get("author") == argument["author"]), None)
+        compose_notes(P,argument,word_frame,argument_end,pal,(W,H),publication)
     for a, b, page in timed_facts:
         facts = page["facts"]
         if page.get("demo_note"):
