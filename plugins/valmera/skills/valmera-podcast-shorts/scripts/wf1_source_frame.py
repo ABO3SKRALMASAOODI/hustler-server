@@ -361,6 +361,18 @@ def bind(coverage, frames, result):
                 quote_segments=result.get('quote_segments') or [],spend=result.get('spend') or {})
 
 
+def camera_follows_voice(entry, cuts, turns):
+    """The next source cut shows the new talker while their identified turn is live."""
+    join = entry["shot"][1]
+    for outgoing, incoming in zip(turns, turns[1:]):
+        if (outgoing["speaker"] == entry["listener"] and incoming["speaker"] == entry["speaker"]
+                and incoming["start"] <= join < incoming["end"]):
+            return any(abs(shot["t0"]-join) < 1e-4 and shot.get("faces")
+                       and any(span["who"] == "speaker" and span["t0"] <= join < span["t1"]
+                               for span in shot.get("spans", [])) for shot in cuts)
+    return False
+
+
 def reaction_portraits(reading):
     """When a screen share has two known cameras, hold the listener on the directed reaction."""
     speakers = reading.get("speaker_inserts") or []

@@ -6,6 +6,15 @@ import wf1_principle
 
 
 WRITING = """Write the factual type for this passage from the attached source readings and editorial brief.
+When examples name alternative approvers and a possible wait for agreement, return approval_example.
+Give first,last (inclusive word IDs), job (one short illustrative object), stations:[{at,label}]
+for its preparation, ONE selected recipient, and any explicitly conditional later handoff.
+Start the first station at first. Keep station labels short. Give states:[{at,label}] for what
+each alternative decides, why this same job can remain open through another meeting and what
+might happen next. Put unselected approvers only in states, never in the route. Anchor a short
+return to the opening idea on the actual last thought, after the possible escalation. Keep the
+interviewee's attributed measurement separate from the example. Company documentation may explain
+public approval capabilities only. Use the live source for the two-person exchange and gestures.
 When the speaker recounts a reporting chain and contrasts organizational depth with flatness, return a
 top-level reporting_example object: first and last word IDs for the whole recollection (question through
 payoff), speaker, question (concrete standalone paraphrase, e.g. "Who reports to whom?"), finding_at,

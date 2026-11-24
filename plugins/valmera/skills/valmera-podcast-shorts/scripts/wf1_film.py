@@ -831,6 +831,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     decode_region = shared_presenter_region(reading)
     entries = [(word_frame(r['first']), min(f_end, round(r['shot'][1]*FPS)+LEAD_F), r)
                for r in reading.get('voice_entries', [])]
+    from wf1_source_frame import camera_follows_voice
+    jcuts = [(a,b,row) for a,b,row in entries if 0 < b-a <= FPS
+             and camera_follows_voice(row, tshots, coverage.get("speaking_turns") or [])]
+    # Let the source camera run continuously through a short audio lead. Its
+    # existing cut then reveals the incoming speaker, already in sync.
+    entries = [entry for entry in entries if entry not in jcuts]
     views = sorted(reading.get('closing_views', []), key=lambda r:r['shot'][0])
     crops = []
     if views:
@@ -1104,6 +1110,13 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         first, last = reporting["first"], reporting["last"]
         reporting_span = (word_frame(first), word_frame(last+1) or f_end)
         pages = [part for page in pages for part in wf1_principle.outside(page, first, last)]
+    import wf1_approval
+    approval = wf1_approval.example(d.get("approval_example"), len(clock.words))
+    approval_span = None
+    if approval:
+        first, last = approval["first"], approval["last"]
+        approval_span = (word_frame(first), word_frame(last+1) or f_end)
+        pages = [part for page in pages for part in wf1_principle.outside(page, first, last)]
     # The take reader already located speakers in ordinary camera shots.
     # Screen-share presenter tiles are only one of the possible live returns.
     live_spans = [(round(sp["t0"]*FPS)+LEAD_F, round(sp["t1"]*FPS)+LEAD_F)
@@ -1177,9 +1190,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     publisher_spans = {(a,b) for a,b,p in timed_facts if p.get("publisher_excerpt")}
     phase_spans = [(a,b) for a,b,p in timed_facts if p.get("model_phase")]
     source_pages = phase_spans + [(a,b) for a,b,p in timed_facts if any(f.get("excerpt") or f.get("perspective") for f in p["facts"])]
-    if reporting_span:
-        source_pages.append(reporting_span)
-        report_spans.append(reporting_span)
+    for span in (reporting_span, approval_span):
+        if span:
+            source_pages.append(span)
+            report_spans.append(span)
     if source_pages:
         coverage = dict(coverage, windows=[
             dict(w, on_take=True) if not w.get("publisher_camera") and any(lo <= round(w["t0"]*FPS)+LEAD_F+1 and
@@ -1382,6 +1396,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     signal_moves = stress_moves(coverage.get('unresolved_holds'), stress)
     d['band']['motivated_frames']=sorted({move_frame(coverage,m,FPS,LEAD_F) for m in resolved_moves} | set(signal_moves))
     placement_report['spend']+=move_spend
+    if jcuts:
+        coverage_report["j_cuts"] = [dict(f=[a,b], picture=row["listener"], voice=row["speaker"])
+                                     for a,b,row in jcuts]
     coverage_report['speaker_moves']=resolved_moves
     coverage_report['stress_moves']=signal_moves
     coverage_report['take_pieces']=[dict(f=pc["f"], who=pc["who"], punch=pc["punch"], cut=pc["cut"]) for pc in pieces]
@@ -1675,10 +1692,11 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     cut_pts.append(fa)
                     continue
             on_reporting = reporting_span and reporting_span[0] <= fa < reporting_span[1]
-            if on_reporting or (demo_span and demo_span[0] <= fa < demo_span[1]):
+            on_approval = approval_span and approval_span[0] <= fa < approval_span[1]
+            if on_reporting or on_approval or (demo_span and demo_span[0] <= fa < demo_span[1]):
                 from scene.motion import fit_panel
                 crop = [0,0,1,1]
-                seat = [0,.10,1,.48] if on_reporting else [0,.09,1,.52]
+                seat = [0,.10,1,.48] if on_reporting or on_approval else [0,.09,1,.52]
                 box = fit_panel(crop, (take["w"],take["h"]), (W,H), seat)
                 P.page([fa,fb],"#14171B",grain=0)
                 P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],source_frame=True,
@@ -2428,6 +2446,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     devices = []                                         # the palette's asks: rows whose type performs (laid at the render, chain.alien_bank)
     # An attributed claim carries the reading on the ground below its source picture.
     fact_pages = []
+    if approval:
+        a,b = approval_span
+        wf1_approval.draw(P,approval,word_frame,b,pal,W)
+        fact_pages.append(dict(first=approval["first"],last=approval["last"],f=[a,b],
+                               approval_example=approval, facts=[dict(value=approval["job"],
+                               relation="Illustration", source=dict(url=script.get("source_url")))]))
     if reporting:
         a,b = reporting_span
         wf1_reporting.draw(P,a,b,reporting,word_frame,pal,W,H)
