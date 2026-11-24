@@ -206,7 +206,7 @@ def _commons_pages(search, kind, count):
               f"{pre}urlwidth": 640,
               f"{pre}extmetadatafilter": "LicenseShortName|LicenseUrl|"
               "Artist|ObjectName|ImageDescription|AttributionRequired|"
-              "Categories|Credit"}
+              "Categories|Credit|DateTimeOriginal"}
     data = net_fetch.get_json(COMMONS_API, params=params,
                               timeout_s=API_TIMEOUT_S,
                               allowed_hosts=["commons.wikimedia.org"])
@@ -256,6 +256,7 @@ def _wikimedia(query, kind, orientation, count):
                 "_file": p.get("title"),
                 "_categories": _clip(mv("Categories"), 300),
                 "_source_note": _clip(mv("Credit"), 200),
+                "image_date": _clip(mv("DateTimeOriginal"), 80),
                 "width": info.get("width"), "height": info.get("height")}
         if p.get("pageid") in named:
             # its own words may not name it: the statement does
@@ -946,8 +947,10 @@ def check_named(subject, cands, workdir=None, budget_s=None, frame_size=None):
     the subject, best first, each with what it shows. No answer passes
     nothing: an unchecked picture of a real person is never offered."""
     import base64
+    import hashlib
     import shutil
     import tempfile
+    from pathlib import Path
     from PIL import Image, ImageOps
     cands = cands[:NAMED_CHECK_MAX]
     if not cands:
@@ -974,31 +977,62 @@ def check_named(subject, cands, workdir=None, budget_s=None, frame_size=None):
                 return i, None
         with ThreadPoolExecutor(max_workers=6) as pool:
             seen = dict(pool.map(thumb, range(len(cands))))
-        content, rows = [{"type": "text", "text":
+        content = [{"type": "text", "text":
                          f"Subject: {subject['name']}. Each picture must "
                          f"show: {subject['must_show']}",
-                         "cache_control": {"type": "ephemeral"}}], []
+                         "cache_control": {"type": "ephemeral"}}]
+        # Cache the exact view, subject brief and provenance inside this supply.
+        # Each file has its own atomic entry so parallel subjects can share it.
+        cache = Path(workdir) / "named-looks" if workdir else None
+        if cache:
+            try:
+                cache.mkdir(exist_ok=True)
+            except OSError:
+                cache = None
+        verdict, keys, rows = {}, {}, []
         for i, c in enumerate(cands):
             p = seen.get(i)
             if not p:
                 continue
             with open(p, "rb") as f:
-                data = base64.standard_b64encode(f.read()).decode()
+                data = f.read()
+            rows.append(i)
+            if cache:
+                identity = [CHECK_NAMED_SYSTEM, NAMED_CHECK_MODEL, subject["name"], subject["must_show"],
+                            frame_size, _caption(c), c.get("page_url"), c.get("id"), c.get("credit"), c.get("license")]
+                keys[i] = cache / hashlib.sha256(json.dumps(identity).encode() + data).hexdigest()
+                try:
+                    prior = json.loads(keys[i].read_text())
+                    if type(prior.get("ok")) is bool and type(prior.get("grade")) is int:
+                        verdict[i] = prior
+                        continue
+                except (OSError, ValueError, AttributeError):
+                    pass
+            data = base64.standard_b64encode(data).decode()
             content += [{"type": "text", "text": f"picture {i}: caption: "
                          f"{_caption(c)}"},
                         {"type": "image", "detail": "low", "source": {
                             "type": "base64", "media_type": "image/jpeg",
                             "data": data}}]
-            rows.append(i)
         if not rows:
             return [], [dict(error="no thumbnail could be read")], 0.0
-        txt, usd = _ask(CHECK_NAMED_SYSTEM, content, "named_check",
-                        budget_s or NAMED_CHECK_S, 2400,
-                        model=NAMED_CHECK_MODEL)
-        verdict = {}
-        for o in _objects(txt):          # a cut-off answer keeps its lines
-            if isinstance(o.get("n"), int):
-                verdict[o["n"]] = o
+        usd = 0.
+        missing = set(rows) - verdict.keys()
+        if missing:
+            txt, usd = _ask(CHECK_NAMED_SYSTEM, content, "named_check",
+                            budget_s or NAMED_CHECK_S, 2400, model=NAMED_CHECK_MODEL)
+            for o in _objects(txt):
+                i = o.get("n")
+                if type(i) is not int or i not in missing:
+                    continue
+                verdict[i] = o
+                if cache and type(o.get("ok")) is bool and type(o.get("grade")) is int:
+                    try:
+                        with tempfile.NamedTemporaryFile("w", dir=tmp, delete=False) as stream:
+                            json.dump(o, stream)
+                        os.replace(stream.name, keys[i])
+                    except OSError:
+                        pass  # The current look still has its answer.
         kept, report = [], []
         for i in rows:
             v = verdict.get(i) or {}
