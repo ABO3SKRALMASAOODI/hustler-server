@@ -909,7 +909,7 @@ class Runtime:
         after that, through one bilinear tap, at whatever scale the word is settling through (a blur
         is smooth: it is fully described on the grid it is drawn on). A blur that is moving asks once
         per value and is drawn as it always was. Blurs within 2% of each other share one copy."""
-        size = (max(int(round(spr["w"])), 1), max(int(round(spr["h"])), 1))
+        size = (max(1, min(round(spr["w"]), spr["aw"])), max(1, min(round(spr["h"]), spr["ah"])))
         key = (spr["page"], spr["ax"], spr["ay"], spr["aw"], spr["ah"], int(round(32 * math.log2(max(sig, 1e-3)))))
         e = self.soft.get(key)
         if e is None:
