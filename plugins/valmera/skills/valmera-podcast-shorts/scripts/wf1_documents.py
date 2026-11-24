@@ -144,6 +144,18 @@ def uncropped_image(rec):
 
 
 @lru_cache(maxsize=64)
+def visible_lines(path):
+    if sys.platform != "darwin" or not shutil.which("swift"):
+        return []
+    try:
+        lines = subprocess.check_output(["swift",str(Path(__file__).with_name("document_excerpt.swift")),path],
+                                        timeout=20,stderr=subprocess.DEVNULL)
+        return [(r["text"],r["box"]) for r in json.loads(lines) if valid_detail(r.get("box"))]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+
+
+@lru_cache(maxsize=64)
 def recorded_detail(path, literal):
     """Locate the placement reader's literal in a retained crop that predates authored detail boxes."""
     if not literal or sys.platform != "darwin" or not shutil.which("swift") or not os.path.isfile(path):

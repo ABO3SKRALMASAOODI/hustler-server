@@ -40,7 +40,7 @@ for _p in (os.path.join(SKILLS, "_shell"), os.path.join(SKILLS, "valmera-stories
 import film as F  # noqa: E402
 
 FPS, W, H, LEAD_F = F.FPS, F.W, F.H, F.LEAD_F
-CAPTION_CONTRACT = 12
+CAPTION_CONTRACT = 13
 Clock, r4, smooth = F.Clock, F.r4, F.smooth
 
 WALL = "YouTube is refusing this Mac as a bot"       # the words a short stops with when its footage could not be fetched for that reason
@@ -842,7 +842,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     demo_span = (word_frame(demo["first"]), word_frame(demo["last"]+1) or f_end) if demo else None
     source_rows = []
     speakers = []
-    sequence = reading.get('inserts', []) + reading.get('speaker_inserts', [])
+    from wf1_source_frame import reaction_portraits
+    portraits = reading.get('speaker_inserts', []) + reaction_portraits(reading)
+    sequence = reading.get('inserts', []) + portraits
     starts = {rec['first'] for rec in sequence}
     def source_span(rec, live):
         a = word_frame(rec['first'])
@@ -857,7 +859,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             b = min(b, round(hi*FPS)+LEAD_F)
         return a,b
 
-    for rec in reading.get('speaker_inserts', []):
+    for rec in portraits:
         a,b = source_span(rec, True)
         if b > a:
             speakers.append((a,b,rec['tile']))
@@ -1097,6 +1099,15 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         next_word = word_frame(page["last"] + 1)
         if next_word is not None:
             b = min(b, next_word)
+        witness = page["facts"][0].get("chain") or {}
+        if witness.get("witness") == "characterization":
+            origin = script.get("source_start", 0)
+            onset = clock.words[page["first"]]["t0"] + origin - LEAD_F/FPS
+            claim = next((c for c in coverage.get("claims", []) if c.get("speaker") == witness["speaker"]
+                          and isinstance(c.get("start"),(int,float)) and isinstance(c.get("end"),(int,float))
+                          and c["start"] <= onset <= c["end"]), None)
+            if claim:
+                a = min(a,max([Clock.f(claim["start"]-origin)+LEAD_F]+[end for _,end,_ in timed_facts if end<=a]))
         if page.get("analogy_step"):
             a = Clock.f(clock.words[page["first"]]["t0"])
             b = Clock.f(clock.words[page["last"]+1]["t0"]) if next_word is not None else f_end
@@ -2435,11 +2446,15 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             continue
         if page.get("analogy_step"):
             step = page["analogy_step"]
+            if not step["label"].strip():
+                continue
             heading = "Hypothetical"
             if page.get("research_stage"):
                 heading += " · " + page["research_stage"]
-            wf1_display.reading_card(P,[a,b],step["label"],heading, "",pal,
-                                     centre=.65,max_height=.19,group="analogy")
+            phases_so_far = page.get("comparison_labels") or []
+            states = [(label, i == len(phases_so_far)-1) for i,label in enumerate(phases_so_far)] if len(phases_so_far)>1 else []
+            wf1_display.reading_card(P,[a,b],"" if states else step["label"],heading,"",pal,
+                                     centre=.65,max_height=.24,group="analogy",steps=states)
             fact_pages.append(dict(page,f=[a,b]))
             P.events.append(a)
             continue
@@ -2591,8 +2606,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             claim = facts[0]["chain"]
             if claim.get("witness"):
                 credit = ("Interview recollection" if claim["witness"] == "recollection" else "Interview opinion")
-                wf1_display.reading_card(P,[a,b],claim["label"],claim["speaker"]+" · "+credit,"",pal,
-                                         centre=.65,max_height=.19,group="interview-note")
+                body = claim["label"]
+                if claim["witness"] == "characterization":
+                    body = next((value.strip() for value in (claim.get("referent"), claim.get("statement"))
+                                 if isinstance(value,str) and value.strip()),claim["report"])
+                wf1_display.reading_card(P,[a,b],body,claim["speaker"]+" · "+credit,"",pal,
+                                         centre=.63,max_height=.31,group="interview-note")
                 fact_pages.append(dict(page,f=[a,b]))
                 continue
             byline = claim["speaker"] + " · " + (claim.get("label") or wf1_display.OPINION_LABELS[claim["stance"]])
@@ -2849,11 +2868,20 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     cue_starts = {step["at"] for _,_,page in timed_facts if page.get("sequence_kind") == "comparison"
                   for step in page["sequence"]}
     cue_starts.update(r['first'] for r in reading.get('voice_entries', []))
-    reveal_words = {p["first"] for _,_,p in timed_facts if (p.get("analogy_step") or {}).get("reveal")}
+    reveal_words = {p["first"] for _,_,p in timed_facts if (p.get("analogy_step") or {}).get("reveal")
+                    and (p["analogy_step"].get("label") or p["last"] < len(clock.words)-1)}
     reveal_words.update(c["reveal"] for _,_,c in research_views)
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
                             hold=reading_spans, omit=omit, phrase_ends=d.get("caption_ends") or (),
                             accents=d.get("caption_accents") or (), accent_ink=pal["accent"], cue_starts=cue_starts, reveal_words=reveal_words)
+    closing_phrase = any(p["last"] == len(clock.words)-1 and (p.get("analogy_step") or {}).get("reveal")
+                         and not p["analogy_step"].get("label") for _,_,p in timed_facts)
+    if closing_phrase:
+        captions = [it for it in P.items if it.get("role") == "cap"]
+        if captions:
+            last_caption = max(captions,key=lambda it:it["f"][1])
+            if last_caption["f"][1] >= f_voice_end-1:
+                last_caption["f"][1] = f_end
     for word in list(P.items):
         if word.get("role") == "cap":
             # On the scale comparison its spoken cue is the graphic. Enlarge that

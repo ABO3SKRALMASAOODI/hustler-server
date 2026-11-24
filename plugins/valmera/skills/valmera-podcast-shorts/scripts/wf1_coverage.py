@@ -138,7 +138,9 @@ A cumulative fundraising estimate needs no figure in the label. For a private ou
 identify the interview owner once, then change the short label on the words stating the result. Split a long
 recollection into two adjacent interview_cues: the remembered setup and the result (e.g. "Funds set aside" and
 "Some went unused"). Finish with the speaker's interpretation on its own words. Keep figures in the audio.
-Set stance=recollection on remembered events, characterization on an interpretation.
+Set stance=recollection on remembered events, characterization on an interpretation. On a causal
+interpretation, give statement: one short clause naming what the speaker thinks caused what.
+The speaker owns this reading; the displayed survey only establishes its actual responses.
 If the closing interpretation points back to a mechanism defined earlier, give its interview_cue a referent:
 a short concrete restatement of the earlier mechanism on the returning words. Keep a proposed cycle conditional,
 including how one round would affect the next. Keep the speaker and full caption.

@@ -861,7 +861,9 @@ def comparison_pages(pages, comparison, words):
         for p in protected:
             spans = [(a,b) for lo,hi in spans for a,b in
                      ((lo,min(hi,p["first"])),(max(lo,p["last"]+1),hi)) if a < b]
-        result.extend(dict(first=a,last=b-1,analogy=True,analogy_step=steps[start],facts=[fact]) for a,b in spans)
+        result.extend(dict(first=a,last=b-1,analogy=True,analogy_step=steps[start],
+                           comparison_labels=[steps[c]["label"] for c in cues if c<=start and steps[c].get("label")][-2:],
+                           facts=[fact]) for a,b in spans)
     return result
 
 

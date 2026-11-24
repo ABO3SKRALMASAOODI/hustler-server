@@ -9,7 +9,7 @@ from tempfile import NamedTemporaryFile
 from PIL import Image
 
 from placement_check import file_digest
-from wf1_documents import image_part
+from wf1_documents import image_part, visible_lines
 
 
 PROMPT = """Read the numbered words and the actual uncropped frames of this interview together.
@@ -361,6 +361,24 @@ def bind(coverage, frames, result):
                 quote_segments=result.get('quote_segments') or [],spend=result.get('spend') or {})
 
 
+def reaction_portraits(reading):
+    """When a screen share has two known cameras, hold the listener on the directed reaction."""
+    speakers = reading.get("speaker_inserts") or []
+    portraits = []
+    for cue in reading.get("reactions") or []:
+        before = next((r for r in speakers if r["last"] == cue["first"]-1), None)
+        after = next((r for r in speakers if r["first"] == cue["last"]+1), None)
+        if not before or not after or before["shot"] != after["shot"] or before["tile"] != after["tile"]:
+            continue
+        speaker = before["tile"]
+        others = {tuple(r["tile"]) for r in speakers if r["shot"] == before["shot"]
+                  and (r["tile"][2] <= speaker[0] or speaker[2] <= r["tile"][0]
+                       or r["tile"][3] <= speaker[1] or speaker[3] <= r["tile"][1])}
+        if len(others) == 1:
+            portraits.append(dict(cue, shot=before["shot"], tile=list(others.pop())))
+    return portraits
+
+
 def presenter_crop(inserts, faces, src, aspect):
     """Frame the talking head within its documented tile between evidence clauses."""
     if not faces:
@@ -435,6 +453,29 @@ def presenter_card(plan, span, take_key, dest, tile, crop, src, work, ffmpeg, de
     plan.card(span,key,dest,crop=crop,src=src,**style)
 
 
+def spoken_cells(rec):
+    """Locate literal spoken cell values side by side on the same approved detail row."""
+    import string
+    if not rec.get("panel_box") or rec["box"] == rec["panel_box"] or not rec.get("clause"):
+        return []
+    def words(text):
+        return [token.strip(string.punctuation).casefold() for token in text.replace("&"," and ").split()]
+    spoken = words(rec["clause"])
+    left,top,right,bottom = rec["box"]
+    matches = []
+    for text,box in visible_lines(rec["path"]):
+        tokens = words(text)
+        if (tokens and left <= box[0] < box[2] <= right and top <= box[1] < box[3] <= bottom
+                and any(spoken[i:i+len(tokens)] == tokens for i in range(len(spoken)))):
+            matches.append(box)
+    for i,first in enumerate(matches):
+        for other in matches[i+1:]:
+            if (max(first[1],other[1]) < min(first[3],other[3]) and
+                    (first[2] < other[0] or other[2] < first[0])):
+                return sorted([first,other],key=lambda box:box[0])
+    return []
+
+
 def compose(plan, span, rec, key, take_key, src, width, height, work, ffmpeg, decode_region=None, report=False):
     """A pixel-preserving document and the synchronous presenter, clear of the caption seat."""
     from scene.motion import fit_panel
@@ -458,6 +499,23 @@ def compose(plan, span, rec, key, take_key, src, width, height, work, ffmpeg, de
             plan.card(span, take_key if in_shot else key, overview, crop=[0,0,1,1],
                       **({"src":src} if in_shot else {}), source_ink=[overview])
         plan.card(span, key, detail, crop=rec["box"], source_ink=[detail], caption_baseline=.89)
+        return
+    cells = spoken_cells(rec)
+    if cells:
+        plan.page(span, "#151A20", grain=0)
+        if live:
+            dest = fit_panel(tile,size,canvas,[.025,.025,.975,.39],align_y=1)
+            presenter_card(plan,span,take_key,dest,tile,tile,src,work,ffmpeg,decode_region)
+        overview = fit_panel(rec["box"],size,canvas,[.035,.402,.965,.555])
+        plan.card(span,key,overview,crop=rec["box"],source_ink=[overview])
+        # Both labels stay still at the same scale. The complete row above preserves their relation.
+        for i,(left,top,right,bottom) in enumerate(cells):
+            dx,dy = .012,(bottom-top)*.29
+            crop = [max(rec["box"][0],left-dx),max(rec["box"][1],top-dy),
+                    min(rec["box"][2],right+dx),min(rec["box"][3],bottom+dy)]
+            y = .58+i*.09
+            dest = fit_panel(crop,size,canvas,[.075,y,.925,y+.066])
+            plan.card(span,key,dest,crop=crop,source_ink=[dest],cell_detail=True,caption_baseline=.88)
         return
     if report:
         seat = [0,.15 if live else .03,1,.40]
