@@ -2246,6 +2246,10 @@ def check(ctx, rd, sc):
     # 16 Nov and found nothing the render review had not; the delivered record carries that review.
     r = wf3.check(ctx, rd, sc)
     b = sc.get("beats") or {}
+    if not r.get("final_music") and (ctx.args or {}).get("music_ledger"):
+        # The parent has the branded take and measured cuts after supply is pruned.
+        # Keep the two authored score positions that it cannot read from those bytes.
+        r["checks"]["music_cues"] = dict(turn_s=sc.get("story_turn_s"), payoff_s=sc.get("turn_s"))
     history = [dict(b["rendered_check"], frames="the render review's composed frames; the delivered programme is the same")] \
         if b.get("rendered_check") else []
     if history:

@@ -681,3 +681,65 @@ def test_every_source_rung_is_asked_again_on_ipv4():
     assert names[:2] == ["plain", "plain+ipv4"]
     assert all(n.endswith("+ipv4") == ("--force-ipv4" in extra) for n, extra in podcast.rungs())
     assert len([n for n in names if n.endswith("+ipv4")]) == len(names) // 2
+
+
+def test_parent_resumes_pruned_music_after_exchange(tmp_path, monkeypatch):
+    """A stopped ledger write leaves a complete pair. Same URL adopts it without mixing twice."""
+    import wf1_staged_music as finish
+
+    link = "https://youtu.be/abcdefghijk"
+    root = tmp_path / "work"
+    work = root / "episode-test"
+    folder = work / "films" / "accepted"
+    _film(folder, "Accepted", "prints", music=False)
+    rec = json.loads((folder / "film.json").read_text())
+    rec["rules"] = {"music_picked": False}
+    (folder / "film.json").write_text(json.dumps(rec))
+    child = work / "shorts" / "m01"
+    child.mkdir(parents=True)
+    done = dict(id="m01", ok=True, folder=str(folder))
+    (child / "done.json").write_text(json.dumps(done))
+    valid = work / "films" / "already-scored"
+    _film(valid, "Already scored", "window")
+    prior = {f.name: (f.stat().st_ino, f.read_bytes()) for f in valid.iterdir()}
+    other = work / "shorts" / "m02"
+    other.mkdir()
+    (other / "done.json").write_text(json.dumps(dict(id="m02", ok=True, folder=str(valid))))
+    state = dict(test=True, video_id="abcdefghijk", done=["fetch", "hear", "moments"], seconds={})
+    for name, data in [("run", state), ("music_used", ["previous"]),
+                       ("fetch", dict(info={}, video="pruned")), ("hear", {}),
+                       ("moments", dict(moments=[dict(id="m01", rank=1), dict(id="m02", rank=2)], bar=7))]:
+        (work / (name + ".json")).write_text(json.dumps(data))
+    monkeypatch.setattr(podcast, "WORK_ROOT", str(root))
+    monkeypatch.setattr(podcast, "ENV_FILE", str(tmp_path / "no.env"))
+    monkeypatch.setattr(sys, "argv", ["podcast.py", link, "--test-out", str(tmp_path / "out"), "--keep-work"])
+    calls = []
+
+    def score(clean, out, doc, used, scratch):
+        calls.append(used.copy())
+        assert clean.read_bytes() == b"mp4:film.mp4"
+        out.write_bytes(b"scored")
+        return dict(cid="fresh", title="Chosen", clean_export="film_clean.mp4")
+
+    monkeypatch.setattr(finish, "score_copy", score)
+    write = finish.write_json
+
+    def interrupt_ledger(path, value):
+        if path.name == "music_used.json":
+            raise OSError("interrupted ledger write")
+        write(path, value)
+
+    monkeypatch.setattr(finish, "write_json", interrupt_ledger)
+    assert podcast.main() == 2
+    assert json.loads((work / "music_used.json").read_text()) == ["previous"]
+    assert (folder / "film.mp4").read_bytes() == b"scored"
+    assert (folder / "film_clean.mp4").read_bytes() == b"mp4:film.mp4"
+    assert not (tmp_path / "out").exists()
+    monkeypatch.setattr(finish, "write_json", write)
+    assert podcast.main() == 0
+    assert calls == [["previous"]]
+    assert json.loads((work / "music_used.json").read_text()) == ["previous", "fresh"]
+    manifest = json.loads(next((tmp_path / "out").glob("*/shorts.json")).read_text())
+    assert manifest["shorts"][0]["music"]["title"] == "Chosen"
+    assert set(folder.parent.iterdir()) == {folder, valid}
+    assert {f.name: (f.stat().st_ino, f.read_bytes()) for f in valid.iterdir()} == prior

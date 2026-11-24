@@ -408,6 +408,25 @@ def last_word(l1_path, work=None):
         return None
 
 
+def card_music(card_bed, overlap, n_out, ref):
+    """Continue the chosen edit across the card at the normal closing level."""
+    import numpy as np
+    tempo = float(card_bed["tempo"])
+    start = max(0, card_bed["at_s"] - overlap/SR*tempo)
+    from score.music import card_phrase
+    music = card_phrase(card_bed["path"], start, tempo, overlap+n_out, card_bed.get("bar_s"), ffmpeg=FF)
+    target_db = min(-24., ref-9.)
+    gain = min(10**((target_db-_k_db(music))/20), .35/max(np.max(np.abs(music)),1e-6))
+    env = np.interp(np.arange(len(music)), [0, overlap, len(music)-.12*SR, len(music)-1], [0,1,1,0])
+    return music * (gain*env[:,None])
+
+
+def card_voice_duck(frames, at, end):
+    import numpy as np
+    return np.interp(np.arange(frames), [at - .35*SR, at, end, end + .90*SR],
+                     [1., .25, .25, 1.])[:, None]
+
+
 def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=True, last_word_s=None, sting=True, card_bed=None):
     """The closing section's sound, as a 48 kHz stereo WAV laid from `cut` samples on: the programme's own samples
     there, holding TAIL_AFTER_WORD_S past the last word and then falling as the references' music falls (tail_gain),
@@ -452,14 +471,7 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
     out[:len(dry)] = mono_low(dry, ramp) * g[:, None]
     if card_bed:
         overlap = min(len(dry), round(.20 * SR))
-        tempo = float(card_bed["tempo"])
-        start = max(0, card_bed["at_s"] - overlap/SR*tempo)
-        from score.music import card_phrase
-        music = card_phrase(card_bed["path"], start, tempo, overlap+n_out, card_bed.get("bar_s"), ffmpeg=FF)
-        target_db = min(-24., ref-9.)
-        gain = min(10**((target_db-_k_db(music))/20), .35/max(np.max(np.abs(music)),1e-6))
-        env = np.interp(np.arange(len(music)), [0, overlap, len(music)-.12*SR, len(music)-1], [0,1,1,0])
-        out[len(dry)-overlap:len(dry)-overlap+len(music)] += music * (gain*env[:,None])
+        out[len(dry)-overlap:] += card_music(card_bed, overlap, n_out, ref)
     acc = np.zeros((n_tail, 2), np.float64)
     info["ref_lufs"] = round(ref, 1)
     st = pick_sting(used) if sting else None
@@ -485,8 +497,7 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
     gain = min(target - _k_db(voice), TP_CEIL_DB - _true_peak_db(voice))
     at = min(total - cut + round(CARD_LINE_AT * SR), n_tail - len(voice))
     end = at + len(voice)
-    duck = np.interp(np.arange(n_tail), [at - .35*SR, at, end, end + .90*SR],
-                     [1., .25, .25, 1.])[:, None]
+    duck = card_voice_duck(n_tail, at, end)
     acc *= duck
     out *= duck
     acc[at:end] += voice * 10 ** (gain / 20)

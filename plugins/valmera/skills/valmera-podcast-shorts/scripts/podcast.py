@@ -774,6 +774,9 @@ def shorts(run, fetched, sel, lanes):
     run.log("footage routes: " + (", ".join(routes) if routes else "this Mac's own address (no proxy or transport configured)"))
     import wf1_film
     ms = sel["moments"]
+    import wf1_staged_music
+    for m in ms:
+        wf1_staged_music.recover(run, jload(run.p("shorts", m["id"], "done.json")))
     with cf.ThreadPoolExecutor(max_workers=max(1, lanes)) as pool:
         recs = list(pool.map(lambda m: build_short(run, m, fetched, sel.get("podcast") or {}), ms))
     for wait in WALL_WAITS:                                # the wall lifts by itself: wait, then continue the walled shorts
@@ -955,6 +958,9 @@ def deliver(run, fetched, sel, built, out_root, test=False):
     pod, info = sel.get("podcast") or {}, fetched["info"]
     made = {r["id"]: r for r in built["made"]}
     rows = []
+    import wf1_staged_music
+    for record in made.values():
+        wf1_staged_music.recover(run, record)
     for m in sel["moments"]:
         r = made.get(m["id"])
         f = jload(os.path.join(r["folder"], "film.json")) if r else None
