@@ -276,3 +276,23 @@ def test_inset_on_its_own_documentary_card_keeps_one_source_clock(tmp_path, monk
     result = layout.pip(scene, str(tmp_path), dict(id="dr2", f=[193,201], frames=8))
     placed, = result["items"]
     assert (placed["id"], placed["src"], placed["crop"]) == ("results", card["src"], card["crop"])
+
+
+def test_spoken_highlight_lands_in_its_full_cue_when_graphics_share_the_word(tmp_path):
+    from scene.palette.type import highlight
+    def item(id_, role, t, y):
+        return dict(k="word",id=id_,v="cap",f=[0,45],t=t,x=.2,y=y,role=role,ink="#FFFFFF")
+    line = item("cue", "cap", "like in a minute.", .75)
+    label = item("source", "graphic", "Minutes of the meeting", .25)
+    l1 = scene_of([label,line],45)
+    p = highlight(l1,str(tmp_path),dict(id="focus",dev="highlight",at=10,t="minute",style="under",target_role="cap"))
+    assert p["log"]["on"] == "cue" and p["log"]["phrase"] == "minute."
+    assert not p["drop"] and all(i["k"] != "word" for i in p["items"])
+    # The panel's caption baseline is settled after the palette lays the underline.
+    from scene.text_layout import resolve
+    line["chunk"] = "complete cue"
+    panel = dict(id="panel", k="card", f=[0,45], source_ink=[[0,0,1,.45]], caption_baseline=.86)
+    l1["items"].extend([panel, *p["items"]])
+    rect = p["items"][0]["rect"][-1][1]
+    resolve(l1)
+    assert p["items"][0]["rect"][-1][1] - rect == pytest.approx(line["y"] - .75,abs=.001)

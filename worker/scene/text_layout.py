@@ -76,6 +76,16 @@ def speaker_seats(scene, metadata):
 def resolve(scene, speaker_layout=None):
     width, height = scene["frame"]
     voices = scene["voices"]
+    # Palette underlines are drawn on the measured glyphs before the final layout.
+    # Preserve their position within the line through every later translation and scale.
+    hosts = {it["id"]: it for it in scene["items"] if it["k"] == "word"}
+    underlines = []
+    for effect in scene["items"]:
+        word = hosts.get(effect.get("underline_for"))
+        if word:
+            frames = range(*effect["f"])
+            before = [item_box(word, voices, width, height, f) for f in frames]
+            underlines.append((effect, word, frames, before))
     occupied = defaultdict(lambda: [MARK])
     faces = speaker_seats(scene, speaker_layout or {})
     for frame, face in faces.items():
@@ -401,6 +411,16 @@ def resolve(scene, speaker_layout=None):
                     )
                 layer[key] = values[0] if min(values) == max(values) else values
 
+    for effect, word, frames, before in underlines:
+        rects = []
+        for f, old in zip(frames, before):
+            rect = AR(effect["rect"], f, frames.start)
+            new = item_box(word, voices, width, height, f)
+            if old and new and old[2] > old[0] and old[3] > old[1]:
+                rect = [new[i%2] + (value-old[i%2])*(new[i%2+2]-new[i%2])/(old[i%2+2]-old[i%2])
+                        for i,value in enumerate(rect)]
+            rects.append(rect)
+        effect["rect"] = rects
     # Keep etched footage recognizable and its overlapping titles legible. Bound the
     # line treatment to an open band between the final text and cited source regions.
     for effect in scene["items"]:

@@ -472,7 +472,7 @@ def brackets(l1, work, ask, sense=None):
 
 # --------------------------------------------------------------------------- a word on screen, marked on its hit
 
-def target(l1, text, a, z, prefer_big=True):
+def target(l1, text, a, z, prefer_big=True, role=None):
     """(item, voice, lo, hi): the word item on screen between a and z whose text holds ``text`` (display type first),
     and the phrase's characters in it [lo, hi), widened to whole words (a phrase is marked word by word)."""
     want = K.norm(text)
@@ -481,6 +481,8 @@ def target(l1, text, a, z, prefer_big=True):
     cands = []
     for it in l1.get("items") or []:
         if it.get("k") != "word" or it["f"][1] <= a or it["f"][0] >= z:
+            continue
+        if role and it.get("role") != role:
             continue
         if want in K.norm(it.get("t")):
             cands.append(it)
@@ -577,11 +579,11 @@ def highlight(l1, work, ask, sense=None):
         return {"skip": "highlight needs a word"}
     a, z, hit = K.span(l1, ask, need=int(o.get("hold", 24)), text=t)
     f_hit = hit[0][1] if hit else a
-    got = target(l1, t, f_hit, f_hit + 2)
+    got = target(l1, t, f_hit, f_hit + 2, role=o.get("target_role"))
     if got is None:
         # Captions can type on a few frames after the spoken word. Seat the
         # marker on the same word's actual entrance.
-        got = target(l1, t, f_hit, f_hit + max(3, round(0.22 * fps)))
+        got = target(l1, t, f_hit, f_hit + max(3, round(0.22 * fps)), role=o.get("target_role"))
     if got is None:
         return {"skip": f"'{t}' is not on screen there"}
     it, v, lo, hi = got
@@ -610,6 +612,8 @@ def highlight(l1, work, ask, sense=None):
         rects.append([round(r[0], 5), round(r[1], 5), round(r[0] + (r[2] - r[0]) * grow[q], 5), round(r[3], 5)])
     col = o.get("c") or pal["accent"]
     items = [K.rect(f"{ask['id']}.hl", (f_hit, end), rects, col, a=float(o.get("a", 1.0)), z=2)]
+    if style == "under":
+        items[0]["underline_for"] = it["id"]
     drop = []
     turned = False
     if style != "under" and K.lum(col) > 0.45 and K.lum(it.get("ink") or "#FFFFFF") > 0.45:
