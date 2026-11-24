@@ -3420,10 +3420,13 @@ def passage_image(locator, words, focus=None):
             if (color !== 'transparent' && color !== 'rgba(0, 0, 0, 0)') { bg = color; break; }
         }
         // Keep the capture outside the hydrated article while its UI finishes mounting.
+        // Put only this temporary excerpt above banners in the screenshot.
+        copy.setAttribute('popover', 'manual');
         document.documentElement.appendChild(copy);
+        copy.showPopover();
         Object.assign(copy.style, {fontFamily:ink.fontFamily, fontWeight:ink.fontWeight,
             color:ink.color, backgroundColor:bg, textAlign:ink.textAlign});
-        Object.assign(copy.style, {position:'relative', width:'min(19em, 90vw)',
+        Object.assign(copy.style, {position:'fixed', inset:'0 auto auto 0', border:0, width:'min(19em, 90vw)',
             maxWidth:'100%', height:'auto', padding:'.75em', margin:0,
             fontSize:'22px', lineHeight:'1.4', boxSizing:'border-box'});
         return copy;

@@ -794,3 +794,25 @@ def test_spoken_device_lands_on_the_existing_phrase_and_picture(film, device, ph
     words = [it for it in out["items"] if it["k"] == "word"]
     assert [(it["t"], it["f"]) for it in words] == [(phrase, [5,47])]
     assert words[0]["y"] != cue["y"] and words[0]["y"][-1] == cue["y"]
+
+
+@needs_ffmpeg
+def test_contour_on_fitted_interview_keeps_one_synchronous_picture(film):
+    l1, work = film
+    base = l1["items"][0]
+    card = dict(base, id="portrait", k="card", source_frame=True,
+                x=.5, y=.45, w=1., h=.32, crop=[0., 0., 1., 1.])
+    l1.update(documentary_cuts=[], items=[
+        dict(id="ground", k="shot", f=[0, 120], pic="plate", plate=dict(c="#101820")),
+        card, *l1["items"][1:]])
+    out, patch = lay(l1, work, dict(dev="contour", f=[10, 100], sections=[
+        dict(f=[10, 40], energy="brisk"), dict(f=[40, 83], energy="strobe"),
+        dict(f=[83, 100], energy="hold")], stress=[21, 56]))
+    for f in range(120):
+        layers = [it for it in out["items"] if it["k"] in ("shot", "card")
+                  and it["pic"] != "plate" and it["f"][0] <= f < it["f"][1]]
+        assert [it["id"] for it in layers] == ["portrait"]
+    portrait = next(it for it in out["items"] if it["id"] == "portrait")
+    assert portrait["crop"] == card["crop"] and portrait["src"] == card["src"]
+    assert min(portrait["s"][10:83]) < 1 and max(portrait["s"]) <= 1
+    assert portrait["s"][:10] == [1.] * 10 and portrait["s"][83:] == [1.] * 37

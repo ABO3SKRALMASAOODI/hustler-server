@@ -443,6 +443,44 @@ def burst(l1, work, ask, sense_=None, pool=None):
 
 # ----------------------------------------------------------------- contour
 
+def _fitted_contour(l1, spans, stress, heard):
+    """Accent the existing interview card. Its matte, source cut and lens are one composition."""
+    cards = [it for it in l1["items"] if it["k"] == "card" and K.is_take(it.get("pic"))
+             and any(a < it["f"][1] and it["f"][0] < z for (a, z), _ in spans)]
+    if not cards:
+        return None
+
+    runs = []
+    for (a, z), energy in sorted(spans):
+        if energy == "hold":
+            continue
+        if runs and a <= runs[-1][1]:
+            runs[-1][1] = max(z, runs[-1][1])
+        else:
+            runs.append([a, z])
+
+    # One ease per continuous run, even when a source cut or a caption layout
+    # change has divided the fitted interview into several scene cards.
+    items, events = {}, []
+    for a, z in runs:
+        peak = max((p for p in stress if a < p[0] < z-1),
+                   key=lambda p: p[1], default=((a+z-1)//2, .4))[0]
+        for card in cards:
+            lo, hi = card["f"]
+            if hi <= a or z <= lo:
+                continue
+            if card["id"] not in items:
+                items[card["id"]] = dict(card, s=[A(card.get("s", 1.), f, lo) for f in range(lo, hi)])
+            scales = items[card["id"]]["s"]
+            for f in range(max(a, lo), min(z, hi)):
+                u = (f-a)/(peak-a) if f <= peak else (z-1-f)/(z-1-peak)
+                scales[f-lo] *= 1-.045*u*u*(3-2*u)
+            if lo <= peak < hi:
+                events.append(dict(f=peak, what="portrait accent", kind="panel", strength=.4))
+    return dict(items=list(items.values()), events=events, log=dict(fitted=list(items), stress=heard,
+                sections=[dict(f=[a,z], energy=energy) for (a,z),energy in spans]))
+
+
 def contour(l1, work, ask, sense_=None, pool=None):
     """The pace contour: each section re-cut at its energy. strobe: 2-8 frame shots of the moment's pictures (the pool's
     and the section's own, other moments of the same clips); brisk: a new picture every 0.33-0.8 s, the take's
@@ -466,6 +504,10 @@ def contour(l1, work, ask, sense_=None, pool=None):
         heard = "voice" if stress else "none"
     need = sum((z - a) // 4 if en == "strobe" else (z - a) // (2 * BRISK_F[0]) for (a, z), en in spans if en != "hold")
     pics_all = K.pictures(l1, work, args, pool, sense_=sense_, need=need, length_s=STROBE_F[1] / fps + 0.05)
+    if len(pics_all) == 1 and K.is_take(pics_all[0].aid):
+        fitted = _fitted_contour(l1, spans, stress, heard)
+        if fitted:
+            return fitted
     turn = 0
     for s_ in secs:
         a, z = K.span(cur, dict(s_), default_s=2.0, least=4)
