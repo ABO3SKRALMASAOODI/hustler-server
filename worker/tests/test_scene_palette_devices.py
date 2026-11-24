@@ -296,3 +296,22 @@ def test_spoken_highlight_lands_in_its_full_cue_when_graphics_share_the_word(tmp
     rect = p["items"][0]["rect"][-1][1]
     resolve(l1)
     assert p["items"][0]["rect"][-1][1] - rect == pytest.approx(line["y"] - .75,abs=.001)
+
+
+def test_interview_split_uses_the_live_picture_and_its_authored_note(tmp_path, monkeypatch):
+    from scene.palette import layout, picks
+    face = dict(k="card", id="host", pic="own:cut1", f=[50,93], src=[1.6,3.03],
+                source_frame=True, x=.5,y=.28,w=1.,h=.316,crop=[0,0,1,1])
+    text = dict(k="word", id="setup", role="graphic", fact_type=True, f=[0,94], v="cap", t="Meeting context", x=.08, y=.65)
+    scene = scene_of([face, text], 150)
+    scene["documentary_cuts"] = []
+    same = picks.Pic("main", "episode.mp4", "video", 1920, 1080, 5)
+    scene["assets"] = {key:dict(path=same.path) for key in ("main","own:cut1")}
+    monkeypatch.setattr(picks, "pictures", lambda *a, **kw: [same])
+    ask = dict(id="dr0", f=[57,93])
+    split = layout.split(scene, str(tmp_path), ask)
+    placed, = split["items"]
+    assert split["log"]["panels"] == 2 and placed["id"] == face["id"]
+    assert placed["src"] == face["src"] and placed["y"][7] != placed["y"][-1]
+    inset, = layout.pip(scene, str(tmp_path), ask)["items"]
+    assert inset["id"] == face["id"] and inset["src"] == face["src"]

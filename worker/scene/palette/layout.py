@@ -192,6 +192,14 @@ def grid(l1, work, ask, sense_=None, pool=None):
 
 # ----------------------------------------------------------------- split screen and panels
 
+def _same_take(l1, work, card, pic):
+    aid = card.get("pic")
+    if not (K.is_take(aid) and K.is_take(pic.aid)):
+        return False
+    path = l1.get("assets", {}).get(aid, {}).get("path")
+    return aid == pic.aid or (path and K._key(work, path) == K._key(work, pic.path))
+
+
 def split(l1, work, ask, sense_=None, pool=None):
     """The frame cut into panels: the speaker in one (on his own clock, so the voice stays in sync) and what he names in
     the other; or two or three pictures side by side. Panels slide in from their own edges and settle.
@@ -204,6 +212,28 @@ def split(l1, work, ask, sense_=None, pool=None):
     take_on = under is not None and K.is_take(under.get("pic"))
     with_take = bool(args.get("take", take_on)) and take_on
     pics = K.pictures(l1, work, args, pool, sense_=sense_, least=2 if not with_take else 1)
+    if len(pics) == 1 and K.is_take(pics[0].aid):
+        # A fitted interview over a plate is already the top panel. The report
+        # in the other seat supplies the second subject on this exact clock.
+        from ..plan import A
+        from .kit import item_box
+        for card in l1["items"]:
+            if (card["k"] != "card" or not _same_take(l1, work, card, pics[0])
+                    or not (card["f"][0] <= a < card["f"][1])):
+                continue
+            lo, hi = card["f"]
+            y = [A(card["y"], f, lo) for f in range(lo,hi)]
+            top = y[a-lo] - A(card["h"],a,lo)/2
+            bottom = y[a-lo] + A(card["h"], a, lo)/2
+            notes = [item_box(it,l1["voices"],W,H,a) for it in l1["items"] if it["k"] == "word"
+                     and it.get("fact_type") and it["f"][0] <= a < it["f"][1]]
+            if any(box and bottom <= box[1] for box in notes):
+                # Slide towards the authored seat without crossing the text or
+                # clipping the picture at the frame edge.
+                for j,u in enumerate(K.decel(min(8,hi-a,z-a))):
+                    y[a-lo+j] -= min(max(0,top),.08)*(1-u)
+                return dict(items=[dict(card,y=y)],events=[dict(f=a,what="interview panel settles",kind="panel",strength=.45)],
+                            log=dict(panels=2,take=True,stacked=True))
     given = len([p for p in pics if p.chosen is not None])
     k = int(args.get("panels") or ((given + (1 if with_take else 0)) if given else (2 if with_take else min(max(len(pics), 2), 3))))
     k = min(max(k, 2), 3)
@@ -541,7 +571,7 @@ def pip(l1, work, ask, sense_=None, pool=None):
         checked = {r["pic"] for r in l1["documentary_cuts"] if r["f"][0] <= a < r["f"][1]}
         window = next((it for it in l1["items"] if it["k"] == "card" and it["f"][0] <= a < it["f"][1]
                        and ((it.get("pic") in checked and it.get("source_ink"))
-                            or (K.is_take(pic.aid) and it.get("pic") == pic.aid))), None)
+                            or _same_take(l1, work, it, pic))), None)
         if window:
             return _settle_window(window, a, min(8,z-a))
     m = z - a
