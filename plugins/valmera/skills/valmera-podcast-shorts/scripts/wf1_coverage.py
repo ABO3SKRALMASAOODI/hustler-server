@@ -88,12 +88,15 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None, stor
                 paths = {frame['t']: frame['path'] for frame in frames}
                 for insert in old['source_reading']['inserts']:
                     insert['path'] = paths[insert['t']]
+            fit_route_examples(old["windows"],old.get("handoffs") or [],words)
             return old
     prompt = '''Direct documentary pictures for a spoken podcast clip. Return JSON:
 {"entities":[{"name":str,"is":"person|company|place|product|event|thing","must_show":str,"word_ids":[int]}],
  "windows":[{"first":int,"last":int,"name":str,"external":true,"association":false,"claim":str,"must_show":str,"why":str,
    "depictions":[{"name":str,"must_show":str,"video_searches":[str]}]}],
  "episode_examples":[{"first":int,"last":int,"graphic_first":int,"graphic_last":int,"label":str}],
+ "handoffs":[{"first":int,"last":int,"title":str,"speaker":str,"steps":[{"at":int,"label":str}]}],
+ "borrowed_estimates":[{"first":int,"application":int,"last":int,"speaker":str,"application_label":str,"question":str}],
  "print_readings":[{"first":int,"last":int}],
  "contextual_definitions":[{"start":number,"gloss":str}],
  "comparisons":[{"first":int,"last":int,"premise":str,"consequence":str}],
@@ -159,7 +162,20 @@ Open an institutional archive on the words naming or describing the institution 
 Use complete explanatory clauses, typically 2-5 seconds, not a separate window for each word.
 Where several publishers would only illustrate the same capability, give the window single_action=true
 and identify the visible action and its result. Hold the best readable demonstration on that action.
-Keep separate physical examples or process steps wherever each adds evidence. Do not split one clause
+For a speaker explaining how work passes between participants, author one handoffs span from the
+setup or gesture through the last handoff, ending before the spoken takeaway. Name what travels in
+title using only its short noun phrase. Each label is ONLY the receiving team’s name (e.g. "Product",
+"Engineering"), anchored on the actual handoff word. Leave verbs in the captions; combine actions by the same
+team. This is the speaker's account. For a representative record put evidence_role="example" on its
+own reading window at the introduction of the feedback; give it a complete phrase to read. A
+separately asserted event may have evidence_role="independent". Do not turn an unnamed handoff
+into a documented release. Keep the source gestures, reaction and closing voice on the live camera.
+For a speaker applying someone else's numerical estimate by analogy, mark borrowed_estimates.
+first begins the estimate's context, application is the first word of its application, last ends the
+application cue. Give the speaker's name and a compact application_label explaining their analogy.
+question asks what the original estimate measured and how certain it is. Put the original author
+or artifact in one single_action window on its own words. Let that same research address the estimate.
+Keep separate physical examples or process steps wherever each adds independent evidence. Do not split one clause
 into fragments such as 'There are scale' and 'effects, like Google'. Give it the complete thought.
 The original synchronous interview is the visual fallback. Plan an external window only when a
 real picture can show its specific referent. Use other recordings of the speaker only for an event
@@ -305,15 +321,42 @@ an honest subject; never invent one.'''
     print_readings = [r for r in out.get("print_readings") or []
                       if isinstance(r,dict) and type(r.get("first")) is int and type(r.get("last")) is int
                       and 0 <= r["first"] <= r["last"] < len(words)]
-    for c in [*print_readings, *([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
+    def has_span(row):
+        return (isinstance(row, dict) and type(row.get("first")) is int and type(row.get("last")) is int
+                and 0 <= row["first"] <= row["last"] < len(words))
+
+    def text_fields(row, *keys):
+        return all(isinstance(row.get(k),str) and row[k].strip() for k in keys)
+
+    routes = []
+    for route in out.get("handoffs") or []:
+        if not has_span(route) or not text_fields(route, "speaker", "title"):
+            continue
+        steps = []
+        for step in route.get("steps") or []:
+            if (isinstance(step,dict) and type(step.get("at")) is int and text_fields(step,"label")
+                    and route["first"] <= step["at"] <= route["last"]
+                    and (not steps or steps[-1]["at"] < step["at"])):
+                steps.append(dict(at=step["at"], label=step["label"].strip()))
+        if len(steps) >= 2:
+            routes.append(dict(route, steps=steps))
+    out["handoffs"] = routes
+    out["borrowed_estimates"] = [r for r in out.get("borrowed_estimates") or []
+                                 if has_span(r) and text_fields(r,"speaker","question","application_label")
+                                 and type(r.get("application")) is int and r["first"] < r["application"] <= r["last"]]
+    for c in [*routes, *print_readings, *([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
         remaining = []
         for w in windows:
+            if c in routes and w.get("evidence_role") in ("example","independent"):
+                remaining.append(w)
+                continue
             for a,b in ((w["first"], min(w["last"], c["first"]-1)),
                         (max(w["first"], c["last"]+1), w["last"])):
                 if a <= b:
                     remaining.append(dict(w, first=a, last=b, t0=words[a]["start"], t1=words[b]["end"],
                                           say=" ".join(v["w"] for v in words[a:b+1])))
         windows = remaining
+    fit_route_examples(windows, routes, words)
     for row in windows:
         row['depictions'] = ladder(row.get('depictions'))
         row['rung'] = 0
@@ -323,6 +366,18 @@ an honest subject; never invent one.'''
         out['source_reading']['replaces'] = []
     with open(path, 'w') as f: json.dump(out, f, indent=1)
     return out
+
+
+def fit_route_examples(windows, routes, words):
+    """Let the checked example start with the phrase that introduces it, before the first handoff."""
+    for i,row in enumerate(windows):
+        route = next((r for r in routes if r["first"] <= row["first"] <= row["last"] < r["steps"][0]["at"]), None)
+        if route and row.get("evidence_role") == "example":
+            first = row["first"]
+            left = max(route["first"],windows[i-1]["last"]+1 if i else 0)
+            while first > left and words[first-1].get("seg") == words[row["first"]].get("seg") and "seg" in words[first]:
+                first -= 1
+            row.update(first=first,t0=words[first]["start"],say=" ".join(w["w"] for w in words[first:row["last"]+1]))
 
 
 def same_picture(left,right):
@@ -344,6 +399,7 @@ def same_picture(left,right):
 def research_names(coverage):
     """A name spoken only inside the comparison stays in the inventory for the graphic."""
     local = (coverage.get("comparisons") or []) + (coverage.get("speaker_claims") or []) + (coverage.get("episode_examples") or [])
+    local += coverage.get("handoffs") or []
     inside = {i for c in local for i in range(c["first"], c["last"]+1)}
     if not inside:
         return coverage.get("named") or []
@@ -354,7 +410,11 @@ def research_names(coverage):
 
 
 def outside_comparisons(window, a, b, coverage):
-    for row in (coverage.get("comparisons") or []) + (coverage.get("speaker_claims") or []) + (coverage.get("episode_examples") or []):
+    for route in coverage.get("handoffs") or []:
+        if route["first"] <= window["first"] <= window["last"] <= route["last"]:
+            # An illustrative request belongs on its own phrase; later handoffs return to the testimony.
+            return window["first"],window["last"]
+    for row in (coverage.get("comparisons") or []) + (coverage.get("speaker_claims") or []) + (coverage.get("episode_examples") or []) + (coverage.get("handoffs") or []):
         if row["last"] < window["first"]:
             a = max(a, row["last"]+1)
         elif row["first"] > window["last"]:

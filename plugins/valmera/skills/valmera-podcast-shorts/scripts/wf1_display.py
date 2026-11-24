@@ -44,6 +44,17 @@ episode_examples already have a labeled illustration on the live episode; leave 
 Keep the full contrast and the complete host reply in captions. Use the script's definition and framework claims on their addressed words. A spoken count can introduce
 one requirement explored here; name the requirement as an action that stands alone, then give its reading time to the concrete steps. Resolve a
 short form on first use, with enough time to read it. Keep the estimate separate from what a demo shows.
+handoffs and borrowed_estimates already have word-addressed compositions. Leave their labels to
+those compositions. Finish the typography for each handoff in ONE staircase ask, using
+args.handoff_for (first word ID), args.title (only the thing moving, e.g. "Customer feedback"),
+and args.sequence=[{at: unchanged step ID,label: receiving team's short name only}]. No verbs,
+role descriptions or repeated title in the route labels. Each station will share the same diagram.
+If a borrowed estimate has only its question, use its existing checked sources
+to finish it in a facts ask with args.estimate_for (its first word ID) and args.facts=[{source,
+also_sources,statement,credit}] and args.application_label (a short cue naming the new domain as an analogy). Use a short line of estimated quantity, unit and uncertainty. Credit
+the author/date and, where consequential, the later reassessment separately from the interview.
+Keep any representative request in its own source seat, then return to the live
+gestures. Let the final condition land in the original speaker's exact cue, including during a reaction.
 Use separate captions for the literal speech. A visual change to the camera or a paraphrased pull quote
 alone cannot explain a changing relationship.
 For each date, amount, target or estimate worth displaying, put facts in its type ask's args:
@@ -111,6 +122,7 @@ def editorial(ctx, script, pack):
     research = pack.get("referent_research") or coverage.get("research_context") or {}
     sources = {"interview": dict(url=args.get("source_url"), publisher=args.get("channel"),
                                  supports=["The speaker's own account in the numbered passage."])}
+    borrowed = {r["first"]:dict(r) for r in coverage.get("borrowed_estimates") or []}
     speaker_claims = [dict(c) for c in coverage.get("speaker_claims") or []]
     definitions = {row["start"]: row.get("gloss") for row in coverage.get("contextual_definitions") or []
                    if isinstance(row, dict) and type(row.get("start")) in (int, float)}
@@ -138,6 +150,13 @@ def editorial(ctx, script, pack):
                 reading = src.get("supports") or ref.get("finding")
                 if reading and reading not in evidence["supports"]:
                     evidence["supports"].append(reading)
+        estimate = borrowed.get(ref.get("estimate_for"))
+        if estimate and all(isinstance(ref.get(k),str) and ref[k].strip() for k in ("statement","credit")):
+            cited_sources = [sources[s["url"]] for s in ref.get("sources") or []
+                             if isinstance(s,dict) and s.get("url") in sources
+                             and not same_recording(s["url"],sources["interview"].get("url"))]
+            if cited_sources:
+                estimate.update(statement=ref["statement"],credit=ref["credit"],sources=cited_sources)
         # The reader ties an original to this particular claim (an author can make many).
         cited = [(src["url"], q) for src in ref.get("sources") or [] if isinstance(src, dict)
                  and src.get("url") in sources for q in src.get("quotations") or []
@@ -176,7 +195,8 @@ def editorial(ctx, script, pack):
             source = sources.setdefault(src["url"], dict(url=src["url"], publisher=src["channel"], supports=[]))
             if action not in source["supports"]:
                 source["supports"].append(action)
-    return dict(episode_examples=coverage.get("episode_examples") or [], callback=coverage.get("callback"), speaker_claims=speaker_claims, comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=claims, episode_start=(script.get("window") or [0])[0],
+    return dict(handoffs=coverage.get("handoffs") or [], borrowed_estimates=list(borrowed.values()),
+                episode_examples=coverage.get("episode_examples") or [], callback=coverage.get("callback"), speaker_claims=speaker_claims, comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=claims, episode_start=(script.get("window") or [0])[0],
                 sources=sources, picture_windows=[{k:w[k] for k in ("first","last","name","claim","must_show","example") if k in w}
                                                   for w in coverage.get("windows", [])], speaker_inserts=[{k:r[k] for k in ('first','last')}
                     for r in (coverage.get('source_reading') or {}).get('speaker_inserts',[])], source_inserts=[{k:r[k] for k in ('first','last','shows')}
@@ -205,6 +225,17 @@ OPINION_LABELS = {"concern": "Concern", "characterization": "Opinion", "recollec
 ESTIMATE_LABELS = {"discussed_estimate": "Estimate under discussion", "personal_estimate": "Personal estimate"}
 
 
+def same_recording(left, right):
+    """A time locator identifies an interval of the interview, not another publication."""
+    from urllib.parse import parse_qsl, urlsplit
+    def identity(url):
+        p = urlsplit(url)
+        return (p.scheme,p.netloc,p.path,sorted((k,v) for k,v in parse_qsl(p.query,keep_blank_values=True)
+                                                if k not in ("t","start","time_continue")),
+                "" if p.fragment.startswith("t=") else p.fragment)
+    return bool(left and right and identity(left) == identity(right))
+
+
 def claim_fact(claim, fact, sources, words):
     """Use the original witness's exact statement or the reporting speaker's qualified account."""
     interview = sources["interview"]
@@ -218,12 +249,15 @@ def claim_fact(claim, fact, sources, words):
     source = sources.get(key) if isinstance(key, str) else None
     if claim.get("stance") in OPINION_LABELS:
         statement = fact.get("statement")
-        if source and source != interview and isinstance(statement, str) and statement.strip():
-            supporting = [source]
-            for url in fact.get("also_sources") or []:
-                other = sources.get(url) if isinstance(url, str) else None
-                if other and other != interview and other not in supporting:
-                    supporting.append(other)
+        supporting = []
+        for item in [source, *(sources.get(k) for k in fact.get("also_sources") or [] if isinstance(k,str))]:
+            if not item or item in supporting:
+                continue
+            if same_recording(item.get("url"),interview.get("url")) and not fact.get("excerpt"):
+                continue
+            supporting.append(item)
+        if supporting and isinstance(statement,str) and statement.strip():
+            source = supporting[0]
             excerpt = fact.get("excerpt")
             verified = excerpt and excerpt in source.get("quotations", [])
             return dict(statement=statement, value=statement, source=source, supporting_sources=supporting,
@@ -283,8 +317,37 @@ def bind(direction, editorial, words):
     beat_roles = {b.get("w"):b["role"] for b in direction.get("beats") or []
                   if b.get("role") in ("figure", "turn")}
     displayed = set()
+    routes = {r["first"]:dict(r) for r in editorial.get("handoffs") or []}
+    estimates = {r["first"]:dict(r) for r in editorial.get("borrowed_estimates") or []}
     for ask in direction["asks"]:
         args = ask["args"]
+        route_id = args.get("handoff_for")
+        if type(route_id) is int and route_id in routes:
+            route = routes[route_id]
+            labels = {s["at"]:s["label"].strip() for s in args.get("sequence") or []
+                      if isinstance(s,dict) and type(s.get("at")) is int
+                      and isinstance(s.get("label"),str) and s["label"].strip()}
+            route["steps"] = [dict(step,label=labels.get(step["at"],step["label"])) for step in route["steps"]]
+            if isinstance(args.get("title"),str) and args["title"].strip():
+                route["title"] = args["title"].strip()
+            continue
+        estimate_id = args.get("estimate_for")
+        if type(estimate_id) is int and estimate_id in estimates:
+            estimate = estimates[estimate_id]
+            if isinstance(args.get("application_label"),str) and args["application_label"].strip():
+                estimate["application_label"] = args["application_label"].strip()
+            for fact in args.get("facts") or []:
+                if not isinstance(fact,dict):
+                    continue
+                keys = [fact.get("source"), *(fact.get("also_sources") or [])]
+                cited = [sources[k] for k in keys if isinstance(k,str) and k in sources and
+                         not same_recording(sources[k].get("url"),sources["interview"].get("url"))]
+                if cited and all(isinstance(fact.get(k),str) and fact[k].strip() for k in ("statement","credit")):
+                    if not estimate.get("sources"):
+                        estimate.update(sources=cited, statement=fact["statement"], credit=fact["credit"])
+                    break
+            if estimate.get("sources"):
+                continue
         facts = []
         first = ask["at"]["w"]
         last = (ask.get("until") or ask["at"])["w"]
@@ -488,9 +551,59 @@ def bind(direction, editorial, words):
         # The episode establishes the premise. The label is the editor's hypothetical illustration.
         fact = dict(source=sources["interview"], value=example["label"], relation="Illustrative example")
         pages.append(dict(first=a, last=b, episode_example=True, facts=[fact]))
+    pages = testimony_pages(pages, dict(editorial,borrowed_estimates=list(estimates.values()),handoffs=list(routes.values())))
     pages.sort(key=lambda page: page["first"])
     return dict(direction, asks=asks, display=display, caption_ends=ends, caption_accents=sorted(accents), claims=claims, display_facts=pages,
                 arc=[m for m in direction["arc"] if not any(p["first"] <= m["w"] <= p["last"] for p in pages)])
+
+
+def estimate_credit(fact):
+    """Short author-year references. Keep full publication titles and locators in the sources."""
+    labels = []
+    for source in fact.get("supporting_sources") or []:
+        author = source.get("author") or source.get("publisher")
+        date = str(source.get("publication_date") or "").replace("-"," ").split()
+        year = next((part for part in date if len(part)==4 and part.isdecimal()), None)
+        if not author or not year:
+            return fact["attribution"]
+        label = f"{author} ({year})"
+        if label not in labels:
+            labels.append(label)
+    return "\n".join(labels) or fact["attribution"]
+
+
+def testimony_pages(pages, editorial):
+    interview = editorial["sources"]["interview"]
+    scopes = [r for r in editorial.get("borrowed_estimates") or [] if r.get("sources")]
+    routes = editorial.get("handoffs") or []
+    if not (scopes or routes):
+        return pages
+    def superseded(page):
+        for treatment in [*scopes,*routes]:
+            if treatment["first"] <= page["first"] <= treatment["last"]:
+                if all(same_recording(f.get("source",{}).get("url"),interview.get("url"))
+                       for f in page["facts"]):
+                    return True
+        return False
+    result = []
+    for page in pages:
+        if superseded(page):
+            continue
+        if any(r["first"] <= page["first"] and page["last"] <= r["last"] for r in routes):
+            if len(page["facts"]) == 1 and page["facts"][0].get("example"):
+                page = dict(page,route_example=True)
+        result.append(page)
+    for r in scopes:
+        for a,b,title,text,source in (
+                (r["first"],r["application"]-1,r["credit"],r["statement"],r["sources"][0]),
+                (r["application"],r["last"],r["speaker"],r["application_label"],interview)):
+            result.append(dict(first=a,last=b,scope_cue=True,facts=[dict(
+                attribution=title,value=text,source=source,
+                supporting_sources=r["sources"] if a==r["first"] else [interview])]))
+    for r in routes:
+        result.append(dict(first=r["first"],last=r["last"],sequence_kind="handoff",sequence=r["steps"],
+                           facts=[dict(value=r["title"],source=interview,attribution=r["speaker"])]))
+    return result
 
 
 def figure_readings(span, fact, pictures):
@@ -667,7 +780,8 @@ def reading_card(plan, span, body, byline, source, palette, *, centre=.64, max_h
                 rows.append(part)
         return rows
 
-    header = wrap(byline, "quote_credit")
+    header = ([line for citation in byline.splitlines() for line in wrap(citation,"quote_credit")]
+              if group == "estimate-scope" else wrap(byline, "quote_credit"))
     footer = wrap(source, "quote_credit")
     body_rows = wrap(body, "quote_body")
     def measure(text, voice, colour, node=None):

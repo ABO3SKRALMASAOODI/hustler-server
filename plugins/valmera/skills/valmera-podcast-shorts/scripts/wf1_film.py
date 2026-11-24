@@ -926,7 +926,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     # surface. Give independent scenario steps their own remaining word interval.
     evidence = [p for p in pages if any(f.get("perspective") or f.get("excerpt") for f in p["facts"])]
     for page in list(pages):
-        if not page.get("sequence"):
+        if not page.get("sequence") or page.get("sequence_kind") == "handoff":
             continue
         overlaps = [p for p in evidence if p["first"] <= page["last"] and page["first"] <= p["last"]]
         if not overlaps:
@@ -1010,7 +1010,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             b = f_end
         # A speaker-led explanation already carries its report in voice and captions.
         # A quotation from an original or a qualified estimate has its own evidentiary work.
-        qualified = page.get("sequence") or any((f.get("chain") or {}).get("stance") in wf1_display.CONTEXT_LABELS or f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
+        qualified = page.get("sequence") or page.get("scope_cue") or any((f.get("chain") or {}).get("stance") in wf1_display.CONTEXT_LABELS or f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
                         (f.get("chain") or {}).get("stance") in wf1_display.ESTIMATE_LABELS or
                         (f.get("chain") or {}).get("original") for f in facts)
         narrated = all(f.get("chain") and not f.get("relation") for f in facts)
@@ -1035,7 +1035,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         rows = wf1_display.typeset(facts, P.R, DISPLAY_W * W, str.upper if st["upper"] else str)
         return len(rows) > 4
 
-    report_spans = [(a, b) for a, b, page in timed_facts if page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"])]
+    report_spans = [(a, b) for a, b, page in timed_facts if page.get("scope_cue") or page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"])]
 
     # A remembered figure or reversal can live in the spoken cue and the show's own
     # shot. Release the timeline on the authored word, preserving the entire source frame.
@@ -1062,6 +1062,16 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                             for e in coverage.get("episode_examples") or [])
     if thought:
         comparison_spans.append((word_frame(thought["first"]),word_frame(thought["last"]+1) or f_end))
+    comparison_spans.extend((a,b) for a,b,p in timed_facts if p.get("scope_cue"))
+    # A first-person conclusion after the route has its own treatment: the original
+    # voice, camera and exact captions. Distinct sourced claims retain their pages.
+    return_voices = {word_frame(c["first"]):c["speaker"] for c in d.get("claims") or []
+               if c.get("speaker") == c.get("subject") and not c.get("stance")
+               and c.get("last") == len(clock.words)-1 and any(
+                   r["speaker"] == c["speaker"] and r["last"] < c["first"] for r in coverage.get("handoffs") or [])
+               and not any(w["last"] >= c["first"] for w in coverage["windows"] if not w.get("on_take"))}
+    returns = [(frame,f_end) for frame in return_voices]
+    comparison_spans.extend(returns)
     comparison_spans.extend(source_pages)
     comparison_spans.extend((a,b) for a,b,page in timed_facts if page.get("sequence"))
     if (source_rows or comparison_spans) and dr:
@@ -1192,6 +1202,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     tcuts = [pc["f"][0] for pc in pieces[1:]]          # the take's own cuts and its cuts between speakers, in film frames
     from wf1_coverage import speaker_moves, move_frame
     composed_spans = [r[:2] for r in ins] + [[lo,hi] for lo,hi,_ in speakers] + [list(span) for span in source_pages]
+    composed_spans.extend([a,b] for a,b in returns)
+    composed_spans.extend([a,b] for a,b,p in timed_facts if p.get("scope_cue") or p.get("sequence_kind") == "handoff")
     if (thought and all(w.get("on_take") for w in coverage["windows"])) or (coverage.get("episode_examples") and not coverage["windows"]) or (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
             and any(r[4].get("episode_excerpt") for r in ins)):
         # Both the local demo and the remaining camera passages landed on their directed words.
@@ -1384,7 +1396,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                      for r in reading.get("reactions", [])]
         layout_edges = [round(t*FPS)+LEAD_F for shot in authored for t in shot]
         layout_edges.extend(f for start,end,_ in thought_spans for f in (start,end))
-        layout_edges.extend(f for span in reactions for f in span)
+        layout_edges.extend(f for span in reactions+returns for f in span)
         layout_edges.append(turn_f if turn_f is not None else f_last)
         layout_edges.extend(f for span in report_spans for f in span)
         layout_edges.extend(comparison_landings)
@@ -1457,7 +1469,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                        speaker_panel=True, source_ink=[box], caption_baseline=.88)
                 cut_pts.append(fa)
                 continue
-            if on_report or (authored_span and not closing_speaker):
+            returning = any(lo <= fa < hi for lo,hi in returns)
+            if on_report or returning or (authored_span and not closing_speaker):
                 # The source cut is already a composition. Fit all panels and both original
                 # credit corners together, with an independent ground for the caption.
                 aspect = take["w"]/take["h"]
@@ -1679,7 +1692,16 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         full = [0., 0., 1., 1.]
         crop = detail if figure and not rec.get("reframe") else full
         result_start = f0
-        if figure or rec.get("reframe"):
+        route_example = next((p for a,b,p in timed_facts if p.get("route_example") and a < f1 and f0 < b
+                              and p["facts"][0]["source"].get("url") == rec.get("page")), None)
+        if route_example and not rec.get("reframe") and figure:
+            # The actual request occupies one detail seat while the same camera clock
+            # continues above it. The receiving teams belong to the speaker's diagram.
+            source_box = fit_panel(full,(take["w"],take["h"]),(W,H),[0,.095,1,.41])
+            src = [max(0,(f-LEAD_F)/FPS) for f in span]
+            P.card(span,pieces[0]["key"],source_box,crop=full,src=src,source_ink=[source_box],caption_baseline=.88)
+            view(crop,[.045,.416,.955,.524],span,document_excerpt=True,look=None,grade=dict(gain=1.))
+        elif figure or rec.get("reframe"):
             from scene.motion import document_figure, contextual_detail
             below = .50 if any(lo < f1 and f0 < hi for lo,hi in report_spans) else .79
             reference = rec.get("example") or {}
@@ -1853,6 +1875,21 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             elif rec.get("provider") == "primary-document":
                 document(f0, f1, kind, name, rec, keys[rec["path"]])
                 document_pics.add(keys[rec["path"]])
+            elif any(page.get("scope_cue") and a < f1 and f0 < b for a,b,page in timed_facts):
+                from scene.motion import fit_panel
+                size = rec["w"],rec["h"]
+                box = fit_panel([0,0,1,1],size,(W,H),[0,.09,1,.49])
+                P.page([f0,f1],"#14171B",grain=0)
+                P.card([f0,f1],keys[rec["path"]],box,crop=[0,0,1,1],source_ink=[box],
+                       **({"src":rec["src"]} if kind=="clip" else {}))
+                note(f0,f1,kind,name,rec,"window")
+                source = rec.get("source") or {}
+                credit = " · ".join(dict.fromkeys(filter(None,(rec.get("name_super") or name,source.get("channel")))))
+                if credit:
+                    labels.append((f0,f1,credit,keys[rec["path"]]))
+                cut_pts.append(f0)
+                P.events.append(f0)
+                continue
             elif lay == "bleed" or kind == "clip":
                 bleed(f0, f1, kind, name, rec, keys[rec["path"]])
             elif lay == "window":
@@ -1968,6 +2005,13 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     for a,b,body,title,credit in report_cards:
         wf1_display.reading_card(P,[a,b],body,title,credit,pal,centre=.64,max_height=.22,group="field-report")
         P.events.append(a)
+    for lo,hi in returns:
+        owner = return_voices[lo]
+        for pc in pieces:
+            a,b = max(lo,pc["f"][0]),min(hi,pc["f"][1])
+            if a < b and pc["who"] == "listener":
+                wf1_display.reading_card(P,[a,b],"","Voice · "+owner,"",pal,centre=.684,
+                                         max_height=.09,group="interview-voice")
     for a,b,role in thought_spans:
         if b <= a:
             continue
@@ -1987,6 +2031,38 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         P.events.append(a)
     for a, b, page in timed_facts:
         facts = page["facts"]
+        if page.get("route_example"):
+            fact = facts[0]
+            picture = next((pc for pc in P.pictures if a < pc["f"][1] and pc["f"][0] < b
+                            and pc.get("source") == fact["source"].get("url")), None)
+            credit = (picture or {}).get("document",{}).get("publication") or fact["source"].get("publisher","")
+            label = "Example · "+credit
+            wf1_display.reading_card(P,[a,b],"" if picture else fact["value"],label,"",pal,
+                                     centre=.066 if picture else .468, max_height=.10,group="handoff-example")
+            fact_pages.append(dict(page,f=[a,b]))
+            continue
+        if page.get("sequence_kind") == "handoff":
+            from scene.palette.type import handoff_route
+            fact = facts[0]
+            cues = [(word_frame(step["at"]),step["label"]) for step in page["sequence"]]
+            route = handoff_route("handoff-"+str(a), (a,b), cues, width=W, height=H,
+                                  voice=P.voices["cap"], ink=pal["ink"], accent=pal["accent"])
+            P.items.extend(route["items"])
+            P.voices.update(route["voices"])
+            wf1_display.reading_card(P,[a,b],"",fact["attribution"]+" · "+fact["value"],"",pal,
+                                     centre=.548,max_height=.09,group="handoff-heading")
+            P.events.extend(f for f,_ in cues)
+            fact_pages.append(dict(page,f=[a,b]))
+            continue
+        if page.get("scope_cue"):
+            fact = facts[0]
+            attributed = wf1_display.estimate_credit(fact) if not wf1_display.same_recording(
+                fact["source"].get("url"),script.get("source_url")) else fact["attribution"]+" · Analogy"
+            wf1_display.reading_card(P,[a,b],fact["value"],attributed,"",pal,
+                                     centre=.645,max_height=.29,group="estimate-scope")
+            fact_pages.append(dict(page,f=[a,b]))
+            P.events.append(a)
+            continue
         if page.get("context_cue") or page.get("action_intro"):
             fact = facts[0]
             wf1_display.reading_card(P, [a,b], fact["value"], fact["attribution"], "", pal,
