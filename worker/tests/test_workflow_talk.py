@@ -488,3 +488,21 @@ def test_diecut_phrase_inside_spoken_line_uses_that_caption(tmp_path):
     cue, = patch["items"]
     assert (cue["id"], cue["t"], cue["f"]) == (cap["id"], cap["t"], cap["f"])
     assert min(cue["y"]) < .8 and cue["y"][-1] == .8
+
+
+def test_podcast_duck_follows_a_quiet_syllable_inside_one_detected_span():
+    from score import music
+
+    sr = music.SR
+    t = np.arange(8 * sr) / sr
+    carrier = np.sin(2 * np.pi * 400 * t)
+    voice = (carrier * np.where(t < 1.9, .28, np.where(t < 2.1, .06, 0))).astype(np.float32)
+    bed = (.10 * np.cos(2 * np.pi * 180 * t)).astype(np.float32)
+    original = bed.copy()
+    spans = music.voice_spans(voice)
+    assert len(spans) == 1
+    music.duck_spoken_words(bed, voice, spans)
+    syllable = slice(round(1.95 * sr), round(2.05 * sr))
+    margin = 10 * np.log10(np.mean(voice[syllable]**2) / np.mean(bed[syllable]**2))
+    assert margin >= 5.
+    assert np.array_equal(bed[-sr:], original[-sr:])

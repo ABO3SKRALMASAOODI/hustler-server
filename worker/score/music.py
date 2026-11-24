@@ -1782,6 +1782,7 @@ def duck_spoken_words(music, voice, words):
     length = min(len(music), len(voice))
     hop = SR // 100
     gain_db = np.zeros(math.ceil(length / hop) + 1)
+    syllable_db = np.zeros_like(gain_db)
     if not length or not words:
         return
     # Word stamps can begin in room tone before the first voiced sample.
@@ -1793,28 +1794,49 @@ def duck_spoken_words(music, voice, words):
         a, b = max(0, round(start * SR)), min(length, round(end * SR))
         if b <= a:
             continue
-        speech = (cumulative[b] - cumulative[a]) / (b-a)
-        left, right = max(0, a-SR), min(length, b+SR)
+        # Detected speech spans can hold several words. Compare overlapping
+        # syllables, keeping a short word intact and anchoring the last window
+        # at the end of the span so a partial window can't ride on room tone.
+        width = min(SR // 10, b - a)
+        starts = np.minimum(np.arange(a, b - width + 5*hop, 5*hop), b - width)
+        stops = starts + width
+        speech = (cumulative[stops] - cumulative[starts]) / width
+        left, right = np.maximum(0, starts-SR), np.minimum(length, stops+SR)
         local = (cumulative[right] - cumulative[left]) / (right-left)
-        bed = np.mean(music[a:b] ** 2)
-        if speech <= max(.003 ** 2, local * 10**(-17/10)) or bed <= 0:
-            continue
-        # Keep the existing song ride wherever the word already clears it.
-        change = 10 * math.log10(speech / bed) - HOLD["hold_floor_db"]
-        if change >= 0:
-            continue
-        lo, hi = a // hop, math.ceil(b / hop)
-        # Reach the depth at the first sample and hold through the last.
-        # Overlapping words share the deeper ramp, without compounding dips.
-        gain_db[lo:hi+1] = np.minimum(gain_db[lo:hi+1], change)
-    if not np.any(gain_db < 0):
+        # A window entering room tone should release the bed. Keep the whole
+        # word measurement for sustained, quieter replies between loud voices.
+        whole = (cumulative[b] - cumulative[a]) / (b-a)
+        limits = np.maximum(.003 ** 2, local * 10**(-HOLD["hold_deep_db"]/10))
+        sounding = speech > limits
+        windows = list(zip(starts[sounding], stops[sounding], speech[sounding]))
+        left, right = max(0, a-SR), min(length, b+SR)
+        nearby = (cumulative[right] - cumulative[left]) / (right-left)
+        if whole > max(.003 ** 2, nearby * 10**(-17/10)):
+            windows.append((a, b, whole))
+        for lo, hi, power in windows:
+            bed = np.mean(music[lo:hi] ** 2)
+            if bed > 0:
+                # Leave a soft syllable extra room up to the ordinary dialogue
+                # target. A level word keeps its existing word-wide margin.
+                below_word = max(0., 10 * math.log10(whole / power))
+                margin = min(UNDER_VOICE["podcast"], HOLD["hold_floor_db"] + below_word)
+                change = 10 * math.log10(power / bed) - margin
+                frames = slice(lo // hop, math.ceil(hi / hop) + 1)
+                # Short replies share the slow word ride across speakers. In a
+                # longer span let the local dip release between syllables.
+                local_dip = b - a > .4 * SR and hi - lo < b - a
+                ride = syllable_db if local_dip else gain_db
+                ride[frames] = np.minimum(ride[frames], change)
+    if not (np.any(gain_db < 0) or np.any(syllable_db < 0)):
         return
     # Reach the required depth before a soft voice enters. Adjacent words
     # share a ride and the return takes as long as the level change needs.
-    for i in range(len(gain_db)-2, -1, -1):
-        gain_db[i] = min(gain_db[i], gain_db[i+1] + .04)
-    for i in range(1, len(gain_db)):
-        gain_db[i] = min(gain_db[i], gain_db[i-1] + .03)
+    for ride, attack, release in ((gain_db, .04, .03), (syllable_db, .30, .20)):
+        for i in range(len(ride)-2, -1, -1):
+            ride[i] = min(ride[i], ride[i+1] + attack)
+        for i in range(1, len(ride)):
+            ride[i] = min(ride[i], ride[i-1] + release)
+    gain_db = np.minimum(gain_db, syllable_db)
     curve = 10 ** (np.interp(np.arange(length), np.arange(len(gain_db))*hop, gain_db) / 20)
     music[:length] *= curve.reshape((length,) + (1,) * (music.ndim-1))
 
@@ -1898,6 +1920,7 @@ def podcast_bed(music, voice, marks, song, plan, song_path, report):
                 music *= (10 ** (ride / 20))[:, None]
             report["opening_bed_dbfs"] = round(float(10*np.log10(max(1e-12,np.mean(music[:first]**2)))), 2)
     duck_spoken_words(music, voice, marks.get("words", []))
+    report["podcast_bed_version"] = 2
     tempo = plan["segments"][-1].get("tempo") or plan["tempo"]
     report["card_bed"] = dict(path=os.path.abspath(song_path), tempo=tempo, bar_s=song.get("bar_s"),
                               at_s=song["bars"][plan["end_hit_bar"]]["t0"] +
