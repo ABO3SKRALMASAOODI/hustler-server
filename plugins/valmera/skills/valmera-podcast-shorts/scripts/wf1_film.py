@@ -698,7 +698,7 @@ def stress_moves(holds, stress, edge=FPS, most=3 * FPS):
     return sorted(out)
 
 
-def build(script, sup, style_id, direction=None):
+def build(script, sup, style_id, direction=None, *, read_report=None):
     """(l1, beats) for one short. script: {"title", "segments": [{"say", "pictures": [names]}]}; sup: the pack
     (wf1_short.supply); direction: {"display": [{"seg", "text"}], "past_segs": [i], "turn_seg": i, "arc": [...],
     "director": DIRECTOR_CONTRACT 4's beats, sections and asks}. With a director, each section takes its own layout,
@@ -962,6 +962,8 @@ def build(script, sup, style_id, direction=None):
     # Keep any part of the separate byline still needed on an adjacent clause.
     credits = [(p, p["facts"][0].get("attribution")) for p in pages if p.get("sequence")]
     credits.extend((p, f["perspective"]["speaker"]) for p in evidence for f in p["facts"] if f.get("perspective"))
+    credits.extend((p, f["attribution"]) for p in pages for f in p["facts"]
+                   if f.get("attribution") and (f.get("chain") or {}).get("stance") in wf1_display.ESTIMATE_LABELS)
     for page in list(pages):
         facts = page["facts"]
         if len(facts) != 1 or (facts[0].get("chain") or {}).get("stance") not in wf1_display.OPINION_LABELS:
@@ -973,7 +975,8 @@ def build(script, sup, style_id, direction=None):
                          ((lo,min(hi,panel["first"]-1)),(max(lo,panel["last"]+1),hi)) if a<=b]
         if spans != [(page["first"], page["last"])]:
             pages.remove(page)
-            pages.extend(dict(page,first=a,last=b) for a,b in spans)
+            pages.extend(dict(page,first=a,last=b) for a,b in spans
+                         if clock.words[b]["t1"] - clock.words[a]["t0"] >= .45)
     # After the last documented event, the founder can deliver the resolution in their own voice.
     # Leave a closing state up when it brings additional evidence or explains a hypothetical.
     for n,page in enumerate(pages):
@@ -1231,6 +1234,56 @@ def build(script, sup, style_id, direction=None):
                       and all(f.get("perspective") and (f.get("program_entry") or not f.get("excerpt")) for f in p["facts"])}
     if source_pages:
         ins, _ = _director().hold_take(ins, source_pages, min_f=1, fps=FPS)
+    # Bind the compact editorial reading to the selected source slices, after device holds.
+    # On a rebuilt edit only a change in those pixels, words or claims needs another reading.
+    import wf1_field_report
+    account = wf1_field_report.account(d)
+    report = {}
+    report_cards = []
+    if account and read_report:
+        report, cost = read_report(account, clock.words, ins)
+        placement_report["spend"].extend(cost)
+    if report:
+        recall = account["recall"]
+        scope = account["estimate"]
+        turn, outcome = word_frame(report["workflow_at"]), word_frame(report["outcome_at"])
+        end = min(f_end, Clock.f(clock.words[recall["last"]]["t1"]))
+        credit = scope["speaker"] + "’s conversations with " + scope["subject"]
+        question_start = word_frame(account["question"]["first"])
+        report_cards.extend([(question_start,turn,"",credit,""),
+                             (turn,outcome,report["workflow"],"Core workflow · Illustration",""),
+                             (outcome,end,"",credit,"")])
+        evidence_spans = []
+        retained = []
+        report["illustrated"] = []
+        for i,(a,b,kind,name,rec) in enumerate(ins):
+            illustration = report["pictures"].get(i)
+            if not illustration:
+                retained.append([a,b,kind,name,rec])
+                continue
+            evidence_spans.append((a,b))
+            if illustration["kind"] == "illustration":
+                report["illustrated"].append(dict(window=rec.get("window"), f=[a,b], title=illustration["title"]))
+                report_cards.append((a,b,illustration["body"],"Illustration · "+illustration["title"],""))
+            else:
+                retained.append([a,b,kind,name,dict(rec, field_example=illustration)])
+        ins = retained
+        def carries_other_evidence(a,b,page):
+            facts = page["facts"]
+            if len(facts) != 1:
+                return True
+            fact = facts[0]
+            if (fact.get("chain") or {}).get("stance") == "recollection" and fact.get("attribution") == recall["speaker"] and page["first"] == recall["first"]:
+                return False
+            if fact.get("source",{}).get("url") != script.get("source_url") or fact.get("chain"):
+                return True
+            # A verbatim slice can be read in its original timed caption over the example.
+            value = [F.norm_word(w) for w in str(fact.get("value","")).split()]
+            spoken = [F.norm_word(w["w"]) for w in clock.words[page["first"]:page["last"]+1]]
+            repeats = value and any(spoken[i:i+len(value)] == value for i in range(len(spoken)))
+            return not (repeats and any(lo < b and a < hi for lo,hi in evidence_spans))
+        timed_facts = [(a,b,page) for a,b,page in timed_facts if carries_other_evidence(a,b,page)]
+        report_spans.extend((a,b) for a,b,*_ in report_cards)
     # Reserve picture space for actual multi-line performances on the speaker.
     # Read the same hold and word clock as the palette, including its implicit exit.
     said = [[w["w"], Clock.f(w["t0"])-1, Clock.f(w["t1"]), int(w["seg"])] for w in clock.words]
@@ -1707,6 +1760,51 @@ def build(script, sup, style_id, direction=None):
             prints(run)
         for k in run:
             f0, f1, kind, name, rec = ins[k]
+            if rec.get("field_example"):
+                from scene.motion import fit_panel
+                example = rec["field_example"]
+                span = [f0,f1]
+                crop = example.get("crop") or rec.get("action_box") or [0,0,1,1]
+                # A previous crop can identify this same source with different geometry.
+                # Keep the new readable excerpt unless that exact placement needs widening.
+                origin = rec.get("document_origin") or (rec.get("text_cleared") or {}).get("from_path") or rec["path"]
+                if any(isinstance(r,dict) and (r.get("origin") or r.get("path")) == origin
+                       and r.get("window") == rec.get("window") and r.get("f") == span
+                       and r.get("source_slice") == rec.get("src") and r.get("source_crop") == crop
+                       for r in d.get("reframe") or []):
+                    crop = [0,0,1,1]
+                P.page(span,"#171B23","#0D1015",grain=.012)
+                size = (rec["w"], rec["h"])
+                key = keys[rec["path"]]
+                if kind == "clip" and crop != [0,0,1,1]:
+                    # The listing scrolls off the screen. Keep that motion above a stable excerpt
+                    # of the exact frame the reader cited, rather than cropping a different link.
+                    from PIL import Image
+                    still = wf1_field_report.sample(rec, sup["work"], sup["ffmpeg"])
+                    with Image.open(still) as im:
+                        width,height = im.size
+                    detail = P.image(asset_id("p",dict(path=still)),dict(path=still,w=width,h=height))
+                    full = [0,0,1,1]
+                    context_box = fit_panel(full,size,(W,H),[.04,.15,.96,.43])
+                    P.card(span,key,context_box,crop=full,src=rec["src"],source_ink=[context_box],caption_baseline=.88)
+                    box = fit_panel(crop,size,(W,H),[.04,.44,.96,.57])
+                    P.card(span,detail,box,crop=crop,source_ink=[box],caption_baseline=.88)
+                else:
+                    box = fit_panel(crop,size,(W,H),[.04,.18,.96,.54])
+                    P.card(span,key,box,crop=crop,source_ink=[box],caption_baseline=.88,
+                           **({"src":rec["src"]} if kind=="clip" else {}))
+                publisher = (rec.get("source") or {}).get("channel") or rec.get("credit") or name
+                source = " · ".join(dict.fromkeys(filter(None,(publisher,example.get("source_label")))))
+                wf1_display.reading_card(P,span,example["body"],"Example · "+example["title"],source,
+                                         pal,centre=.684,max_height=.20,group="source-example")
+                note(f0,f1,kind,name,rec,"document" if rec.get("document") else "window")
+                P.pictures[-1].update(source_crop=crop,field_example=example)
+                if rec.get("document"):
+                    document_pics.add(keys[rec["path"]])
+                    P.pictures[-1]["document"] = rec["document"]
+                cut_pts.append(f0)
+                P.events.append(f0)
+                continue
             if rec.get('provider') == 'interview-frame':
                 from wf1_source_frame import compose
                 key = keys[rec["path"]]
@@ -1836,6 +1934,9 @@ def build(script, sup, style_id, direction=None):
     devices = []                                         # the palette's asks: rows whose type performs (laid at the render, chain.alien_bank)
     # An attributed claim carries the reading on the ground below its source picture.
     fact_pages = []
+    for a,b,body,title,credit in report_cards:
+        wf1_display.reading_card(P,[a,b],body,title,credit,pal,centre=.64,max_height=.22,group="field-report")
+        P.events.append(a)
     for a,b,role in thought_spans:
         if b <= a:
             continue
@@ -2262,7 +2363,7 @@ def build(script, sup, style_id, direction=None):
                                | {e["f"] for e in dev_events if 0 <= e["f"] < f_end}),
                  device_events=dev_events,
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=CAPTION_CONTRACT, display=[dict(f=[a, b], text=t) for a, b, t in shown],
-                 display_facts=fact_pages, thought_experiment=thought,
+                 display_facts=fact_pages, field_report=report, thought_experiment=thought,
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t, pic=pic) for a, b, t, pic in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=(sorted(set(layouts_used)) if dr and len(set(layouts_used)) > 1 else (layouts_used[0] if dr and layouts_used else st["layout"])), placement_check=placement_report, coverage=coverage_report,

@@ -1340,10 +1340,14 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
               source_start=(script.get("window") or [0])[0], speaking_turns=script.get("speaking_turns", []),
               segments=[dict(say=ln["text"], pictures=[n for n in ln.get("subjects") or []]) for ln in pack["lines"]])
     sc["reviewed_clauses"] = reviewed_clauses
+    import wf1_field_report
+    def read_report(account, words, rows):
+        return wf1_field_report.read(account, words, rows, ctx.supply, pack["ffmpeg"], _llm())
+
     for attempt in range(RECOVERY_PASSES + 3 + LADDER_RUNGS):
         knobs["coverage_final"] = coverage_final(pack) or bool(pack.get("coverage_recoveries"))
         try:
-            l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
+            l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs, read_report=read_report)
             break
         except wf1_coverage.CoverageError as error:
             pack['coverage_missing']=list(error.report.get('missing_windows') or [])
@@ -1366,7 +1370,7 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
             save_pack(ctx,pack)
     else:
         knobs["coverage_final"] = True
-        l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
+        l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs, read_report=read_report)
     early = seat_brand_words(l1)
     if early:
         beats.setdefault("taste_moved",[]).extend(early)
@@ -1412,7 +1416,7 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
     # into the film's tail, so no short keeps a flat bed (round1 thin-sound)
     story_turn_s = round(beats["story_turn_f"] / F.FPS, 3) if beats.get("story_turn_f") is not None else None
     return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, last_word_s=last_word_s, story_turn_s=story_turn_s, turn_drop=turn_s is not None, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
-                thought_read=True, frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=reading_spend + ([d["spend"]] if d.get("spend") else []) +
+                field_report_read=True, thought_read=True, frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=reading_spend + ([d["spend"]] if d.get("spend") else []) +
                 [dict(u,stage='supply',what='primary documents') for research in pack.get('document_research',[]) for u in research.get('spend',[])] +
                 [dict(u,stage='supply',what='documentary research revision') for u in pack.get('research_spend',[])] +
                 [dict(stage="score", what="picture-to-words check", **u) for u in (beats.get("placement_check") or {}).get("spend", [])])
@@ -1627,7 +1631,9 @@ def render(ctx, script, sc):
                     and sc['beats'].get('caption_contract')!=wf1_film.CAPTION_CONTRACT)
     import wf1_experiment
     needs_reading = not sc.get("thought_read") and all(wf1_experiment.materials(sc.get("direction") or {}))
-    if rejected_plan or stale_captions or needs_reading:
+    import wf1_field_report
+    needs_account = not sc.get("field_report_read") and wf1_field_report.account(sc.get("direction") or {})
+    if rejected_plan or stale_captions or needs_reading or needs_account:
         if history and rejected_plan:
             pictures = sc.get("beats", {}).get("pictures", [])
             _repair_window_boundaries(ctx, [r for r in history[-1]["placements"] if not r["ok"]
@@ -1667,7 +1673,7 @@ def render(ctx, script, sc):
                         dict(path=path, sha256=file_digest(path), f=pic["f"], src=pic.get("source_slice"),
                              clause=pic.get("clause"), clause_t=pic.get("clause_t"), source=pic.get("source"),
                              **(dict(approved_crop=pic["source_crop"], approved_media=file_digest(pic["path"]))
-                                if pic.get("mode") == "window" and pic.get("source_crop") else {}),
+                                if pic.get("mode") == "window" and pic.get("source_crop") and not pic.get("field_example") else {}),
                              motion_ok=row.get("motion_ok"), fit=pic.get("fit"),
                              attribution=pic.get("attribution"), reason=row.get("reason"),
                              **({"fresh_clip":pic["fresh_clip"]} if pic.get("fresh_clip") else {})))
@@ -1926,7 +1932,10 @@ def _rebuild_holds(ctx, script, sc, rd, defer=False):
     if sc["beats"].get("thought_experiment"):
         from wf1_experiment import local_windows
         coverage = dict(coverage, windows=local_windows(coverage, sc["beats"]["thought_experiment"]))
-    weak = hold_windows(measured, coverage, sc["beats"].get("pictures") or [])
+    # Count the exact frames occupied by authored illustrations in the same coverage ruler.
+    # Unillustrated portions of that clause can still ask for a picture.
+    illustrations = (sc["beats"].get("field_report") or {}).get("illustrated") or []
+    weak = hold_windows(measured, coverage, (sc["beats"].get("pictures") or []) + illustrations)
     weak = [i for i in weak if i not in pack.get("settled_hold_windows", [])]
     if not weak:
         return False
@@ -2001,6 +2010,11 @@ def unrepaired(picture, found):
             continue
         if (r.get("origin") or r.get("path")) not in own or r.get("window") not in (None, picture.get("source_slot") or picture.get("window")):
             continue
+        if picture.get("field_example") and r.get("fault") == "reframe" and r.get("source_crop"):
+            if (r.get("source_crop") != picture.get("source_crop") or r.get("f") != picture.get("f")
+                    or r.get("source_slice") != picture.get("source_slice")):
+                continue
+            return can_widen_source(picture)
         if (picture.get("approved_crop") and r.get("fault") == "reframe" and r.get("f")
                 and (r["f"] != picture.get("f") or r.get("source_slice") != picture.get("source_slice"))):
             continue
@@ -2049,7 +2063,7 @@ def _repair_window_boundaries(ctx, rejected):
 def can_widen_source(picture):
     # Older scores marked a document reframed while still drawing its clipped detail.
     return picture.get("source_crop") != [0,0,1,1] and (
-        not picture.get("reframed") or picture.get("mode") == "document")
+        not picture.get("reframed") or picture.get("mode") == "document" or bool(picture.get("field_example")))
 
 
 def _rebuild_rejected(ctx, script, sc, report, defer=False):
@@ -2083,7 +2097,13 @@ def _rebuild_rejected(ctx, script, sc, report, defer=False):
                           and old.get("origin_sha256") == origin_digest and old.get("source") == p["source"])
         # If the whole checked source is already on screen, widening its crop is
         # a no-op. Review the source and clause together before spending another render.
-        if r.get("fault", "reframe") == "reframe" and can_widen_source(p) and not has((window, origin, "reframe")):
+        already_framed = has((window, origin, "reframe"))
+        if already_framed and p.get("field_example"):
+            already_framed = any(old.get("fault") == "reframe" and old.get("window") == window
+                                 and (old.get("path") == origin or (origin_digest and old.get("origin_sha256") == origin_digest))
+                                 and old.get("f") == p.get("f") and old.get("source_slice") == p.get("source_slice")
+                                 and old.get("source_crop") == p.get("source_crop") for old in previous)
+        if r.get("fault", "reframe") == "reframe" and can_widen_source(p) and not already_framed:
             step = (window, origin, "reframe")
         elif not has((window, origin, "contradiction")):
             step = (window, origin, "contradiction")
@@ -2170,7 +2190,7 @@ def check(ctx, rd, sc):
         style=b.get("style"), layout=b.get("layout"), cutaway_share=b.get("cutaway_share"), finishes=b.get("finishes"), alien=b.get("alien"),
         pictures=len(pics), clips=len([p for p in pics if p.get("kind") == "clip"]), photographs=len([p for p in pics if p.get("kind") == "photo"]),
         new_pictures_10s=round(len(pics) / secs * 10, 2), display_words=[x.get("text") for x in b.get("display") or []],
-        display_facts=b.get("display_facts", []), thought_experiment=b.get("thought_experiment"), placement_check=b.get("placement_check"), rendered_check=b.get("rendered_check"), render_reviews=rd.get("picture_review"),
+        display_facts=b.get("display_facts", []), field_report=b.get("field_report"), thought_experiment=b.get("thought_experiment"), placement_check=b.get("placement_check"), rendered_check=b.get("rendered_check"), render_reviews=rd.get("picture_review"),
         delivered_check=b.get("delivered_check"), delivery_reviews=history,
         sources=[dict(f=p.get("f"), visible_f=p.get("visible_f"), kind=p.get("kind"), name=p.get("name"), source=p.get("source"), time_range=p.get("time_range"),
                       mode=p.get("mode"), window=p.get("window"), w=p.get("w"), h=p.get("h"), rung=p.get("rung"), how=p.get("how"),
