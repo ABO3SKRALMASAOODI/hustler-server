@@ -180,6 +180,70 @@ def counter(l1, work, ask, sense=None):
 
 # --------------------------------------------------------------------------- staircase and the two-size stack
 
+def reporting_chain(group, end, levels, counts, flat, *, width, height, voice, ink, accent):
+    """Build upwards on the speaker's clock. Only explicitly linked counts share a level."""
+    items, voices = [], {}
+
+    def label(key, span, text, x, y, room, size, colour):
+        font = group + "." + key
+        voices[font] = K.fit(dict(voice, track=0), text, room*width, cap_px=round(size*width), floor_px=1)
+        items.append(K.word(font, span, text, font, x, y, colour, fact_type=True, text_group=group))
+
+    def rule(key, span, x0, y0, x1, y1, colour):
+        items.append(K.rect(group+"."+key, span, [x0,y0,x1,y1], colour, z=6))
+
+    # Keep the labels at their final positions from the outset. A new connector
+    # ends at the next node without passing through any label.
+    positions = {}
+    step = min(.054, .165 / max(1,len(levels)-1))
+    radius = .008
+    ry = radius * width/height
+    for i,(cue,text) in enumerate(levels):
+        y = .77 - i*step
+        node_y = y - .009
+        positions[cue] = y
+        if i:
+            rule(f"link{i}", [cue,end], .095-.002, node_y, .095+.002, node_y+step, accent)
+        rule(f"node{i}", [cue,end], .095-radius, node_y-ry, .095+radius, node_y+ry, accent)
+        label(f"level{i}", [cue,end], text, .12, y, .40, .045, ink)
+
+    first = levels[0][0]
+    label("deep", [first,end], "Deep", .085,.562,.41,.056,accent)
+    loose = [(i,cue,value) for i,(cue,value,level) in enumerate(counts) if level not in positions]
+    if loose:
+        label("counts", [loose[0][1],flat], "Direct reports", .56,.638,.36,.040,ink)
+        label("open-quote", [loose[0][1],flat], "“", .555,.702,.036,.045,ink)
+        cell = .30 / len(loose)
+        for slot,(i,cue,value) in enumerate(loose):
+            x = .592 + slot*cell
+            key = f"count{i}"
+            label(key, [cue,flat], value, x,.715,cell*.90,.074,accent)
+            advance = K.ink_box(voices[group+"."+key],value)[0]/width
+            until = loose[slot+1][1] if slot+1 < len(loose) else flat
+            label(f"close-quote{i}", [cue,until], "”", x+advance+.002,.702,.036,.045,ink)
+    for i,(cue,value,level) in enumerate(counts):
+        if level in positions:
+            until = next((f for f,_,target in counts[i+1:] if target == level),flat)
+            # Place the annotation after its measured level text, before the count column.
+            level_idx = next(j for j,(f,_) in enumerate(levels) if f==level)
+            name = levels[level_idx][1]
+            x = .135 + K.ink_box(voices[f"{group}.level{level_idx}"],name)[0]/width
+            text = value if loose else value + " direct reports"
+            room = max(.035,.55-x) if loose else .92-x
+            label(f"count{i}", [cue,until], text, x,positions[level],room,.043,accent)
+    # Use the same nodes and vertical distance for an illustrative short chain.
+    # The whole team occupies one level without assigning it a headcount.
+    label("flat", [flat,end], "Flat", .56,.562,.35,.056,ink)
+    base = .77-.009
+    rule("flat-link", [flat,end], .568,base-step,.572,base,ink)
+    for i,text in enumerate(("Team","Manager")):
+        baseline = .77-i*step
+        y = baseline-.009
+        rule(f"flat-node{i}", [flat,end], .57-radius,y-ry,.57+radius,y+ry,ink)
+        label(f"flat-level{i}", [flat,end], text, .595,baseline,.32,.045,ink)
+    return dict(items=items,voices=voices)
+
+
 def handoff_route(group, span, steps, *, width, height, voice, ink, accent):
     """Lay out a connected route once. Move the signal to the receiving station on its cue."""
     start,end = span
