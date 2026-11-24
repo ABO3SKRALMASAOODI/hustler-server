@@ -741,35 +741,41 @@ def snap(l1, work, ask, sense_=None, pool=None):
     W, H, fps = K.geometry(l1)
     args = K.args_of(ask)
     f, _ = K.span(l1, args, default_s=0.1, least=1)
-    sh = K.shot_at(l1, f)
+    sh = K.take_picture_at(l1, f)
     if sh is None or sh.get("pic") == "plate":
         return {"skip": "no picture under the word"}
     lo, hi = sh["f"]
-    if f - lo < 3:
-        f = lo
     size = float(args.get("size", 1.3))
     pic = K.pic_of_asset(l1, work, sh.get("pic"))
     cs = K.crops(l1, work, sh)
+    panel = sh["k"] == "card"
+    drawn_width = W * sh.get("w", .5) if panel else W
+    if panel and pic and not sh.get("crop"):
+        cs = [sense.cover(pic.w, pic.h, drawn_width, H * sh.get("h", .5))] * (hi - lo)
     if pic:
         w_min = min(c[2] - c[0] for c in cs[f - lo:])
-        size = min(size, (w_min * pic.w) / (W / TASTE_UP))
+        size = min(size, (w_min * pic.w) / (drawn_width / TASTE_UP))
     if size < 1.12:
         return {"skip": "the picture has no pixels for a punch"}
     hold = int(args.get("hold") or (hi - f))
     e = min(f + max(hold, 4), hi)
     back = bool(args.get("back")) and e < hi
-    pieces = []
-    if f > lo:
-        pieces.append(sense.slice_shot(sh, lo, f, sh["id"]))
-    punch = sense.slice_shot(sh, f, e, sh["id"] if f == lo else f"{sh['id']}~s")
     over = [1.0 + 0.045 * math.exp(-j / 1.6) for j in range(e - f)]
-    punch["crop"] = [K.r5(K.scale_crop(c, 1.0 / (size * over[j]), *_subject_point(c))) for j, c in enumerate(cs[f - lo:e - lo])]
-    pieces.append(punch)
-    if e < hi:
-        rest = sense.slice_shot(sh, e, hi, f"{sh['id']}~t")
-        if not back:
-            rest["crop"] = [K.r5(K.scale_crop(c, 1.0 / size, *_subject_point(c))) for c in cs[e - lo:]]
-        pieces.append(rest)
+    landed = [K.r5(K.scale_crop(c, 1.0 / (size * over[j]), *_subject_point(c)))
+              for j, c in enumerate(cs[f - lo:e - lo])]
+    tail = cs[e - lo:] if back else [K.r5(K.scale_crop(c, 1.0 / size, *_subject_point(c))) for c in cs[e - lo:]]
+    if panel:
+        # Keep the fitted panel's original source clock, pose and credit seat.
+        pieces = [dict(sh, crop=cs[:f-lo] + landed + tail)]
+    else:
+        pieces = []
+        if f > lo:
+            pieces.append(sense.slice_shot(sh, lo, f, sh["id"]))
+        punch = sense.slice_shot(sh, f, e, sh["id"] if f == lo else f"{sh['id']}~s")
+        pieces.append(dict(punch, crop=landed))
+        if e < hi:
+            rest = sense.slice_shot(sh, e, hi, f"{sh['id']}~t")
+            pieces.append(rest if back else dict(rest, crop=tail))
     return {"items": pieces, "drop": [sh["id"]], "assets": {}, "events": [{"f": f, "what": "snap zoom", "kind": "punch", "strength": 0.7}],
             "log": {"shot": sh["id"], "f": f, "size": round(size, 3), "until": e, "back": back}}
 

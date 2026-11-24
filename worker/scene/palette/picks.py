@@ -25,6 +25,7 @@ import numpy as np
 
 from .. import bake, motion
 from ..alien import sense
+from ..plan import A
 
 TAKE_PREFIX = ("main", "own:")
 FLASH_STEP = 0.10          # WCAG 2.x general flash: an opposing pair of relative-luminance changes of 10% or more...
@@ -51,6 +52,16 @@ def shots(l1):
 
 def shot_at(l1, f):
     return sense.shot_at(l1, int(f))
+
+
+def take_picture_at(l1, frame):
+    """A live interview may be a fitted foreground card over a base plate."""
+    panels = (it for it in l1.get("items") or [] if it.get("k") == "card"
+              and it.get("pic") != "plate" and (is_take(it.get("pic")) or it.get("source_frame") or it.get("speaker_panel"))
+              and it["f"][0] <= frame < it["f"][1] and A(it.get("op", 1), frame, it["f"][0]) > 0
+              and A(it.get("s", 1), frame, it["f"][0]) > 0)
+    panel = max(panels, key=lambda it: (it.get("z", 0), str(it["id"])), default=None)
+    return panel or shot_at(l1, frame)
 
 
 def cuts(l1):
