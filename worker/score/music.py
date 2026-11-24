@@ -1715,7 +1715,7 @@ def to_ar(x):
     from . import sound as SD
     x = np.asarray(x, np.float32)
     ch = 2 if x.ndim > 1 else 1
-    r = subprocess.run([ffmpeg or FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "f32le", "-ar", str(SR), "-ac", str(ch), "-i", "pipe:0",
+    r = subprocess.run([FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "f32le", "-ar", str(SR), "-ac", str(ch), "-i", "pipe:0",
                         "-ac", "1", "-ar", str(SD.AR), "-f", "f32le", "pipe:1"], input=x.tobytes(), capture_output=True, timeout=600)
     return np.frombuffer(r.stdout, np.float32).copy()
 

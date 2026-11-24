@@ -247,3 +247,22 @@ def test_the_arranged_bed_is_the_projects_asset_with_its_licence(tmp_path, monke
     meta = rows[0][1]["meta"]
     assert meta["chosen_by"] == "valmera" and meta["library_slug"] == "t-one" and meta["credit"] == track["credit"] and meta["license"] == "CC-BY-4.0" and meta["removable"]
     assert MF.ensure_arranged_asset(ctx, {"cid": "gone"}, str(path))[0] is None
+
+
+@needs_ffmpeg
+def test_podcast_score_resamples_the_spine_and_muxes_the_arrangement(songs, tmp_path):
+    l1, index = _film(16.)
+    source = str(tmp_path / "voice.mp4")
+    output = str(tmp_path / "scored.mp4")
+    subprocess.run([FF, "-loglevel", "error", "-f", "lavfi", "-i", "color=s=64x96:r=30",
+                    "-f", "lavfi", "-i", "sine=frequency=300", "-t", "16",
+                    "-c:v", "libx264", "-c:a", "aac", source], check=True)
+    l1["assets"] = {"main": {"abs": source}}
+    for word in index["words"]:
+        word["w"] = "voice"
+    report = MF.score(l1, str(tmp_path), film=source, out=output, kind="podcast",
+                      song=songs["full"], payoff_s=10., index=index)
+    assert report["ok"] and report["mix"]["card_bed"]["path"] == songs["full"]
+    assert os.path.getsize(output) > 0
+    with np.load(tmp_path / "mix_stems.npz") as stems:
+        assert np.max(np.abs(stems["bed"])) > .01
