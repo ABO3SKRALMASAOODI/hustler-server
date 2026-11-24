@@ -403,3 +403,14 @@ def test_archival_figure_uses_the_reading_area_on_a_phone():
     assert w > .6 and h > .48
     assert .13 <= box[1] < box[3] <= .80
     assert abs(w*1080/(h*1920) - .517*1104/(.924*874)) < 1e-4
+
+
+def test_product_answer_keeps_surrounding_rows_at_its_reading_scale():
+    detail = [.04,.755,.957,.986]
+    size = (1134,521)
+    crop = motion.contextual_detail(detail,size,(W,H),top=.20,bottom=.54)
+    box = motion.document_figure(crop,size,(W,H),top=.20,bottom=.54)
+    assert crop == [detail[0],0.,detail[2],1.]
+    assert .20 <= box[1] < box[3] <= .54
+    assert box[3]-box[1] > .24
+    assert box[2]-box[0] == pytest.approx(.89)

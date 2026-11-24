@@ -41,9 +41,21 @@ def fit_panel(crop, source_size, canvas_size, seat, align_y=.5):
     return [x, y, x + width, y + height]
 
 
-def document_figure(crop, source_size, canvas_size, bottom=.79):
+def document_figure(crop, source_size, canvas_size, bottom=.79, top=.15):
     """Give the selected figure one reading area between the credit and the spoken caption or card."""
-    return fit_panel(crop, source_size, canvas_size, [.055,.15,.945,bottom])
+    return fit_panel(crop, source_size, canvas_size, [.055,top,.945,bottom])
+
+
+def contextual_detail(crop, source_size, canvas_size, bottom=.79, top=.15):
+    """Let a thin result row retain the surrounding application at the same reading scale."""
+    left, upper, right, lower = crop
+    # Preserve the entire width of the answer. Fill the available reading seat vertically
+    # with real neighboring rows, up to the bounds of the acquired overview.
+    width = (right-left) * source_size[0]
+    target = width / source_size[1] * (bottom-top)*canvas_size[1] / (.89*canvas_size[0])
+    height = min(1., max(lower-upper, target))
+    y = max(0., min(1.-height, (upper+lower-height)/2))
+    return [left, y, right, y+height]
 
 
 class Cam:
