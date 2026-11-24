@@ -1394,8 +1394,7 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
     coverage = pack["coverage"]
     index_path = os.path.join(ctx.supply, "index.json")
     retiming_spend = []
-    if (coverage.get("comparisons") and not coverage.get("comparison_clock") and
-            any("reveal" not in c for c in coverage["comparisons"]) and os.path.isfile(index_path)):
+    if wf1_coverage.needs_comparison_clock(coverage) and os.path.isfile(index_path):
         # Resume an older scored pack on its same sources and selected cuts. Only
         # refresh the word-addressed comparison and its accompanying definition.
         import wf1_source_frame
@@ -1415,7 +1414,8 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
         else:
             if timed.get("comparisons"):
                 coverage = dict(coverage, comparisons=timed["comparisons"], comparison_clock=True,
-                                contextual_definitions=timed.get("contextual_definitions",coverage.get("contextual_definitions",[])))
+                                comparison_states=True, contextual_definitions=coverage.get("contextual_definitions")
+                                or timed.get("contextual_definitions", []))
                 pack = dict(pack, coverage=coverage)
             retiming_spend = timed.get("spend") or []
     thought, reading_spend = wf1_experiment.read(d, pack["coverage"]["words"], ctx.supply, _llm())

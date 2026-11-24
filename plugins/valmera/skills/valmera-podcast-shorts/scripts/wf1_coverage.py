@@ -68,6 +68,14 @@ def story_context(script):
                 episode_start=(script.get("window") or [0])[0])
 
 
+def needs_comparison_clock(coverage):
+    """Recognize an unaddressed reveal or a retained list that just reprints its premise."""
+    return any(("reveal" not in case and not coverage.get("comparison_clock")) or
+               (not coverage.get("comparison_states") and any(
+                   step.get("label") == case.get("premise") for step in case.get("steps") or []))
+               for case in coverage.get("comparisons") or [])
+
+
 def plan(words, title, work, llm, named=None, off_camera=None, frames=None, story=None, speaking_turns=None, *, timing_only=False):
     """named: the script stage's resolved referents (script.named), the director's subjects from the start.
     off_camera: [{first, last, t0, t1}] word spans the show's own camera holds a listener while the voice speaks
@@ -80,7 +88,7 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None, stor
     if os.path.exists(path):
         old = json.load(open(path))
         if (old.get('contract') == CONTRACT and (not old.get('comparisons') or old.get('comparison_clock'))
-                and (not timing_only or old.get('source_key') == source_key)
+                and (not timing_only or (old.get('source_key') == source_key and not needs_comparison_clock(old)))
                 and old.get('words') == words and (old.get('named') or []) == named
                 and old.get('story') == story and old.get('speaking_turns') == speaking_turns and (old.get('off_camera') or []) == off_camera):
             if timing_only:
@@ -153,6 +161,16 @@ Preserve the complete spoken relationship in the running caption.
 Read story.claims, story.meaning and the editorial brief with the actual words. For an explicitly imagined analogy,
 give its whole vehicle (including the imagined consequence) ONE inclusive comparisons span. Write
 two concise graphic labels, premise and consequence, that explain its logic in the conditional.
+When one hypothetical case unfolds in successive actions and the speaker applies its outcome
+to their own practice, give the comparison an application:{at,label,speaker}. Its at is the
+start of the return to the real situation, label is their short specific interpretation, and
+speaker is the person making it. Write the application in personal terms ("He expects …",
+"She questions …") within six to eight words. Preserve any irony in the spoken return.
+A speaker's expectation describes that person's view, not professional guidance. Include the whole application through its last spoken word.
+Use steps for EACH distinct action in the example, starting on its own clause. Label only
+that action in a few words. Do not put the combined premise in a step. Set reveal at the
+start of the consequence clause, not its final noun. The consequence is its own row.
+Keep this entire example on the moving original interview, with these compact annotations.
 When the speaker names a physical indicator and acts out its reading changing, the comparison can
 supply an original, unnumbered dial illustration. Give it instrument:{enter,change,leave,trend},
 with integer word IDs: enter on the specific instrument or brand as named, change on the adjective
@@ -353,6 +371,12 @@ an honest subject; never invent one.'''
                          and type(step.get("at")) is int and row["first"] <= step["at"] <= row["last"]
                          and isinstance(step.get("label"),str) and step["label"].strip()]
                 comparison["steps"] = sorted(steps,key=lambda step:step["at"])
+            application = row.get("application")
+            if (isinstance(application, dict) and type(application.get("at")) is int
+                    and comparison.get("reveal", len(words)) < application["at"] <= row["last"]
+                    and all(isinstance(application.get(k), str) and application[k].strip()
+                            for k in ("label", "speaker"))):
+                comparison["application"] = {k: application[k] for k in ("at", "label", "speaker")}
             instrument = row.get("instrument")
             if isinstance(instrument, dict):
                 cues = [instrument.get(k) for k in ("enter", "change", "leave")]
@@ -379,7 +403,7 @@ an honest subject; never invent one.'''
             if ids and ids[0] <= claim["first"] <= claim["last"] <= ids[-1]:
                 claim.update(first=ids[0], last=ids[-1])
                 break
-    out.update(story=story, comparisons=comparisons, comparison_clock=True, speaker_claims=speaker_claims, speaking_turns=speaking_turns)
+    out.update(story=story, comparisons=comparisons, comparison_clock=True, comparison_states=True, speaker_claims=speaker_claims, speaking_turns=speaking_turns)
     if frames:
         out['source_reading'] = source_frame.bind(dict(out, words=words, windows=windows), frames, dict(out,spend={}))
     # Reserve locally directed words before assigning indices to external research windows.

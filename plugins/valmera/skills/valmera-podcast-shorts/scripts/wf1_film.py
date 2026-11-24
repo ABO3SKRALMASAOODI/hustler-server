@@ -810,6 +810,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     # after the word), so the end card joins after the payoff, never over it
     f_voice_end = Clock.f(max(w["t1"] for w in clock.words)) if clock.words else Clock.f(clock.dur)
     f_end = max(min(f_voice_end + BREATH_F, int((float(take["dur"]) + LEAD_F / FPS) * FPS)), f_voice_end + 1)
+    from renderer import outro_join_frames
+    caption_handoff = max(f_voice_end, f_end - outro_join_frames(FPS, f_end / FPS))
     stress = F.voice_stress(sup)
     nseg = len(script["segments"])
     cap_y = float(st["cap_y"])
@@ -1061,6 +1063,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                   dict(url=script.get("source_url"), publisher=script.get("source_credit")))
     research_views = []
     instrument_scenes = []
+    case_payoffs = []
     dial_asks = [ask for ask in dr.get("asks", []) if ask["dev"] == "analogy_dial"]
     for comparison in coverage.get("comparisons") or []:
         first, last = comparison["first"], comparison["last"]
@@ -1081,6 +1084,11 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             research_views.append((word_frame(project["last"]+1), word_frame(last+1) or f_end, comparison))
         elif not publisher:
             pages = wf1_display.comparison_pages(pages, comparison, clock.words)
+            if comparison.get("application"):
+                # Widen on the consequence to keep the original performance and
+                # its return to the real situation on one continuous camera.
+                case_payoffs.append((Clock.f(clock.words[comparison["reveal"]]["t0"]),
+                                     word_frame(last+1) or f_end))
     import wf1_principle
     principle = d.get("principle_example")
     pages = wf1_principle.pages(pages, principle, clock.words)
@@ -1160,6 +1168,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             if page.get("research_stage") and next_word is not None and not any(
                     q.get("research_stage") and q["first"] == page["last"]+1 for q in pages):
                 b = next_word
+        if page.get("case_phase") == "application" and page["last"] == len(clock.words)-1:
+            b = caption_handoff
         if page.get("principle_plate") and page["last"] == len(clock.words)-1:
             b = f_end
         facts = page["facts"]
@@ -1693,6 +1703,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         for start, end, dial in instrument_scenes:
             layout_edges.extend((start, end, word_frame(dial["at"]["w"]),
                                  word_frame((dial.get("until") or dial["at"])["w"]+1) or end))
+        layout_edges.extend(frame for span in case_payoffs for frame in span)
         layout_edges.extend(comparison_landings)
         layout_edges.extend(f for start,(end,_,_) in live_beats.items() for f in (start,end))
         layout_edges.extend(f for lo,hi,_ in speakers for f in (lo,hi))
@@ -1731,10 +1742,11 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 continue
             on_reporting = reporting_span and reporting_span[0] <= fa < reporting_span[1]
             on_approval = approval_span and approval_span[0] <= fa < approval_span[1]
-            if on_reporting or on_approval or (demo_span and demo_span[0] <= fa < demo_span[1]):
+            on_case = any(lo <= fa < hi for lo,hi in case_payoffs)
+            if on_case or on_reporting or on_approval or (demo_span and demo_span[0] <= fa < demo_span[1]):
                 from scene.motion import fit_panel
                 crop = [0,0,1,1]
-                seat = [0,.10,1,.48] if on_reporting or on_approval else [0,.09,1,.52]
+                seat = [0,.10,1,.48] if on_case or on_reporting or on_approval else [0,.09,1,.52]
                 box = fit_panel(crop, (take["w"],take["h"]), (W,H), seat)
                 P.page([fa,fb],"#14171B",grain=0)
                 P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],source_frame=True,
@@ -2580,7 +2592,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             step = page["analogy_step"]
             if not step["label"].strip():
                 continue
-            heading = "Hypothetical"
+            heading = page.get("heading") or "Hypothetical"
             if page.get("research_stage"):
                 heading += " · " + page["research_stage"]
             phases_so_far = page.get("comparison_labels") or []
@@ -3034,12 +3046,19 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 cap["f"][1] = max(cap["f"][0]+1,min(cap["f"][1],Clock.f(off)))
     closing_phrase = any(p["last"] == len(clock.words)-1 and (p.get("analogy_step") or {}).get("reveal")
                          and not p["analogy_step"].get("label") for _,_,p in timed_facts)
-    if closing_phrase:
+    applied_close = any(p.get("case_phase") == "application" and p["last"] == len(clock.words)-1
+                        for _,_,p in timed_facts)
+    if closing_phrase or applied_close:
         captions = [it for it in P.items if it.get("role") == "cap"]
         if captions:
             last_caption = max(captions,key=lambda it:it["f"][1])
             if last_caption["f"][1] >= f_voice_end-1:
-                last_caption["f"][1] = f_end
+                if applied_close:
+                    # The subtitle owns the complete sentence and its reading breath.
+                    # End it on the first card-join frame after the source word releases.
+                    last_caption["f"][1] = caption_handoff
+                else:
+                    last_caption["f"][1] = f_end
     for word in list(P.items):
         if word.get("role") == "cap":
             # On the scale comparison its spoken cue is the graphic. Enlarge that

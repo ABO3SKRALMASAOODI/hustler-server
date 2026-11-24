@@ -886,18 +886,41 @@ def comparison_pages(pages, comparison, words):
     fact = dict(relation=comparison["premise"], value=comparison["consequence"], source={})
     if reveal is None:
         return result + [dict(first=first,last=last,analogy=True,facts=[fact])]
-    steps = {first:dict(label=comparison["premise"])}
-    steps.update((step["at"],step) for step in comparison.get("steps") or [])
-    steps.setdefault(reveal, dict(label="", reveal=True))
+    application = comparison.get("application")
+    steps = {step["at"]: step for step in comparison.get("steps") or []}
+    if application:
+        # The premise summarizes the entire case. Its individual actions own the
+        # screen on their speech, before the consequence and the speaker’s return.
+        steps = {at: step for at, step in steps.items() if at < reveal}
+        steps[reveal] = dict(label=comparison["consequence"], reveal=True)
+        steps[application["at"]] = dict(label=application["label"])
+    else:
+        steps.setdefault(first, dict(label=comparison["premise"]))
+        preceding = max((at for at in steps if at <= reveal), default=first)
+        if steps[preceding]["label"] != comparison["consequence"]:
+            steps.setdefault(reveal, dict(label="", reveal=True))
     cues = sorted(steps)
+    history = []
     for start,end in zip(cues,cues[1:] + [last+1]):
+        label = steps[start]["label"]
+        if label and (not history or label != history[-1]):
+            history.append(label)
         spans = [(start,end)]
         for p in protected:
             spans = [(a,b) for lo,hi in spans for a,b in
                      ((lo,min(hi,p["first"])),(max(lo,p["last"]+1),hi)) if a < b]
+        labels = history[-2:]
+        annotation = {}
+        if application:
+            applied = start >= application["at"]
+            annotation = dict(heading=application["speaker"] + ("’s view" if applied else "’s example"),
+                              case_phase="application" if applied else "example")
+            if start == reveal:
+                labels = history[-3:]
+            elif applied:
+                labels = [label]
         result.extend(dict(first=a,last=b-1,analogy=True,analogy_step=steps[start],
-                           comparison_labels=[steps[c]["label"] for c in cues if c<=start and steps[c].get("label")][-2:],
-                           facts=[fact]) for a,b in spans)
+                           comparison_labels=labels, **annotation, facts=[fact]) for a,b in spans)
     return result
 
 
