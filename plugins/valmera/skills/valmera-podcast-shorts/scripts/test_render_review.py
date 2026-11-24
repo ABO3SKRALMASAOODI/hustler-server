@@ -642,7 +642,7 @@ def test_a_composed_fault_is_framed_again_first_then_gives_only_its_window_to_th
     assert not wf1_coverage.is_rejected({(r['window'],r['path']) for r in knobs['reject']},2,'/supply/clip.mp4')
 
 
-def test_score_hands_the_findings_to_the_build_by_window(tmp_path,monkeypatch):
+def test_compose_hands_the_findings_to_the_build_by_window(tmp_path,monkeypatch):
     import wf1_coverage,wf1_alignment
     from placement_check import CONTRACT
     pack=dict(coverage=dict(contract=wf1_coverage.CONTRACT,windows=[]),alignment_contract=wf1_alignment.CONTRACT,
@@ -653,7 +653,6 @@ def test_score_hands_the_findings_to_the_build_by_window(tmp_path,monkeypatch):
                                                              dict(window=1,path='b.mp4',fault='reframe')]))
     monkeypatch.setattr(wf.wf3,'load_pack',lambda _:pack)
     monkeypatch.setattr(wf.wf3,'env_path',lambda:'')
-    monkeypatch.setattr(wf,'direction_of',lambda *a:dict())
     monkeypatch.setattr(wf.chain,'wants_music',lambda _:True)
     monkeypatch.setattr(wf.F,'taste_check',lambda *a:dict(ok=True,problems=[]))
     monkeypatch.setattr(wf.F,'audio_scene',lambda *a:{})
@@ -661,8 +660,8 @@ def test_score_hands_the_findings_to_the_build_by_window(tmp_path,monkeypatch):
     def build(sc,pack,style,knobs):
         seen.append(knobs);return dict(items=[],dur_f=90),dict(pictures=[])
     monkeypatch.setattr(wf.wf1_film,'build',build)
-    wf.score(SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),args={},log=lambda x:None),
-             dict(title='t',style=dict(id='window'),hook_line='h',close_line='c'))
+    wf.compose(SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),args={},log=lambda x:None),
+             dict(title='t',style=dict(id='window'),hook_line='h',close_line='c'), pack, {})
     assert seen[0]['reject']==[dict(window=3,path='a.mp4',fault='contradiction')]
     assert seen[0]['reframe']==[dict(window=1,path='b.mp4',fault='reframe')]
     assert 'drop' not in seen[0]
@@ -822,3 +821,18 @@ def test_renamed_source_carries_the_actual_crop_finding(tmp_path):
     attempts = wf.current_rejections(str(tmp_path))
     assert [a["fault"] for a in attempts] == ["reframe","contradiction"]
     assert all(a["reason"] == report["placements"][0]["reason"] and a["framing_key"] == "framing" for a in attempts)
+
+
+def test_only_identical_unwidened_composed_findings_recover_the_original_crop(tmp_path):
+    from placement_check import CONTRACT
+    original = dict(window=2, path="coding.mp4", f=[331,388], origin_sha256="original",
+                    source="publisher", clause_t=[10.92,12.82], source_crop=[.11,.06,.69,.70],
+                    source_slice=[.02,1.85], framing_key="same", fault="reframe", review_key="first")
+    repeated = dict(original, reframed=True, fault="contradiction", review_key="retry")
+    genuine = dict(repeated, review_key="different", framing_key="wider")
+    (tmp_path/"render_rejected.json").write_text(json.dumps([original,repeated,genuine]))
+    (tmp_path/"render_rejected_contract.json").write_text(json.dumps(CONTRACT))
+    rows = [dict(key=k, fault="reframe", ok=False) for k in ("first","retry","different")]
+    (tmp_path/"render_reviews.json").write_text(json.dumps([dict(contract=CONTRACT, placements=rows)]))
+    found = wf.current_rejections(str(tmp_path))
+    assert [r["review_key"] for r in found] == ["first","different"]

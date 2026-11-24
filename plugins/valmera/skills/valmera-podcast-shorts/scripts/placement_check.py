@@ -639,11 +639,16 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         images = None
         key = _review_key(review, media, said) if media is not None else None
         if (media is not None and key not in cache and review == "placement" and
-                said.get("story_hook") and said["story_hook"] == said["context"]):
-            # Older checks already saw this entire hook as the surrounding sentence.
-            previous = _review_key(review, media, {k:v for k,v in said.items() if k != "story_hook"})
-            if previous in cache:
-                cache[key] = cache[previous]
+                said.get("story_hook") and (said["story_hook"] == said["context"] or
+                    (entry["source"], spoken, entry["context"]) in script.get("reviewed_clauses", ()))):
+            # A retained score also has a composed reading of this source on
+            # these exact words in the same story. Reuse only an exact source key.
+            prior_words = {k:v for k,v in said.items() if k != "story_hook"}
+            for view in (media, [*media[:-1], visible_slice(rec,kind)]):
+                previous = _review_key(review, view, prior_words)
+                if previous in cache:
+                    cache[key] = cache[previous]
+                    break
         if media is not None and not rec.get("composed_fps") and key not in cache and media[-1]:
             prior_key = _review_key(review, [*media[:-1], visible_slice(rec,kind)], said)
             if prior_key in cache:

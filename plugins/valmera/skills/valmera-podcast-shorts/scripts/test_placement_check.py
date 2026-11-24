@@ -544,3 +544,25 @@ def test_retry_keeps_scout_crop_and_directed_focus_separate(tmp_path, monkeypatc
     clip["x"] = .8
     cov.checked_proposals(dict(windows=[window]), {0:[clip]}, {}, 1., check)
     assert len(calls) == 2
+
+
+def test_same_scored_clause_reuses_only_the_exact_legacy_source_view(tmp_path, monkeypatch):
+    import placement_check as pc
+    path = tmp_path/"demo.mp4"
+    path.write_bytes(b"demo")
+    clause = "the AI answers the search"
+    script = dict(segments=[dict(say=clause)])
+    rec = dict(path=str(path), src=[0.,1.], seconds=2, clause=clause, source=dict(url="publisher"))
+    monkeypatch.setattr(pc, "evidence", lambda *args:[b"frame"])
+    calls = []
+    def check():
+        return pc.check([[0,30,"clip","Search",dict(rec)]], script, _clock(), str(tmp_path), "ff",
+                        call=_approving(calls))[1]
+    assert check()["reused"] == 0
+    script.update(hook_line="They're searching", reviewed_clauses={("publisher",clause,clause)})
+    assert check()["reused"] == 1
+    rec["src"] = [.5,1.5]
+    assert check()["reused"] == 0
+    rec["claim"] = "automating core work"
+    assert check()["reused"] == 0
+    assert len(calls) == 3

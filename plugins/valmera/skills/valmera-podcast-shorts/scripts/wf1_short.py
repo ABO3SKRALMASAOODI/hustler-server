@@ -1308,7 +1308,11 @@ def score(ctx, script):
         with open(path,'w') as f:json.dump(stored,f,indent=1)
     if (ctx.args or {}).get('identity'):
         pack['coverage']['context']=ctx.args['identity']
-    d = direction_of(ctx, script, pack)
+    return compose(ctx, script, pack, direction_of(ctx, script, pack))
+
+
+def compose(ctx, script, pack, d, reviewed_clauses=()):
+    import wf1_coverage
     knobs = film_direction(d)
     knobs.update({k: v for k, v in ((ctx.args or {}).get("direction") or {}).items()})
     # The composed review's findings, each local to its window: a contradiction gives that window's slot to its next
@@ -1323,6 +1327,7 @@ def score(ctx, script):
               source_credit=(ctx.args or {}).get("channel"), source_url=(ctx.args or {}).get("source_url"),
               source_start=(script.get("window") or [0])[0], speaking_turns=script.get("speaking_turns", []),
               segments=[dict(say=ln["text"], pictures=[n for n in ln.get("subjects") or []]) for ln in pack["lines"]])
+    sc["reviewed_clauses"] = reviewed_clauses
     for attempt in range(RECOVERY_PASSES + 3 + LADDER_RUNGS):
         knobs["coverage_final"] = coverage_final(pack) or bool(pack.get("coverage_recoveries"))
         try:
@@ -1401,6 +1406,15 @@ def score(ctx, script):
                 [dict(stage="score", what="picture-to-words check", **u) for u in (beats.get("placement_check") or {}).get("spend", [])])
 
 
+def framing_key(l1, a, b):
+    geometry = []
+    for it in l1["items"]:
+        if (it.get("k") not in ("shot", "card") or it["f"][1] <= a or it["f"][0] >= b):
+            continue
+        geometry.append({k:it[k] for k in ("k","pic","f","src","crop","x","y","w","h","s","z") if k in it})
+    return hashlib.sha256(json.dumps(geometry,sort_keys=True).encode()).hexdigest()
+
+
 def _render_review(ctx, rd, sc):
     """Check the composed phone frames: source approval cannot certify a crop or a tiny print."""
     from placement_check import check as placement_check
@@ -1431,12 +1445,7 @@ def _render_review(ctx, rd, sc):
                                 review="composed")
     for row in report["placements"]:
         a,b = row["f"]
-        geometry = []
-        for it in l1["items"]:
-            if (it.get("k") not in ("shot", "card") or it["f"][1] <= a or it["f"][0] >= b):
-                continue
-            geometry.append({k:it[k] for k in ("k","pic","f","src","crop","x","y","w","h","s","z") if k in it})
-        row["framing_key"] = hashlib.sha256(json.dumps(geometry,sort_keys=True).encode()).hexdigest()
+        row["framing_key"] = framing_key(l1, a, b)
         row["transition_audit"] = dict(ok=row.get("ok") is True, reason=row.get("reason", ""), review="composed")
     real=sum(p['f'][1]-p['f'][0] for p in report['placements'])/F.FPS
     ends = {tuple(p.get('visible_f') or p['f']):p['action_end'] for p in sc['beats'].get('pictures') or [] if 'action_end' in p}
@@ -1547,8 +1556,11 @@ def retained_repairs(supply, pack, beats, wanted):
         w = windows[i]
         if any(p["first"] <= w.get("first", -1) and w.get("last", p["last"]+1) <= p["last"] for p in pages):
             continue
-        tried = [i, w.get("first"), w.get("last")]
         witnesses = coverage.get("passed_placements", {}).get(str(i), [])
+        witnesses_used = sorted({json.dumps([r.get("sha256"), r.get("f"), r.get("src")])
+                                 for r in witnesses if r.get("motion_ok")})
+        attempt = [i, repair_options(pack, [i]), witnesses_used]
+        tried = hashlib.sha256(json.dumps(attempt, sort_keys=True).encode()).hexdigest()
         if tried in pack.get("retained_motion_tried", []):
             missing.append(i)
             continue
@@ -1576,16 +1588,16 @@ def repair_options(pack, wanted):
     options = []
     for i in sorted(set(wanted)):
         window = windows[i]
-        names = {window["name"], *window.get("subjects", [])}
+        names = {window.get("name"), *window.get("subjects", [])}
         candidates = [c for group in pack.get("footage", []) if group["i"] == i for c in group["clips"]]
         candidates.extend(p for name in names for p in pack.get("pictures", {}).get(name, []))
         sources = set()
         for c in candidates:
             if os.path.isfile(c["path"]) and not c.get("dull"):
-                sources.add((file_digest(c["path"]), json.dumps(c.get("source") or c.get("page"),sort_keys=True),
-                             tuple(c.get("time_range") or ()), c.get("shows"), c.get("x")))
-        clause = tuple(window.get(k) for k in ("t0","t1","say","must_show","on_take"))
-        options.append((clause, frozenset(sources)))
+                evidence = {k:c[k] for k in ("source","page","document","time_range","shows","x") if k in c}
+                sources.add((file_digest(c["path"]), json.dumps(evidence,sort_keys=True)))
+        clause = {k:window.get(k) for k in ("t0","t1","say","must_show","claim","example","on_take","single_action")}
+        options.append((clause, sorted(sources)))
     return options
 
 
@@ -1606,7 +1618,7 @@ def render(ctx, script, sc):
                 and 0 <= r["id"] < len(pictures) and pictures[r["id"]].get("mode") != "source-insert"
                 and (r.get("fault") != "reframe" or not can_widen_source(pictures[r["id"]]))])
         previous_spend=sc.get('spend',[])
-        rebuilt=score(ctx,script)
+        rebuilt=recompose(ctx,script,sc)
         rebuilt['spend']=previous_spend+[u for u in rebuilt.get('spend',[]) if u not in previous_spend]
         sc.clear();sc.update(rebuilt)
         json.dump(sc,open(os.path.join(ctx.run_dir,'score.json'),'w'),indent=1)
@@ -1637,6 +1649,8 @@ def render(ctx, script, sc):
                     passed.setdefault(str(pic.get("window")), []).append(
                         dict(path=path, sha256=file_digest(path), f=pic["f"], src=pic.get("source_slice"),
                              clause=pic.get("clause"), clause_t=pic.get("clause_t"), source=pic.get("source"),
+                             **(dict(approved_crop=pic["source_crop"], approved_media=file_digest(pic["path"]))
+                                if pic.get("mode") == "window" and pic.get("source_crop") else {}),
                              motion_ok=row.get("motion_ok"), fit=pic.get("fit"),
                              attribution=pic.get("attribution"), reason=row.get("reason"),
                              **({"fresh_clip":pic["fresh_clip"]} if pic.get("fresh_clip") else {})))
@@ -1646,7 +1660,7 @@ def render(ctx, script, sc):
                 identities={(r["sha256"],tuple(r["f"])) for r in rows}
                 for row in older:
                     identity=(row.get("sha256"),tuple(row.get("f",[])))
-                    if row.get("motion_ok") and identity not in identities:
+                    if identity not in identities:
                         rows.append(row)
                         identities.add(identity)
             pending = pack.pop("pending_retained_motion", [])
@@ -1752,10 +1766,81 @@ def _rebuild_motion(ctx, script, sc, report, defer=False):
     return True
 
 
+def retained_cuts(supply, coverage):
+    """Reconstruct lost pins from checked scene snapshots on their exact spoken interval."""
+    from pathlib import Path
+    from placement_check import CONTRACT, file_digest
+    history = Path(supply, "render_reviews.json")
+    if not history.is_file():
+        return
+    accepted = {}
+    reviewed = set()
+    for report in json.loads(history.read_text()):
+        if report.get("contract") != CONTRACT:
+            continue
+        for row in report["placements"]:
+            if row.get("unchecked") or not row.get("framing_key"):
+                continue
+            key = (tuple(row["f"]), row.get("source"), row["framing_key"])
+            if row.get("ok"):
+                accepted[key] = row
+            else:
+                accepted.pop(key, None)
+            if row.get("ok") or row.get("fault") == "reframe":
+                reviewed.add((row.get("source"), row.get("words"), row.get("context")))
+    if not accepted:
+        return reviewed
+    passed = coverage.setdefault("passed_placements", {})
+    for path in sorted(Path(supply).glob("l1.devices.*.json")):
+        scene = json.loads(path.read_text())
+        for cut in scene.get("documentary_cuts", []):
+            a,b = cut["f"]
+            url = (cut.get("source_evidence") or {}).get("url")
+            row = accepted.get(((a,b), url, framing_key(scene,a,b)))
+            if not row:
+                continue
+            for i, w in enumerate(coverage["windows"]):
+                if (row["words"] != w.get("say") or a < round(w["t0"]*F.FPS)+wf1_film.LEAD_F
+                        or b > round(w["t1"]*F.FPS)+wf1_film.LEAD_F):
+                    continue
+                pins = passed.setdefault(str(i), [])
+                asset = cut.get("path")
+                if not asset or not os.path.isfile(asset):
+                    continue
+                sha = file_digest(asset)
+                if cut["pic"] not in ("v"+sha[:24], "p"+sha[:24]):
+                    continue
+                pin = next((p for p in pins if p["f"] == [a,b] and p["sha256"] == sha), None)
+                if pin is None:
+                    pin = dict(path=asset, sha256=sha, source=url, f=[a,b], src=cut.get("source_slice"),
+                               clause=w["say"], clause_t=[w["t0"],w["t1"]], motion_ok=row.get("motion_ok"),
+                               fit=row.get("fit",0), reason=row.get("reason"))
+                    pins.append(pin)
+                card = next((it for it in scene["items"] if it["k"] == "card" and it.get("pic") == cut["pic"]
+                             and it["f"] == [a,b] and it.get("source_ink")), None)
+                if card:
+                    pin.update(approved_crop=card.get("crop"), approved_media=sha)
+    return reviewed
+
+
+def recompose(ctx, script, sc):
+    """Render repairs inherit the scored words, direction and checked source stock."""
+    from wf1_coverage import story_context
+    if sc.get("direction") and os.path.isfile(os.path.join(ctx.supply, "pack.json")):
+        pack = wf3.load_pack(ctx)
+        if (pack.get("coverage", {}).get("story") == story_context(script)
+                and not pack.get("platform_walled")
+                and all(os.path.isfile(p) for p in sc["direction"].get("pictures", {}).values())):
+            pack["work"] = ctx.supply
+            reviewed = retained_cuts(ctx.supply, pack["coverage"])
+            return compose(ctx, script, pack, sc["direction"], reviewed or ())
+    return score(ctx, script)
+
+
 def _rescore(ctx, script, sc):
     measured = sc.get("beats", {}).get("measured_before_research")
     old_spend = sc.get("spend", [])
-    rebuilt = score(ctx, script)
+    rebuilt = recompose(ctx, script, sc)
     rebuilt["spend"] = old_spend + [u for u in rebuilt.get("spend", []) if u not in old_spend]
     if measured:
         rebuilt.setdefault("beats", {})["measured_before_research"] = measured
@@ -1850,6 +1935,21 @@ def current_rejections(supply, active_only=True):
         return []
     rows = json.load(open(path)) if os.path.exists(path) else []
     rows=[r if isinstance(r, dict) else dict(window=None,path=r,fault="contradiction") for r in rows]
+    # Older builds promoted a second crop finding even when "reframe" drew the
+    # identical source rectangle and layers. Restore the pending geometry repair.
+    if active_only and any(r.get("reframed") and r.get("fault") == "contradiction" for r in rows):
+        review_path = os.path.join(supply, "render_reviews.json")
+        if os.path.isfile(review_path):
+            with open(review_path) as f:
+                crop_reviews = {p.get("key") for report in json.load(f) if report.get("contract") == CONTRACT
+                                for p in report["placements"] if p.get("fault") == "reframe" and not p.get("ok")}
+            def same_view(row):
+                return tuple(json.dumps(row.get(k)) for k in (
+                    "window", "origin_sha256", "source", "source_slice", "source_crop", "f", "clause_t", "framing_key"))
+            pending = {same_view(r) for r in rows if r.get("fault") == "reframe" and r.get("framing_key")
+                       and r.get("source_crop") and r["source_crop"] != [0,0,1,1]}
+            rows = [r for r in rows if not (r.get("fault") == "contradiction" and r.get("reframed")
+                    and r.get("review_key") and r["review_key"] in crop_reviews and same_view(r) in pending)]
     path=os.path.join(supply,"pack.json")
     if not active_only or not os.path.isfile(path):
         return rows
@@ -1877,6 +1977,9 @@ def unrepaired(picture, found):
                 return True
             continue
         if (r.get("origin") or r.get("path")) not in own or r.get("window") not in (None, picture.get("source_slot") or picture.get("window")):
+            continue
+        if (picture.get("approved_crop") and r.get("fault") == "reframe" and r.get("f")
+                and (r["f"] != picture.get("f") or r.get("source_slice") != picture.get("source_slice"))):
             continue
         if r.get("fault") != "reframe" or not picture.get("reframed"):
             return True

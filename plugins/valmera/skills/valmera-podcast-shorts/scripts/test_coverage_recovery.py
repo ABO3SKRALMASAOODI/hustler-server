@@ -647,3 +647,22 @@ def test_research_only_the_distinct_missing_proof(tmp_path):
     # still goes through the regular placement check before its first composed verdict.
     pack = dict(coverage=dict(windows=windows), footage=[dict(i=2,clips=[dict(path=str(patient),motion_p90=3)])])
     assert wf.retained_repairs(str(tmp_path),pack,beats,[0,1,2]) == ([1],[2])
+
+
+def test_local_motion_retry_tracks_evidence_and_claim_across_renames(tmp_path):
+    import wf1_short as wf
+    clip = tmp_path/"candidate.mp4"
+    clip.write_bytes(b"verified native frames")
+    window = dict(first=12,last=16,t0=2,t1=4,say="the AI answers",claim="finding information")
+    candidate = dict(path=str(clip), motion_p90=2, source=dict(url="publisher"))
+    pack = dict(coverage=dict(windows=[window]), footage=[dict(i=0,clips=[candidate])])
+    def repair():
+        return wf.retained_repairs(str(tmp_path), pack, {}, [0])
+    assert repair() == ([],[0])
+    renamed = clip.rename(tmp_path/"second-fetch.mp4")
+    candidate["path"] = str(renamed)
+    assert repair() == ([0],[])
+    window["claim"] = "doing core work"
+    assert repair() == ([],[0])
+    renamed.write_bytes(b"different frames")
+    assert repair() == ([],[0])

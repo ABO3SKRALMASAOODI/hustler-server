@@ -689,6 +689,8 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
             if ("source" in prior and url!=prior["source"]) or any(same_picture(rec, old) for old in used):
                 continue
             rec = dict(rec)
+            if same_words and prior.get("approved_crop") and (lo,hi) == (original_lo,original_hi):
+                rec.update(approved_crop=prior["approved_crop"], approved_media=prior.get("approved_media"))
             if prior.get("src"):
                 start,end = prior["src"]
                 speed = (end-start)/(original_hi-original_lo)

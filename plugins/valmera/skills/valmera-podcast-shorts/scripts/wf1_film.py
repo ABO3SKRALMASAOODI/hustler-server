@@ -1118,8 +1118,16 @@ def build(script, sup, style_id, direction=None):
     for row in ins:
         rec = row[4]
         origin = (rec.get("text_cleared") or {}).get("from_path") or rec["path"]
+        if rec.get("approved_crop") and rec.get("approved_media") != file_digest(rec["path"]):
+            rec.pop("approved_crop")
         if (rec.get("window"),origin) in reframes or (None,origin) in reframes:
-            row[4] = dict(rec,reframe=True)
+            # A finding on another slice of the same file must not widen a
+            # previously approved composition on its own words.
+            exact = any(r.get("f") == row[:2] and r.get("source_slice") == rec.get("src")
+                        and r.get("window") == rec.get("window") and r.get("path") == origin
+                        for r in d.get("reframe", []) if isinstance(r, dict))
+            if not rec.get("approved_crop") or exact:
+                row[4] = dict(rec,reframe=True)
     for row in ins:                                      # a clip the check cut clear of another editor's text is a new file
         if row[4]["path"] not in keys:
             keys[row[4]["path"]] = (P.video if row[2] == "clip" else P.image)(asset_id("v" if row[2]=="clip" else "p",row[4]), row[4])
@@ -1425,7 +1433,7 @@ def build(script, sup, style_id, direction=None):
                                shows=rec.get("shows"), mode=mode, pic=keys[rec["path"]], source_slice=rec.get("src"),
                                window=rec.get("window"), claim=rec.get("claim"), example=rec.get("example"), clause=rec.get("clause"), clause_t=rec.get("clause_t"), fit=rec.get("fit"),
                                reframed=bool(rec.get("reframe")), attribution=rec.get("attribution"), name_super=rec.get("name_super"),
-                               **{k:rec[k] for k in ("action_box","action_end","action_caption") if k in rec},
+                               **{k:rec[k] for k in ("action_box","action_end","action_caption","approved_crop") if k in rec},
                                w=rec.get("w"), h=rec.get("h"), upscaled_from=rec.get("upscaled_from"), rung=rec.get("rung"),
                                how=rec.get("how"), source_size=rec.get("source_size"),
                                illustration=rec.get('illustration'), source_evidence=rec.get('source') or dict(url=rec.get('page'),title=rec.get('title'),channel=rec.get('credit')),
@@ -1496,11 +1504,12 @@ def build(script, sup, style_id, direction=None):
             kw["look"] = "mono_silver"
         from wf1_documents import valid_detail
         detail = rec.get("action_box")
-        if valid_detail(detail):
+        checked_crop = rec.get("approved_crop")
+        if (valid_detail(detail) or valid_detail(checked_crop)) and not rec.get("reframe"):
             from scene.motion import fit_panel
             # The frame reader located the action on these same moving source pixels.
-            crop = list(detail)
-            if rec.get("action_caption"):
+            crop = list(checked_crop or detail)
+            if not checked_crop and rec.get("action_caption"):
                 # Include the adjacent changing rows when the result is a single line of UI.
                 pad = .04*(crop[2]-crop[0])
                 crop[0], crop[2] = max(0.,crop[0]-pad), min(1.,crop[2]+pad)
