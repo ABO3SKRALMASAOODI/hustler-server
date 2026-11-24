@@ -152,7 +152,11 @@ Read story.claims, story.meaning and the editorial brief with the actual words. 
 give its whole vehicle (including the imagined consequence) ONE inclusive comparisons span. Write
 two concise graphic labels, premise and consequence, that explain its logic in the conditional.
 Set reveal to the word that first makes the closing image recognizable (the noun itself for a delayed
-metaphor). The complete spoken caption lands there. Where a hypothetical escalates over several clauses,
+metaphor). For opposing hypothetical cases, place the second case label on the first word of its clause,
+even when the distinguishing verb comes later. Keep its short conditional label through the implication.
+A research_project introduction belongs to the interview through the spoken name and expansion. Keep its
+setup and illustration on the same camera when the gesture explains the contrast. Use high-level labels.
+The complete spoken caption lands there. Where a hypothetical escalates over several clauses,
 start the comparison at its setup. Write short conditional steps on actual changes of thought, through
 the question about control or goals. On a demonstrative gesture use gesture=true and a box containing
 both face and moving hands from the source samples. Leave their movement in view. Keep other steps on
@@ -335,7 +339,7 @@ an honest subject; never invent one.'''
             if type(reveal) is int and row["first"] <= reveal <= row["last"]:
                 comparison["reveal"] = reveal
                 steps = [step for step in (row.get("steps") or []) if isinstance(step,dict)
-                         and type(step.get("at")) is int and row["first"] <= step["at"] < reveal
+                         and type(step.get("at")) is int and row["first"] <= step["at"] <= row["last"]
                          and isinstance(step.get("label"),str) and step["label"].strip()]
                 comparison["steps"] = sorted(steps,key=lambda step:step["at"])
             comparisons.append(comparison)
@@ -406,7 +410,17 @@ an honest subject; never invent one.'''
     out["borrowed_estimates"] = [r for r in out.get("borrowed_estimates") or []
                                  if has_span(r) and text_fields(r,"speaker","question","application_label")
                                  and type(r.get("application")) is int and r["first"] < r["application"] <= r["last"]]
-    for c in [*([record] if record else []), *routes, *print_readings, *([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
+    # A project's spoken introduction already has primary footage. Reserve it
+    # before the footage ladder allocates searches or assigns window indices.
+    project_intros = []
+    for claim in (story or {}).get("claims") or []:
+        if (claim.get("stance") == "research_project" and
+                all(type(claim.get(k)) in (int,float) for k in ("start","end"))):
+            origin = story.get("episode_start",0)
+            ids = [i for i,w in enumerate(words) if claim["start"] <= origin+(w["start"]+w["end"])/2 < claim["end"]]
+            if ids:
+                project_intros.append(dict(first=ids[0],last=ids[-1]))
+    for c in [*project_intros, *([record] if record else []), *routes, *print_readings, *([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
         remaining = []
         for w in windows:
             if c.get("stance") == "observation" and not c.get("scope_question"):

@@ -101,6 +101,14 @@ def _near(ctx, t0, t1, pad=25.0):
     return [(float(t), w) for t, w in words if t0 - pad <= float(t) <= t1 + pad]
 
 
+def project_title(title, claims):
+    opening = min((c for c in claims if type(c.get("start")) in (int,float)),
+                  key=lambda c: c["start"], default={})
+    if opening.get("stance") == "research_project" and isinstance(opening.get("stage"), str):
+        return opening["stage"].strip() or title
+    return title
+
+
 def script(ctx, ideas_out):
     idea = ideas_out["ideas"][0]
     ideas_out["chosen"] = idea
@@ -154,7 +162,14 @@ def script(ctx, ideas_out):
     system += (" When the opening assumes an earlier idea, write the opening framework report as a brief "
                "standalone context cue naming that earlier idea. Include context_start, the episode second "
                "where that speaker explains it. Preserve the selected opening words and end the cue at the "
-               "transition to the new example.")
+               "transition to the new example. When the speaker introduces a different research project, the new project owns "
+               "the opening, including the spoken expansion of its name. Write one stance=research_project claim spanning "
+               "that whole introduction. The report names the team, collaborator and project in one short sentence. "
+               "Give its stage as a concise standalone subject title, such as Early drug discovery. If the speaker illustrates it conditionally, give "
+               "example_start and example_end in absolute episode seconds covering both cases through the implication. "
+               "Title the clip for the research question or stage in plain language. Attribute the project to the interview. "
+               "A general discovery overview supplies stage context only. Keep a hypothetical example and a forecast "
+               "distinct from identified results, performance measurements, or clinical outcomes.")
     anchors = (f"# The moment's anchors, measured on the words\nThe hook opens at {float(idea['t0']):.2f} s: {idea.get('hook') or ''}\n"
                f"Candidate closing boundary at {float(idea['t1']):.2f} s: {idea.get('payoff') or ''}\n"
                f"Measured length: {float(idea['t1']) - float(idea['t0']):.1f} s\n\n")
@@ -202,10 +217,12 @@ def script(ctx, ideas_out):
     from wf1_source_frame import episode_excerpt
     selected = earlier.get(str(s.get("callback_id")))
     callback = episode_excerpt(ctx, selected, views, earlier.get(str(s.get("callback_context_id")))) if selected else None
-    return dict(**({"callback": callback} if callback else {}), title=s.get("title") or idea.get("title"), style=reg, window=[round(t0, 2), round(t1, 2)], source=ctx.source,
+    claims = [c for c in s.get("claims") or [] if isinstance(c, dict)]
+    title = project_title(s.get("title") or idea.get("title"), claims)
+    return dict(**({"callback": callback} if callback else {}), title=title, style=reg, window=[round(t0, 2), round(t1, 2)], source=ctx.source,
                 hook_line=s.get("hook_line") or idea.get("hook"), close_line=s.get("close_line") or idea.get("payoff"),
                 speaking_turns=[t for t in s.get("speaking_turns") or [] if isinstance(t, dict)],
-                claims=[c for c in s.get("claims") or [] if isinstance(c, dict)],
+                claims=claims,
                 speakers=int(s.get("speakers") or idea.get("speakers") or 1), names=[r["name"] for r in named], named=named,
                 direction=f"{reg['name']}: {reg.get('look', '')} {s.get('brief') or ''}".strip(), idea=idea, spend=spend)
 

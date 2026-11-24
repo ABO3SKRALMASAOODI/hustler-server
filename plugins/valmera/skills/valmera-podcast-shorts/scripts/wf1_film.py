@@ -1012,12 +1012,27 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         if len(steps)>1 and steps[-1]["source"] == interview and any(s["source"] != interview for s in steps[:-1]):
             pages[n] = dict(page, last=steps[-1]["at"]-1, sequence=steps[:-1])
     pages.sort(key=lambda p: p["first"])
-    for comparison in ([] if publisher else coverage.get("comparisons") or []):
-        pages = wf1_display.comparison_pages(pages, comparison, clock.words)
+    story = coverage.get("story") or {}
+    projects = wf1_display.research_phases(story, clock.words,
+                  dict(url=script.get("source_url"), publisher=script.get("source_credit")))
+    research_views = []
+    for comparison in coverage.get("comparisons") or []:
+        first, last = comparison["first"], comparison["last"]
+        episode = story.get("episode_start", 0) + coverage["words"][first]["end"]
+        project = next((p for p in projects if p["last"] < first and
+                        all(type(p["claim"].get(k)) in (int,float) for k in ("example_start","example_end"))
+                        and p["claim"]["example_start"] <= episode <= p["claim"]["example_end"]), None)
+        cases = wf1_display.research_comparison(comparison, project, clock.words) if project else None
+        if cases:
+            from wf1_principle import outside
+            pages = [part for page in pages for part in outside(page, first, last)] + cases
+            research_views.append((word_frame(project["last"]+1), word_frame(last+1) or f_end, comparison))
+        elif not publisher:
+            pages = wf1_display.comparison_pages(pages, comparison, clock.words)
     import wf1_principle
     principle = d.get("principle_example")
     pages = wf1_principle.pages(pages, principle, clock.words)
-    phases = d.get("model_phases") or []
+    phases = sorted([*(d.get("model_phases") or []), *projects], key=lambda p: p["first"])
     model_spans = [(word_frame(wf1_display.model_claim_start(pages, p)), word_frame(p["last"]+1) or f_end)
                    for p in phases]
     pages = wf1_display.model_pages(pages, phases)
@@ -1034,6 +1049,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         if page.get("analogy_step"):
             a = Clock.f(clock.words[page["first"]]["t0"])
             b = Clock.f(clock.words[page["last"]+1]["t0"]) if next_word is not None else f_end
+            if page.get("research_stage") and next_word is not None and not any(
+                    q.get("research_stage") and q["first"] == page["last"]+1 for q in pages):
+                b = next_word
         if page.get("principle_plate") and page["last"] == len(clock.words)-1:
             b = f_end
         facts = page["facts"]
@@ -1320,6 +1338,19 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 shot = next((s for s in tshots if s["t0"] <= (b-LEAD_F)/FPS < s["t1"]), None)
                 if shot:
                     gestures.append((max(a,round(shot["t0"]*FPS)+LEAD_F),b,next_gesture))
+    # Fit all visible gesture extents from this source shot once, including its setup.
+    # A definition or independent reading can still use its approved seat on the same words.
+    study_seats = []
+    for lo, hi, comparison in research_views:
+        for shot in tshots:
+            start = round(shot["t0"] * FPS) + LEAD_F
+            end = round(shot["t1"] * FPS) + LEAD_F
+            regions = [step["box"] for step in comparison.get("steps", []) if step.get("gesture")
+                       and step.get("box") and start <= word_frame(step["at"])+1 < end]
+            if regions:
+                from scene.motion import gesture_region
+                crop = gesture_region(regions, [face["box"] for face in shot.get("faces", [])])
+                study_seats.append((max(lo,start), min(hi,end), crop))
     dated_spans = {(a,b) for a,b,p in timed_facts if any(f.get("record") for f in p["facts"])}
     live_citations.update(phase_spans)
     live_citations.update(publisher_spans)
@@ -1476,6 +1507,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         finally:
             capture.release()
 
+    def on_study_reading(frame):
+        return any(lo <= frame < hi and not page.get("analogy_step") for lo,hi,page in timed_facts)
+
     def take_shot(a, b):
         """The take between pictures: each framing on the one who speaks it, cut where the show cut and where the
         speaker changes; the moves inside a framing are the driver's (motivated words, the voice's stress)."""
@@ -1516,6 +1550,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         layout_edges.append(turn_f if turn_f is not None else f_last)
         layout_edges.extend(f for span in report_spans for f in span)
         layout_edges.extend(f for lo,hi,_ in gestures for f in (lo,hi))
+        layout_edges.extend(f for lo,hi,_ in study_seats for f in (lo,hi))
         layout_edges.extend(comparison_landings)
         layout_edges.extend(f for start,(end,_,_) in live_beats.items() for f in (start,end))
         layout_edges.extend(f for lo,hi,_ in speakers for f in (lo,hi))
@@ -1565,9 +1600,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     cut_pts.append(fa)
                     continue
             gesture = next((step for lo,hi,step in gestures if lo <= fa < hi), None)
-            if gesture:
+            study_crop = next((crop for lo,hi,crop in study_seats if lo <= fa < hi), None)
+            if gesture or (study_crop and not on_study_reading(fa)):
                 from scene.motion import fit_panel
-                crop = gesture.get("box")
+                crop = study_crop or gesture.get("box")
                 if not (isinstance(crop,list) and len(crop)==4 and all(type(v) in (int,float) for v in crop)
                         and 0 <= crop[0] < crop[2] <= 1 and 0 <= crop[1] < crop[3] <= 1):
                     crop = [0,0,1,1]
@@ -2309,7 +2345,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             continue
         if page.get("analogy_step"):
             step = page["analogy_step"]
-            wf1_display.reading_card(P,[a,b],step["label"],"Hypothetical", "",pal,
+            heading = "Hypothetical"
+            if page.get("research_stage"):
+                heading += " · " + page["research_stage"]
+            wf1_display.reading_card(P,[a,b],step["label"],heading, "",pal,
                                      centre=.65,max_height=.19,group="analogy")
             fact_pages.append(dict(page,f=[a,b]))
             P.events.append(a)
@@ -2717,6 +2756,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                   for step in page["sequence"]}
     cue_starts.update(r['first'] for r in reading.get('voice_entries', []))
     reveal_words = {p["first"] for _,_,p in timed_facts if (p.get("analogy_step") or {}).get("reveal")}
+    reveal_words.update(c["reveal"] for _,_,c in research_views)
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
                             hold=reading_spans, omit=omit, phrase_ends=d.get("caption_ends") or (),
                             accents=d.get("caption_accents") or (), accent_ink=pal["accent"], cue_starts=cue_starts, reveal_words=reveal_words)

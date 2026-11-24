@@ -399,6 +399,8 @@ def model_phases(direction, sources, words):
 def model_claim_start(pages, phase):
     """Include the interview setup when the director starts its source phase mid-definition."""
     first = phase["first"]
+    if phase.get("claim"):
+        return first
     owner = None
     for page in sorted(pages, key=lambda row: row["last"], reverse=True):
         if len(page["facts"]) != 1:
@@ -412,6 +414,43 @@ def model_claim_start(pages, phase):
                 and same_recording(fact.get("source", {}).get("url"), claim.get("interview"))):
             first, owner = page["first"], subject
     return first
+
+
+def research_phases(story, words, source):
+    """The interview owns its project introduction, including the spoken project name."""
+    claims = [c for c in story.get("claims", []) if isinstance(c,dict) and c.get("stance") == "research_project"]
+    phases = []
+    for claim in claim_windows(dict(episode_start=story.get("episode_start",0), claims=claims), words):
+        first, last = claim["first"], claim["last"]
+        # Episode subtitle anchors can fall inside the first word of a sentence.
+        if first == 1 and words[0]["seg"] == words[first]["seg"]:
+            first = 0
+        phases.append(dict(first=first, last=last, show_first=first, show_last=last, source=source,
+                           heading=claim["speaker"]+" · Interview", statement=claim["report"],
+                           credit=claim.get("stage") or "", claim=claim))
+    return phases
+
+
+def research_comparison(comparison, phase, words):
+    """Retain the two case names through the implication, independently of the verbatim cue."""
+    start, last = comparison["first"], comparison["last"]
+    reveal = comparison.get("reveal")
+    if reveal is None or not start < reveal <= last:
+        return None
+    steps = comparison.get("steps") or []
+    first = next((s for s in steps if s["at"] < reveal), {})
+    second = next((s for s in steps if s["at"] == reveal), {})
+    switch = reveal
+    # A retained director may point at the verb inside the second sentence.
+    # Start with that sentence's subject. Within one sentence keep the addressed word.
+    if words[reveal]["seg"] != words[first.get("at",start)]["seg"]:
+        while switch > start and words[switch-1]["seg"] == words[reveal]["seg"]:
+            switch -= 1
+    fact = dict(source=phase["source"], attribution=phase["claim"]["speaker"])
+    return [dict(first=a, last=b, analogy=True, facts=[dict(fact,value=label)],
+                 analogy_step=dict(step,label=label), research_stage=phase["credit"])
+            for a,b,step,label in [(start,switch-1,first,first.get("label") or comparison["premise"]),
+                                   (switch,last,second,second.get("label") or comparison["consequence"])]]
 
 
 def model_pages(pages, phases):
@@ -812,7 +851,7 @@ def comparison_pages(pages, comparison, words):
         return result + [dict(first=first,last=last,analogy=True,facts=[fact])]
     steps = {first:dict(label=comparison["premise"])}
     steps.update((step["at"],step) for step in comparison.get("steps") or [])
-    steps[reveal] = dict(label="", reveal=True)
+    steps.setdefault(reveal, dict(label="", reveal=True))
     cues = sorted(steps)
     for start,end in zip(cues,cues[1:] + [last+1]):
         spans = [(start,end)]
