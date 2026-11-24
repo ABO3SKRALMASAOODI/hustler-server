@@ -454,11 +454,8 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
         overlap = min(len(dry), round(.20 * SR))
         tempo = float(card_bed["tempo"])
         start = max(0, card_bed["at_s"] - overlap/SR*tempo)
-        cmd = [FF, "-v", "error", "-stream_loop", "-1", "-i", card_bed["path"],
-               "-af", f"atrim=start={start:.6f},asetpts=PTS-STARTPTS,atempo={tempo:.8f}",
-               "-ar", str(SR), "-ac", "2", "-t", str((overlap+n_out)/SR+.05), "-f", "f32le", "-"]
-        pcm = subprocess.run(cmd, capture_output=True, check=True, timeout=120).stdout
-        music = np.frombuffer(pcm, np.float32).reshape(-1,2)[:overlap+n_out]
+        from score.music import card_phrase
+        music = card_phrase(card_bed["path"], start, tempo, overlap+n_out, card_bed.get("bar_s"), ffmpeg=FF)
         target_db = min(-24., ref-9.)
         gain = min(10**((target_db-_k_db(music))/20), .35/max(np.max(np.abs(music)),1e-6))
         env = np.interp(np.arange(len(music)), [0, overlap, len(music)-.12*SR, len(music)-1], [0,1,1,0])
@@ -514,6 +511,37 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
         q = np.clip(np.rint(mix * 8388607.0), -8388608, 8388607).astype("<i4")
         f.writeframes(q.view(np.uint8).reshape(-1, 4)[:, :3].tobytes())
     return wav, cut, info
+
+
+def encoded_card_score(scored, clean, programme_s, outro_s):
+    """Measure the actual scored-minus-clean signal on the encoded sample clock.
+    Both exports carry the same brand recording; fit its level on the line."""
+    import numpy as np
+    from scipy.signal import correlate
+
+    hop = SR // 10
+    start = max(0, (round(programme_s * SR) - 2*hop) // hop * hop)
+    end = round((programme_s + outro_s) * SR)
+    wet = _pcm(scored, start, end)
+    dry = _pcm(clean, start, end)
+    at = round((programme_s + CARD_LINE_AT)*SR) - start
+    n = min(len(_pcm(CARD_LINE)), len(dry)-at, len(wet)-at)
+    radius = min(round(.01*SR), at, len(wet)-at-n)
+    gain, lag = 1., 0
+    if n > 0 and radius >= 0:
+        ref = dry[at:at+n].mean(axis=1)
+        if np.dot(ref,ref) > 1e-8:
+            match = correlate(wet[at-radius:at+n+radius].mean(axis=1),ref,mode="valid",method="fft")
+            lag = int(match.argmax()) - radius
+            gain = float(np.dot(wet[at+lag:at+lag+n].mean(axis=1),ref) / np.dot(ref,ref))
+    i = max(0,lag)
+    count = min(len(wet)-i, len(dry)-(i-lag))
+    residue = wet[i:i+count] - gain*dry[i-lag:i-lag+count]
+    rows = []
+    for k in range(0,len(residue),hop):
+        power = float(np.mean(residue[k:k+hop]**2))
+        rows.append([round((start+i+k)/SR,4),round(10*math.log10(max(1e-12,power)),2)])
+    return dict(clean_gain=gain,lag_samples=lag,windows_100ms_dbfs=rows)
 
 
 def tail_shape(final, prog_s, last_word_s=None, outro_s=None):

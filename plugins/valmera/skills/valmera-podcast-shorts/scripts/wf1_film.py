@@ -1001,6 +1001,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         pages = [p for p in pages if p not in competing]
         pages.append(dict(first=comparison["first"], last=comparison["last"], facts=[
             dict(relation=comparison["premise"], value=comparison["consequence"], source={})], analogy=True))
+    import wf1_principle
+    principle = d.get("principle_example")
+    pages = wf1_principle.pages(pages, principle, clock.words)
     # The take reader already located speakers in ordinary camera shots.
     # Screen-share presenter tiles are only one of the possible live returns.
     live_spans = [(round(sp["t0"]*FPS)+LEAD_F, round(sp["t1"]*FPS)+LEAD_F)
@@ -1011,12 +1014,14 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         next_word = word_frame(page["last"] + 1)
         if next_word is not None:
             b = min(b, next_word)
+        if page.get("principle_plate") and page["last"] == len(clock.words)-1:
+            b = f_end
         facts = page["facts"]
         if page.get("sequence") and facts[0].get("callback_source") and page["last"] == len(clock.words)-1:
             b = f_end
         # A speaker-led explanation already carries its report in voice and captions.
         # A quotation from an original or a qualified estimate has its own evidentiary work.
-        qualified = page.get("sequence") or page.get("scope_cue") or any((f.get("chain") or {}).get("stance") in wf1_display.CONTEXT_LABELS or f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
+        qualified = page.get("principle_plate") or page.get("sequence") or page.get("scope_cue") or any((f.get("chain") or {}).get("stance") in wf1_display.CONTEXT_LABELS or f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
                         (f.get("chain") or {}).get("stance") in wf1_display.ESTIMATE_LABELS or
                         (f.get("chain") or {}).get("original") for f in facts)
         narrated = all(f.get("chain") and not f.get("relation") for f in facts)
@@ -1041,7 +1046,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         rows = wf1_display.typeset(facts, P.R, DISPLAY_W * W, str.upper if st["upper"] else str)
         return len(rows) > 4
 
-    report_spans = [(a, b) for a, b, page in timed_facts if page.get("record_role") or page.get("scope_cue") or page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"])]
+    report_spans = [(a, b) for a, b, page in timed_facts if page.get("principle_plate") or page.get("record_role") or page.get("scope_cue") or page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"])]
 
     # A remembered figure or reversal can live in the spoken cue and the show's own
     # shot. Release the timeline on the authored word, preserving the entire source frame.
@@ -1079,6 +1084,13 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     returns = [(frame,f_end) for frame in return_voices]
     if record_span:
         comparison_spans.append(record_span)
+    if principle:
+        if principle.get("film_sources") or principle.get("film_source"):
+            comparison_spans.extend((word_frame(p["first"]),word_frame(p["last"]+1) or f_end)
+                                    for p in d.get("display_facts") or []
+                                    if p["first"] < principle["setup"] and any(
+                                        (f.get("chain") or {}).get("stance") == "framework" for f in p["facts"]))
+        comparison_spans.append((word_frame(principle["setup"]),word_frame(principle["last"]+1) or f_end))
     comparison_spans.extend(returns)
     comparison_spans.extend(source_pages)
     comparison_spans.extend((a,b) for a,b,page in timed_facts if page.get("sequence"))
@@ -1195,6 +1207,26 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 if rec.get("provider") == "primary-document":
                     from wf1_documents import uncropped_image
                     row[4] = uncropped_image(row[4])
+    if principle:
+        from wf1_documents import uncropped_image
+        kept = []
+        film_seen = False
+        film_sources = set(principle.get("film_sources") or [])
+        if principle.get("film_source"):
+            film_sources.add(principle["film_source"])
+        for row in ins:
+            rec = row[4]
+            if rec.get("page") and rec["page"] == principle.get("cover_source"):
+                row = [*row[:4], dict(uncropped_image(rec),reframe=True)]
+            elif row[2] == "clip" and (
+                    (rec.get("source") or {}).get("url") or rec.get("page")) in film_sources:
+                if film_seen:
+                    continue
+                film_seen = True
+                row = [row[0], min(row[1],row[0]+2*FPS), *row[2:]]
+                row[4] = dict(rec,film_example=principle.get("film_label") or row[3])
+            kept.append(row)
+        ins = kept
     for row in ins:                                      # a clip the check cut clear of another editor's text is a new file
         if row[4]["path"] not in keys:
             keys[row[4]["path"]] = (P.video if row[2] == "clip" else P.image)(asset_id("v" if row[2]=="clip" else "p",row[4]), row[4])
@@ -1483,7 +1515,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                and pieces[k]["who"] == "speaker" and meta[pieces[k]["key"]]["faces"]
                                and not any(lo <= fa < hi for lo, hi in reactions))
             comparison_outcome = any(lo <= fa < hi for lo,hi in comparison_landings.items())
-            if (closing_speaker or comparison_outcome) and on_report and not live and meta[pieces[k]["key"]]["faces"]:
+            illustrating = any(lo <= fa < hi and p.get("principle_plate") for lo,hi,p in timed_facts)
+            if (closing_speaker or comparison_outcome or illustrating) and on_report and not live and meta[pieces[k]["key"]]["faces"]:
                 # Keep the citation's reading surface below the live presenter.
                 from scene.motion import Cam
                 info = meta[pieces[k]["key"]]
@@ -1735,7 +1768,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             figure_url = reference.get("figure_url")
             example = (figure_url == (rec.get("document") or {}).get("url") if figure_url else
                        bool(reference.get("source")) and reference["source"].split("#")[0] == (rec.get("page") or "").split("#")[0])
-            top = .20 if example else .15  # the fixed brand ends at .182
+            top = .20 if example or (principle and rec.get("page") == principle.get("cover_source")) else .15  # the fixed brand ends at .182
             if example:
                 below = min(.79, below+.04)
                 crop = contextual_detail(crop, size, (W,H), bottom=below, top=top)
@@ -1924,7 +1957,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             cut_pts.append(f0)
             P.events.append(f0)
             label = rec.get("name_super") or (rec.get("attribution") if d.get("labels") else None)
-            archive_credit = (d.get("archive_credits") or {}).get(rec["path"])
+            archive_credit = (d.get("archive_credits") or {}).get(rec.get("document_origin") or rec["path"])
+            if rec.get("film_example"):
+                archive_credit = dict(archive_credit or {}, label="Film example · "+rec["film_example"])
             if archive_credit:
                 P.pictures[-1]["archive_credit"] = archive_credit
             if archive_credit and archive_credit.get("credit"):
@@ -2072,6 +2107,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     record_accent = None
     for a, b, page in timed_facts:
         facts = page["facts"]
+        if page.get("principle_plate"):
+            wf1_display.reading_card(P,[a,b],facts[0]["value"],page["heading"],page["credit"],pal,
+                                     centre=.635, max_height=.26,group="principle")
+            fact_pages.append(dict(page,f=[a,b]))
+            P.events.append(a)
+            continue
         if page.get("record_role"):
             role = page["record_role"]
             fact = facts[0]

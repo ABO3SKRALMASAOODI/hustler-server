@@ -839,6 +839,9 @@ def music_version(ctx, rd, sc):
     if mix.get("card_bed"):
         tail = brand.tail_shape(final, chk["programme_s"], sc.get("last_word_s"), chk["outro_s"])
         does["encoded_card_bed"] = {k:tail[k] for k in ("card_last250_dbfs","card_quarters_dbfs")}
+        clean = os.path.join(ctx.run_dir, "final.mp4")
+        if os.path.isfile(clean):
+            does["encoded_card_bed"].update(brand.encoded_card_score(final, clean, chk["programme_s"], chk["outro_s"]))
     music = dict(picked_by_valmera=True, title=ch.get("title"), author=ch.get("author"), license=ch.get("license"), credit=ch.get("credit"),
                  page_url=ch.get("page_url"), cid=ch.get("cid"), why=ch.get("why"), chosen_by=ch.get("chosen_by"), tried=rep.get("tried"), does=does,
                  tracks=ch.get("tracks"), pool=ch.get("pool"), entry=ch.get("entry"),

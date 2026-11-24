@@ -1293,7 +1293,7 @@ def descend(ctx, script, pack, missing):
 
 def film_direction(d):
     """Carry the Director's authored fields into the picture and sound composers."""
-    knobs = {k: d.get(k) for k in ("display", "archive_credits", "archive_views", "caption_ends", "caption_accents", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
+    knobs = {k: d.get(k) for k in ("display", "principle_example", "archive_credits", "archive_views", "caption_ends", "caption_accents", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
     if d.get("beats") or d.get("sections") or d.get("asks"):
         knobs["director"] = {k: d.get(k) for k in ("beats", "sections", "asks", "arc", "pictures", "by", "seed")}
     return knobs
@@ -1346,6 +1346,11 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
     import wf1_experiment
     thought, reading_spend = wf1_experiment.read(d, pack["coverage"]["words"], ctx.supply, _llm())
     knobs = film_direction(d)
+    if knobs.get("principle_example"):
+        from wf1_principle import finish_reading
+        knobs["principle_example"], setup_spend = finish_reading(
+            knobs["principle_example"],d.get("archive_credits") or {},pack["coverage"]["words"],ctx.supply,_llm())
+        reading_spend.extend(setup_spend)
     if thought:
         knobs["thought_experiment"] = thought
     knobs.update({k: v for k, v in ((ctx.args or {}).get("direction") or {}).items()})

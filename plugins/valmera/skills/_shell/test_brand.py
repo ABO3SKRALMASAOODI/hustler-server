@@ -385,3 +385,23 @@ def test_final_aac_holds_a_scored_peak_at_a_spoken_seam(tmp_path):
     assert true_peak(final, 0.) <= -1.
     measured = brand.check(prog, final, str(tmp_path))
     assert measured["true_peak_dbtp"] <= -1 and np.isfinite(measured["lra"])
+
+
+def test_card_continuation_crossing_a_mastered_fade_and_leading_rest(tmp_path):
+    # The selected final downbeat rings into a faded master. A whole-file
+    # loop then adds its leading rest in the middle of the five-second card.
+    time = np.arange(12 * SR) / SR
+    envelope = np.interp(time, [0, 1.1, 1.2, 9.8, 10.8, 12], [0, 0, 1, 1, 0, 0])
+    track = str(tmp_path / "orchestra.wav")
+    from scipy.io.wavfile import write
+    write(track, SR, (.16 * envelope * np.sin(2*np.pi*428*time)).astype(np.float32))
+    programme = make_programme(tmp_path / "voice.mp4", .15*np.sin(2*np.pi*181*time[:6*SR]))
+    kwargs = dict(prog_s=6, fps=30, j=9, outro_s=5, sting=False, last_word_s=5.6)
+    wav, cut, _ = brand.accent_tail(programme, str(tmp_path), **kwargs)
+    dry = brand._pcm(wav)
+    wav, _, _ = brand.accent_tail(programme, str(tmp_path), **kwargs,
+                                 card_bed=dict(path=track, at_s=9.6, tempo=1., bar_s=2.))
+    stem = (brand._pcm(wav) - dry)[6*SR-cut:][:5*SR]
+    db = 10*np.log10(np.maximum(1e-12, np.mean(stem.reshape(50,SR//10,2)**2,axis=(1,2))))
+    assert db.min() > -48, db
+    assert np.median(db[5:16]) < np.median(db[32:45])-8

@@ -532,3 +532,44 @@ def test_m21_heard_estimate_and_earlier_demo_share_the_scene(tmp_path, quiet_eng
     for frame in range(4):
         box = kit.item_box(caption,scene["voices"],1080,1920,frame)
         assert .029 <= box[0] and box[2] <= .971
+
+
+def test_composited_illustration_owns_the_shared_scenario_plate(tmp_path, quiet_engines, monkeypatch):
+    ctx, script, pack = material(tmp_path)
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *a: ([], []))
+    evidence = dict(attribution="Guest", source=dict(url=INTERVIEW, publisher="Interview"), value="Earlier demonstration")
+    pages = [dict(first=2,last=17,sequence=[dict(at=2,label="Earlier demonstration"),
+                  dict(at=8,label="Which decision?")],facts=[evidence]),
+             dict(first=8,last=17,episode_example=True,facts=[dict(evidence,value="Review the test result")])]
+    l1, beats = wf.wf1_film.build(script,pack,"prints",dict(display_facts=pages))
+    example = next(p for p in beats["display_facts"] if p.get("episode_example"))
+    from scene import compile as compiler
+    plan = compiler.compile(l1,str(tmp_path),segment=False)
+    seen = set()
+    for frame in range(*example["f"]):
+        labels = [i["t"] for i in plan.active(frame) if i.get("fact_type") and i.get("t")]
+        assert "Earlier demonstration" not in labels and "Which decision?" not in labels, labels
+        seen.update(labels)
+    assert "Review the test result" in seen
+
+
+def test_directed_principle_returns_to_one_observable_decision_on_the_warning(tmp_path, quiet_engines, monkeypatch):
+    import wf1_principle
+    ctx,script,pack = material(tmp_path)
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *a: ([], []))
+    source = dict(url=PAPER,publisher="Publisher",checked_on="2026-11-24",supports=["Use evidence."])
+    raw = dict(source=PAPER,principle="Use evidence",decision="The test failed. Launch approved.",
+               comparison="Which result supported approval?",warning="Review the missing retest.",
+               setup=3,observe=9,compare=18,release=26,warn=39,last=45)
+    example = wf1_principle.bind(raw,{PAPER:source},pack["coverage"]["words"])
+    competing = dict(first=4,last=45,facts=[dict(attribution="Host",source=source,value="Pinned verdict")])
+    l1,beats = wf.wf1_film.build(script,pack,"prints",dict(principle_example=example,display_facts=[competing]))
+    from scene import compile as compiler
+    plan = compiler.compile(l1,str(tmp_path),segment=False)
+    plates = [page for page in beats["display_facts"] if page.get("principle_plate")]
+    assert [p["first"] for p in plates] == [3,9,18,39]
+    for page in plates:
+        labels = [i["t"] for i in plan.active(sum(page["f"])//2) if i.get("fact_type")]
+        assert page["heading"] in labels and "Pinned verdict" not in labels
+    assert plates[0]["credit"] == "Publisher · checked 2026-11-24"
+    assert not any(i.get("fact_type") for i in plan.active((plates[2]["f"][1]+plates[3]["f"][0])//2))

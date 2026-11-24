@@ -9,7 +9,7 @@ from pathlib import Path
 
 import wf1_record
 
-CONTRACT = 13
+CONTRACT = 14
 
 
 class CoverageError(RuntimeError):
@@ -110,7 +110,10 @@ window on the words that speak of it, under its resolved name (a full name, neve
 name alone), with its event-level must_show. Words may refer to them by pronoun or first name.
 Decide what would establish the spoken proposition before accepting a named item's draft must_show.
 If the interview uses the present activity as an example of a general principle, the recording can
-establish that example. An explanation of what someone COULD observe calls for an episode_example.
+establish that example. A dramatization cited as an analogy gets one short film-example window. A named book cover is its
+own original, shown whole. When the speaker proposes checking a published principle against a decision,
+research the principle and its exact wording, then keep the hypothetical on the take. The score
+composes its anonymous illustration. Other explanations of what someone COULD observe call for an episode_example.
 first..last cover the example and incidental category alternatives that illustrate the same principle.
 graphic_first..graphic_last cover only the words introducing the main concrete example. Give a short
 label naming a possible observation about THAT example (e.g. "Where listeners stop in an episode").
