@@ -81,3 +81,19 @@ def test_story_joints_from_the_beats_and_a_real_voice(tmp_path):
     for x in j[:3]:
         assert 0.5 <= x["next_first_word_t"] - x["last_word_t"] <= 2.3 and x["t"] == x["next_first_word_t"]
     assert j[3]["t1"] - j[3]["t0"] == 1.5
+
+
+def test_podcast_resumes_music_with_the_current_picture_and_audio_score(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(workflow="wf1", args={}, run_dir=str(tmp_path), tmp=str(tmp_path), log=lambda msg: None)
+    (tmp_path / "final.mp4").touch()
+    monkeypatch.setattr(chain.brand, "check", lambda *args: dict(ok=True, programme_s=20, outro_s=5))
+    attempts = []
+    def music(ctx, render, score):
+        attempts.append((render, score))
+        if len(attempts) == 2:
+            return dict(final_music="scored.mp4")
+    monkeypatch.setattr(chain, "music_version", music)
+    rd, sc = dict(film="picture.mp4"), dict(l1="scene.json", l1_audio="spine.json")
+    assert chain.finish_and_check(ctx, rd, sc)["final_music"] == "scored.mp4"
+    assert attempts == [(rd, sc), (rd, sc)]

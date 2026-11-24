@@ -951,6 +951,9 @@ def finish_and_check(ctx, rd, sc):
     c["ok"] = bool(c["ok"] and m["ok"])
     out = dict(final=final, checks=c)
     mv = music_version(ctx, rd, sc)              # the film's music: Valmera's choice, or the song the owner handed this run
+    if not mv and ctx.workflow == "wf1" and sc.get("l1") and wants_music(ctx):
+        ctx.log("Resuming the podcast music finish from the current score")
+        mv = music_version(ctx, rd, sc)
     if mv:
         out.update(mv)
     elif ctx.workflow == "wf3" and (ctx.args or {}).get("one_command") and wants_music(ctx):
