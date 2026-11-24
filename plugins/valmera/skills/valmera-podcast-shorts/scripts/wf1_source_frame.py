@@ -21,6 +21,16 @@ enclosing the actual document, plot title, legend and BOTH labeled axes. Include
 tile is the normalized rectangle of the live PRESENTING speaker in that frame if visibly clear,
 else null. Do not interpret sample numbers as measured values. Never infer a cost chart from an
 output-only chart. Leave guesses, unrelated visuals and ordinary conversational shots on the speaker.
+When a presenter explains how one product works and then shows its actual result in this take,
+return live_demo:{first,cue,last,frame,box,tile,shows,speaker,term_word}. first starts the explanation
+(including its unanswered setup), cue is the first word pointing the viewer to the result, and last
+includes the presenter's personal conclusion about it. term_word is the first word actually naming
+the mechanism, when defined. Select the verified frame of the result, box around its label and one
+readable completed item, retaining every source redaction. Give the synchronous presenter's tile.
+Describe one item by its visible wording, including truncation. Keep the lead-in and illustrative list
+of inputs on the presenter, including the hands. A list of connected applications describes sources
+for this product, not separate demos of those applications. Keep independent events outside this
+passage. Omit live_demo for ordinary charts, recalled demos or general conversations.
 Plan the whole screen-share passage together. Return source_panels: [{frame,box,shows}] for
 reusable clean original views, and presenter_tiles: [{frame,box}] for each visible speaker.
 Choose a frame without an obstructing pointer, tooltip or webcam over the evidence. Keep one
@@ -263,7 +273,19 @@ def bind(coverage, frames, result):
             if not row:
                 continue
             speakers.append(dict(first=row['first'], last=row['last'], tile=tile['box'], shot=tile['shot']))
-    for row in result.get('source_inserts') or []:
+    demo = result.get("live_demo") or {}
+    demo_rows = []
+    if (addresses(demo) and type(demo.get("cue")) is int and demo["first"] <= demo["cue"] <= demo["last"]
+            and type(demo.get("frame")) is int and 0 <= demo["frame"] < len(frames) and box(demo.get("box"))
+            and isinstance(demo.get("shows"),str) and demo["shows"].strip()):
+        demo_rows = [dict(demo, first=demo["cue"], demonstration=True)]
+    else:
+        demo = {}
+    def outside_demo(row):
+        return not demo or row["last"] < demo["first"] or row["first"] > demo["last"]
+    speakers = [r for r in speakers if outside_demo(r)]
+    additional = [r for r in result.get("source_inserts") or [] if addresses(r) and outside_demo(r)]
+    for row in additional + demo_rows:
         if not addresses(row):
             continue
         panel = reference(row, 'panel', panels)
@@ -289,10 +311,13 @@ def bind(coverage, frames, result):
                             tile=tile['box'] if tile else box(row.get('tile')),
                             tile_shot=tile['shot'] if tile else frame['shot'],
                             shows=row.get('shows') or frame.get('shows'), w=w, h=h,
+                            **(dict(demonstration=True) if row.get('demonstration') else {}),
                             **(dict(panel_box=panel['box']) if panel else {})))
     # A retained pack already indexes its external windows. Only a fully covered
     # window can be retired without losing research on a different adjacent clause.
     covered = {i for row in inserts + (speakers if inserts or panels else []) for i in range(row['first'],row['last']+1)}
+    if demo:
+        covered.update(range(demo["first"],demo["last"]+1))
     replaces = [i for i,w in enumerate(windows) if all(j in covered for j in range(w['first'],w['last']+1))]
     authored = sorted({tuple(frames[i]['shot']) for i in result.get('authored_frames') or []
                        if type(i) is int and 0 <= i < len(frames)})
@@ -332,7 +357,7 @@ def bind(coverage, frames, result):
             entries.append(dict(first=first, shot=shot, speaker=speaker, listener=listener,
                                 reaction=row.get('reaction') is True))
     closing = [dict(first=r['first'], shot=shot, box=r['box']) for r,shot in identified('closing_views') if box(r.get('box'))]
-    return dict(voice_entries=entries, closing_views=closing, speaker_inserts=speakers, reactions=reactions, authored_shots=[list(span) for span in authored], inserts=sorted(inserts,key=lambda r:r['first']),replaces=replaces,
+    return dict(live_demo=demo, voice_entries=entries, closing_views=closing, speaker_inserts=speakers, reactions=reactions, authored_shots=[list(span) for span in authored], inserts=sorted(inserts,key=lambda r:r['first']),replaces=replaces,
                 quote_segments=result.get('quote_segments') or [],spend=result.get('spend') or {})
 
 
@@ -418,6 +443,22 @@ def compose(plan, span, rec, key, take_key, src, width, height, work, ffmpeg, de
     live = tile and shot[0] <= src[0]+.04 and src[1] <= shot[1]+.04
     size = rec['w'], rec['h']
     canvas = width, height
+    if rec.get("demonstration"):
+        from scene.motion import demonstration_panels
+        overview, detail = demonstration_panels(rec["box"], size, canvas)
+        plan.page(span, "#14171B", grain=0)
+        # The overview runs on the original clock. The magnifier uses the actual
+        # verified frame, retaining baked-in masks even if the presenter scrolls.
+        in_shot = rec["shot"][0] <= src[0]+.035 and src[1] <= rec["shot"][1]+.035
+        if rec.get("presenter_result") and live:
+            dest = fit_panel(tile,size,canvas,[.02,.035,.98,.405])
+            presenter_card(plan,span,take_key,dest,tile,tile,src,work,ffmpeg,decode_region,
+                           source_ink=[dest])
+        else:
+            plan.card(span, take_key if in_shot else key, overview, crop=[0,0,1,1],
+                      **({"src":src} if in_shot else {}), source_ink=[overview])
+        plan.card(span, key, detail, crop=rec["box"], source_ink=[detail], caption_baseline=.89)
+        return
     if report:
         seat = [0,.15 if live else .03,1,.40]
     else:

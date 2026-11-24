@@ -7,7 +7,7 @@ import os
 def direct(coverage,work,llm):
     """Resolve the speaker's referents before spending downloads on generic substitutes."""
     import wf1_coverage
-    if not (coverage["windows"] or coverage.get("borrowed_estimates") or any(needs_original(c, coverage) for c in coverage.get("claims") or [])
+    if not (coverage["windows"] or (coverage.get("source_reading") or {}).get("live_demo") or coverage.get("borrowed_estimates") or any(needs_original(c, coverage) for c in coverage.get("claims") or [])
             or any(c.get("scope_question") for c in coverage.get("speaker_claims") or [])):
         return dict(references={}, spend=[])
     key=hashlib.sha256(json.dumps([5,coverage],sort_keys=True).encode()).hexdigest()[:16]
@@ -119,6 +119,13 @@ def research(coverage,work,llm):
               claims=[c for c in coverage.get('claims') or [] if needs_original(c, coverage)], subjects=[dict(i=i, **{k:w[k] for k in ("name","say","claim","must_show","why") if k in w}) for i,w in enumerate(coverage['windows'])])
     scope = [c for c in coverage.get('speaker_claims') or [] if c.get('scope_question')]
     estimates = coverage.get('borrowed_estimates') or []
+    demo = (coverage.get("source_reading") or {}).get("live_demo")
+    if demo:
+        data["shown_demonstration"] = dict(shows=demo["shows"], source_task=
+            "Find the maker's original product and availability announcements for this demonstrated mechanism. "
+            "Document one concrete relationship and the release status and permissions for background jobs. "
+            "Return source URLs, dates and publishers in references with empty windows. "
+            "The episode owns the visible result and the speaker owns the personal experience.")
     data['scope_checks'] = scope
     data["borrowed_estimates"] = estimates
     pages = {}

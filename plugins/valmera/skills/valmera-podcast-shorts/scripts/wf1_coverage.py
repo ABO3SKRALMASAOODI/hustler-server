@@ -420,7 +420,8 @@ an honest subject; never invent one.'''
             ids = [i for i,w in enumerate(words) if claim["start"] <= origin+(w["start"]+w["end"])/2 < claim["end"]]
             if ids:
                 project_intros.append(dict(first=ids[0],last=ids[-1]))
-    for c in [*project_intros, *([record] if record else []), *routes, *print_readings, *([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
+    demo = local.get("live_demo")
+    for c in [*([demo] if demo else []), *project_intros, *([record] if record else []), *routes, *print_readings, *([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
         remaining = []
         for w in windows:
             if c.get("stance") == "observation" and not c.get("scope_question"):

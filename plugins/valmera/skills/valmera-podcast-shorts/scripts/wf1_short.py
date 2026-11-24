@@ -297,7 +297,19 @@ def supply(ctx, script):
         spend.append(dict(stage="supply",what="interview source composition",**original['spend']))
     coverage['context']=who
     import wf1_context
-    primary_direction = wf1_context.direct(coverage, os.path.join(sup_dir, 'referent-research'), _llm())
+    # A copied run can carry the publisher records that established the product's scope.
+    # An episode demonstration already supplies its picture, separately from those records.
+    sources = script.get("verified_sources") or []
+    demo = original.get("live_demo")
+    if sources:
+        coverage["existing_sources"] = sources
+    if (demo and sources and demo["first"] == 0 and demo["last"] == len(words)-1
+            and not coverage["windows"] and not coverage.get("borrowed_estimates")
+            and not any(wf1_context.needs_original(c,coverage) for c in coverage["claims"])
+            and not any(c.get("scope_question") for c in coverage.get("speaker_claims", []))):
+        primary_direction = dict(references=dict(references=[dict(sources=sources, windows=[])]), spend=[])
+    else:
+        primary_direction = wf1_context.direct(coverage, os.path.join(sup_dir, 'referent-research'), _llm())
     windows = coverage['windows']
     pack = dict(sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[],
                 footage=[], title=script.get("title"), coverage=coverage,
@@ -1339,6 +1351,10 @@ def score(ctx, script):
     # indices and read only the original take when the pack predates source framing.
     previous = coverage.get('source_reading') or {}
     needs_source = 'authored_shots' not in previous or (previous.get('inserts') and 'speaker_inserts' not in previous)
+    # Read an older retained screen only once when a definition leads into it.
+    if (previous.get("inserts") and "live_demo" not in previous and
+            any(c.get("stance") == "definition" for c in script.get("claims") or [])):
+        needs_source = True
     if len(script.get("speaking_turns") or []) > 1 and "voice_entries" not in previous:
         needs_source = True
     if needs_source and os.path.isfile(os.path.join(ctx.supply,'index.json')):
@@ -1370,6 +1386,7 @@ def score(ctx, script):
 def compose(ctx, script, pack, d, reviewed_clauses=()):
     import wf1_coverage
     import wf1_experiment
+    sys.path[:0] = [p for p in wf3.env_path().split(os.pathsep) if p not in sys.path]
     coverage = pack["coverage"]
     index_path = os.path.join(ctx.supply, "index.json")
     retiming_spend = []
@@ -1404,6 +1421,12 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
     publisher, usage = wf1_publisher_reading.read(pages, coverage, ctx.supply, _llm(), pack.get("pictures"))
     reading_spend.extend(usage)
     knobs = film_direction(d)
+    demo = (coverage.get("source_reading") or {}).get("live_demo")
+    if demo:
+        import wf1_demo
+        knobs["demo_notes"], usage = wf1_demo.read(demo, coverage["words"],
+            (pack.get("referent_research") or {}).get("references", []), pages, ctx.supply, _llm(), pack["ffmpeg"])
+        reading_spend.extend(usage)
     if publisher:
         knobs.update(publisher_reading=publisher, display_facts=pages)
     if knobs.get("principle_example"):
@@ -1420,7 +1443,6 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
     knobs["reject"] = [r for r in found if r.get("fault") != "reframe"]
     knobs["reframe"] = [r for r in found if r.get("fault") == "reframe"]
     knobs.setdefault("bed", chain.wants_music(ctx) or bool((ctx.args or {}).get("song")))      # the film gets music: the sounds are designed for a film with a bed
-    sys.path[:0] = [p for p in wf3.env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     sc = dict(title=script.get("title"), hook_line=script.get("hook_line"), close_line=script.get("close_line"),
               source_credit=(ctx.args or {}).get("channel"), source_url=(ctx.args or {}).get("source_url"),
@@ -1665,7 +1687,7 @@ def retained_repairs(supply, pack, beats, wanted):
     windows = wf1_publisher_reading.local_coverage(coverage, beats.get("publisher_reading") or {}).get("windows", [])
     for i in sorted(set(wanted)):
         w = windows[i]
-        if w.get("publisher_camera"):
+        if w.get("publisher_camera") or w.get("on_take"):
             continue
         if any(p["first"] <= w.get("first", -1) and w.get("last", p["last"]+1) <= p["last"] for p in pages):
             continue
@@ -1854,7 +1876,7 @@ def _rebuild_motion(ctx, script, sc, report, defer=False):
                            (pics[row['id']].get('document') or {}).get('sha256') and
                            pics[row['id']]['document'].get('url') in records)))]
     stills={pics[row['id']]['path'] for row in remaining if row.get('motion_ok') is not True
-            and pics[row['id']].get('mode') != 'source-insert'}
+            and pics[row['id']].get('mode') not in ('source-insert','publisher-demo')}
     previous=set(pack.get('composed_stills') or [])
     weak = sorted({pics[row['id']].get('window') for row in remaining
                    if row.get('ok') and row.get('motion_ok') is False and isinstance(pics[row['id']].get('window'),int)})
@@ -2119,6 +2141,8 @@ def unrepaired(picture, found):
                 return True
             continue
         if (r.get("origin") or r.get("path")) not in own or r.get("window") not in (None, picture.get("source_slot") or picture.get("window")):
+            continue
+        if picture.get("mode") == "publisher-demo" and r.get("f") != picture.get("f"):
             continue
         if picture.get("field_example") and r.get("fault") == "reframe" and r.get("source_crop"):
             if (r.get("source_crop") != picture.get("source_crop") or r.get("f") != picture.get("f")

@@ -838,6 +838,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         crops = closing_crops(take['path'], views, (take['w'],take['h']), FPS)
     closing = [(max(word_frame(r['first']), round(r['shot'][0]*FPS)+LEAD_F),
                 min(f_end, round(r['shot'][1]*FPS)+LEAD_F), crop) for r,crop in zip(views,crops)]
+    demo = reading.get("live_demo") or {}
+    demo_span = (word_frame(demo["first"]), word_frame(demo["last"]+1) or f_end) if demo else None
     source_rows = []
     speakers = []
     sequence = reading.get('inserts', []) + reading.get('speaker_inserts', [])
@@ -861,7 +863,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             speakers.append((a,b,rec['tile']))
     for rec in reading.get('inserts', []):
         a,b = source_span(rec, 'panel_box' in rec)
-        if rec.get("episode_excerpt") and rec["last"] == len(clock.words)-1:
+        if (rec.get("episode_excerpt") or rec.get('demonstration')) and rec["last"] == len(clock.words)-1:
             b = f_end
         slot = f"source:{rec['first']}-{rec['last']}"
         if source_rows:
@@ -893,6 +895,40 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         source_rows.append([a,b,'photo',name,dict(rec,provider='interview-frame',source_slot=slot,source=source,page=source['url'],
                             clause=' '.join(w['w'] for w in clock.words[rec['first']:rec['last']+1]),
                             clause_t=[coverage['words'][rec['first']]['start'],coverage['words'][rec['last']]['end']])])
+    if demo:
+        # On the personal outcome, keep the same redacted detail below the
+        # synchronous presenter. The interview provides this claim's attribution.
+        claims = [c for c in coverage.get("claims") or [] if c.get("speaker") == demo.get("speaker")
+                  and c.get("subject") == c.get("speaker") and not c.get("stance")
+                  and isinstance(c.get("start"), (float,int))]
+        for row in list(source_rows):
+            rec = row[4]
+            if not (rec.get("demonstration") and rec.get("tile")):
+                continue
+            origin = script.get("source_start",0)
+            cuts = [Clock.f(c["start"]-origin+LEAD_F/FPS) for c in claims]
+            turn = next((f for f in sorted(cuts) if row[0] < f < row[1]), None)
+            if turn is not None:
+                source_rows.append([turn,row[1],*row[2:4],dict(rec, presenter_result=True)])
+                row[1] = turn
+    for page in d.get("demo_notes") or []:
+        fig = page.get("figure")
+        if not fig:
+            continue
+        a = word_frame(page["first"])
+        b = min(Clock.f(clock.words[page["last"]]["t1"]), word_frame(page["last"]+1) or f_end,
+                a+int(fig["seconds"]*FPS),f_end)
+        same_view = any((r.get("origin") or r.get("path")) == fig["path"] and r.get("f") == [a,b]
+                        for r in d.get("reject") or [])
+        if b <= a or same_view:
+            continue
+        fact = page["facts"][0]
+        source = fact["source"]
+        rec = dict(fig,provider="publisher-demo",src=[0,(b-a)/FPS],name=page["demo_note"],
+                   source=dict(url=source["url"],channel=source["publisher"],title=page["demo_note"],figure_url=fig["figure_url"]),
+                   claim=fact["value"],clause=" ".join(w["w"] for w in clock.words[page["first"]:page["last"]+1]))
+        source_rows.append([a,b,"clip",page["demo_note"],rec])
+    source_rows.sort(key=lambda row:row[0])
     source_spans = [r[:2] for r in source_rows]
     def on_evidence(a,b):
         return a is not None and b is not None and any(a < end and start < b for start,end in source_spans)
@@ -1036,6 +1072,21 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     model_spans = [(word_frame(wf1_display.model_claim_start(pages, p)), word_frame(p["last"]+1) or f_end)
                    for p in phases]
     pages = wf1_display.model_pages(pages, phases)
+    if demo:
+        # These words are one presentation. A retained broad explainer, or a
+        # device on its opening, must not cover the camera or pre-empt the answer.
+        notes = d.get("demo_notes") or []
+        keep = [p for p in pages if p["last"] < demo["first"] or p["first"] > demo["last"]]
+        if not notes:
+            for page in pages:
+                if page.get("gloss") and demo["first"] <= page["first"] < demo["cue"]:
+                    term = demo.get("term_word")
+                    first = term if type(term) is int and demo["first"] <= term < demo["cue"] else page["first"]
+                    chain = page["facts"][0].get("chain") or {}
+                    last = min(demo["cue"]-1, max(first,chain.get("last",page["last"])))
+                    keep.append(dict(page,first=first,last=last,demo_note=chain.get("term") or "Definition"))
+                    break
+        pages = keep + notes
     # The take reader already located speakers in ordinary camera shots.
     # Screen-share presenter tiles are only one of the possible live returns.
     live_spans = [(round(sp["t0"]*FPS)+LEAD_F, round(sp["t1"]*FPS)+LEAD_F)
@@ -1067,7 +1118,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                         or any(lo < b and a < hi for lo,hi in live_spans))
         own_account = d.get("caption_ends") and all(
             f.get("chain") and f["chain"].get("speaker") == f["chain"].get("subject") for f in facts)
-        if b > a and (qualified or not (on_evidence(a,b) or ((on_presenter or own_account) and narrated))):
+        if b > a and (page.get("demo_note") or qualified or not (on_evidence(a,b) or ((on_presenter or own_account) and narrated))):
             timed_facts.append((a,b,page))
     # Retained directions can predate the claims chain. A dense attributed block
     # still gets a reading interval, with all its authored copy and provenance.
@@ -1133,6 +1184,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         comparison_spans.append((word_frame(principle["setup"]),word_frame(principle["last"]+1) or f_end))
     comparison_spans.extend(model_spans)
     comparison_spans.extend(returns)
+    if demo_span:
+        comparison_spans.append(demo_span)
     comparison_spans.extend(source_pages)
     comparison_spans.extend((a,b) for a,b,page in timed_facts if page.get("sequence"))
     if (source_rows or comparison_spans) and dr:
@@ -1225,6 +1278,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         if cost:
             placement_report["spend"].append(cost)
         return geometry
+    if demo_span:
+        # A previously checked tutorial may still be present in a retained score.
+        # Re-seat just the words now covered by the demonstrator and their own UI.
+        ins, _ = _director().hold_take(ins,[demo_span],min_f=1,fps=FPS)
     ins = action_holds(ins, coverage, FPS, LEAD_F, detail)
     for row in ins:
         if row[2] == "clip" and row[4].get("reframe") and "action_end" not in row[4]:
@@ -1285,7 +1342,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     composed_spans = [r[:2] for r in ins] + [[lo,hi] for lo,hi,_ in speakers] + [list(span) for span in source_pages]
     composed_spans.extend([a,b] for a,b in returns)
     composed_spans.extend([a,b] for a,b,p in timed_facts if p.get("scope_cue") or p.get("sequence_kind") == "handoff")
-    if (publisher and all(w.get("publisher_camera") or w.get("on_take") for w in coverage["windows"])) or (record and not coverage["windows"]) or (thought and all(w.get("on_take") for w in coverage["windows"])) or (coverage.get("episode_examples") and not coverage["windows"]) or (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
+    if (demo and demo["first"] == 0 and demo["last"] == len(clock.words)-1 and not coverage["windows"]) or (publisher and all(w.get("publisher_camera") or w.get("on_take") for w in coverage["windows"])) or (record and not coverage["windows"]) or (thought and all(w.get("on_take") for w in coverage["windows"])) or (coverage.get("episode_examples") and not coverage["windows"]) or (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
             and any(r[4].get("episode_excerpt") for r in ins)):
         # Both the local demo and the remaining camera passages landed on their directed words.
         resolved_moves,move_spend = coverage.get("moves", []), []
@@ -1308,7 +1365,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     if pre and take.get("on_camera") is not False:
         held = DR.take_spans(pre, f_end)
         if held:
-            other = [row for row in ins if row[4].get('provider') != 'interview-frame']
+            other = [row for row in ins if row[4].get('provider') not in ('interview-frame','publisher-demo')]
             other, cleared = DR.hold_take(other, held, fps=FPS)
             ins = sorted(other+source_rows,key=lambda row:row[0])
             coverage_report['take_held'] = dict(spans=held, cleared_f=cleared)
@@ -1318,7 +1375,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     pages=[ask["f"] for ask in pre if ask.get("dev")=="type_run" and ask.get("words")
            and isinstance(ask.get("f"),list) and len(ask["f"])==2]
     if pages:
-        other,cleared=DR.hold_take([row for row in ins if row[4].get('provider') != 'interview-frame'],pages,min_f=1,fps=FPS)
+        other,cleared=DR.hold_take([row for row in ins if row[4].get('provider') not in ('interview-frame','publisher-demo')],pages,min_f=1,fps=FPS)
         ins=sorted(other+source_rows,key=lambda row:row[0])
         coverage_report["authored_pages"]=dict(spans=pages,cleared_f=cleared)
     # A short program citation can share the live closing interview. Longer verbatim
@@ -1547,6 +1604,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         layout_edges.extend(f for start,end,_ in thought_spans for f in (start,end))
         layout_edges.extend(f for span in reactions+returns for f in span)
         layout_edges.extend(f for lo,hi,_ in entries+closing for f in (lo,hi))
+        if demo_span:
+            layout_edges.extend(demo_span)
         layout_edges.append(turn_f if turn_f is not None else f_last)
         layout_edges.extend(f for span in report_spans for f in span)
         layout_edges.extend(f for lo,hi,_ in gestures for f in (lo,hi))
@@ -1559,6 +1618,15 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         for fa, fb in zip(edges, edges[1:]):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
+            if demo_span and demo_span[0] <= fa < demo_span[1]:
+                from scene.motion import fit_panel
+                crop = [0,0,1,1]
+                box = fit_panel(crop, (take["w"],take["h"]), (W,H), [0,.09,1,.52])
+                P.page([fa,fb],"#14171B",grain=0)
+                P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],source_frame=True,
+                       source_ink=[box],caption_baseline=.89)
+                cut_pts.append(fa)
+                continue
             entry = next((r for lo,hi,r in entries if lo <= fa < hi), None)
             if entry:
                 P.page([fa,fb], "#14171B", grain=0)
@@ -2139,6 +2207,16 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 cut_pts.append(f0)
                 P.events.append(f0)
                 continue
+            if rec.get("provider") == "publisher-demo":
+                from scene.motion import fit_panel
+                span = [f0,f1]
+                crop = [0,0,1,1]
+                box = fit_panel(crop,(rec["w"],rec["h"]),(W,H),[.015,.06,.985,.51])
+                P.page(span,"#14171B",grain=0)
+                P.card(span,keys[rec["path"]],box,crop=crop,src=rec["src"],source_ink=[box],caption_baseline=.89)
+                note(f0,f1,kind,name,rec,"publisher-demo")
+                cut_pts.append(f0)
+                continue
             if rec.get('provider') == 'interview-frame':
                 from wf1_source_frame import compose
                 key = keys[rec["path"]]
@@ -2147,6 +2225,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     src = [max(0,(f-LEAD_F)/FPS) for f in (fa,fb)]
                     compose(P,[fa,fb],rec,key,pieces[0]["key"],src,W,H,sup["work"],sup["ffmpeg"],decode_region,
                             report=any(lo<=fa<hi for lo,hi in report_spans))
+                if rec.get("demonstration"):
+                    credit = " · ".join(filter(None,(demo.get("speaker"),rec["source"].get("channel"))))
+                    wf1_display.reading_card(P,[f0,f1],"","",credit,pal,centre=.821,max_height=.052,
+                                             group="episode-credit")
                 if rec.get("episode_excerpt"):
                     lo,hi = rec["episode_excerpt"]
                     credit = " · ".join(filter(None,(rec["source"]["channel"], f"{lo}–{hi} s")))
@@ -2339,6 +2421,14 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     record_accent = None
     for a, b, page in timed_facts:
         facts = page["facts"]
+        if page.get("demo_note"):
+            fact = facts[0]
+            source = fact["source"]
+            credit = " · ".join(filter(None,(source.get("publisher"),source.get("publication_date"))))
+            wf1_display.reading_card(P,[a,b],fact["value"],page["demo_note"],credit,pal,
+                                     centre=.65,max_height=.34,group="demonstration-note")
+            fact_pages.append(dict(page,f=[a,b]))
+            continue
         if page.get("publisher_excerpt"):
             wf1_publisher_reading.compose(P,[a,b],page["publisher_excerpt"],pal)
             fact_pages.append(dict(page,f=[a,b]))
@@ -2651,6 +2741,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         next_subject = [round(w['t0']*FPS)+LEAD_F for w in coverage['windows'] if round(w['t0']*FPS)+LEAD_F>a+1]
         if next_subject:
             b = min(b,min(next_subject))
+        if demo_span and a < demo_span[1] and demo_span[0] < b:
+            continue
         if b - a < 14 or on_evidence(a,b):
             continue
         if record_span and a < record_span[1] and record_span[0] < b:
@@ -2733,6 +2825,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         shown.append((a, b, text))
     shown.sort()
     for a, b, text, pic in labels:
+        if demo_span and a < demo_span[1] and demo_span[0] < b:
+            continue
         if b - a < 14 or on_evidence(a,b):
             continue
         if pic in document_pics:
@@ -2867,7 +2961,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         # a picture the film placed is its scene asset; one it did not is its path, which the palette reads from the pool
         by_id = {pid: keys.get(path) or path for pid, path in (dr.get("pictures") or {}).items()}
         asks, notes = DR.palette_asks(dr, word_frame, seg_span, by_id.get, f_end)
-        owned = list(model_spans)
+        owned = list(model_spans) + ([demo_span] if demo_span else [])
         if thought:
             owned.append((word_frame(thought["first"]), word_frame(thought["last"]+1) or f_end))
         if owned:

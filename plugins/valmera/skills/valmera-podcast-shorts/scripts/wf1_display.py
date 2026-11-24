@@ -113,6 +113,8 @@ whether it is hypothetical. When it helps, use one compact staircase with both l
 seat, each entering on its own spoken cue and standing together through the question. A direction
 arrow or question mark can express the relationship. Keep that clause's other display and type
 asks for other beats. Use quantitative bars, curves or counters only with sourced magnitudes.
+A live_demo has its camera, checked publisher readings and original result already assigned. Keep its
+spoken captions and emotional timing; source composition handles its graphic type and layouts.
 source_inserts are pictures taken from this very interview. On their word spans let the original
 artifact explain the clause, including a cue pointing to it. Follow the overview into the named rows.
 speaker_inserts are the Director's planned return to the person explaining what the artifact means.
@@ -282,7 +284,8 @@ def editorial(ctx, script, pack):
             asset = Path(rec.get("path") or "")
             if page and rec.get("provider") == "primary-document" and asset.is_file():
                 page["checked_on"] = date.fromtimestamp(asset.stat().st_mtime).isoformat()
-    return dict(record_example=coverage.get("record_example"), handoffs=coverage.get("handoffs") or [], borrowed_estimates=list(borrowed.values()),
+    return dict(live_demo=(coverage.get("source_reading") or {}).get("live_demo"),
+                record_example=coverage.get("record_example"), handoffs=coverage.get("handoffs") or [], borrowed_estimates=list(borrowed.values()),
                 episode_examples=coverage.get("episode_examples") or [], callback=coverage.get("callback"), speaker_claims=speaker_claims, comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=claims, episode_start=(script.get("window") or [0])[0],
                 sources=sources, picture_windows=[{k:w[k] for k in ("first","last","name","claim","must_show","example") if k in w}
                                                   for w in coverage.get("windows", [])], speaker_inserts=[{k:r[k] for k in ('first','last')}
