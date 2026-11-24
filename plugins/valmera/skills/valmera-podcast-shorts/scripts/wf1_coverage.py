@@ -94,6 +94,7 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None, stor
  "windows":[{"first":int,"last":int,"name":str,"external":true,"association":false,"claim":str,"must_show":str,"why":str,
    "depictions":[{"name":str,"must_show":str,"video_searches":[str]}]}],
  "episode_examples":[{"first":int,"last":int,"graphic_first":int,"graphic_last":int,"label":str}],
+ "print_readings":[{"first":int,"last":int}],
  "contextual_definitions":[{"start":number,"gloss":str}],
  "comparisons":[{"first":int,"last":int,"premise":str,"consequence":str}],
  "speaker_claims":[{"first":int,"last":int,"speaker":str,"stance":"concern|characterization|recollection","report":str,"scope_question":str}],
@@ -129,6 +130,9 @@ is part of that same thought. Use recollection for memories about adoption or mo
 claim when set in type. Give one short indirect report for the whole judgment, keeping the speaker's
 qualifications and the named products. Leave ordinary connective commentary and restatements in
 the running interview. Estimates already identified in story.claims keep their own treatment.
+When a published definition leads into imagined capabilities, cite the checked print in the score.
+Keep the definition and the speaker’s speculative examples on their own words. The book’s text establishes
+the definition and the interview establishes the thought experiment. List those local word intervals in print_readings. End them before any genuine observed result or recorded event.
 Where an estimate quantifies a real observable capability, put one single_action external window on
 the act itself, even if no vendor is named. An illustrative primary demo can show a tool writing code;
 the hypothetical percentage stays with the speaker. Limit the demo to the actual action and visible result.
@@ -295,7 +299,10 @@ an honest subject; never invent one.'''
         if not isinstance(callback.get("action"), str):
             callback.pop("action", None)
         out["callback"] = callback
-    for c in [*([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
+    print_readings = [r for r in out.get("print_readings") or []
+                      if isinstance(r,dict) and type(r.get("first")) is int and type(r.get("last")) is int
+                      and 0 <= r["first"] <= r["last"] < len(words)]
+    for c in [*print_readings, *([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
         remaining = []
         for w in windows:
             for a,b in ((w["first"], min(w["last"], c["first"]-1)),

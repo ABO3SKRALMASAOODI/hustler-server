@@ -760,6 +760,12 @@ def direction_of(ctx, script, pack):
     from placement_check import file_digest
     import wf1_display
     editorial = dict(writing=wf1_display.WRITING, material=wf1_display.editorial(ctx, script, pack))
+    import wf1_experiment
+    thought_facts = wf1_experiment.director_material(editorial["material"], rows)
+    if thought_facts:
+        prints, _ = wf1_experiment.materials(dict(thought_facts=thought_facts))
+        editorial["material"]["originals"] = [f["excerpt"] for f in prints]
+        editorial["writing"] += "\nInclude the reading below as thought_reading in the same direction.\n" + wf1_experiment.PROMPT
     archive = {pic["id"]:pic["archive_source"] for pic in pics if pic.get("archive_source")}
     editorial["material"]["archive_pictures"] = archive
     for pic in pics:
@@ -801,6 +807,8 @@ def direction_of(ctx, script, pack):
                   workflow="podcast short", dur_s=dur, title=(script or {}).get("title"), hook=(script or {}).get("hook_line"),
                   payoff=(script or {}).get("close_line"), editorial=editorial, ask=llm.ask, log=getattr(ctx, "log", None))
     d = wf1_display.bind(d, editorial["material"], rows)
+    if thought_facts:
+        d["thought_facts"] = thought_facts
     sources = editorial["material"]["sources"]
     credits = {}
     for credit in d.get("archive_credits") or []:
@@ -1313,7 +1321,11 @@ def score(ctx, script):
 
 def compose(ctx, script, pack, d, reviewed_clauses=()):
     import wf1_coverage
+    import wf1_experiment
+    thought, reading_spend = wf1_experiment.read(d, pack["coverage"]["words"], ctx.supply, _llm())
     knobs = film_direction(d)
+    if thought:
+        knobs["thought_experiment"] = thought
     knobs.update({k: v for k, v in ((ctx.args or {}).get("direction") or {}).items()})
     # The composed review's findings, each local to its window: a contradiction gives that window's slot to its next
     # candidate, a crop through a face is framed again (never a global, permanent drop: round 1, 19 Nov).
@@ -1400,7 +1412,7 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
     # into the film's tail, so no short keeps a flat bed (round1 thin-sound)
     story_turn_s = round(beats["story_turn_f"] / F.FPS, 3) if beats.get("story_turn_f") is not None else None
     return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, last_word_s=last_word_s, story_turn_s=story_turn_s, turn_drop=turn_s is not None, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
-                frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=([d["spend"]] if d.get("spend") else []) +
+                thought_read=True, frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=reading_spend + ([d["spend"]] if d.get("spend") else []) +
                 [dict(u,stage='supply',what='primary documents') for research in pack.get('document_research',[]) for u in research.get('spend',[])] +
                 [dict(u,stage='supply',what='documentary research revision') for u in pack.get('research_spend',[])] +
                 [dict(stage="score", what="picture-to-words check", **u) for u in (beats.get("placement_check") or {}).get("spend", [])])
@@ -1548,6 +1560,8 @@ def retained_repairs(supply, pack, beats, wanted):
     windows = coverage.get("windows", [])
     pages = [p for p in beats.get("display_facts", []) if any(
         f.get("excerpt") or f.get("perspective") for f in p["facts"])]
+    if beats.get("thought_experiment"):
+        pages.append(beats["thought_experiment"])
     local, missing = [], []
     originals = originals_of(supply)
     footage = {line["i"]:line["clips"] for line in pack.get("footage", [])}
@@ -1611,7 +1625,9 @@ def render(ctx, script, sc):
     rejected_plan=any(unrepaired(p,found) for p in sc.get('beats',{}).get('pictures',[]))
     stale_captions=('caption_lines' in sc.get('beats',{})
                     and sc['beats'].get('caption_contract')!=wf1_film.CAPTION_CONTRACT)
-    if rejected_plan or stale_captions:
+    import wf1_experiment
+    needs_reading = not sc.get("thought_read") and all(wf1_experiment.materials(sc.get("direction") or {}))
+    if rejected_plan or stale_captions or needs_reading:
         if history and rejected_plan:
             pictures = sc.get("beats", {}).get("pictures", [])
             _repair_window_boundaries(ctx, [r for r in history[-1]["placements"] if not r["ok"]
@@ -1903,7 +1919,11 @@ def _rebuild_holds(ctx, script, sc, rd, defer=False):
     if pack.get("holds_researched"):
         return False
     sc.setdefault("beats", {})["measured_before_research"] = measured
-    weak = hold_windows(measured, pack.get("coverage") or {}, sc["beats"].get("pictures") or [])
+    coverage = pack.get("coverage") or {}
+    if sc["beats"].get("thought_experiment"):
+        from wf1_experiment import local_windows
+        coverage = dict(coverage, windows=local_windows(coverage, sc["beats"]["thought_experiment"]))
+    weak = hold_windows(measured, coverage, sc["beats"].get("pictures") or [])
     weak = [i for i in weak if i not in pack.get("settled_hold_windows", [])]
     if not weak:
         return False
@@ -2144,7 +2164,7 @@ def check(ctx, rd, sc):
         style=b.get("style"), layout=b.get("layout"), cutaway_share=b.get("cutaway_share"), finishes=b.get("finishes"), alien=b.get("alien"),
         pictures=len(pics), clips=len([p for p in pics if p.get("kind") == "clip"]), photographs=len([p for p in pics if p.get("kind") == "photo"]),
         new_pictures_10s=round(len(pics) / secs * 10, 2), display_words=[x.get("text") for x in b.get("display") or []],
-        display_facts=b.get("display_facts", []), placement_check=b.get("placement_check"), rendered_check=b.get("rendered_check"), render_reviews=rd.get("picture_review"),
+        display_facts=b.get("display_facts", []), thought_experiment=b.get("thought_experiment"), placement_check=b.get("placement_check"), rendered_check=b.get("rendered_check"), render_reviews=rd.get("picture_review"),
         delivered_check=b.get("delivered_check"), delivery_reviews=history,
         sources=[dict(f=p.get("f"), visible_f=p.get("visible_f"), kind=p.get("kind"), name=p.get("name"), source=p.get("source"), time_range=p.get("time_range"),
                       mode=p.get("mode"), window=p.get("window"), w=p.get("w"), h=p.get("h"), rung=p.get("rung"), how=p.get("how"),

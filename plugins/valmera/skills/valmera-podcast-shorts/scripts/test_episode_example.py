@@ -80,3 +80,58 @@ def test_late_text_accent_returns_to_the_spoken_word_and_keeps_pictured_action()
     bound = wf1_display.bind(dict(caption_ends=[3,7],asks=asks,arc=[]),edit,words)
     assert bound["caption_accents"] == [0]
     assert bound["asks"] == [asks[1]]
+
+
+def test_print_releases_to_full_spoken_examples_and_marks_one_actual_word(tmp_path, quiet_engines):
+    ctx,script,pack = material(tmp_path)
+    words = pack["words"]["words"]
+    script["source_url"] = ctx.args["source_url"]
+    source = dict(url="book",publication_date="2014",publisher="Press")
+    excerpt = dict(speaker="Author",words="Original definition",locator="Chapter two")
+    thought = dict(first=0,citation=4,turn=10,last=25,setup=12,accent=17,title="Book",edition="First edition",
+                   source=source,excerpt=excerpt,paraphrase="The scoped definition",locator="Ch. 2",speaker="Guest",
+                   examples=[dict(first=10,last=18,kind="figure"),dict(first=20,last=25,kind="payoff")],
+                   caption_ends=[4,9,13,18,25])
+    fact = dict(source=source,excerpt=excerpt,value=excerpt["words"],chain=dict(speaker="Guest",subject="Author"))
+    estimate = dict(source=dict(url=script["source_url"]),value="A fixed estimate",
+                    chain=dict(speaker="Guest",subject="Guest",stance="personal_estimate"))
+    pack["coverage"]["comparisons"] = [dict(first=10,last=18,premise="Premise",consequence="Fixed consequence")]
+    scene,beats = wf1_film.build(script,pack,"window",dict(thought_experiment=thought,display_facts=[
+        dict(first=0,last=13,facts=[fact]),dict(first=10,last=18,facts=[estimate])]))
+    assert not beats["display_facts"]
+    caption = " ".join(item["t"] for item in scene["items"] if item.get("role")=="cap")
+    assert " ".join(w["w"] for w in words[10:19]) in caption
+    assert [(a["dev"],a["t"]) for a in scene["devices"]] == [("highlight",words[17]["w"])]
+    display = " ".join(i["t"] for i in scene["items"] if i.get("fact_type"))
+    assert all(t in display for t in ("The scoped definition","First edition","2014","Ch. 2"))
+
+
+def test_print_reading_reserves_local_words_before_the_footage_request(tmp_path):
+    words = [dict(w=t,start=i,end=i+.9) for i,t in enumerate(
+        "the printed definition imagine a century in one hour then the filmed trial".split())]
+    raw = dict(windows=[dict(first=0,last=12,external=True,name="The trial",must_show="The recorded trial")],
+               print_readings=[dict(first=0,last=8)])
+    model = SimpleNamespace(ask=lambda *a,**kw:(json.dumps(raw),{}),json_block=json.loads)
+    plan = wf1_coverage.plan(words,"Clock",tmp_path,model)
+    assert [(w["first"],w["last"],w["say"]) for w in plan["windows"]] == [(9,12,"then the filmed trial")]
+
+
+def test_current_director_supplies_the_print_reading_in_its_existing_call(tmp_path):
+    import wf1_experiment
+    import wf1_short
+    director = wf1_short.wf1_film._director()
+    rows = [dict(w=str(i),seg=0,t0=i,t1=i+.9) for i in range(9)]
+    sentences, numbered = director.numbered([dict(i=0,text="one thought")],rows)
+    plan = dict(original=0,first=0,citation=2,turn=4,last=8,setup=5,accent=6,edition="First edition",
+                title="Book",locator="Chapter 2",paraphrase="A scoped definition",caption_ends=[3,8],
+                examples=[dict(first=4,last=8,kind="figure")])
+    direction,_ = director.repair(dict(thought_reading=plan),sentences,numbered)
+    excerpt = dict(speaker="Author",words="The checked words",url="book",event="Publication",locator="Chapter 2")
+    claim = dict(start=0,end=3.9,speaker="Guest",subject="Author",report="The definition",event="Publication",
+                 primary_excerpt=dict(source="book",quote=excerpt["words"]))
+    estimate = dict(start=4,end=8.9,speaker="Guest",subject="Guest",stance="personal_estimate",report="An example")
+    editorial = dict(claims=[claim,estimate],sources=dict(book=dict(url="book",publication_date="2014",
+                     quotations=[excerpt]),interview=dict(url="episode")))
+    direction["thought_facts"] = wf1_experiment.director_material(editorial,rows)
+    reading, spend = wf1_experiment.read(direction,rows,tmp_path,None)
+    assert not spend and reading["source"]["url"]=="book" and reading["speaker"]=="Guest"

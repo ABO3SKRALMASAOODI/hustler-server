@@ -666,3 +666,12 @@ def test_local_motion_retry_tracks_evidence_and_claim_across_renames(tmp_path):
     assert repair() == ([],[0])
     renamed.write_bytes(b"different frames")
     assert repair() == ([],[0])
+
+
+def test_checked_print_and_imagined_span_do_not_request_motion_for_their_words(tmp_path):
+    import wf1_short as wf
+    windows = [dict(first=a,last=b,t0=a/3,t1=(b+1)/3,say=str(i)) for i,(a,b) in
+               enumerate([(10,16),(17,22),(23,42),(44,65),(114,129)])]
+    beats = dict(thought_experiment=dict(first=1, last=113), display_facts=[
+        dict(first=1,last=12,facts=[dict(excerpt={"words":"checked definition"})])])
+    assert wf.retained_repairs(str(tmp_path),dict(coverage=dict(windows=windows)),beats,range(5)) == ([4],[])
