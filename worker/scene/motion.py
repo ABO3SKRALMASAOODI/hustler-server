@@ -46,6 +46,17 @@ def document_figure(crop, source_size, canvas_size, bottom=.79, top=.15):
     return fit_panel(crop, source_size, canvas_size, [.055,top,.945,bottom])
 
 
+def marked_figure(crop, target, source_size, canvas_size):
+    """Fit the checked excerpt and place a short underline under the visible target."""
+    box = fit_panel(crop, source_size, canvas_size, [.055,.277,.945,.524])
+    x, y, right, bottom = box
+    sx, sy = (right-x)/(crop[2]-crop[0]), (bottom-y)/(crop[3]-crop[1])
+    left = x + max(0., min(crop[2]-crop[0], target[0]-crop[0]))*sx
+    end = x + max(0., min(crop[2]-crop[0], target[2]-crop[0]))*sx
+    base = min(bottom, max(y, y+(target[3]-crop[1])*sy))
+    return box, [left, base, end, base+.005]
+
+
 def contextual_detail(crop, source_size, canvas_size, bottom=.79, top=.15):
     """Let a thin result row retain the surrounding application at the same reading scale."""
     left, upper, right, lower = crop
