@@ -1312,3 +1312,17 @@ DEVICES = {
                   "card": 'readalong at until dim. The caption page stands whole and dim; each word comes up as it is said',
                   "amplifies": "a slow, important sentence the viewer should read with him"},
 }
+
+
+def inference_gap(group, span, cues, *, width, height, voice, ink, accent, y):
+    """Two separate endpoints. The ellipsis appears on the voice and never closes the gap."""
+    left, right = .12, .88
+    name = group + ".dots"
+    font = dict(voice, px=round(width * .069), track=0)
+    items = [K.rect(group + suffix, span, [a, y, b, y + 2 / height], ink, .62, z=5)
+             for suffix, a, b in ((".left", left, .397), (".right", .603, right))]
+    for i, frame in enumerate(cues):
+        if span[0] <= frame < span[1]:
+            items.append(K.word(f"{group}.dot{i}", [frame, span[1]], "•", name,
+                                .45 + .05 * i, y + .011, accent, fact_type=True, text_group=group))
+    return dict(items=items, voices={name:font})

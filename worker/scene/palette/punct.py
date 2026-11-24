@@ -183,6 +183,15 @@ def white(l1, work, ask, sense):
     n = max(1, min(int(ask.get("n") or 3), 5))
     alpha = [1.0, 0.55, 0.22, 0.08, 0.0][:n]
     i = ask["id"]
+    documents = [card for card in sense.cards_at(f) if card.get("document_excerpt")]
+    if documents:
+        # Light the edge of the paper. Its printed ink stays visible on the landing frame.
+        card = max(documents, key=lambda c: c["w"] * c["h"])
+        x0, y0, x1, _ = card_rect(card)
+        edge = 3 / (l1.get("frame") or [1080, 1920])[1]
+        rect = [x0, max(0., y0-edge), x1, max(edge, y0)]
+        return {"items": [flash(f"{i}edge", f, f+n, "fill", alpha, c="#FFFFFF", rect=rect)],
+                "events": [{"f": f, "kind": "white_card", "strength": .6}], "log": {"paper_edge": card["id"]}}
     if ask.get("card") or ask.get("clip"):
         # the pictures' cards only (not the palette's overlays): a card as large as the frame is a full-frame white,
         # spaced and recorded like one
