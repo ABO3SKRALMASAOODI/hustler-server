@@ -573,3 +573,33 @@ def test_directed_principle_returns_to_one_observable_decision_on_the_warning(tm
         assert page["heading"] in labels and "Pinned verdict" not in labels
     assert plates[0]["credit"] == "Publisher · checked 2026-11-24"
     assert not any(i.get("fact_type") for i in plan.active((plates[2]["f"][1]+plates[3]["f"][0])//2))
+
+
+def test_source_model_owns_just_its_cue_and_returns_to_the_speaker():
+    import wf1_display
+    src = dict(url=PAPER, author="Author", publisher="Publisher", supports=["Safety tests influence the timing decision."])
+    direction = dict(model_phases=[dict(first=1,last=8,show_first=3,show_last=6,
+        source=PAPER,heading="Conditional model",statement="Tests inform the launch decision.",credit="Author · 2026")])
+    words = [dict(w="word") for _ in range(11)]
+    pages = [dict(first=a,last=b,facts=[dict(value=v)]) for a,b,v in [(0,10,"Background"),(2,5,"Repeated")]]
+    phases = wf1_display.model_phases(direction, {PAPER:src}, words)
+    result = wf1_display.model_pages(pages, phases)
+    assert [(p["first"],p["last"]) for p in result] == [(0,0),(3,6),(9,10)]
+    assert result[1]["facts"][0]["source"] == src
+    account = dict(value="The guest favors proceeding.", source=dict(url=INTERVIEW),
+                   chain=dict(speaker="Guest", subject="Author", interview=INTERVIEW))
+    close = dict(first=9,last=10,facts=[account])
+    credited = wf1_display.model_pages([close], phases)[-1]
+    assert credited["heading"] == "Guest’s reading" and credited["facts"][0]["value"] == ""
+    assert close["facts"][0]["value"] == "The guest favors proceeding."
+
+
+def test_published_phase_absorbs_its_overlapping_spoken_definition_and_setup():
+    import wf1_display as display
+    def page(a, b, subject, stance):
+        return dict(first=a,last=b,facts=[dict(source=dict(url=INTERVIEW),
+            chain=dict(speaker="Guest", subject=subject, stance=stance, interview=INTERVIEW))])
+    pages = [page(0,2,"Other example","definition"), page(3,7,"Feedback","framework"),
+             page(8,15,"Feedback","definition")]
+    assert display.model_claim_start(pages, dict(first=14)) == 3
+    assert display.model_claim_start(pages, dict(first=16)) == 16

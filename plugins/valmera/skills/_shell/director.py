@@ -543,6 +543,7 @@ def repair(d, sentences, words, names=(), seed=0):
     return dict(contract=CONTRACT, beats=beats, sections=sections, asks=asks, display=display[:6],
                 caption_ends=caption_ends,
                 **({"thought_reading": d["thought_reading"]} if isinstance(d.get("thought_reading"),dict) else {}),
+                **({"model_phases": d["model_phases"]} if isinstance(d.get("model_phases"),list) else {}),
                 **({"principle_example": d["principle_example"]} if isinstance(d.get("principle_example"),dict) else {}),
                 archive_views=d.get("archive_views") if isinstance(d.get("archive_views"), list) else [],
                 archive_credits=d.get("archive_credits") if isinstance(d.get("archive_credits"), list) else [],

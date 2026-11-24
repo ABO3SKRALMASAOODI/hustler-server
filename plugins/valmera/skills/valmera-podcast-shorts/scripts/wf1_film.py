@@ -1000,6 +1000,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     import wf1_principle
     principle = d.get("principle_example")
     pages = wf1_principle.pages(pages, principle, clock.words)
+    phases = d.get("model_phases") or []
+    model_spans = [(word_frame(wf1_display.model_claim_start(pages, p)), word_frame(p["last"]+1) or f_end)
+                   for p in phases]
+    pages = wf1_display.model_pages(pages, phases)
     # The take reader already located speakers in ordinary camera shots.
     # Screen-share presenter tiles are only one of the possible live returns.
     live_spans = [(round(sp["t0"]*FPS)+LEAD_F, round(sp["t1"]*FPS)+LEAD_F)
@@ -1020,7 +1024,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             b = f_end
         # A speaker-led explanation already carries its report in voice and captions.
         # A quotation from an original or a qualified estimate has its own evidentiary work.
-        qualified = page.get("principle_plate") or page.get("sequence") or page.get("scope_cue") or any((f.get("chain") or {}).get("stance") in wf1_display.CONTEXT_LABELS or f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
+        qualified = page.get("model_phase") or page.get("principle_plate") or page.get("sequence") or page.get("scope_cue") or any((f.get("chain") or {}).get("stance") in wf1_display.CONTEXT_LABELS or f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
                         (f.get("chain") or {}).get("stance") in wf1_display.ESTIMATE_LABELS or
                         (f.get("chain") or {}).get("original") for f in facts)
         narrated = all(f.get("chain") and not f.get("relation") for f in facts)
@@ -1045,7 +1049,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         rows = wf1_display.typeset(facts, P.R, DISPLAY_W * W, str.upper if st["upper"] else str)
         return len(rows) > 4
 
-    report_spans = [(a, b) for a, b, page in timed_facts if page.get("analogy_step") or page.get("principle_plate") or page.get("record_role") or page.get("scope_cue") or page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"])]
+    report_spans = [(a, b) for a, b, page in timed_facts if page.get("analogy_step") or page.get("model_phase") or page.get("principle_plate") or page.get("record_role") or page.get("scope_cue") or page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"])]
 
     # A remembered figure or reversal can live in the spoken cue and the show's own
     # shot. Release the timeline on the authored word, preserving the entire source frame.
@@ -1058,7 +1062,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 end = word_frame(steps[i+1]["at"]) if i+1 < len(steps) else b
                 if a <= start < end <= b:
                     live_beats[start] = (end,step["beat"],step["at"])
-    source_pages = [(a,b) for a,b,p in timed_facts if any(f.get("excerpt") or f.get("perspective") for f in p["facts"])]
+    phase_spans = [(a,b) for a,b,p in timed_facts if p.get("model_phase")]
+    source_pages = phase_spans + [(a,b) for a,b,p in timed_facts if any(f.get("excerpt") or f.get("perspective") for f in p["facts"])]
     if source_pages:
         coverage = dict(coverage, windows=[
             dict(w, on_take=True) if any(lo <= round(w["t0"]*FPS)+LEAD_F+1 and
@@ -1090,6 +1095,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                     if p["first"] < principle["setup"] and any(
                                         (f.get("chain") or {}).get("stance") == "framework" for f in p["facts"]))
         comparison_spans.append((word_frame(principle["setup"]),word_frame(principle["last"]+1) or f_end))
+    comparison_spans.extend(model_spans)
     comparison_spans.extend(returns)
     comparison_spans.extend(source_pages)
     comparison_spans.extend((a,b) for a,b,page in timed_facts if page.get("sequence"))
@@ -1297,6 +1303,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 if shot:
                     gestures.append((max(a,round(shot["t0"]*FPS)+LEAD_F),b,next_gesture))
     dated_spans = {(a,b) for a,b,p in timed_facts if any(f.get("record") for f in p["facts"])}
+    live_citations.update(phase_spans)
     live_citations.update(dated_spans)
     comparison_landings = {word_frame(p["sequence"][-1]["at"]): b for a,b,p in timed_facts
                            if p.get("sequence_kind") == "comparison"}
@@ -1516,6 +1523,16 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 P.page([fa,fb], ground, grain=0)
                 P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],crop=crop,source_ink=[box],
                        speaker_panel=True,caption_baseline=.86)
+                cut_pts.append(fa)
+                continue
+            if any(lo <= fa < hi for lo, hi in phase_spans):
+                # Use the original wide frame above the source, including a second participant
+                # when the interview cuts to a two-shot. Keep the lower seat for the spoken cue.
+                from scene.motion import fit_panel
+                box = fit_panel([0,0,1,1], (take["w"],take["h"]), (W,H), [0,.10,1,.49])
+                P.page([fa,fb], "#14171B", grain=0)
+                P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],source_ink=[box],
+                       speaker_panel=True,caption_baseline=.87)
                 cut_pts.append(fa)
                 continue
             if any(lo <= fa < hi for lo, hi in dated_spans) and pieces[k]["who"] == "speaker":
@@ -2168,9 +2185,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             fact_pages.append(dict(page,f=[a,b]))
             P.events.append(a)
             continue
-        if page.get("principle_plate"):
+        if page.get("principle_plate") or page.get("model_phase"):
             wf1_display.reading_card(P,[a,b],facts[0]["value"],page["heading"],page["credit"],pal,
-                                     centre=.635, max_height=.26,group="principle")
+                                     centre=.635, max_height=.36 if page.get("model_phase") else .26,
+                                     group="model-source" if page.get("model_phase") else "principle")
             fact_pages.append(dict(page,f=[a,b]))
             P.events.append(a)
             continue
@@ -2676,12 +2694,14 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         # a picture the film placed is its scene asset; one it did not is its path, which the palette reads from the pool
         by_id = {pid: keys.get(path) or path for pid, path in (dr.get("pictures") or {}).items()}
         asks, notes = DR.palette_asks(dr, word_frame, seg_span, by_id.get, f_end)
+        owned = list(model_spans)
         if thought:
-            lo,hi = word_frame(thought["first"]), word_frame(thought["last"]+1) or f_end
+            owned.append((word_frame(thought["first"]), word_frame(thought["last"]+1) or f_end))
+        if owned:
             from scene.palette import span as device_span
             def independent(ask):
                 start,end = device_span(ask, l1)
-                return end <= lo or hi <= start
+                return all(end <= lo or hi <= start for lo,hi in owned)
             asks = [ask for ask in asks if independent(ask)]
         if asks:
             l1["devices"] = list(l1.get("devices") or []) + asks        # after the rows whose type performs (perform)

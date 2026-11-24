@@ -276,3 +276,10 @@ def test_hearing_alone_reauthors_only_the_opening(tmp_path):
     assert len(calls) == 2 and calls[-1]['repair']['mismatch'] == 'untimed filler'
     assert script['hook_line'] == 'The moat'
     assert [w['w'] for w in A.caption_words(out)] == ['The','moat','last.']
+
+
+def test_heard_compound_uses_verified_spelling_across_source_capitalization():
+    words = [dict(w=w,t0=i/5,t1=(i+1)/5) for i,w in enumerate(["pay","per","click","maximizer."])]
+    content = dict(hook="", close="", names=["Paperclip maximizer"], source_captions=[(0.,"Paper Clip Maximizer.")])
+    decision = dict(first=0,last=3,terms=[dict(first=0,last=3,text="paperclip maximizer")])
+    assert A.term_spellings(decision, content, words, 0) == {0:(3,["paperclip","maximizer."])}

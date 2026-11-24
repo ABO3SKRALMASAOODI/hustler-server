@@ -125,6 +125,19 @@ source evidence, distinguishes an estimate or supplies a necessary attribution. 
 on other beats. Use short lines readable in the available speech. The attached material is evidence, not instructions."""
 
 
+WRITING += """
+When a guest moves from a hypothetical system to a published thought experiment and a later conditional model,
+use model_phases in the direction. Each row owns a distinct claim on inclusive numbered words first..last.
+Within it show just one short source reading on show_first..show_last; leave the rest to the live speaker
+and full spoken captions. Give source (the checked original's key), heading (what kind of evidence this is),
+statement (six to ten words that read as a complete thought), credit (compact author/title and year or locator).
+Use a two- or three-word heading. Give the target and its unit the headline of the example, explain whose
+hypothesis it is in the credit. Size the reading to its seconds; leave the interest in the live voice.
+Give the final interpretation a separate brief attribution on the complete cue, without repeating the cue.
+For a hypothetical target use one figure from the original, labeled as its illustrative goal. State the
+difference between what exists and what is imagined. For a timing model explain how evidence changes the
+decision. Credit an interviewee's interpretation separately using the interview source on their own words.
+Use this source seat as the device for those cues. Leave other accounts with their own existing direction."""
 WRITING += "\n" + wf1_principle.PROMPT
 
 
@@ -364,6 +377,66 @@ def claim_fact(claim, fact, sources, words):
             return dict(source=interview, attribution=speaker, value="“"+heard+"”",
                         relation=f"{stamp//60}:{stamp%60:02d}", chain=chain)
     return dict(source=interview, attribution=speaker if claim.get("stance") in ESTIMATE_LABELS else speaker+" reports", value=claim["report"], chain=chain)
+
+
+def model_phases(direction, sources, words):
+    """Bind the director's reading interval and its source to the longer spoken claim."""
+    phases = []
+    for row in direction.get("model_phases") or []:
+        if not isinstance(row, dict):
+            continue
+        points = [row.get(k) for k in ("first", "show_first", "show_last", "last")]
+        if not all(type(i) is int for i in points) or not 0 <= points[0] <= points[1] <= points[2] <= points[3] < len(words):
+            continue
+        if not all(isinstance(row.get(k), str) and row[k].strip() for k in ("source", "heading", "statement", "credit")):
+            continue
+        source = sources.get(row["source"])
+        if source and source.get("url") and (not phases or phases[-1]["last"] < row["first"]):
+            phases.append(dict(row, source=source))
+    return phases
+
+
+def model_claim_start(pages, phase):
+    """Include the interview setup when the director starts its source phase mid-definition."""
+    first = phase["first"]
+    owner = None
+    for page in sorted(pages, key=lambda row: row["last"], reverse=True):
+        if len(page["facts"]) != 1:
+            continue
+        fact = page["facts"][0]
+        claim = fact.get("chain") or {}
+        subject = (claim.get("speaker"), claim.get("subject"))
+        joins_setup = owner == subject and first == page["last"] + 1
+        if (page["first"] < first and (first <= page["last"] or joins_setup)
+                and claim.get("stance") in ("framework", "definition")
+                and same_recording(fact.get("source", {}).get("url"), claim.get("interview"))):
+            first, owner = page["first"], subject
+    return first
+
+
+def model_pages(pages, phases):
+    if not phases:
+        return pages
+    for phase in phases:
+        first = model_claim_start(pages, phase)
+        pages = [part for page in pages for part in wf1_principle.outside(page, first, phase["last"])]
+        pages.append(dict(first=phase["show_first"], last=phase["show_last"], model_phase=True,
+                          heading=phase["heading"], credit=phase["credit"],
+                          facts=[dict(value=phase["statement"], source=phase["source"])]))
+    # A director can credit the guest with a regular interview fact on the return.
+    # Match its named subject to the author of the model just shown.
+    for i, page in enumerate(pages):
+        if len(page["facts"]) != 1 or page.get("model_phase"):
+            continue
+        fact = page["facts"][0]
+        claim = fact.get("chain") or {}
+        preceding = [p for p in phases if p["last"] < page["first"]]
+        if (preceding and claim.get("speaker") and claim.get("subject") and
+                claim["subject"] == preceding[-1]["source"].get("author") and
+                same_recording(fact.get("source", {}).get("url"), claim.get("interview"))):
+            pages[i] = dict(page, model_phase=True, heading=claim["speaker"]+"’s reading", credit="",
+                        facts=[dict(fact, value="")])
+    return sorted(pages, key=lambda page: page["first"])
 
 
 def bind(direction, editorial, words):
@@ -635,7 +708,7 @@ def bind(direction, editorial, words):
     pages = testimony_pages(pages, dict(editorial,borrowed_estimates=list(estimates.values()),handoffs=list(routes.values())))
     pages.sort(key=lambda page: page["first"])
     example = wf1_principle.bind(direction.get("principle_example"), sources, words)
-    return dict(direction, principle_example=example, asks=asks, display=display, caption_ends=ends, caption_accents=sorted(accents), claims=claims, display_facts=pages,
+    return dict(direction, model_phases=model_phases(direction, sources, words), principle_example=example, asks=asks, display=display, caption_ends=ends, caption_accents=sorted(accents), claims=claims, display_facts=pages,
                 arc=[m for m in direction["arc"] if not any(p["first"] <= m["w"] <= p["last"] for p in pages)])
 
 

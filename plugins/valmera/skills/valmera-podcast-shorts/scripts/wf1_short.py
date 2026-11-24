@@ -1294,7 +1294,7 @@ def descend(ctx, script, pack, missing):
 
 def film_direction(d):
     """Carry the Director's authored fields into the picture and sound composers."""
-    knobs = {k: d.get(k) for k in ("display", "principle_example", "archive_credits", "archive_views", "caption_ends", "caption_accents", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
+    knobs = {k: d.get(k) for k in ("display", "model_phases", "principle_example", "archive_credits", "archive_views", "caption_ends", "caption_accents", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
     if d.get("beats") or d.get("sections") or d.get("asks"):
         knobs["director"] = {k: d.get(k) for k in ("beats", "sections", "asks", "arc", "pictures", "by", "seed")}
     return knobs
