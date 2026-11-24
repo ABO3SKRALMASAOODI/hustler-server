@@ -698,6 +698,22 @@ def test_whip_leaves_the_live_interview_panel_at_a_real_cut(film):
     assert outgoing["crop"][0]!=outgoing["crop"][-1] and outgoing["shutter"]==.85
 
 
+def test_pip_on_a_captioned_source_result_lands_on_its_live_card(film):
+    l1, work = film
+    page = K.shot_at(l1,120)
+    page.update(pic="plate",plate={"c0":"#171B23"})
+    page.pop("src",None)
+    source = dict(id="search",k="card",pic="v1",f=page["f"],x=.5,y=.32,w=.92,h=.25,
+                  src=[.5,2.5],crop=[0,0,1,1],source_ink=[[.04,.2,.96,.45]])
+    credit = dict(id="credit",k="word",f=page["f"],t="Example · Search",v="cap",x=.08,y=.65,z=8,role="graphic")
+    l1.update(items=l1["items"]+[source,credit],documentary_cuts=[dict(f=page["f"],pic="v1")])
+    out,_ = lay(l1,work,dict(dev="pip",id="result",at=112,frames=16))
+    landed = next(it for it in out["items"] if it["id"]=="search")
+    assert isinstance(landed.get("s"),list) and landed["s"][0] < landed["s"][15] == 1
+    assert next(it for it in out["items"] if it["id"]=="credit") == credit
+    assert not any(it.get("id")=="result.in" for it in out["items"])
+
+
 def test_pip_into_a_date_page_animates_the_date_on_its_cut(film):
     l1, work = film
     next_shot = K.shot_at(l1, 120)

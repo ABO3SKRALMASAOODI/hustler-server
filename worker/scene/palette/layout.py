@@ -459,6 +459,18 @@ def _page_inset(l1, page, words, frames, xy, ident):
                 log=dict(join=start,frames=n,subject="authored page"))
 
 
+def _settle_window(window, a, frames):
+    from ..plan import A
+    lo, hi = window["f"]
+    arrival = K.decel(min(frames, hi-a))
+    scale = [A(window.get("s", 1), f, lo) for f in range(lo, hi)]
+    for i, progress in enumerate(arrival, a-lo):
+        scale[i] *= .9 + .1*progress
+    return {"items": [dict(window, s=scale)],
+            "events": [{"f": a, "what": "source window settles", "kind": "pop", "strength": .45}],
+            "log": {"inset": window["pic"]}}
+
+
 def pip(l1, work, ask, sense_=None, pool=None):
     """Photo-in-photo: the next picture arrives as a framed window inside the current one, holds, then grows to take the
     frame on the join. With no join near, a picture of the pool comes in as an inset and leaves. ask: at, frames
@@ -477,6 +489,11 @@ def pip(l1, work, ask, sense_=None, pool=None):
             words = [it for it in l1["items"] if it["k"]=="word" and it.get("role")=="graphic"
                      and it["f"]==q["f"] and it.get("t") and it.get("v") in l1["voices"]]
             if words:
+                checked = {r["pic"] for r in l1.get("documentary_cuts", []) if r["f"][0] <= c < r["f"][1]}
+                evidence = next((it for it in l1["items"] if it.get("k") == "card"
+                                 and it.get("source_ink") and it["f"][0] == c and it["pic"] in checked), None)
+                if evidence:
+                    return _settle_window(evidence, c, n)
                 return _page_inset(l1, q, words, n, (wx,wy), args.get("id","pip"))
         card, _ = _full_card(q, l1, work, c, c + 1, "tmp")
         # A documentary window sits over a cropped background of the same source.
@@ -526,15 +543,7 @@ def pip(l1, work, ask, sense_=None, pool=None):
                        and ((it.get("pic") in checked and it.get("source_ink"))
                             or (K.is_take(pic.aid) and it.get("pic") == pic.aid))), None)
         if window:
-            from ..plan import A
-            lo, hi = window["f"]
-            arrival = K.decel(min(8, z-a, hi-a))
-            scale = [A(window.get("s", 1), f, lo) for f in range(lo, hi)]
-            for i, progress in enumerate(arrival, a-lo):
-                scale[i] *= .9 + .1*progress
-            return {"items": [dict(window, s=scale)],
-                    "events": [{"f": a, "what": "source window settles", "kind": "pop", "strength": .45}],
-                    "log": {"inset": window["pic"]}}
+            return _settle_window(window, a, min(8,z-a))
     m = z - a
     rng = K.rng_of(l1, args)
     w_ = 0.5
