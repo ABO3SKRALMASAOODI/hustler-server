@@ -157,6 +157,63 @@ def screen_credit(record):
     return host.removeprefix("www.") if host else record.get("credit")
 
 
+def linked_examples(pack, supply):
+    """Put the publisher figure chosen during referent research on the ordinary picture shelf."""
+    from placement_check import file_digest
+
+    references = (pack.get("referent_research") or {}).get("references") or []
+    if not references:
+        return 0
+    manifest = Path(supply, "document-sources", "manifest.json")
+    originals = json.loads(manifest.read_text()) if manifest.exists() else []
+    pictures = pack["pictures"]
+    added = 0
+    for i, window in enumerate(pack["coverage"]["windows"]):
+        example = window.get("example") or {}
+        page = example.get("source")
+        if not page or window.get("on_take") or window.get("reuse_excerpt"):
+            continue
+        source = next((src for ref in references if i in (ref.get("windows") or [])
+                       for src in ref.get("sources") or [] if src.get("url") == page and src.get("figure_url")
+                       and (not example.get("figure_url") or src["figure_url"] == example["figure_url"])), None)
+        if not source:
+            continue
+        url = example["figure_url"] = source["figure_url"]
+        existing = next((r for rows in pictures.values() for r in rows
+                         if (r.get("document") or {}).get("url") == url and os.path.isfile(r["path"])
+                         and (r.get("page") or "").split("#")[0] == page.split("#")[0]), None)
+        if existing is not None:
+            window["reuse_excerpt"] = dict(path=existing["path"], sha256=file_digest(existing["path"]))
+            added += 1
+            continue
+        try:
+            folder = Path(supply, "primary-documents")
+            folder.mkdir(parents=True, exist_ok=True)
+            data = cached_document(url, originals)
+            if data is None:
+                data, _ = download(url, str(folder))
+            image, = pages(data)
+            digest = hashlib.sha256(data).hexdigest()
+            folder = folder / digest[:16]
+            folder.mkdir(exist_ok=True)
+            path = folder / "original-image"
+            path.write_bytes(data)
+            # The document renderer starts from the real published view. Placement still reads its pixels.
+            title = source.get("figure_title") or window["name"]
+            rec = dict(name=window["name"], path=str(path), w=image.width, h=image.height, faces=[],
+                       provider="primary-document", page=page, url=url, title=title, credit=source.get("publisher"),
+                       licence="source document, not licensed (owner's decision)", shows=title,
+                       document=dict(url=url, sha256=digest, page=1, box=[0,0,1,1], detail=[0,0,1,1]))
+            pictures.setdefault(window["name"], []).append(rec)
+            window["reuse_excerpt"] = dict(path=str(path), sha256=digest)
+            pack.setdefault("credits", []).append(dict(kind="document", name=window["name"], title=title,
+                credit=rec["credit"], licence=rec["licence"], page=page, source_page=1))
+            added += 1
+        except Exception as exc:
+            pack.setdefault("document_research", []).append(dict(errors=[dict(window=i, url=url, error=str(exc)[:200])]))
+    return added
+
+
 def acquire(windows,work,llm,sources=None):
     import writer
     from PIL import Image

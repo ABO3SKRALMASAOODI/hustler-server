@@ -1678,11 +1678,32 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
 
         full = [0., 0., 1., 1.]
         crop = detail if figure and not rec.get("reframe") else full
+        result_start = f0
         if figure or rec.get("reframe"):
-            from scene.motion import document_figure
+            from scene.motion import document_figure, contextual_detail
             below = .50 if any(lo < f1 and f0 < hi for lo,hi in report_spans) else .79
-            box = document_figure(crop, size, (W,H), bottom=below)
-            P.card(span, key, box, crop=crop, source_ink=[box], caption_baseline=.88, document_excerpt=True)
+            reference = rec.get("example") or {}
+            figure_url = reference.get("figure_url")
+            example = (figure_url == (rec.get("document") or {}).get("url") if figure_url else
+                       bool(reference.get("source")) and reference["source"].split("#")[0] == (rec.get("page") or "").split("#")[0])
+            top = .20 if example else .15  # the fixed brand ends at .182
+            if example:
+                below = min(.79, below+.04)
+                crop = contextual_detail(crop, size, (W,H), bottom=below, top=top)
+            box = document_figure(crop, size, (W,H), bottom=below, top=top)
+            grade = dict(look=None, grade=dict(gain=1.)) if example else {}
+            if example and figure and not rec.get("reframe") and f1-f0 >= 3*FPS:
+                from wf1_documents import uncropped_image
+                overview = uncropped_image(rec)
+                if overview["path"] != rec["path"]:
+                    # Establish the actual application, then read the selected answer at full width.
+                    overview_key = P.image(asset_id("p", overview), overview)
+                    result_start += FPS
+                    seat = document_figure(full, (overview["w"],overview["h"]), (W,H), bottom=below, top=top)
+                    P.card([f0,result_start], overview_key, seat, crop=full, source_ink=[seat],
+                           document_excerpt=True, caption_baseline=.88, **grade)
+            P.card([result_start,f1], key, box, crop=crop, source_ink=[box], caption_baseline=.88,
+                   document_excerpt=True, **grade)
         elif detail:
             # Legacy OCR supplies the heading alone. Keep the artifact that gives that label meaning.
             view(full, [.055,.15,.945,.30], span)
@@ -1695,6 +1716,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             view(full, [.055, .198, .945, .48], span)
         note(f0, f1, kind, name, rec, "document")
         P.pictures[-1].update(source_crop=crop, document=rec.get("document"), excerpt_crop=detail)
+        if result_start > f0:
+            P.pictures[-1]["overview"] = dict(f=[f0,result_start], pic=overview_key, path=overview["path"], crop=full)
 
     def bleed(f0, f1, kind, name, rec, key):
         source_ink = clipped_source_ink(rec) if kind == "clip" else []
@@ -1849,9 +1872,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 continue
             if rec.get("provider") == "primary-document":
                 # The figure and the supporting statement may have different sources.
-                urls = {url for url in (rec.get("page"), rec.get("url")) if url}
+                urls = {url.split("#")[0] for url in (rec.get("page"), rec.get("url")) if url}
                 credited = [(a, b) for a, b, page in timed_facts
-                            if any(fact["source"].get("url") in urls for fact in page["facts"])]
+                            if any((fact["source"].get("url") or "").split("#")[0] in urls
+                                   for fact in page["facts"])]
                 from wf1_documents import screen_credit
                 credit = archive_credit["label"] if archive_credit else screen_credit(rec)
                 if credit:
@@ -1963,7 +1987,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         P.events.append(a)
     for a, b, page in timed_facts:
         facts = page["facts"]
-        if page.get("context_cue"):
+        if page.get("context_cue") or page.get("action_intro"):
             fact = facts[0]
             wf1_display.reading_card(P, [a,b], fact["value"], fact["attribution"], "", pal,
                                      centre=.65, max_height=.25, group="opening-context")
@@ -2003,9 +2027,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     P.events.append(start)
                     continue
                 if page.get("sequence_kind") == "process":
-                    heading = "Process examples"
                     source = steps[i]["source"]
-                    footer = source.get("publisher") or source.get("url") or ""
+                    credit = source.get("publisher") or source.get("url") or ""
+                    wf1_display.reading_card(P, [start,end], steps[i]["label"], credit, "", pal,
+                                             centre=.65, max_height=.23, group="process")
+                    P.events.append(start)
+                    continue
                 if page.get("sequence_kind") == "history":
                     source = steps[i]["source"]
                     heading = "Timeline"
@@ -2095,7 +2122,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     body = " ".join(filter(None, (fact.get("qualifier"), body, fact.get("relation"))))
                     citation = source
                 span = [a + round((b - a) * k / len(facts)) for k in (i, i + 1)]
-                if (a,b) in live_citations:
+                if fact.get("visible_statement") and fact.get("figure_url"):
+                    for during,text in wf1_display.figure_readings(span, fact, P.pictures):
+                        wf1_display.reading_card(P, during, text, label or speaker, citation, pal)
+                elif (a,b) in live_citations:
                     wf1_display.reading_card(P, span, body, label or source, citation, pal, centre=.64)
                 elif (a,b) in source_pages:
                     perspective = fact.get("perspective")

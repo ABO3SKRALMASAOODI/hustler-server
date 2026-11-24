@@ -142,8 +142,8 @@ def script(ctx, ideas_out):
                "Use it as evidence for meaning, cut only the chosen moment. If a list is announced anywhere, "
                "distinguish its actual members from examples of one. When the full list falls outside the cut, "
                "frame this short around the particular requirement it explains. Where its voice still announces "
-               "the larger list, write a claim with stance=framework and report identifying the subset, ordinal "
-               "if supported, and what it means. Time it across the announcement and the start of the explanation. "
+               "the larger list, write a claim with stance=framework and report naming the concrete action in ordinary language, "
+               "so the thought stands alone without earlier list items. Time it across the announcement and the start of the explanation. "
                "When the term itself needs explanation to follow the argument, explain unfamiliar shorthand at first use with stance=definition and the source's expansion and "
                "plain meaning. For shorthand naming one side of a contrast, keep the complete contrast in speech. Give this cue its own readable interval adjacent to any estimate; or incorporate "
                "the full expansion and meaning in the estimate's report. Budget about three spoken seconds for an eight-word definition; adjacent words can carry its reading. Keep a repeated numerical challenge together. Use nonoverlapping claim intervals. "
@@ -278,10 +278,18 @@ def supply(ctx, script):
     import wf1_context
     primary_direction = wf1_context.direct(coverage, os.path.join(sup_dir, 'referent-research'), _llm())
     windows = coverage['windows']
+    pack = dict(sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[],
+                footage=[], title=script.get("title"), coverage=coverage,
+                referent_research=primary_direction["references"], research_spend=primary_direction["spend"])
+    import wf1_documents
+    wf1_documents.linked_examples(pack, sup_dir)
+    # Keep the original window numbering for placement and recovery. Search only the windows still needing media.
+    video_windows = [i for i,w in enumerate(windows) if not w.get("reuse_excerpt")]
     # Inventory records what was said; windows specify what can truthfully be photographed.
     # Passing the inventory back as search subjects resurrects unnamed people and isolated dates.
     research = {}
-    for window in windows:
+    for i in video_windows:
+        window = windows[i]
         research.setdefault(window['name'],[]).append(window['must_show'])
     import wf1_primary_sources
     originals=wf1_primary_sources.retained(sup_dir)
@@ -291,7 +299,8 @@ def supply(ctx, script):
                                video_sources=originals.get(name,[]),
                                video_searches=list(dict.fromkeys(q for w in windows if w['name']==name for q in w.get('video_searches',[]))),
                                **{'is':'thing'}) for name,requirements in research.items()])
-    direction_key=hashlib.sha256(json.dumps(fscript,sort_keys=True).encode()).hexdigest()[:16]
+    search_key = fscript if len(video_windows) == len(windows) else [fscript, video_windows]
+    direction_key=hashlib.sha256(json.dumps(search_key,sort_keys=True).encode()).hexdigest()[:16]
     footage_name = f'footage-v{wf1_coverage.CONTRACT}-{FOOTAGE_PIXELS}-{direction_key}'
     wf3.given_footage(ctx, os.path.join(sup_dir, footage_name))
     fw, fh = wf1_film.FOOTAGE_FRAME                       # clips fill the phone in every style: fetched at its full size
@@ -302,7 +311,8 @@ def supply(ctx, script):
     foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]), 2) for s in windows],
                          W=fw, H=fh, preserve_source=True, native_pixels=True, look_itself=True, shot_s=1.15, line_max=20, per=5,
                          strict_lines=True, motion_first=True, scout_motion=True, alloc="round", reassign_lost=True,
-                         verify=False, whole_first=True, keep_sources=True, hear_s=0, out_name=footage_name) if windows else None
+                         verify=False, whole_first=True, keep_sources=True, hear_s=0, out_name=footage_name,
+                         lines=video_windows if len(video_windows) < len(windows) else None) if video_windows else None
     if foot:
         n_yt, n_bad = refused(foot)
         ctx.log(f"footage sources: {n_yt} on YouTube, {n_bad} refused or archive-only; {foot['counts'].get('clips')} clips on "
@@ -311,10 +321,9 @@ def supply(ctx, script):
     if platform_walled:
         ctx.log('YouTube refused most footage sources (its wall): the exact refused sources are fetched again, '
                 'with backoff, on every route before the film is built')
-    pack = dict(platform_walled=platform_walled,sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[], footage=[], title=script.get("title"), coverage=coverage)
+    pack["platform_walled"] = platform_walled
     if platform_walled:
         pack['wall'] = dict(sources=refused(foot)[0], refused=refused_rows(foot), since=time.time())
-    pack.update(referent_research=primary_direction['references'],research_spend=primary_direction['spend'])
     subjects, by_line = [], {}
     if foot:
         fdir = os.path.join(sup_dir, footage_name)
@@ -329,7 +338,7 @@ def supply(ctx, script):
         ctx.log(f"footage: {foot['counts']['clips']} clips on {foot['counts']['lines_with_footage']} of {foot['counts']['lines']} sentences; "
                 f"subjects {[s['name'] for s in subjects]}")
     # photographs of the same things, for the sentences the footage left bare
-    bare = photo_subjects(pack["footage"], by_line)
+    bare = photo_subjects(pack["footage"], {i:names for i,names in by_line.items() if i in video_windows})
     named = [dict(name=s["name"], searches=[s["name"]], must_show=s.get("must_show") or s["name"], **{"is": s.get("kind") or "thing"})
              for s in subjects if s["name"] in bare]
     if named:
@@ -346,7 +355,9 @@ def supply(ctx, script):
                     r["faces"] = PX.faces(r["path"])
                 except Exception:  # noqa: BLE001
                     r["faces"] = []
-        pack["pictures"] = {k: v for k, v in got.items() if v}
+        for name, records in got.items():
+            if records:
+                pack["pictures"].setdefault(name, []).extend(records)
         pack["picture_reports"] = reports
         pack["credits"] += [dict(kind="photograph", name=r["name"], title=r.get("title"), licence=r.get("licence"), credit=r.get("credit"), page=r.get("page"))
                             for v in got.values() for r in v]
@@ -1036,6 +1047,10 @@ def refill(ctx, script, pack, shortage):
                 return
             shortage = dict(shortage, **{k:[i for i in shortage.get(k, []) if i in wanted]
                                          for k in ("weak_windows","missing_windows")})
+    import wf1_documents
+    if wf1_documents.linked_examples(pack, ctx.supply):
+        save_pack(ctx, pack)
+        return
     added=0
     # A still cannot repair a motion deficit. Preserve existing documentary
     # evidence, but spend this recovery pass on moving originals first.
@@ -1382,9 +1397,14 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
     l1["pool"] = wf1_coverage.device_pool(pack, beats.get("placement_check"), work=ctx.supply,
                                           ffmpeg=pack.get("ffmpeg") or "ffmpeg",
                                           matched={p.get("origin") or p["path"] for p in shown})
-    l1["documentary_cuts"] = [{k: p.get(k) for k in
-                               ("f", "pic", "path", "source_slice", "time_range", "source_evidence", "name_super")}
-                              for p in shown]
+    l1["documentary_cuts"] = []
+    for picture in shown:
+        cut = {k: picture.get(k) for k in ("f", "pic", "path", "source_slice", "time_range", "source_evidence", "name_super")}
+        overview = picture.get("overview")
+        if overview:
+            l1["documentary_cuts"].append(dict(cut, f=overview["f"], pic=overview["pic"], path=overview["path"]))
+            cut["f"] = [overview["f"][1], cut["f"][1]]
+        l1["documentary_cuts"].append(cut)
     l1["documentary_lead_f"] = wf1_film.LEAD_F
     if l1.get("devices") or l1.get("alien"):
         # the sound design hears the Director's devices: laid now on the scene the render draws (one base picture on

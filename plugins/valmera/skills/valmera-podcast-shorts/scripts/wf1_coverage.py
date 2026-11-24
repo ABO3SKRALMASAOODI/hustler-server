@@ -640,6 +640,9 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
         names=list(dict.fromkeys([window['name'],*window.get('subjects',[])]))
         candidates += sorted([('photo', name, p) for name in names for p in pictures.get(name, [])],
                              key=lambda row:-fits.get((i,row[2]['path']),5))
+        figure_url = (window.get("example") or {}).get("figure_url")
+        if figure_url:
+            candidates.sort(key=lambda row: (row[2].get("document") or {}).get("url") != figure_url)
         priorities = coverage.get("passed_placements", {}).get(str(i), [])
         for prior in priorities:
             # A fresh excerpt is cut locally, so it need not occur in the scout's
@@ -695,6 +698,9 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
                     or not os.path.isfile(path) or file_digest(path) != prior["sha256"]):
                 continue
             kind, name, rec = by_path[path]
+            if (figure_url and chosen and chosen in pool and
+                    (chosen[2].get("document") or {}).get("url") == figure_url and path != chosen[2]["path"]):
+                continue
             url = (rec.get("source") or {}).get("url") or rec.get("page")
             if ("source" in prior and url!=prior["source"]) or any(same_picture(rec, old) for old in used):
                 continue
@@ -873,6 +879,9 @@ as its subject. A specific company introduced by a previous researcher is an ill
 named entity in the speech. When it only demonstrates an adjacent scale comparison, carry the actual
 operational example through that window. For a primary source illustrating an unnamed category, return
 example:{source: exact primary_research URL, statement: roughly six to nine plain words about the documented case}.
+Write statement so it stands on its own over the interview. When pointing to a specific pictured example,
+copy figure_url from its primary source and give visible_statement for those pixels alone. Use ordinary
+language for the action, the qualified price and its unit. Give a technical name its meaning on first use.
 Keep the scope specific to the applications or activity the publisher describes. Name the actual object of
 the claim. Put source, page and standing qualifications in the research record. The on-screen line should
 read within the word interval; the film already labels its publisher and status as an example. Prefer the primary source that documents the relevant operation or process. Use a dated lab talk to show the lab's work or a legible detail of the

@@ -22,7 +22,7 @@ Use picture_windows to tie the source and the displayed fact to the same proposi
 unnamed category's sourced illustration explicitly as an example and state its documented scope.
 For an archive program use the exact talk title and event date beside the interview. For a sequence
 of real processes use sequence_kind="process". Give each step its supporting source and a compact,
-concrete action readable on its spoken cue. Distinguish a documented example from the speaker's words.
+concrete action readable on its spoken cue. Use two or three words for a subsecond step. Distinguish a documented example from the speaker's words.
 Use the original author’s dated words for a reported forecast. Keep their scope and uncertainty.
 A sourced explanation owns its clause; use a scenario on separate words only when it adds a distinct point.
 Also return caption_ends, the inclusive numbered last word of every short, complete spoken reading unit,
@@ -42,7 +42,7 @@ links them. The labels form one qualitative diagram. Word attributions and scena
 an illustration of the interview. Avoid invented measurements, issuer histories and extra acquisition.
 episode_examples already have a labeled illustration on the live episode; leave those graphics to composition.
 Keep the full contrast and the complete host reply in captions. Use the script's definition and framework claims on their addressed words. A spoken count can introduce
-one requirement explored here; put the requirement and its place in the framework on screen. Resolve a
+one requirement explored here; name the requirement as an action that stands alone, then give its reading time to the concrete steps. Resolve a
 short form on first use, with enough time to read it. Keep the estimate separate from what a demo shows.
 Use separate captions for the literal speech. A visual change to the camera or a paraphrased pull quote
 alone cannot explain a changing relationship.
@@ -480,6 +480,8 @@ def bind(direction, editorial, words):
                 retained.append(dict(page, first=last+1))
         pages = retained
         fact = dict(value=statement, statement=statement, relation="Example", source=source, example=True)
+        if example.get("figure_url") and example.get("visible_statement"):
+            fact.update(figure_url=example["figure_url"], visible_statement=example["visible_statement"])
         pages.extend(dict(first=a, last=b, facts=[fact]) for a,b in spans)
     for example in editorial.get("episode_examples") or []:
         a, b = example["graphic_first"], example["graphic_last"]
@@ -489,6 +491,19 @@ def bind(direction, editorial, words):
     pages.sort(key=lambda page: page["first"])
     return dict(direction, asks=asks, display=display, caption_ends=ends, caption_accents=sorted(accents), claims=claims, display_facts=pages,
                 arc=[m for m in direction["arc"] if not any(p["first"] <= m["w"] <= p["last"] for p in pages)])
+
+
+def figure_readings(span, fact, pictures):
+    """Switch to the pictured wording only while the composed card shows that publisher figure."""
+    start, end = span
+    page = fact["source"]["url"].split("#")[0]
+    matches = [(max(start,a), min(end,b)) for picture in pictures for a,b in [picture["f"]]
+               if a < end and start < b and (picture.get("document") or {}).get("url") == fact["figure_url"]
+               and (picture.get("source") or "").split("#")[0] == page]
+    edges = sorted({start, end, *(f for pair in matches for f in pair)})
+    for a,b in zip(edges,edges[1:]):
+        visible = any(lo <= a < hi for lo,hi in matches)
+        yield [a,b], fact["visible_statement"] if visible else fact["statement"]
 
 
 def episode_pages(pages, coverage, words):
@@ -511,6 +526,15 @@ def episode_pages(pages, coverage, words):
                 continue
             page = dict(page, first=0 if not any(p["last"] < first for p in pages) else first,
                         last=stop, context_cue=True)
+        if claim.get("stance") == "framework":
+            # The example enacts this speaker's rule. Move from the premise into the first action.
+            actions = [p["first"] for p in pages if p.get("sequence_kind") == "process"
+                       and page["first"] <= p["first"] <= page["last"]
+                       and p["facts"][0].get("attribution") == claim.get("speaker")]
+            if actions:
+                if min(actions) == page["first"]:
+                    continue
+                page = dict(page, last=min(actions)-1, action_intro=True)
         elif example:
             # Keep the illustration through its explanation, inside the planner's local span.
             while last < example["last"] and words[last+1]["seg"] == words[last]["seg"]:
