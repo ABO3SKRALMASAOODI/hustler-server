@@ -52,3 +52,18 @@ def test_review_row_keeps_the_real_filename_and_neighboring_rows_at_reading_size
     assert crop[0] <= row[0] < row[2] <= crop[2]
     assert (row[3]-row[1])/(crop[3]-crop[1])*(seat[3]-seat[1])*1920 >= 32
     assert underline[1] == pytest.approx(seat[1]+(row[3]-crop[1])/(crop[3]-crop[1])*(seat[3]-seat[1]))
+
+
+def test_dark_stage_fits_one_repeated_projection_with_visible_ink():
+    import numpy as np
+    from scene.continuity import repeated_projection
+    gray = np.zeros((240,480),dtype=np.uint8)
+    rng = np.random.default_rng(92)
+    slide = rng.integers(0,120,(56,140),dtype=np.uint8)
+    gray[86:142,20:160] = slide
+    gray[85:141,312:452] = slide
+    crop, gamma = repeated_projection(gray)
+    assert crop[0] <= 20/480 and crop[2] >= 160/480 and crop[2]-crop[0] < .55
+    assert crop[1] <= 86/240 and crop[3] >= 142/240 and gamma > 1
+    gray[:,240:] = 0
+    assert repeated_projection(gray) is None

@@ -159,3 +159,68 @@ def enclosing_window(path, seconds, action):
                        and row[1][2]-row[1][0] <= 1.15*(inner[2]-inner[0])
                        and row[1][3]-row[1][1] <= 1.55*(inner[3]-inner[1])),default=(0,inner))[1]
         return [max(0,l-.02),max(0,t-.025),min(1,r+.02),min(1,b+.025)]
+
+
+def repeated_projection(gray):
+    """Frame one of two matching lit projections on a dark stage, preserving its ink."""
+    import cv2
+    import numpy as np
+
+    h, w = gray.shape
+    if w < h or np.median(gray) > 45:
+        return None
+    half = w//2
+    left, right = gray[:,:half], gray[:,half:]
+    sift = cv2.SIFT_create(contrastThreshold=.015)
+    src, a = sift.detectAndCompute(left,None)
+    dst, b = sift.detectAndCompute(right,None)
+    if a is None or b is None or len(b) < 2:
+        return None
+    pairs = [m for m,n in cv2.BFMatcher().knnMatch(a,b,k=2) if m.distance < .7*n.distance]
+    if len(pairs) < 8:
+        return None
+    x = np.float32([src[m.queryIdx].pt for m in pairs])
+    y = np.float32([dst[m.trainIdx].pt for m in pairs])
+    matrix, mask = cv2.estimateAffinePartial2D(x,y,ransacReprojThreshold=2)
+    if matrix is None or mask.sum() < 8 or abs(matrix[1,0]) > .06 or not .9 < matrix[0,0] < 1.1:
+        return None
+    aligned = cv2.warpAffine(right,matrix,(half,h),flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP)
+    # Bound the matching bright ink, including titles beyond the keypoints.
+    light = np.minimum(left,aligned)
+    ink = light > max(30,np.percentile(light,96))
+    yy, xx = np.nonzero(ink)
+    if len(xx) < 24:
+        return None
+    # Intersect with the matched panel's vertical extent to exclude matching stage lights below it.
+    hits = x[mask.ravel().astype(bool)]
+    top, bottom = np.min(hits[:,1]), np.max(hits[:,1])
+    keep = (yy >= top-.10*h) & (yy <= bottom+.10*h)
+    if keep.sum() < 24:
+        return None
+    yy,xx = yy[keep],xx[keep]
+    l,r = np.percentile(xx,[.1,99.9])/w
+    t,b = np.percentile(yy,[.1,99.9])/h
+    if r-l < .14 or b-t < .06:
+        return None
+    crop = [max(0.,l-.025),max(0.,t-.08),min(.5,r+.025),min(1.,b+.08)]
+    highlight = max(.1, np.percentile(left[yy,xx],55)/255)
+    gamma = min(1.8,max(1., np.log(highlight)/np.log(.82)))
+    return [round(float(v),5) for v in crop], round(float(gamma),3)
+
+
+def projection_at(path, seconds):
+    try:
+        import cv2
+    except ImportError:
+        return None
+    cap = cv2.VideoCapture(path)
+    try:
+        cap.set(cv2.CAP_PROP_POS_MSEC,seconds*1000)
+        ok, frame = cap.read()
+        if ok:
+            h,w = frame.shape[:2]
+            width = min(w,768)
+            return repeated_projection(cv2.resize(cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY),
+                                                  (width,round(h*width/w))))
+    finally:
+        cap.release()
