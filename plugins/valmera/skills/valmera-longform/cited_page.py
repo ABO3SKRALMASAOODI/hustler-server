@@ -100,7 +100,11 @@ def capture(fact, path):
                     article.screenshot(path=str(out))
                 else:
                     hit.scroll_into_view_if_needed()
-                    hit.screenshot(path=str(out))
+                    data = webrecord.passage_image(hit, quote)
+                    if data:
+                        out.write_bytes(data)
+                    else:
+                        hit.screenshot(path=str(out))
             finally:
                 browser.close()
     with Image.open(out) as im:
@@ -109,7 +113,7 @@ def capture(fact, path):
         path=str(out),
         w=w,
         h=h,
-        source_url=url,
+        source_url=url, words=quote,
         attribution=" · ".join(
             str(v) for v in [fact.get("author"), fact.get("date"), parts.hostname] if v
         ),

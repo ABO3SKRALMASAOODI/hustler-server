@@ -820,7 +820,7 @@ def _sources_md(pod_line, rows):
                 doc = p["document"]
                 c = by_page.get(p.get("source")) or {}
                 fields = (evidence.get("title") or c.get("title"), c.get("credit") or evidence.get("channel"),
-                          doc.get("publication"), doc.get("url"), f"page {doc['page']}", subject, at)
+                          doc.get("publication"), doc.get("url"), f"page {doc['page']}", doc.get("words") or subject, at)
                 out.append("- Document | " + " | ".join(dict.fromkeys(filter(None,fields))))
             elif p.get("kind") == "clip":
                 c = by_clip.get((p.get("source"), tr)) or by_page.get(p.get("source")) or {}
@@ -855,6 +855,14 @@ def _sources_md(pod_line, rows):
                 program = fact.get("program_entry")
                 if program:
                     out.append("- Program | " + " | ".join((program["title"], program["speaker"], program["date"], fact["source"]["url"])))
+                chain = fact.get("chain") or {}
+                if (chain.get("speaker") and chain.get("interview") and chain.get("stance")
+                        and not chain.get("original") and not fact.get("excerpt")):
+                    at = page.get("f")
+                    out.append("- Interview account | " + " | ".join(filter(None, (chain.get("speaker"),
+                        chain.get("heard") or chain.get("report"),chain.get("interview") or episode_url,
+                        chain.get("witness") or chain.get("label") or chain.get("stance"),
+                        f"shown at {at[0]/30:.1f}-{at[1]/30:.1f} s" if at else None))))
                 viewpoint = fact.get("perspective")
                 if viewpoint:
                     out.append("- Interview account | " + " | ".join(filter(None, (viewpoint["speaker"],

@@ -85,6 +85,13 @@ def needs_original(claim, coverage=None):
                 if (0 <= row["first"] <= row["last"] < len(words) and
                         words[row["first"]]["start"] <= middle < words[row["last"]]["end"]):
                     return False
+        # A private outcome already assigned to this witness is complete on the interview.
+        for cue in coverage.get("interview_cues") or []:
+            a,b = cue.get("first"),cue.get("last")
+            if (cue.get("stance") in ("recollection","characterization") and cue.get("speaker") == claim.get("speaker")
+                    and type(a) is int and type(b) is int
+                    and 0 <= a <= b < len(words) and words[a]["start"] <= middle < words[b]["end"]):
+                return False
     return bool(claim.get("stance") != "observation" and claim.get("subject") and claim.get("speaker") != claim["subject"]
                 and claim.get("stance") not in CONTEXT_LABELS and not claim.get("interview_only"))
 
@@ -94,7 +101,7 @@ select the primary event that explains the mechanism in the speaker's argument. 
 future plans belongs to the interview. A dated transaction documents the parties and what happened at that time.
 On a personal aside identify the named person and connect the historical event to the argument. Attribute the
 transaction only to the documented parties. Return scope_for, statement (one short plain sentence), sources
-and record:{source,words,heading,event_date,display,identifier_source (optional URL)}. scope_for is the integer first word ID. source is the exact primary URL and words the minimum
+and record:{source,words,focus (short literal emphasis within words),heading,event_date,display,identifier_source (optional URL)}. scope_for is the integer first word ID. source is the exact primary URL and words the minimum
 verbatim excerpt establishing the relevant action, also in that source's quotations. heading identifies the
 event or the person and role; event_date dates the action. Choose display=excerpt when those words stand alone,
 else statement. This is timed phone copy: fit the body to the actual seconds, around three words per second,
@@ -159,7 +166,9 @@ Start with primary_text when supplied: it is text from the publisher's actual pa
 For a claim with matching dated author text, copy one short verbatim span including its modal
 words and scope into quotations even when the interview refers to another occasion. The
 host's question and the cited author's published prediction are separate. For a scope check
-choose a single readable clause that directly answers the question and keep only sources
+choose a single readable clause that directly answers the question. When an issuer's release only
+documents expected use of capital, select its actual sentence on the policy beat. The interview documents private
+experience; leave undisclosed quantities open. Omit search commentary from display wording. Keep only sources
 that substantiate that clause. Search primary sources for missing evidence. Return JSON {"references":[{"windows":[integer],"referent":str,
 "finding":str,"sources":[{"url":str,"publisher":str,"supports":str}],"depiction_options":[str]}],"unresolved":[str]}.
 For borrowed_estimates, check the original study and material reassessments in the same research

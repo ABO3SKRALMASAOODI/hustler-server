@@ -891,7 +891,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     import wf1_display
     reading_spans = []
     timed_facts = []
-    pages = wf1_display.episode_pages(d.get("display_facts") or [], coverage, clock.words)
+    pages = wf1_display.episode_pages(d.get("display_facts") or [],
+        dict(coverage, interview_cues=[dict(c,interview=script.get("source_url")) for c in coverage.get("interview_cues") or []
+                                      if isinstance(c,dict)]), clock.words)
     pages = wf1_record.pages(pages, record, coverage["words"],
                              dict(url=script.get("source_url"), publisher=script.get("source_credit")),
                              script.get("source_start", 0), dr.get("beats") or [], d.get("caption_ends") or [])
@@ -1038,7 +1040,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
 
     def needs_reading_page(facts):
         if opinion_byline(facts):
-            return facts[0]["chain"].get("stance") == "observation"
+            return facts[0]["chain"].get("stance") == "observation" or bool(facts[0]["chain"].get("witness"))
         if any(f.get("excerpt") or f.get("chain") or wf1_display.source_statement(f, script.get("source_url")) for f in facts):
             return True
         if not any(f.get("attribution") for f in facts):
@@ -2282,7 +2284,13 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         if opinion_byline(facts):
             # The synchronous voice and captions carry the qualified words. Only identify their owner.
             claim = facts[0]["chain"]
-            byline = claim["speaker"] + " · " + wf1_display.OPINION_LABELS[claim["stance"]]
+            if claim.get("witness"):
+                credit = ("Interview recollection" if claim["witness"] == "recollection" else "Interview opinion")
+                wf1_display.reading_card(P,[a,b],claim["label"],claim["speaker"]+" · "+credit,"",pal,
+                                         centre=.65,max_height=.19,group="interview-note")
+                fact_pages.append(dict(page,f=[a,b]))
+                continue
+            byline = claim["speaker"] + " · " + (claim.get("label") or wf1_display.OPINION_LABELS[claim["stance"]])
             if (clock.words[page["first"]]["seg"] == clock.words[page["last"]]["seg"]
                     and clock.words[page["first"]]["seg"] in (reading.get("quote_segments") or [])):
                 byline = "Voice · " + claim["speaker"]

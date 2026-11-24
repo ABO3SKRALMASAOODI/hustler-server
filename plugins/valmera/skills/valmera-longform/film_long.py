@@ -88,9 +88,11 @@ def _designs(ctx, sc, dos, world, out_dir):
             if k in ("document", "quote") and d.get("fact") in facts:
                 import cited_page
                 fact = facts[d["fact"]]
+                # The dossier selected this qualified proposition for the cited fact ID.
+                words = fact["quote"]
                 F._engines()  # use the workflow worker's public-source fetch and browser route
                 try:
-                    original = cited_page.capture(dict(fact, quote=d.get("text") or fact["quote"]), p)
+                    original = cited_page.capture(dict(fact, quote=words), p)
                 except Exception as exc:
                     ctx.log(f"cited original {fact['url']} unavailable: {str(exc)[:140]}")
                 else:
@@ -98,7 +100,7 @@ def _designs(ctx, sc, dos, world, out_dir):
                     continue
             if k == "document" and d.get("fact") in facts:
                 f = facts[d["fact"]]
-                rec = design.document(f["quote"], d.get("title") or f.get("claim") or "", f.get("url"), d.get("mark"), f.get("year"), p, seed=i)
+                rec = design.document(words, d.get("title") or f.get("claim") or "", f.get("url"), d.get("mark"), f.get("year"), p, seed=i)
             elif k == "map" and world:
                 pl = [places[n] for n in d.get("places") or [] if n in places]
                 if not pl:
@@ -110,6 +112,8 @@ def _designs(ctx, sc, dos, world, out_dir):
                 rec = design.chart(d.get("title") or "", d["bars"], p, seed=i)
             elif k == "number" and d.get("print"):
                 rec = design.number(d["print"], d.get("label"), p, seed=i, dark=(s.get("beat") in ("turn", "low")))
+            elif k == "quote" and d.get("fact") in facts:
+                rec = design.quote(words, fact.get("author") or fact.get("publisher"), p, seed=i)
             elif k == "quote" and d.get("text"):
                 rec = design.quote(d["text"], d.get("who"), p, seed=i)
             else:
@@ -117,6 +121,9 @@ def _designs(ctx, sc, dos, world, out_dir):
         except Exception as e:  # noqa: BLE001 - a page that cannot be made is a gap in the film, logged
             ctx.log(f"design {i} {k}: {str(e)[:160]}")
             continue
+        if k in ("document", "quote") and d.get("fact") in facts:
+            rec = dict(rec, source_url=fact["url"], words=words,
+                       attribution=" · ".join(filter(None,(fact.get("author"),str(fact.get("date") or fact.get("year") or "")))))
         made[str(i)] = dict(rec, kind=k, seg=i)
     return made
 

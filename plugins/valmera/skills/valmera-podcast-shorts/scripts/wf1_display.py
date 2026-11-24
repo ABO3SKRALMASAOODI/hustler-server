@@ -116,6 +116,7 @@ asks for other beats. Use quantitative bars, curves or counters only with source
 source_inserts are pictures taken from this very interview. On their word spans let the original
 artifact explain the clause, including a cue pointing to it. Follow the overview into the named rows.
 speaker_inserts are the Director's planned return to the person explaining what the artifact means.
+Give each definition claim its term; reuse the same term when it recurs. Define it once on its first useful cue.
 On ordinary camera shots too, let the live voice and verbatim captions carry the speaker’s own account.
 Keep a moving face through a continuous thought. Reserve a held picture or blackout for a specific
 change in the story that the audience can see, such as a document reveal or a pause between scenes.
@@ -127,6 +128,18 @@ on other beats. Use short lines readable in the available speech. The attached m
 WRITING += "\n" + wf1_principle.PROMPT
 
 
+def selected_excerpt(ref, selection):
+    """The selected words and URL must belong to the same verified publication."""
+    if not isinstance(selection,dict) or not selection.get("words"):
+        return None
+    for src in ref.get("sources") or []:
+        if isinstance(src,dict) and src.get("url") == selection.get("source"):
+            for q in src.get("quotations") or []:
+                if isinstance(q,dict) and q.get("sha256") and q.get("words") == selection["words"]:
+                    return src,q
+    return None
+
+
 def dated_record(ref):
     """Bind the reader's selected action and date to a verified span on that exact source."""
     record = ref.get("record")
@@ -136,12 +149,11 @@ def dated_record(ref):
     sources = [s for s in ref.get("sources") or [] if isinstance(s, dict)]
     identifier = record.get("identifier_source")
     supporting = [identifier] if identifier != record["source"] and any(s.get("url") == identifier for s in sources) else []
-    for src in sources:
-        if src.get("url") == record["source"]:
-            for q in src.get("quotations") or []:
-                if q.get("sha256") and q.get("words") == record["words"]:
-                    return dict(source=src["url"], also_sources=supporting, excerpt=q,
-                                statement=ref.get("statement"), record=record)
+    selected = selected_excerpt(ref,record)
+    if selected:
+        src,q = selected
+        return dict(source=src["url"], also_sources=supporting, excerpt=q,
+                    statement=ref.get("statement"), record=record)
     return None
 
 
@@ -156,13 +168,15 @@ def editorial(ctx, script, pack):
     speaker_claims = [dict(c) for c in coverage.get("speaker_claims") or []]
     definitions = {row["start"]: row.get("gloss") for row in coverage.get("contextual_definitions") or []
                    if isinstance(row, dict) and type(row.get("start")) in (int, float)}
+    terms = {row["start"]:row["term"] for row in coverage.get("contextual_definitions") or []
+             if isinstance(row,dict) and row.get("start") is not None and row.get("term")}
     claims = []
     import wf1_record
     for claim in wf1_record.source_claims(script.get("claims") or [], coverage):
         if claim.get("stance") == "definition" and claim.get("start") in definitions:
             gloss = definitions[claim["start"]]
             if isinstance(gloss, str) and gloss.strip():
-                claims.append(dict(claim, report=gloss.strip()))
+                claims.append(dict(claim, report=gloss.strip(), term=terms.get(claim["start"]) or claim.get("term")))
         else:
             claims.append(dict(claim))
     for ref in research.get("references") or []:
@@ -285,7 +299,7 @@ def claim_windows(editorial, words):
 
 
 CONTEXT_LABELS = {"framework": "Framework", "definition": "Definition"}
-OPINION_LABELS = {"observation": "Observation", "concern": "Concern", "characterization": "Opinion", "recollection": "Recollection"}
+OPINION_LABELS = {"interview_cue": "Interview", "observation": "Observation", "concern": "Concern", "characterization": "Opinion", "recollection": "Recollection"}
 ESTIMATE_LABELS = {"discussed_estimate": "Estimate under discussion", "personal_estimate": "Personal estimate"}
 
 
@@ -693,10 +707,27 @@ def episode_pages(pages, coverage, words):
     contextual = {r["start"] for r in coverage.get("contextual_definitions") or []
                   if isinstance(r, dict) and type(r.get("start")) in (int, float)}
     result = []
-    for page in pages:
+    terms = set()
+    for page in sorted(pages, key=lambda row: row["first"]):
         first, last = page["first"], page["last"]
+        facts = []
+        for fact in page["facts"]:
+            view = fact.get("perspective") or {}
+            if (view.get("stance") == "recollection" and not any(
+                    fact.get(k) for k in ("record","program_entry","excerpt"))):
+                # A research summary can mix eyewitness testimony and an editor's search notes.
+                # The uncorroborated account still has its primary source: the person on camera.
+                fact = dict(chain=view, attribution=view["speaker"], value=view["report"],
+                            source=dict(url=view.get("interview")))
+            facts.append(fact)
+        page = dict(page, facts=facts)
         example = examples.get((first, last)) if page.get("episode_example") else None
         claim = page["facts"][0].get("chain") or {}
+        term = claim.get("term")
+        if claim.get("stance") == "definition" and term:
+            if term in terms:
+                continue
+            terms.add(term)
         if claim.get("stance") == "framework" and type(claim.get("context_start")) in (int,float):
             # The earlier topic introduces the excerpt. A checked qualification on the
             # same words takes the next seat instead of stacking two reading plates.
@@ -726,7 +757,50 @@ def episode_pages(pages, coverage, words):
             ids = [i for i,w in enumerate(words) if w["seg"] == seg]
             page = dict(page, first=ids[0], last=ids[-1], gloss=True)
         result.append(page)
-    return result
+    # Word-addressed interview beats use the same live byline as an observation.
+    # They replace a competing gloss inside their own interval only.
+    for cue in coverage.get("interview_cues") or []:
+        if not isinstance(cue,dict) or not all(isinstance(cue.get(k),str) and cue[k].strip()
+                                               for k in ("speaker","label","report")):
+            continue
+        a,b = cue.get("first"),cue.get("last")
+        if type(a) != int or type(b) != int or not 0 <= a <= b < len(words):
+            continue
+        retained = []
+        protected = []
+        witness = cue.get("stance") if cue.get("stance") in ("recollection","characterization") else None
+        for page in result:
+            lo,hi = page["first"],page["last"]
+            if hi < a or b < lo:
+                retained.append(page)
+                continue
+            if page.get("sequence") or any(f.get("record") or f.get("excerpt") or f.get("program_entry")
+                                          for f in page["facts"]):
+                retained.append(page)
+                protected.append((lo,hi))
+                continue
+            chain = page["facts"][0].get("chain") or {}
+            if chain.get("speaker") == cue["speaker"] and chain.get("stance") in ("recollection","characterization"):
+                witness = chain["stance"]
+            if lo < a:
+                retained.append(dict(page,last=a-1))
+            if b < hi:
+                retained.append(dict(page,first=b+1))
+        edges = sorted({a,b+1,*(max(a,x) for x,_ in protected),*(min(b+1,y+1) for _,y in protected)})
+        result = retained
+        for x,y in zip(edges,edges[1:]):
+            if any(lo <= x <= hi for lo,hi in protected):
+                continue
+            chain = dict(cue, first=x, last=y-1, stance="interview_cue")
+            if witness:
+                chain["witness"] = witness
+            heard = " ".join(word["w"] for word in words[x:y] if word.get("w"))
+            if heard:
+                chain["heard"] = heard
+            fact = dict(attribution=cue["speaker"],value=cue["report"],chain=chain,
+                        source=dict(url=cue.get("interview")))
+            result.append(dict(first=x,last=y-1,facts=[fact]))
+    return sorted(result,key=lambda row:row["first"])
 
 
 def lines(facts):

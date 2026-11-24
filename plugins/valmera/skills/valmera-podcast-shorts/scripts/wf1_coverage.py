@@ -9,7 +9,7 @@ from pathlib import Path
 
 import wf1_record
 
-CONTRACT = 14
+CONTRACT = 15
 
 
 class CoverageError(RuntimeError):
@@ -100,7 +100,8 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None, stor
  "handoffs":[{"first":int,"last":int,"title":str,"speaker":str,"steps":[{"at":int,"label":str}]}],
  "borrowed_estimates":[{"first":int,"application":int,"last":int,"speaker":str,"application_label":str,"question":str}],
  "print_readings":[{"first":int,"last":int}],
- "contextual_definitions":[{"start":number,"gloss":str}],
+ "interview_cues":[{"first":int,"last":int,"speaker":str,"label":str,"report":str,"stance":optional "recollection|characterization"}],
+ "contextual_definitions":[{"start":number,"term":str,"gloss":str}],
  "comparisons":[{"first":int,"last":int,"premise":str,"consequence":str}],
  "speaker_claims":[{"first":int,"last":int,"speaker":str,"stance":"concern|characterization|recollection|observation","report":str,"scope_question":str,"scope_kind":optional "dated_record"}],
  "moves":[{"word":int,"why":str}]}.
@@ -120,6 +121,20 @@ label naming a possible observation about THAT example (e.g. "Where listeners st
 The compositor marks it illustrative. Do not imply access to real measurements, private dashboards,
 figures or clinical effects. Keep the other categories on the live conversation. A reported actual
 result, named event, specific deployed capability or attributed finding still needs its own evidence.
+Use interview_cues on specific words where the live camera, synchronous speech and a short attribution
+distinguish whose evidence it is. Label the *kind* of claim in two or three words. A rough cumulative estimate
+stays an estimate in the speaker's voice. A proposed alternative to a burdensome recurring event and a host's
+hypothetical choice stay hypothetical. Choose a fresh framing on the actual change of thought and leave the
+reaction and spoken number intact. Labels should convey the actual distinction at phone size, e.g.
+"Annual tender" on the burden, "Marketplace idea" on the alternative, "Hypothetical payout" on the new concern.
+A cumulative fundraising estimate needs no figure in the label. For a private outcome recalled by a founder, use one interview source hinge:
+identify the interview owner once, then change the short label on the words stating the result. Split a long
+recollection into two adjacent interview_cues: the remembered setup and the result (e.g. "Funds set aside" and
+"Some went unused"). Finish with the speaker's interpretation on its own words. Keep figures in the audio.
+Set stance=recollection on remembered events, characterization on an interpretation.
+For contextual_definitions use a stable term for repeated definitions; gloss it once when useful. Use the
+public announcement once on its documented policy. Its financing amount and search notes do not establish
+private reserves, take-up or universal sentiment. Keep the public policy and private outcome on separate words.
 Use contextual_definitions for draft definition claims whose term is incidental to a contrast or
 qualification: return the original claim.start, and a short gloss only if essential (else empty).
 Preserve the complete spoken relationship in the running caption.

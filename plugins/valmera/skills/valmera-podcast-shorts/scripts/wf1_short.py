@@ -1080,7 +1080,7 @@ def refill(ctx, script, pack, shortage):
                        and not pack.get('missing_document_attempted'))
     if motion_ready or missing_documents:
         import wf1_documents
-        context=dict(identity=coverage.get('context'),primary_research=coverage.get('research_context'),prior_errors=[e for r in pack.get('document_research',[]) for e in r.get('errors',[])][-12:])
+        context=dict(identity=coverage.get('context'),primary_research=pack.get('referent_research') or coverage.get('research_context'),prior_errors=[e for r in pack.get('document_research',[]) for e in r.get('errors',[])][-12:])
         cached_path=os.path.join(ctx.supply,'document-sources','manifest.json')
         originals=json.load(open(cached_path)) if os.path.exists(cached_path) else []
         document_windows=shortage['missing_windows'] if missing_documents else wanted
