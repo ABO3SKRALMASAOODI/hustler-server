@@ -665,6 +665,20 @@ def lum(hexc):
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
+def print_contrast(tone, ink, mode=None):
+    """Contrast of the printed ink against the measured ground, after blending."""
+    def linear(channel):
+        return channel / 12.92 if channel <= .04045 else ((channel + .055) / 1.055) ** 2.4
+    channels = rgb(ink)
+    if mode == "multiply":
+        channels = [tone * value for value in channels]
+    elif mode == "difference":
+        channels = [abs(tone - value) for value in channels]
+    printed = sum(weight * linear(value) for weight, value in zip((.2126, .7152, .0722), channels))
+    base = linear(tone)
+    return (max(base, printed) + .05) / (min(base, printed) + .05)
+
+
 def sat(hexc):
     r, g, b = rgb(hexc)
     return (max(r, g, b) - min(r, g, b)) / max(max(r, g, b), 1e-6)

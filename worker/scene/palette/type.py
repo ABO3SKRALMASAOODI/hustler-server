@@ -901,6 +901,19 @@ def redact(l1, work, ask, sense=None):
     t = cased(t, o, "upper")
     a, z, hit = K.span(l1, ask, need=int(o.get("hold", 30)), text=t)
     mode = o.get("mode") or K.rng_of(l1, ask).choice(["reveal", "strike"])
+    if mode == "strike" and l1.get("workflow_text_layout"):
+        cue = K.accent_cue(l1, a, z, t)
+        if cue is not None:
+            # The existing spoken line already owns this lettering. Perform the
+            # emphasis there, preserving its full natural reading interval.
+            lo, hi = cue["f"]
+            box = K.item_box(cue, l1["voices"], W, H) or [0, 0, 1, 1]
+            tone, _ = S.ground(box, lo, hi)
+            inks = [o.get("c") or pal["accent"], "#FFFFFF", "#000000"]
+            ink = next(colour for colour in inks if K.print_contrast(tone, colour) >= 4.5)
+            cue.update(ink=ink, stroke=dict(c="#0B0A09" if K.lum(ink) > .5 else "#FFFFFF", w=2))
+            return dict(items=[cue], marks=_marks(max(a, lo), "caption accent", .5),
+                        log=dict(mode=mode, cue=cue["id"], read_f=[lo, hi], ink=ink))
     v = K.mono(o.get("px") or 66) if o.get("font") in (None, "mono") else K.voice(pal["font"], K.px(o.get("px") or 80), shadow=0.4)
     lines = K.wrap(v, t, 0.84 * W)
     while len(lines) > 4 and v["px"] > K.px(K.FLOOR_PX + 4):

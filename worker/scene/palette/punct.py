@@ -360,20 +360,6 @@ def blur_in(l1, work, ask, sense):
             "log": {"shot": sh["id"]}}
 
 
-def _print_contrast(tone, ink, mode):
-    from .kit import rgb
-    def linear(channel):
-        return channel / 12.92 if channel <= .04045 else ((channel + .055) / 1.055) ** 2.4
-    channels = rgb(ink)
-    if mode == "multiply":
-        channels = [tone * value for value in channels]
-    elif mode == "difference":
-        channels = [abs(tone - value) for value in channels]
-    printed = sum(weight * linear(value) for weight, value in zip((.2126, .7152, .0722), channels))
-    base = linear(tone)
-    return (max(base, printed) + .05) / (min(base, printed) + .05)
-
-
 def word_blend(l1, work, ask, sense):
     a, b = span(ask, l1)
     mode = next((m for m in (ask.get("blend"), ask.get("as")) if m in ("difference", "multiply")), "difference")
@@ -402,12 +388,12 @@ def word_blend(l1, work, ask, sense):
             tone, _ = ground.ground(box, lo, hi)
         colour = "#FFFFFF" if mode == "difference" else word.get("ink") or K.LIGHT
         item = dict(word, ink=colour, blend=mode)
-        if _print_contrast(tone, colour, mode) < 3:
-            if mode == "multiply" and _print_contrast(tone, K.DARK, mode) >= 3:
+        if K.print_contrast(tone, colour, mode) < 3:
+            if mode == "multiply" and K.print_contrast(tone, K.DARK, mode) >= 3:
                 item["ink"] = K.DARK
             else:
                 item.pop("blend")
-                item["ink"] = next((ink for ink in (colour, K.LIGHT, K.DARK) if _print_contrast(tone, ink, None) >= 3), K.LIGHT)
+                item["ink"] = next((ink for ink in (colour, K.LIGHT, K.DARK) if K.print_contrast(tone, ink, None) >= 3), K.LIGHT)
                 item["stroke"] = dict(c=K.DARK if K.lum(item["ink"]) > .5 else K.LIGHT, w=2)
         if item.get("blend") == "difference":
             item.pop("stroke", None)
