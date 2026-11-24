@@ -122,11 +122,44 @@ def transform(index, decision, spellings=None, keep_window=False, opening=(), wi
     return out,(a,b)
 
 
-def caption_words(index):
+def caption_words(index, source_words=(), offset=0., close=""):
     """The supply word map used by coverage, the Director and the interview captions."""
-    return [dict(w=w['w'], start=round(float(w['t0']),3), end=round(float(w['t1']),3), seg=si)
+    words = [dict(w=w['w'], start=round(float(w['t0']),3), end=round(float(w['t1']),3), seg=si)
             for si,s in enumerate(index['sentences'])
             for w in index['words'][s['wi0']:s['wi1']+1]]
+    # Local hearing sometimes absorbs the opening of a quick interjection. Both the
+    # attributed episode turn and the selected close must attest the full wording.
+    quote = close.split()
+    if quote and len(words) >= len(quote) and all(_same(w["w"], q) for w,q in zip(words[-len(quote):],quote)):
+        return words
+    for n, (t, token) in enumerate(source_words):
+        if not token.lstrip().startswith(">>") or not quote or n + len(quote) > len(source_words):
+            continue
+        turn = source_words[n:n+len(quote)]
+        if not all(_same(w.lstrip().removeprefix(">>").strip(), q) for (_,w),q in zip(turn,quote)):
+            continue
+        for missing in range(1,len(quote)-1):
+            suffix = words[-(len(quote)-missing):]
+            if len(suffix) != len(quote)-missing or not all(_same(w["w"], q) for w,q in zip(suffix,quote[missing:])):
+                continue
+            first = len(words)-len(suffix)
+            if first and words[first-1]["seg"] == suffix[0]["seg"]:
+                continue
+            anchor = suffix[0]["start"]
+            delta = offset + anchor - turn[missing][0]
+            if abs(delta) > .5:
+                continue
+            left = max(words[first-1]["end"] if first else 0., t - offset + delta)
+            if left >= anchor:
+                continue
+            scale = (anchor-left)/(turn[missing][0]-t) if turn[missing][0] > t else 0.
+            if scale <= 0:
+                continue
+            edges = [left + (at-t)*scale for at,_ in turn[:missing]] + [anchor]
+            restored = [dict(w=q, seg=suffix[0]["seg"], start=round(a,3), end=round(b,3))
+                        for q,a,b in zip(quote,edges,edges[1:])]
+            return words[:first] + restored + suffix
+    return words
 
 
 def out_point(index,decision,source_words,window_start):

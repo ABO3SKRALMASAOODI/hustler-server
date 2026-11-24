@@ -7,7 +7,7 @@ import importlib.util
 import subprocess
 from pathlib import Path
 
-CONTRACT = 11
+CONTRACT = 12
 
 
 class CoverageError(RuntimeError):
@@ -93,6 +93,8 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None, stor
 {"entities":[{"name":str,"is":"person|company|place|product|event|thing","must_show":str,"word_ids":[int]}],
  "windows":[{"first":int,"last":int,"name":str,"external":true,"association":false,"claim":str,"must_show":str,"why":str,
    "depictions":[{"name":str,"must_show":str,"video_searches":[str]}]}],
+ "episode_examples":[{"first":int,"last":int,"graphic_first":int,"graphic_last":int,"label":str}],
+ "contextual_definitions":[{"start":number,"gloss":str}],
  "comparisons":[{"first":int,"last":int,"premise":str,"consequence":str}],
  "speaker_claims":[{"first":int,"last":int,"speaker":str,"stance":"concern|characterization|recollection","report":str,"scope_question":str}],
  "moves":[{"word":int,"why":str}]}.
@@ -100,6 +102,18 @@ named lists the referents the script stage resolved from the whole moment, each 
 picture it needs as it was at the time (must_show). For each with identifiable external evidence, plan a
 window on the words that speak of it, under its resolved name (a full name, never a pronoun or first
 name alone), with its event-level must_show. Words may refer to them by pronoun or first name.
+Decide what would establish the spoken proposition before accepting a named item's draft must_show.
+If the interview uses the present activity as an example of a general principle, the recording can
+establish that example. An explanation of what someone COULD observe calls for an episode_example.
+first..last cover the example and incidental category alternatives that illustrate the same principle.
+graphic_first..graphic_last cover only the words introducing the main concrete example. Give a short
+label naming a possible observation about THAT example (e.g. "Where listeners stop in an episode").
+The compositor marks it illustrative. Do not imply access to real measurements, private dashboards,
+figures or clinical effects. Keep the other categories on the live conversation. A reported actual
+result, named event, specific deployed capability or attributed finding still needs its own evidence.
+Use contextual_definitions for draft definition claims whose term is incidental to a contrast or
+qualification: return the original claim.start, and a short gloss only if essential (else empty).
+Preserve the complete spoken relationship in the running caption.
 Read story.claims, story.meaning and the editorial brief with the actual words. For an explicitly imagined analogy,
 give its whole vehicle (including the imagined consequence) ONE inclusive comparisons span. Write
 two concise graphic labels, premise and consequence, that explain its logic in the conditional.
@@ -234,6 +248,15 @@ an honest subject; never invent one.'''
         # and the picture checks work on what is valid; the speaker carries the rest; the record says what was open.
         windows = [w for w in windows if 't0' in w and w.get('external') is True]
         out['plan_problems'] = problems
+    examples = []
+    for example in out.get("episode_examples") or []:
+        if not isinstance(example, dict):
+            continue
+        bounds = [example.get(k) for k in ("first","graphic_first","graphic_last","last")]
+        if (all(type(v) is int for v in bounds) and 0 <= bounds[0] <= bounds[1] <= bounds[2] <= bounds[3] < len(words)
+                and isinstance(example.get("label"), str) and example["label"].strip()):
+            examples.append(example)
+    out["episode_examples"] = examples
     comparisons = []
     for row in out.get("comparisons") or []:
         if (isinstance(row, dict) and type(row.get("first")) is int and type(row.get("last")) is int
@@ -272,7 +295,7 @@ an honest subject; never invent one.'''
         if not isinstance(callback.get("action"), str):
             callback.pop("action", None)
         out["callback"] = callback
-    for c in [*([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
+    for c in [*([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
         remaining = []
         for w in windows:
             for a,b in ((w["first"], min(w["last"], c["first"]-1)),
@@ -310,7 +333,7 @@ def same_picture(left,right):
 
 def research_names(coverage):
     """A name spoken only inside the comparison stays in the inventory for the graphic."""
-    local = (coverage.get("comparisons") or []) + (coverage.get("speaker_claims") or [])
+    local = (coverage.get("comparisons") or []) + (coverage.get("speaker_claims") or []) + (coverage.get("episode_examples") or [])
     inside = {i for c in local for i in range(c["first"], c["last"]+1)}
     if not inside:
         return coverage.get("named") or []
@@ -321,7 +344,7 @@ def research_names(coverage):
 
 
 def outside_comparisons(window, a, b, coverage):
-    for row in (coverage.get("comparisons") or []) + (coverage.get("speaker_claims") or []):
+    for row in (coverage.get("comparisons") or []) + (coverage.get("speaker_claims") or []) + (coverage.get("episode_examples") or []):
         if row["last"] < window["first"]:
             a = max(a, row["last"]+1)
         elif row["first"] > window["last"]:

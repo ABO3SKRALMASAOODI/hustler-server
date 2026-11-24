@@ -144,8 +144,8 @@ def script(ctx, ideas_out):
                "frame this short around the particular requirement it explains. Where its voice still announces "
                "the larger list, write a claim with stance=framework and report identifying the subset, ordinal "
                "if supported, and what it means. Time it across the announcement and the start of the explanation. "
-               "Explain unfamiliar shorthand at first use with stance=definition and the source's expansion and "
-               "plain meaning. Give this cue its own readable interval adjacent to any estimate; or incorporate "
+               "When the term itself needs explanation to follow the argument, explain unfamiliar shorthand at first use with stance=definition and the source's expansion and "
+               "plain meaning. For shorthand naming one side of a contrast, keep the complete contrast in speech. Give this cue its own readable interval adjacent to any estimate; or incorporate "
                "the full expansion and meaning in the estimate's report. Budget about three spoken seconds for an eight-word definition; adjacent words can carry its reading. Keep a repeated numerical challenge together. Use nonoverlapping claim intervals. "
                "Attribute hypothetical quantities, keeping the demo's actual action distinct from the estimate.")
     anchors = (f"# The moment's anchors, measured on the words\nThe hook opens at {float(idea['t0']):.2f} s: {idea.get('hook') or ''}\n"
@@ -239,8 +239,10 @@ def supply(ctx, script):
     sents = idx.get("sentences") or []
     if not sents:
         raise RuntimeError("nothing was heard in the window")
-    words = wf1_alignment.caption_words(idx)
+    words = wf1_alignment.caption_words(idx, heard_run, float(script["window"][0]), script["close_line"])
     dur = float(idx["video"]["duration"])
+    # The segment script and the word clock must describe the same restored speech.
+    line_text = [" ".join(w["w"] for w in words if w["seg"] == i) for i in range(len(sents))]
     wj = os.path.join(sup_dir, "words.json")
     # the voice runs the whole take: the breath the clip keeps after its last word is heard, not cut at the word
     json.dump(dict(voice="the take", duration=round(dur, 3) if words else dur, words=words), open(wj, "w"), ensure_ascii=False)
@@ -270,8 +272,7 @@ def supply(ctx, script):
         spend.append(dict(stage="supply",what="interview source composition",**original['spend']))
     coverage['context']=who
     import wf1_context
-    primary_direction = (wf1_context.direct(coverage, os.path.join(sup_dir, 'referent-research'), _llm())
-                         if coverage['windows'] or coverage['claims'] or any(c.get('scope_question') for c in coverage.get('speaker_claims', [])) else dict(references={}, spend=[]))
+    primary_direction = wf1_context.direct(coverage, os.path.join(sup_dir, 'referent-research'), _llm())
     windows = coverage['windows']
     # Inventory records what was said; windows specify what can truthfully be photographed.
     # Passing the inventory back as search subjects resurrects unnamed people and isolated dates.
@@ -357,7 +358,7 @@ def supply(ctx, script):
     import wf1_speaker
     pack["take"] = dict(path=src, w=int(v["width"]), h=int(v["height"]), fps=float(v["fps"]), dur=dur, faces=faces, still=still, shots=len(idx.get("shots") or []),
                         cuts=[{k: c[k] for k in c if k != "measures"} for c in cuts], on_camera=wf1_speaker.on_camera(cuts))
-    pack["lines"] = [dict(i=i, t0=s["t0"], t1=s["t1"], text=s["text"], subjects=by_line.get(i) or []) for i, s in enumerate(sents)]
+    pack["lines"] = [dict(i=i, t0=s["t0"], t1=s["t1"], text=line_text[i], subjects=by_line.get(i) or []) for i, s in enumerate(sents)]
     rec = dict(rec0, narration_s=dur, voice="the take", gate=None, pictures=sum(len(x) for x in pack["pictures"].values()), subjects=len(pack["pictures"]),
                footage=(dict(clips=foot["counts"]["clips"], lines=foot["counts"]["lines_with_footage"], credits=foot["credits"]) if foot else None), spend=spend)
     json.dump(dict(pack=pack, record=rec), open(pk, "w"), ensure_ascii=False, indent=1)
@@ -756,7 +757,8 @@ def direction_of(ctx, script, pack):
     editorial = dict(writing=wf1_display.WRITING, material=wf1_display.editorial(ctx, script, pack))
     archive = {pic["id"]:pic["archive_source"] for pic in pics if pic.get("archive_source")}
     editorial["material"]["archive_pictures"] = archive
-    intent = hashlib.sha256(json.dumps([DR.CONTRACT,editorial,rows,stress,st,script.get("title"),script.get("direction"),
+    coverage_contract = (pack.get("coverage") or {}).get("contract")
+    intent = hashlib.sha256(json.dumps([DR.CONTRACT, coverage_contract, editorial,rows,stress,st,script.get("title"),script.get("direction"),
                                          script.get("hook_line"),script.get("close_line"),take.get("cuts")],
                                         sort_keys=True).encode()).hexdigest()
     choice_path = os.path.join(ctx.supply, "direction_dependencies.json")
@@ -1426,7 +1428,7 @@ def render_revision(sc):
     worker=os.environ.get('VALMERA_WORKER')
     if worker:
         for rel in ('score/music.py','score/audibility.py','score/sound.py','score/sfx_quality.json','scene/pace.py','scene/compile.py','scene/runtime.py','scene/text_layout.py','scene/run.py',
-                    'scene/segments.py','scene/alien/answer.py','scene/palette/kit.py','scene/palette/match.py','scene/palette/layout.py','scene/palette/rhythm.py','scene/palette/__init__.py','scene/palette/behind.py',
+                    'scene/segments.py','scene/alien/answer.py','scene/alien/diecut.py','scene/palette/kit.py','scene/palette/match.py','scene/palette/layout.py','scene/palette/rhythm.py','scene/palette/__init__.py','scene/palette/behind.py',
                     'scene/palette/matte.py','scene/palette/type.py','scene/palette/sense.py','scene/palette/punct.py'):
             path=os.path.join(worker,rel)
             if os.path.isfile(path):digest.update(open(path,'rb').read())

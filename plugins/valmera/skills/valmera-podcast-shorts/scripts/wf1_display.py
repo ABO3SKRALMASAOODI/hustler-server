@@ -30,7 +30,8 @@ where they show the research. Preserve "scenario" for an illustrative or hypothe
 state starting on the question. Name the action from the earlier episode excerpt and keep anonymity. Show the alternatives, their distinct effects and the reaction that
 links them. The labels form one qualitative diagram. Word attributions and scenario framing keep it
 an illustration of the interview. Avoid invented measurements, issuer histories and extra acquisition.
-Use the script's definition and framework claims on their addressed words. A spoken count can introduce
+episode_examples already have a labeled illustration on the live episode; leave those graphics to composition.
+Keep the full contrast and the complete host reply in captions. Use the script's definition and framework claims on their addressed words. A spoken count can introduce
 one requirement explored here; put the requirement and its place in the framework on screen. Resolve a
 short form on first use, with enough time to read it. Keep the estimate separate from what a demo shows.
 Use separate captions for the literal speech. A visual change to the camera or a paraphrased pull quote
@@ -98,7 +99,16 @@ def editorial(ctx, script, pack):
     sources = {"interview": dict(url=args.get("source_url"), publisher=args.get("channel"),
                                  supports=["The speaker's own account in the numbered passage."])}
     speaker_claims = [dict(c) for c in coverage.get("speaker_claims") or []]
-    claims = [dict(c) for c in script.get("claims") or []]
+    definitions = {row["start"]: row.get("gloss") for row in coverage.get("contextual_definitions") or []
+                   if isinstance(row, dict) and type(row.get("start")) in (int, float)}
+    claims = []
+    for claim in script.get("claims") or []:
+        if claim.get("stance") == "definition" and claim.get("start") in definitions:
+            gloss = definitions[claim["start"]]
+            if isinstance(gloss, str) and gloss.strip():
+                claims.append(dict(claim, report=gloss.strip()))
+        else:
+            claims.append(dict(claim))
     for ref in research.get("references") or []:
         for src in ref.get("sources") or []:
             if isinstance(src, dict) and src.get("url"):
@@ -153,7 +163,7 @@ def editorial(ctx, script, pack):
             source = sources.setdefault(src["url"], dict(url=src["url"], publisher=src["channel"], supports=[]))
             if action not in source["supports"]:
                 source["supports"].append(action)
-    return dict(callback=coverage.get("callback"), speaker_claims=speaker_claims, comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=claims, episode_start=(script.get("window") or [0])[0],
+    return dict(episode_examples=coverage.get("episode_examples") or [], callback=coverage.get("callback"), speaker_claims=speaker_claims, comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=claims, episode_start=(script.get("window") or [0])[0],
                 sources=sources, picture_windows=[{k:w[k] for k in ("first","last","name","claim","must_show","example") if k in w}
                                                   for w in coverage.get("windows", [])], speaker_inserts=[{k:r[k] for k in ('first','last')}
                     for r in (coverage.get('source_reading') or {}).get('speaker_inserts',[])], source_inserts=[{k:r[k] for k in ('first','last','shows')}
@@ -291,6 +301,17 @@ def bind(direction, editorial, words):
                               **({"sequence_kind":args["sequence_kind"]} if args.get("sequence_kind") in ("history","process") else {}), facts=[
                 dict(attribution=speaker, source=sources["interview"], value=sequence[0]["label"])]))
             continue
+        if (whole and editorial.get("episode_examples") and ask["dev"] in ("behind", "diecut")
+                and not (ask.get("pics") or args.get("facts") or args.get("claim"))):
+            # A word quoted again on a later beat of the same explanation can
+            # accent its actual utterance. Keep independent picture treatments intact.
+            segment = [i for i,w in enumerate(words) if w["seg"] == words[first]["seg"]]
+            pictured = any(w["first"] <= segment[-1] and segment[0] <= w["last"]
+                           for w in editorial.get("picture_windows") or [])
+            ids = literal_ids(str(args.get("t") or ""), segment)
+            if ids and not pictured and len(ids) < len(segment):
+                accents.update(ids)
+                continue
         if whole and not (args.get("facts") or args.get("claim")) and ask["dev"] in (
                 "lamp", "verb", "staircase", "brackets", "typewriter"):
             rows = args.get("lines") or []
@@ -431,9 +452,37 @@ def bind(direction, editorial, words):
         pages = retained
         fact = dict(value=statement, statement=statement, relation="Example", source=source, example=True)
         pages.extend(dict(first=a, last=b, facts=[fact]) for a,b in spans)
+    for example in editorial.get("episode_examples") or []:
+        a, b = example["graphic_first"], example["graphic_last"]
+        # The episode establishes the premise. The label is the editor's hypothetical illustration.
+        fact = dict(source=sources["interview"], value=example["label"], relation="Illustrative example")
+        pages.append(dict(first=a, last=b, episode_example=True, facts=[fact]))
     pages.sort(key=lambda page: page["first"])
     return dict(direction, asks=asks, display=display, caption_ends=ends, caption_accents=sorted(accents), claims=claims, display_facts=pages,
                 arc=[m for m in direction["arc"] if not any(p["first"] <= m["w"] <= p["last"] for p in pages)])
+
+
+def episode_pages(pages, coverage, words):
+    """Give local illustrations reading time in their sentence; release a gloss with its term."""
+    examples = {(e["graphic_first"], e["graphic_last"]): e for e in coverage.get("episode_examples") or []}
+    contextual = {r["start"] for r in coverage.get("contextual_definitions") or []
+                  if isinstance(r, dict) and type(r.get("start")) in (int, float)}
+    result = []
+    for page in pages:
+        first, last = page["first"], page["last"]
+        example = examples.get((first, last)) if page.get("episode_example") else None
+        claim = page["facts"][0].get("chain") or {}
+        if example:
+            # Keep the illustration through its explanation, inside the planner's local span.
+            while last < example["last"] and words[last+1]["seg"] == words[last]["seg"]:
+                last += 1
+            page = dict(page, last=last)
+        elif claim.get("stance") == "definition" and claim.get("start") in contextual:
+            seg = words[first]["seg"]
+            ids = [i for i,w in enumerate(words) if w["seg"] == seg]
+            page = dict(page, first=ids[0], last=ids[-1], gloss=True)
+        result.append(page)
+    return result
 
 
 def lines(facts):

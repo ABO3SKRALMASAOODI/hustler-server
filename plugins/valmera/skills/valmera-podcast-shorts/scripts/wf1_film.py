@@ -40,7 +40,7 @@ for _p in (os.path.join(SKILLS, "_shell"), os.path.join(SKILLS, "valmera-stories
 import film as F  # noqa: E402
 
 FPS, W, H, LEAD_F = F.FPS, F.W, F.H, F.LEAD_F
-CAPTION_CONTRACT = 11
+CAPTION_CONTRACT = 12
 Clock, r4, smooth = F.Clock, F.r4, F.smooth
 
 WALL = "YouTube is refusing this Mac as a bot"       # the words a short stops with when its footage could not be fetched for that reason
@@ -876,7 +876,7 @@ def build(script, sup, style_id, direction=None):
     import wf1_display
     reading_spans = []
     timed_facts = []
-    pages = list(d.get("display_facts") or [])
+    pages = wf1_display.episode_pages(d.get("display_facts") or [], coverage, clock.words)
     # A scenario on the same words as a sourced explanation shares its reading
     # surface. Give independent scenario steps their own remaining word interval.
     evidence = [p for p in pages if any(f.get("perspective") or f.get("excerpt") for f in p["facts"])]
@@ -987,7 +987,7 @@ def build(script, sup, style_id, direction=None):
         rows = wf1_display.typeset(facts, P.R, DISPLAY_W * W, str.upper if st["upper"] else str)
         return len(rows) > 4
 
-    report_spans = [(a, b) for a, b, page in timed_facts if page.get("sequence") or needs_reading_page(page["facts"])]
+    report_spans = [(a, b) for a, b, page in timed_facts if page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"])]
 
     source_pages = [(a,b) for a,b,p in timed_facts if any(f.get("excerpt") or f.get("perspective") for f in p["facts"])]
     if source_pages:
@@ -999,6 +999,8 @@ def build(script, sup, style_id, direction=None):
     # visual slot, while continuous rhythm direction still spans the film.
     comparison_spans = [(word_frame(c["first"]), Clock.f(clock.words[c["last"]]["t1"]))
                         for c in (coverage.get("comparisons") or []) + (coverage.get("speaker_claims") or [])]
+    comparison_spans.extend((word_frame(e["first"]), Clock.f(clock.words[e["last"]]["t1"]))
+                            for e in coverage.get("episode_examples") or [])
     comparison_spans.extend(source_pages)
     comparison_spans.extend((a,b) for a,b,page in timed_facts if page.get("sequence"))
     if (source_rows or comparison_spans) and dr:
@@ -1118,7 +1120,7 @@ def build(script, sup, style_id, direction=None):
     tcuts = [pc["f"][0] for pc in pieces[1:]]          # the take's own cuts and its cuts between speakers, in film frames
     from wf1_coverage import speaker_moves, move_frame
     composed_spans = [r[:2] for r in ins] + [[lo,hi] for lo,hi,_ in speakers] + [list(span) for span in source_pages]
-    if (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
+    if (coverage.get("episode_examples") and not coverage["windows"]) or (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
             and any(r[4].get("episode_excerpt") for r in ins)):
         # Both the local demo and the remaining camera passages landed on their directed words.
         resolved_moves,move_spend = coverage.get("moves", []), []
@@ -1729,6 +1731,13 @@ def build(script, sup, style_id, direction=None):
     fact_pages = []
     for a, b, page in timed_facts:
         facts = page["facts"]
+        if page.get("episode_example") or page.get("gloss"):
+            label = "e.g." if page.get("episode_example") else facts[0]["chain"].get("subject") or "Definition"
+            wf1_display.reading_card(P, [a,b], facts[0]["value"], label, "", pal,
+                                     centre=.67, max_height=.19, group="interview-note")
+            fact_pages.append(dict(page, f=[a,b]))
+            P.events.append(a)
+            continue
         if page.get("sequence"):
             fact = facts[0]
             steps = page["sequence"]
@@ -1763,6 +1772,9 @@ def build(script, sup, style_id, direction=None):
             # The synchronous voice and captions carry the qualified words. Only identify their owner.
             claim = facts[0]["chain"]
             byline = claim["speaker"] + " · " + wf1_display.OPINION_LABELS[claim["stance"]]
+            if (clock.words[page["first"]]["seg"] == clock.words[page["last"]]["seg"]
+                    and clock.words[page["first"]]["seg"] in (reading.get("quote_segments") or [])):
+                byline = "Voice · " + claim["speaker"]
             voice = f"opinion_credit{a}"
             P.voices[voice] = dict(P.voices["cap"], px=P.R.fit_px("cap", byline, .82*W, 48), track=0)
             listeners = [(round(sp["t0"]*FPS)+LEAD_F, round(sp["t1"]*FPS)+LEAD_F)
@@ -1837,7 +1849,8 @@ def build(script, sup, style_id, direction=None):
                                              centre=.44, max_height=.55)
                 else:
                     wf1_display.reading_card(P, span, body, label or speaker, citation, pal)
-            if (a,b) not in source_pages and not all(wf1_display.source_statement(f, script.get("source_url")) for f in facts):
+            supplemental = all((f.get("chain") or {}).get("stance") == "definition" for f in facts)
+            if not supplemental and (a,b) not in source_pages and not all(wf1_display.source_statement(f, script.get("source_url")) for f in facts):
                 reading_spans.append((a, b))
                 omit.extend(clock.words[page["first"]:page["last"] + 1])
             fact_pages.append(dict(page, f=[a, b]))

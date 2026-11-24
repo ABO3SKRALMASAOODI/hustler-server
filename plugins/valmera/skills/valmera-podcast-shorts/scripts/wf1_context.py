@@ -7,6 +7,9 @@ import os
 def direct(coverage,work,llm):
     """Resolve the speaker's referents before spending downloads on generic substitutes."""
     import wf1_coverage
+    if not (coverage["windows"] or any(needs_original(c) for c in coverage.get("claims") or [])
+            or any(c.get("scope_question") for c in coverage.get("speaker_claims") or [])):
+        return dict(references={}, spend=[])
     key=hashlib.sha256(json.dumps([4,coverage],sort_keys=True).encode()).hexdigest()[:16]
     os.makedirs(work,exist_ok=True);path=os.path.join(work,'direction-'+key+'.json')
     if os.path.exists(path):

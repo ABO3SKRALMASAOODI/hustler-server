@@ -840,6 +840,10 @@ def _sources_md(pod_line, rows):
                     owner = page["facts"][0].get("attribution") if source.get("url") == episode_url else source.get("publisher")
                     out.append(f"- {kind} | " + " | ".join(filter(None,(step["label"],owner,source.get("url")))))
             for fact in page.get("facts", []):
+                if page.get("episode_example"):
+                    source = fact["source"]
+                    out.append("- Illustrative example | " + " | ".join(filter(None, (
+                        fact["value"], source.get("publisher"), source.get("url")))))
                 program = fact.get("program_entry")
                 if program:
                     out.append("- Program | " + " | ".join((program["title"], program["speaker"], program["date"], fact["source"]["url"])))
