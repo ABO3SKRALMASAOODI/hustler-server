@@ -136,14 +136,14 @@ def story_rank(film, pool, call, used=(), top=STORY_TOP):
 
     The prompt is ordered for the provider's prompt cache: the system prompt, then every candidate sorted by cid (the
     same text for every film of a run and every chapter), then a short note of the tracks earlier films already play,
-    then this film's own text last. A pick an earlier film already plays is moved behind the others."""
+    then this film's own text last. Reserved options retain their stable numbers but cannot enter the audition."""
     used = set(used or ())
     rows = sorted(pool, key=lambda t: t["cid"])
     if not rows or call is None:
         return None, "no model"
     taken = [str(i) for i, t in enumerate(rows, 1) if t["cid"] in used]
     user = ("Candidates:\n" + "\n".join(_story_option(i, t) for i, t in enumerate(rows, 1))
-            + ("\n\nAlready under an earlier film of this run (choose another unless nothing else fits): " + ", ".join(taken) if taken else "")
+            + ("\n\nAlready under an earlier film of this run (unavailable; rank only the other numbers): " + ", ".join(taken) if taken else "")
             + "\n\n" + _story_film_text(film)
             + f"\n\nAnswer with up to {top} option numbers, best first, and why the first fits.")
     try:
@@ -154,7 +154,12 @@ def story_rank(film, pool, call, used=(), top=STORY_TOP):
     if not got:
         return None, "the model named no option"
     why = str(v.get("why") or "")[:500]
-    fresh = [i for i in got if rows[i]["cid"] not in used] + [i for i in got if rows[i]["cid"] in used]
+    fresh = [i for i in got if rows[i]["cid"] not in used]
+    if not fresh:
+        # A cached or inattentive ranking can name only unavailable numbers.
+        # Give the same story reader the remaining palette, with fresh numbering.
+        available = [t for t in rows if t["cid"] not in used]
+        return story_rank(film, available, call, top=top) if available else (None, "no fresh story options")
     if fresh[0] != got[0]:
         why = f"{why} (that track already plays under an earlier film of this run, so the model's next pick goes first)"
     return [rows[i] for i in fresh[:top]], why
@@ -416,14 +421,27 @@ def choose(film, marks, cache, used=(), call=None, n=AUDITION, fetch=None, profi
     lookup (a test, a replay with its own cache)."""
     import music_choose
     tried, keep = [], None
-    for pool_name, pool in music_choose.workflow_pools(film):
-        ch, path, got = _choose_from(film, marks, cache, pool, pool_name, used=used, call=call, n=n, fetch=fetch, profile=profile)
-        tried += got
-        if ch is None:
-            continue
-        if ch.get("carries", 0.0) < NO_ARRANGEMENT:
-            return ch, path, tried
-        keep = keep or (ch, path)              # the engine could not arrange it: the next pool is tried first
+    pools = music_choose.workflow_pools(film)
+    reserved = set(used or ())
+    for reuse in ([False, True] if reserved else [False]):
+        for pool_name, pool in pools:
+            # Keep the described palette's cacheable prefix on its first audition.
+            remaining = [t for t in pool if t["cid"] in reserved] if reuse else pool
+            excluded = set() if reuse else reserved
+            while any(t["cid"] not in excluded for t in remaining):
+                ch, path, got = _choose_from(film, marks, cache, remaining, pool_name, used=excluded,
+                                             call=call, n=n, fetch=fetch, profile=profile)
+                tried.extend(got)
+                if ch is not None:
+                    if ch.get("carries", 0.0) < NO_ARRANGEMENT:
+                        return ch, path, tried
+                    keep = keep or (ch, path)
+                # Only widen the audition after the ordinary ranked batch failed.
+                attempted = {r["cid"] for r in got}
+                rest = [t for t in remaining if t["cid"] not in attempted and t["cid"] not in excluded]
+                if not got or len(rest) >= len(remaining):
+                    break
+                remaining = rest
     return (keep[0], keep[1], tried) if keep else (None, None, tried)
 
 
@@ -463,8 +481,8 @@ def _choose_from(film, marks, cache, pool, pool_name, used=(), call=None, n=AUDI
     if opts:
         order, by, pen, arc = list(range(len(opts))), "model (story)", STORY_RANK_PEN, True
     else:
-        opts, prof = music_choose.shortlist(film, used=used, n=8, pool=pool)
-        opts = [o for o in opts if o["cid"] not in set(used or ())] or opts      # a track this film already plays is not offered again while others are
+        available = [t for t in pool if t["cid"] not in used]
+        opts, prof = music_choose.shortlist(film, n=8, pool=available)
         if not opts:
             return None, None, []
         order, why, by = list(range(len(opts))), "the closest match to the references by signal", "signal"

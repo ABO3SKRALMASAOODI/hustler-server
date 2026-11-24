@@ -121,7 +121,7 @@ def test_tracks_an_earlier_film_of_the_run_plays_go_behind_the_others(lib, monke
         seen.append(user)
         return {"order": [1, 4], "why": "x"}
     ch, _p, _t = MF.choose(_film(), _marks(), "/nonexistent", used=["cue-0", "cue-1"], call=model)
-    assert "Already under an earlier film of this run (choose another unless nothing else fits): 1, 2" in seen[0]
+    assert "Already under an earlier film of this run (unavailable; rank only the other numbers): 1, 2" in seen[0]
     assert ch["cid"] == "cue-3" and "already plays under an earlier film" in ch["why"]
 
 
@@ -206,3 +206,36 @@ def test_ranking_receives_the_stakes_and_range_despite_the_hosts_dry_delivery():
         return dict(order=[2,1],why="Space for the guest's answer.")
     MF.story_rank(film, rows, rank)
     assert reading in calls[-1][1] and all(line in calls[-1][1] for _,line in lines)
+
+
+def test_reserved_story_winner_cannot_return_from_model_or_pool_fallback(lib, monkeypatch):
+    rows = [_described("mk-595", "Light plucked strings.", "builds."),
+            _described("pb-243799", "Dry pizzicato.", "builds.")]
+    _palette(lib, monkeypatch, rows)
+    model = lambda *args: {"order": [1], "why": "the plucked strings"}
+    for call in (model, None):
+        ch, _, tried = MF.choose(_film(), _marks(), str(lib), used=["mk-595"], call=call)
+        assert ch["cid"] == "pb-243799"
+        assert ch["chosen_by"] == ("model (story)" if call else "signal")
+        assert all(t["cid"] != "mk-595" for t in tried)
+        ch, _, tried = MF.choose(_film(), _marks(), str(lib), used=["mk-595", "pb-243799"],
+                                 call=call, fetch=lambda t: t.get("path") or t["cid"] + ".mp3")
+        assert ch["pool"] == "library" and ch["cid"] in {"ok-pass", "far-pass"}
+        assert all(t["pool"] == "library" for t in tried)
+
+
+def test_exhaustion_plays_an_arrangeable_reserved_cue_after_all_fresh_sources(lib, monkeypatch):
+    rows = [_described(f"cue-{i}", "Strings.", "builds.") for i in range(5)]
+    _palette(lib, monkeypatch, rows)
+    attempts = []
+
+    def fetch(t):
+        attempts.append(t["cid"])
+        if t["cid"] != "cue-0":
+            raise OSError("unavailable")
+        return t["path"]
+
+    choice, _, _ = MF.choose(_film(), _marks(), str(lib), used=["cue-0"], n=1,
+                             call=lambda *a: {"order": [1], "why": "strings"}, fetch=fetch)
+    assert choice["cid"] == "cue-0" and attempts[-1] == "cue-0"
+    assert set(attempts[:-1]) == {"cue-1", "cue-2", "cue-3", "cue-4", "ok-pass", "far-pass"}
