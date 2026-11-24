@@ -40,3 +40,15 @@ def test_m38_layout_cut_preserves_the_moving_face(tmp_path):
     # Both eyes, the moving hand and the shelf remain in the same screen coordinates.
     assert cv2.absdiff(*phone).mean() < 12
     assert crops[1][2] < .5
+
+
+def test_review_row_keeps_the_real_filename_and_neighboring_rows_at_reading_size():
+    from scene.motion import readable_row_crop
+    pane = [0,.502,1,1]
+    row = [.010,.633,.343,.651]
+    crop = readable_row_crop(pane,row,(2000,1720),(1080,1920))
+    seat, underline = marked_figure(crop,row,(2000,1720),(1080,1920))
+    assert pane[1] <= crop[1] < row[1] < row[3] < crop[3] <= pane[3]
+    assert crop[0] <= row[0] < row[2] <= crop[2]
+    assert (row[3]-row[1])/(crop[3]-crop[1])*(seat[3]-seat[1])*1920 >= 32
+    assert underline[1] == pytest.approx(seat[1]+(row[3]-crop[1])/(crop[3]-crop[1])*(seat[3]-seat[1]))

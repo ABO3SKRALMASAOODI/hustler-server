@@ -58,6 +58,20 @@ def document_figure(crop, source_size, canvas_size, bottom=.79, top=.15):
     return fit_panel(crop, source_size, canvas_size, [.055,top,.945,bottom])
 
 
+def readable_row_crop(pane, row, source_size, canvas_size):
+    """Magnify a real text row with its neighboring rows and the pane's leading edge."""
+    sw, sh = source_size
+    cw, ch = canvas_size
+    # The evidence seat occupies 89% of the canvas width. Target a row about
+    # as tall as the document credit, while keeping the marked line entire.
+    scale = .033*cw / ((row[3]-row[1])*sh)
+    width = min(pane[2]-pane[0], max(1.12*(row[2]-row[0]), .89*cw/(scale*sw)))
+    height = min(pane[3]-pane[1], max(1.4*(row[3]-row[1]), .247*ch/(scale*sh)))
+    left = max(pane[0], min(row[0]-.04*width, pane[2]-width))
+    top = max(pane[1], min(max(row[1]-.52*height, row[3]-height), pane[3]-height))
+    return [left, top, left+width, top+height]
+
+
 def marked_figure(crop, target, source_size, canvas_size):
     """Fit the checked excerpt and place a short underline under the visible target."""
     box = fit_panel(crop, source_size, canvas_size, [.055,.277,.945,.524])
