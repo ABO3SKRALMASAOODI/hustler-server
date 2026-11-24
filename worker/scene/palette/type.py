@@ -541,7 +541,7 @@ def brackets(l1, work, ask, sense=None):
 
 # --------------------------------------------------------------------------- a word on screen, marked on its hit
 
-def target(l1, text, a, z, prefer_big=True, role=None):
+def target(l1, text, a, z, prefer_big=True, role=None, item_id=None):
     """(item, voice, lo, hi): the word item on screen between a and z whose text holds ``text`` (display type first),
     and the phrase's characters in it [lo, hi), widened to whole words (a phrase is marked word by word)."""
     want = K.norm(text)
@@ -550,6 +550,8 @@ def target(l1, text, a, z, prefer_big=True, role=None):
     cands = []
     for it in l1.get("items") or []:
         if it.get("k") != "word" or it["f"][1] <= a or it["f"][0] >= z:
+            continue
+        if item_id is not None and it.get("id") != item_id:
             continue
         if role and it.get("role") != role:
             continue
@@ -646,13 +648,15 @@ def highlight(l1, work, ask, sense=None):
     t = text_of(o)
     if not t:
         return {"skip": "highlight needs a word"}
-    a, z, hit = K.span(l1, ask, need=int(o.get("hold", 24)), text=t)
+    # A cited line may return while different words are being said. An addressed
+    # row has its own editorial cue; speech lookup remains the default for captions.
+    item_id = o.get("target_id")
+    a, z, hit = K.span(l1, ask, need=int(o.get("hold", 24)), text=None if item_id else t)
     f_hit = hit[0][1] if hit else a
-    got = target(l1, t, f_hit, f_hit + 2, role=o.get("target_role"))
+    got = target(l1, t, f_hit, f_hit + 2, role=o.get("target_role"), item_id=item_id)
     if got is None:
-        # Captions can type on a few frames after the spoken word. Seat the
-        # marker on the same word's actual entrance.
-        got = target(l1, t, f_hit, f_hit + max(3, round(0.22 * fps)), role=o.get("target_role"))
+        # Captions can type on a few frames after the spoken word.
+        got = target(l1, t, f_hit, f_hit + max(3, round(0.22 * fps)), role=o.get("target_role"), item_id=item_id)
     if got is None:
         return {"skip": f"'{t}' is not on screen there"}
     it, v, lo, hi = got
