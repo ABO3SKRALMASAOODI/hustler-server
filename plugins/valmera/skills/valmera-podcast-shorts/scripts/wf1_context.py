@@ -111,7 +111,7 @@ def research(coverage,work,llm):
         str(s.get("author") or s.get("publisher")).casefold() == str(c.get("subject")).casefold()
         for s in originals) for c in data["claims"]) and all(any(
         s["url"] == (c.get("scope_fact") or {}).get("source") for s in originals) for c in data["scope_checks"])
-    key=hashlib.sha256(json.dumps([3,data],sort_keys=True).encode()).hexdigest()[:16]
+    key=hashlib.sha256(json.dumps([4,data],sort_keys=True).encode()).hexdigest()[:16]
     os.makedirs(work,exist_ok=True);path=os.path.join(work,key+'.json')
     if os.path.exists(path):return json.load(open(path))
     llm.openai_key()
@@ -154,7 +154,10 @@ estimates a value. For a reported forecast find the publisher’s original capti
 dated writing on this prediction. Return claim_start (the exact claim.start) on its reference. If the
 writing is a separate occasion, give its own title, publication date and scope. Preserve modal words.
 For scope_checks also extract the shortest directly applicable span from the actual primary explainer,
-with the institution as speaker, page title as event and heading as locator. For a program entry return
+with the institution as speaker, page title as event and heading as locator. For a concern about access,
+prefer one exact first-party permissions example at the level of principle; a short documentation heading
+may express the whole example. Request its verbatim words, distinct from the speaker’s concern. Do not
+include operational procedures or infer an observed demonstration from documentation. For a program entry return
 program_entry:{title,speaker,date} on that scope reference, using the exact program title and human-readable
 session date. The program establishes the advertised talk; the interview establishes the speaker's recollection. Use existing_sources
 first. Each such reference and its sources address one claim. For verified first-party wording,

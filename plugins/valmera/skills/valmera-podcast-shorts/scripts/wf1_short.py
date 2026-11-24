@@ -148,6 +148,10 @@ def script(ctx, ideas_out):
                "plain meaning. For shorthand naming one side of a contrast, keep the complete contrast in speech. Give this cue its own readable interval adjacent to any estimate; or incorporate "
                "the full expansion and meaning in the estimate's report. Budget about three spoken seconds for an eight-word definition; adjacent words can carry its reading. Keep a repeated numerical challenge together. Use nonoverlapping claim intervals. "
                "Attribute hypothetical quantities, keeping the demo's actual action distinct from the estimate.")
+    system += (" When the opening assumes an earlier idea, write the opening framework report as a brief "
+               "standalone context cue naming that earlier idea. Include context_start, the episode second "
+               "where that speaker explains it. Preserve the selected opening words and end the cue at the "
+               "transition to the new example.")
     anchors = (f"# The moment's anchors, measured on the words\nThe hook opens at {float(idea['t0']):.2f} s: {idea.get('hook') or ''}\n"
                f"Candidate closing boundary at {float(idea['t1']):.2f} s: {idea.get('payoff') or ''}\n"
                f"Measured length: {float(idea['t1']) - float(idea['t0']):.1f} s\n\n")

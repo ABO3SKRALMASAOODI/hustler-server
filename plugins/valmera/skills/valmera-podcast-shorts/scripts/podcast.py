@@ -833,6 +833,14 @@ def _sources_md(pod_line, rows):
         episode = f.get("source") or {}
         episode_url = episode.get("source_url") if isinstance(episode, dict) else episode
         for page in (ch.get("podcast") or {}).get("display_facts") or []:
+            if page.get("context_cue"):
+                fact = page["facts"][0]
+                at = fact["chain"]["context_start"]
+                out.append(f"- Earlier interview context | {fact['value']} | {fact['attribution']} | {episode_url} | {at:g} s")
+            if page.get("sequence_kind") == "comparison":
+                owner = page["facts"][0]["attribution"]
+                states = " → ".join(step["label"] for step in page["sequence"])
+                out.append(f"- Hypothetical comparison | {owner} | {states} | {episode_url}")
             if page.get("sequence_kind") in ("history", "process"):
                 kind = "Timeline" if page["sequence_kind"] == "history" else "Process example"
                 for step in page["sequence"]:

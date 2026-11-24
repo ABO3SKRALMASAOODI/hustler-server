@@ -1028,7 +1028,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     def needs_reading_page(facts):
         if opinion_byline(facts):
             return False
-        if any(f.get("chain") or wf1_display.source_statement(f, script.get("source_url")) for f in facts):
+        if any(f.get("excerpt") or f.get("chain") or wf1_display.source_statement(f, script.get("source_url")) for f in facts):
             return True
         if not any(f.get("attribution") for f in facts):
             return False
@@ -1232,6 +1232,11 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     # excerpts retain their dedicated reading surface.
     live_citations = {(a,b) for a,b,p in timed_facts if p["last"] == len(clock.words)-1
                       and all(f.get("perspective") and (f.get("program_entry") or not f.get("excerpt")) for f in p["facts"])}
+    live_citations.update((a,b) for a,b,p in timed_facts if len(p["facts"]) == 1
+                          and p["facts"][0].get("perspective", {}).get("stance") == "concern"
+                          and p["facts"][0].get("excerpt"))
+    comparison_landings = {word_frame(p["sequence"][-1]["at"]): b for a,b,p in timed_facts
+                           if p.get("sequence_kind") == "comparison"}
     if source_pages:
         ins, _ = _director().hold_take(ins, source_pages, min_f=1, fps=FPS)
     # Bind the compact editorial reading to the selected source slices, after device holds.
@@ -1382,6 +1387,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         layout_edges.extend(f for span in reactions for f in span)
         layout_edges.append(turn_f if turn_f is not None else f_last)
         layout_edges.extend(f for span in report_spans for f in span)
+        layout_edges.extend(comparison_landings)
         layout_edges.extend(f for start,(end,_,_) in live_beats.items() for f in (start,end))
         layout_edges.extend(f for lo,hi,_ in speakers for f in (lo,hi))
         edges = sorted({a, b, *(f for f in layout_edges if a < f < b), *[c for c in tcuts + joins + list(panel) if a+3 <= c <= b-3],
@@ -1437,12 +1443,13 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                     round(authored_span[1]*FPS)+LEAD_F >= f_voice_end)
                                and pieces[k]["who"] == "speaker" and meta[pieces[k]["key"]]["faces"]
                                and not any(lo <= fa < hi for lo, hi in reactions))
-            if closing_speaker and on_report and not live:
+            comparison_outcome = any(lo <= fa < hi for lo,hi in comparison_landings.items())
+            if (closing_speaker or comparison_outcome) and on_report and not live and meta[pieces[k]["key"]]["faces"]:
                 # Keep the citation's reading surface below the live presenter.
                 from scene.motion import Cam
                 info = meta[pieces[k]["key"]]
-                box = [.05, .10, .95, .47]
-                camera = Cam(info["pw"], info["ph"], .90*W/(.37*H), .90*W, info["max_up"])
+                box = [.05, .06, .95, .56] if comparison_outcome else [.05, .10, .95, .47]
+                camera = Cam(info["pw"], info["ph"], .90*W/((box[3]-box[1])*H), .90*W, info["max_up"])
                 face = max(info["faces"], key=lambda f: f[2]*f[3])
                 crop = camera.on_face(face[:4], height=.68)
                 P.page([fa,fb], "#14171B", grain=0)
@@ -1956,6 +1963,13 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         P.events.append(a)
     for a, b, page in timed_facts:
         facts = page["facts"]
+        if page.get("context_cue"):
+            fact = facts[0]
+            wf1_display.reading_card(P, [a,b], fact["value"], fact["attribution"], "", pal,
+                                     centre=.65, max_height=.25, group="opening-context")
+            fact_pages.append(dict(page, f=[a,b]))
+            P.events.append(a)
+            continue
         if page.get("episode_example") or page.get("gloss"):
             label = "e.g." if page.get("episode_example") else facts[0]["chain"].get("subject") or "Definition"
             wf1_display.reading_card(P, [a,b], facts[0]["value"], label, "", pal,
@@ -1967,6 +1981,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             fact = facts[0]
             steps = page["sequence"]
             first_cue = word_frame(steps[0]["at"]) if steps[0].get("beat") else a
+            if page.get("sequence_kind") == "comparison":
+                first_cue = word_frame(steps[0]["at"])
             cue = [first_cue] + [word_frame(step["at"]) for step in steps[1:]] + [b]
             for i,(start,end) in enumerate(zip(cue,cue[1:])):
                 if start >= end:
@@ -1978,6 +1994,14 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                                               for lo,hi,_,_,rec in source_rows):
                         footer = page["callback_action"]
                 heading = fact["attribution"]+" · Scenario"
+                if page.get("sequence_kind") == "comparison":
+                    # The final quantity lands in the verbatim cue on its own first word.
+                    final = i == len(steps)-1
+                    wf1_display.reading_card(P, [start,end], "" if final else steps[i]["label"],
+                                             fact["attribution"]+" · Hypothetical comparison", "", pal,
+                                             centre=.65, max_height=.21, group="comparison")
+                    P.events.append(start)
+                    continue
                 if page.get("sequence_kind") == "process":
                     heading = "Process examples"
                     source = steps[i]["source"]
@@ -2048,6 +2072,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     # The exact section stays in the source report. Keep a recording's time on screen.
                     location = excerpt["locator"] if claim and (not date or claim.get("event")==excerpt["event"]) else None
                     citation = " · ".join(dict.fromkeys(filter(None, (excerpt["event"], date, location))))
+                    if (a,b) in live_citations and fact.get("perspective", {}).get("stance") == "concern":
+                        from urllib.parse import urlsplit
+                        label = source + " · " + excerpt["event"]
+                        citation = urlsplit(excerpt["url"]).hostname or excerpt["locator"]
                 elif statement:
                     body = statement
                     value = str(fact["value"])
@@ -2223,9 +2251,11 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         for n, r_ in enumerate(rows):
             P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat", name_picture=pic,
                    text_group=f"picture-credit-{pic}-{a}")
+    cue_starts = {step["at"] for _,_,page in timed_facts if page.get("sequence_kind") == "comparison"
+                  for step in page["sequence"]}
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
                             hold=reading_spans, omit=omit, phrase_ends=d.get("caption_ends") or (),
-                            accents=d.get("caption_accents") or (), accent_ink=pal["accent"])
+                            accents=d.get("caption_accents") or (), accent_ink=pal["accent"], cue_starts=cue_starts)
     for word in list(P.items):
         if word.get("role") == "cap":
             # On the scale comparison its spoken cue is the graphic. Enlarge that

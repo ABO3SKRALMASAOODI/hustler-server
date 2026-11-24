@@ -840,7 +840,7 @@ def pin_voices(timeline, voices):
 # ----------------------------------------------------------------- captions that ink word by word; display words
 
 def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z=0, max_chars=22, max_words=4, late=2, script=None, ink_lag_s=None,
-                  omit=(), phrase_ends=(), accents=(), accent_ink=None):
+                  omit=(), phrase_ends=(), accents=(), accent_ink=None, cue_starts=()):
     """Captions at one seat for the whole film (TASTE P1), the way the reference stories set them: a line is laid out
     centred as it will stand, and each word is inked on its own spoken word, where it will stay; the line leaves at
     once when the next begins. `hold`: [(f0, f1)] when a display word has the seat and the caption yields to it.
@@ -867,10 +867,14 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
             fit.append((t0, t1, text, ws))
         ph = fit
     phrase_voices = {}
+    if cue_starts and not phrase_ends:
+        last_words = {id(ws[-1]) for _,_,_,ws in (ph or clock.phrases(max_chars, max_words))}
+        phrase_ends = [i for i,w in enumerate(clock.words) if id(w) in last_words]
     if phrase_ends and clock.words:
         # The director supplies boundaries, never replacement copy. Keep the address of
         # each occurrence even when successive phrases have exactly the same lettering.
         boundaries = {i for i in phrase_ends if type(i) is int and 0 <= i < len(clock.words)}
+        boundaries.update(i-1 for i in cue_starts if 0 < i < len(clock.words))
         boundaries.add(len(clock.words)-1)
         # A reading card can return the seat halfway through an authored phrase.
         for lo, hi in hold:
@@ -894,7 +898,7 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
                 next_end = min(n for n in boundaries if n > end)
                 following = clock.words[start:next_end+1]
                 next_on = following[0]["t0"]
-                if (next_on-group[0]["t0"] < .7 and next_on-group[-1]["t1"] < .3
+                if (start not in cue_starts and next_on-group[0]["t0"] < .7 and next_on-group[-1]["t1"] < .3
                         and not group[-1]["w"].endswith((".", "?", "!"))
                         and not any(Clock.f(group[0]["t0"])-1 < f <= Clock.f(next_on) for span in hold for f in span)
                         and fit(group+following) >= 42):

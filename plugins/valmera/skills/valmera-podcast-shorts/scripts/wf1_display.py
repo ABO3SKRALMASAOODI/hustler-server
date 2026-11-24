@@ -64,7 +64,10 @@ the subject may be someone else. Put a facts ask on the claim. If the brief lack
 args.claim={speaker,subject,event,report} from this passage, with a short qualified indirect sentence.
 To quote an original, use fact.quote copied whole from that source’s quotations record. A research
 summary or an event link alone supports no direct quotation. Otherwise show the speaker’s report.
-A discussed estimate and a personal estimate each get one readable statement in their own interval.
+For a speaker illustrating a personal estimate by comparing two scales, use args.sequence_kind="comparison"
+and args.sequence over the claim. Address each state on the first word that actually discloses it, including
+the final multiplier. Label the scenarios briefly and leave the final quantity to the spoken caption.
+A standalone estimate gets one readable statement in its own interval.
 Use claim.stance (discussed_estimate or personal_estimate), a short indirect report and the actual speaker.
 For a long exact quotation required as evidence, use its whole word span. Let this card carry the reading;
 resume ordinary captioning around it. Choose the shortest complete sourced statement that serves the point.
@@ -311,9 +314,20 @@ def bind(direction, editorial, words):
                     if phrase > previous:
                         state["at"] = phrase
                     previous = state["at"]
+            comparison = args.get("sequence_kind") == "comparison"
+            if comparison:
+                estimate = next((c for c in overlapping if c.get("stance") == "personal_estimate"), None)
+                if estimate:
+                    claim = estimate
+                    span = estimate["first"], estimate["last"]
+                    pages = [p for p in pages if not ((p["first"], p["last"]) == span
+                             and len(p["facts"]) == 1 and (p["facts"][0].get("chain") or {}).get("stance") == "personal_estimate")]
+                    displayed.add(span)
+                if ends:
+                    ends = sorted(set(ends) | {step["at"]-1 for step in sequence if step["at"] > 0})
             speaker = (claim or {}).get("speaker") or args.get("speaker") or "Speaker"
             pages.append(dict(first=first, last=last, sequence=sequence,
-                              **({"sequence_kind":args["sequence_kind"]} if args.get("sequence_kind") in ("history","process") else {}), facts=[
+                              **({"sequence_kind":args["sequence_kind"]} if comparison or args.get("sequence_kind") in ("history","process") else {}), facts=[
                 dict(attribution=speaker, source=sources["interview"], value=sequence[0]["label"])]))
             continue
         if (whole and editorial.get("episode_examples") and ask["dev"] in ("behind", "diecut")
@@ -487,7 +501,17 @@ def episode_pages(pages, coverage, words):
         first, last = page["first"], page["last"]
         example = examples.get((first, last)) if page.get("episode_example") else None
         claim = page["facts"][0].get("chain") or {}
-        if example:
+        if claim.get("stance") == "framework" and type(claim.get("context_start")) in (int,float):
+            # The earlier topic introduces the excerpt. A checked qualification on the
+            # same words takes the next seat instead of stacking two reading plates.
+            following = [p["first"] for p in pages if first <= p["first"] <= last
+                         and any(f.get("perspective") or f.get("excerpt") for f in p["facts"])]
+            stop = min(following)-1 if following else last
+            if stop < first:
+                continue
+            page = dict(page, first=0 if not any(p["last"] < first for p in pages) else first,
+                        last=stop, context_cue=True)
+        elif example:
             # Keep the illustration through its explanation, inside the planner's local span.
             while last < example["last"] and words[last+1]["seg"] == words[last]["seg"]:
                 last += 1

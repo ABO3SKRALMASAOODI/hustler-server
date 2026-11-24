@@ -140,6 +140,9 @@ The operator, hardware scale and network installation can each supply different 
 Let a product demo play across the factual release example, including an estimated cadence.
 A later opinion about the same products needs no further archive search. If a documented policy
 or partnership materially qualifies it, give the precise scope_question for a text citation.
+Where a speaker imagines granting a tool broad access, a first-party documentation excerpt can illustrate
+scoped permissions. Put that question on their concern. Reserve the hypothetical size comparison for the
+interview, using its comparisons span. Prefer the checked document and original voices to generic coverage.
 Otherwise omit scope_question. Keep the real demo or partnership on its own factual clause.
 Inventory the concrete entities and quantities actually named in the passage. An inventory entry need not become a new external window.
 Do not inventory an abstract feeling, rhetorical connective or this interview itself as a concrete
