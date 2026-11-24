@@ -840,7 +840,7 @@ def pin_voices(timeline, voices):
 # ----------------------------------------------------------------- captions that ink word by word; display words
 
 def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z=0, max_chars=22, max_words=4, late=2, script=None, ink_lag_s=None,
-                  omit=(), phrase_ends=(), accents=(), accent_ink=None, cue_starts=()):
+                  omit=(), phrase_ends=(), accents=(), accent_ink=None, cue_starts=(), reveal_words=()):
     """Captions at one seat for the whole film (TASTE P1), the way the reference stories set them: a line is laid out
     centred as it will stand, and each word is inked on its own spoken word, where it will stay; the line leaves at
     once when the next begins. `hold`: [(f0, f1)] when a display word has the seat and the caption yields to it.
@@ -867,7 +867,7 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
             fit.append((t0, t1, text, ws))
         ph = fit
     phrase_voices = {}
-    if cue_starts and not phrase_ends:
+    if (cue_starts or reveal_words) and not phrase_ends:
         last_words = {id(ws[-1]) for _,_,_,ws in (ph or clock.phrases(max_chars, max_words))}
         phrase_ends = [i for i,w in enumerate(clock.words) if id(w) in last_words]
     if phrase_ends and clock.words:
@@ -919,6 +919,7 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
         ph = [(a, min(ph[i+1][0], b+.55) if i+1 < len(ph) else b+.25, t, ws)
               for i,(a,b,t,ws) in enumerate(ph)]
     ph = ph or clock.phrases(max_chars=max_chars, max_words=max_words)
+    disclosures = {id(clock.words[i]) for i in reveal_words}
     accented = {id(clock.words[i]) for i in accents if 0 <= i < len(clock.words)}
     n_lines, next_open = 0, 0
     base_voice = v
@@ -946,6 +947,10 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
                  if (first == a or Clock.f(w.get("t1", w["t0"])) > first) and id(w) not in gone]
         if not pairs:
             continue
+        # Keep the authored caption whole on the reveal. Until that word is heard
+        # only its preceding words are legible, including during the opening fade.
+        reveal_at = [(Clock.f(w["t0"]), " ".join(t for _,t in pairs[:j]))
+                     for j,(w,_) in enumerate(pairs) if id(w) in disclosures]
         page_ink = ink
         if phrase_ends:
             # One measured glyph run shares the normal caption seat and handoff. A
@@ -978,6 +983,14 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
                 continue
             P.cap_lags.append(on - Clock.f(w["t0"]))
             x = x_left + (P.R.width(v, " ".join(toks[:j]) + " x") - P.R.width(v, "x")) / W if j else x_left
+            for frame,prefix in reveal_at:
+                frame = min(b,max(on,frame))
+                if prefix and on < frame:
+                    P.word([on,frame],prefix,v,.5-P.R.width(v,prefix)/(2*W),y,page_ink,1.,note=False,
+                           z=z,role="cap",stroke=dict(w=1.6,c="#0B0A09"))
+                on = frame
+            if on >= b:
+                continue
             P.word([on, b], token, v, x, y, page_ink, 1.0, note=False, z=z, role="cap", stroke=dict(w=1.6, c="#0B0A09"))
         next_open = b
         n_lines += 1

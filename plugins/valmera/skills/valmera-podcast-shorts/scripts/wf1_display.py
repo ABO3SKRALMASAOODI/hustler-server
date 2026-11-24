@@ -701,10 +701,57 @@ def figure_readings(span, fact, pictures):
         yield [a,b], fact["visible_statement"] if visible else fact["statement"]
 
 
+def comparison_pages(pages, comparison, words):
+    """Give the premise and its spoken outcome separate clocks on the synchronous take."""
+    first, last = comparison["first"], comparison["last"]
+    reveal = comparison.get("reveal")
+    # Older scores can carry the exact closing image in both lines. Use that word's
+    # address when available, retaining the existing layout for an unaddressed comparison.
+    if reveal is None and words[last]["w"].strip(string.punctuation).casefold() == (
+            comparison["consequence"].split()[-1].strip(string.punctuation).casefold()):
+        reveal = last
+    competing = [p for p in pages if p["first"] <= last and first <= p["last"]]
+    def independent(page):
+        if page.get("sequence"):
+            return True
+        for fact in page["facts"]:
+            chain = fact.get("chain") or {}
+            if (fact.get("perspective") or fact.get("record") or fact.get("excerpt") or
+                    (chain and (reveal is None or chain.get("original") or
+                                not same_recording(fact.get("source",{}).get("url"),chain.get("interview"))))):
+                return True
+        return False
+    protected = [p for p in competing if independent(p)]
+    if reveal is None and protected:
+        return pages
+    result = [p for p in pages if p not in competing or p in protected]
+    for p in competing:
+        if p in protected:
+            continue
+        if p["first"] < first:
+            result.append(dict(p,last=first-1))
+        if p["last"] > last:
+            result.append(dict(p,first=last+1))
+    fact = dict(relation=comparison["premise"], value=comparison["consequence"], source={})
+    if reveal is None:
+        return result + [dict(first=first,last=last,analogy=True,facts=[fact])]
+    steps = {first:dict(label=comparison["premise"])}
+    steps.update((step["at"],step) for step in comparison.get("steps") or [])
+    steps[reveal] = dict(label="", reveal=True)
+    cues = sorted(steps)
+    for start,end in zip(cues,cues[1:] + [last+1]):
+        spans = [(start,end)]
+        for p in protected:
+            spans = [(a,b) for lo,hi in spans for a,b in
+                     ((lo,min(hi,p["first"])),(max(lo,p["last"]+1),hi)) if a < b]
+        result.extend(dict(first=a,last=b-1,analogy=True,analogy_step=steps[start],facts=[fact]) for a,b in spans)
+    return result
+
+
 def episode_pages(pages, coverage, words):
     """Give local illustrations reading time in their sentence; release a gloss with its term."""
     examples = {(e["graphic_first"], e["graphic_last"]): e for e in coverage.get("episode_examples") or []}
-    contextual = {r["start"] for r in coverage.get("contextual_definitions") or []
+    contextual = {r["start"]:r for r in coverage.get("contextual_definitions") or []
                   if isinstance(r, dict) and type(r.get("start")) in (int, float)}
     result = []
     terms = set()
@@ -723,7 +770,11 @@ def episode_pages(pages, coverage, words):
         page = dict(page, facts=facts)
         example = examples.get((first, last)) if page.get("episode_example") else None
         claim = page["facts"][0].get("chain") or {}
-        term = claim.get("term")
+        contextual_def = contextual.get(claim.get("start"), {})
+        term = claim.get("term") or contextual_def.get("term")
+        if term and claim.get("stance") == "definition" and contextual_def.get("gloss"):
+            fact = dict(facts[0],chain=dict(claim,term=term),value=contextual_def["gloss"])
+            page = dict(page,facts=[fact,*facts[1:]])
         if claim.get("stance") == "definition" and term:
             if term in terms:
                 continue
@@ -755,7 +806,7 @@ def episode_pages(pages, coverage, words):
         elif claim.get("stance") == "definition" and claim.get("start") in contextual:
             seg = words[first]["seg"]
             ids = [i for i,w in enumerate(words) if w["seg"] == seg]
-            page = dict(page, first=ids[0], last=ids[-1], gloss=True)
+            page = dict(page, first=first if term else ids[0], last=ids[-1], gloss=True)
         result.append(page)
     # Word-addressed interview beats use the same live byline as an observation.
     # They replace a competing gloss inside their own interval only.

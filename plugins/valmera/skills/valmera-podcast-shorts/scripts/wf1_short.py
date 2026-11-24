@@ -127,6 +127,7 @@ def script(ctx, ideas_out):
     system += (" Attribute concerns and competitive characterizations to the speaker in the brief. "
                "For an enacted example use the interview as the source of the speaker's questions and hypothesis. "
                "A record preserves wording; attribute an interpretation to its speaker. Introduce a product claim only on the words that support it. "
+               "Keep a speaker’s qualified attribution in their own words. A book discussing a concept establishes context; a claim of coinage needs separate evidence. "
                "Separate demonstrated capabilities from predicted outcomes. Include claims for any nested speech or forecast: [{start,end,speaker,subject,event,report}]. "
                "Set interview_only=true for private reported conversations whose only source is this speaker. Use absolute episode seconds bounding just that claim. speaker is the person actually heard "
                "(use The host or The guest when the name is uncertain); subject is whose statement is described "
@@ -1344,7 +1345,35 @@ def score(ctx, script):
 def compose(ctx, script, pack, d, reviewed_clauses=()):
     import wf1_coverage
     import wf1_experiment
+    coverage = pack["coverage"]
+    index_path = os.path.join(ctx.supply, "index.json")
+    retiming_spend = []
+    if (coverage.get("comparisons") and not coverage.get("comparison_clock") and
+            any("reveal" not in c for c in coverage["comparisons"]) and os.path.isfile(index_path)):
+        # Resume an older scored pack on its same sources and selected cuts. Only
+        # refresh the word-addressed comparison and its accompanying definition.
+        import wf1_source_frame
+        import httpx
+        import openai_budget
+        take = pack["take"]
+        index = shell.jload(index_path, {})
+        try:
+            frames = wf1_source_frame.samples(take["path"], index.get("shots"), take["dur"], ctx.supply, pack["ffmpeg"])
+            timed = wf1_coverage.plan(coverage["words"], script.get("title"), ctx.supply, _llm(),
+                named=coverage.get("named"), off_camera=coverage.get("off_camera"), frames=frames,
+                story=coverage.get("story"), speaking_turns=coverage.get("speaking_turns"), timing_only=True)
+        except openai_budget.OverBudget:
+            raise
+        except (httpx.HTTPError, RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            ctx.log(f"Retaining the scored comparison on its spoken clock: {type(exc).__name__}")
+        else:
+            if timed.get("comparisons"):
+                coverage = dict(coverage, comparisons=timed["comparisons"], comparison_clock=True,
+                                contextual_definitions=timed.get("contextual_definitions",coverage.get("contextual_definitions",[])))
+                pack = dict(pack, coverage=coverage)
+            retiming_spend = timed.get("spend") or []
     thought, reading_spend = wf1_experiment.read(d, pack["coverage"]["words"], ctx.supply, _llm())
+    reading_spend.extend(retiming_spend)
     knobs = film_direction(d)
     if knobs.get("principle_example"):
         from wf1_principle import finish_reading
@@ -1407,7 +1436,7 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
                                           matched={p.get("origin") or p["path"] for p in shown})
     l1["documentary_cuts"] = []
     for picture in shown:
-        cut = {k: picture.get(k) for k in ("f", "pic", "path", "source_slice", "time_range", "source_evidence", "name_super")}
+        cut = {k: picture.get(k) for k in ("f", "pic", "path", "source_slice", "time_range", "source_evidence", "name_super", "name")}
         overview = picture.get("overview")
         if overview:
             l1["documentary_cuts"].append(dict(cut, f=overview["f"], pic=overview["pic"], path=overview["path"]))

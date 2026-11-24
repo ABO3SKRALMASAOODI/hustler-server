@@ -996,13 +996,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             pages[n] = dict(page, last=steps[-1]["at"]-1, sequence=steps[:-1])
     pages.sort(key=lambda p: p["first"])
     for comparison in coverage.get("comparisons") or []:
-        competing = [p for p in pages if p["first"] <= comparison["last"] and comparison["first"] <= p["last"]]
-        if any(p.get("sequence") or any(f.get("chain") or f.get("perspective") for f in p["facts"])
-               for p in competing):
-            continue
-        pages = [p for p in pages if p not in competing]
-        pages.append(dict(first=comparison["first"], last=comparison["last"], facts=[
-            dict(relation=comparison["premise"], value=comparison["consequence"], source={})], analogy=True))
+        pages = wf1_display.comparison_pages(pages, comparison, clock.words)
     import wf1_principle
     principle = d.get("principle_example")
     pages = wf1_principle.pages(pages, principle, clock.words)
@@ -1016,6 +1010,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         next_word = word_frame(page["last"] + 1)
         if next_word is not None:
             b = min(b, next_word)
+        if page.get("analogy_step"):
+            a = Clock.f(clock.words[page["first"]]["t0"])
+            b = Clock.f(clock.words[page["last"]+1]["t0"]) if next_word is not None else f_end
         if page.get("principle_plate") and page["last"] == len(clock.words)-1:
             b = f_end
         facts = page["facts"]
@@ -1048,7 +1045,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         rows = wf1_display.typeset(facts, P.R, DISPLAY_W * W, str.upper if st["upper"] else str)
         return len(rows) > 4
 
-    report_spans = [(a, b) for a, b, page in timed_facts if page.get("principle_plate") or page.get("record_role") or page.get("scope_cue") or page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"])]
+    report_spans = [(a, b) for a, b, page in timed_facts if page.get("analogy_step") or page.get("principle_plate") or page.get("record_role") or page.get("scope_cue") or page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"])]
 
     # A remembered figure or reversal can live in the spoken cue and the show's own
     # shot. Release the timeline on the authored word, preserving the entire source frame.
@@ -1289,10 +1286,21 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     live_citations.update((a,b) for a,b,p in timed_facts if len(p["facts"]) == 1
                           and p["facts"][0].get("perspective", {}).get("stance") == "concern"
                           and p["facts"][0].get("excerpt"))
+    gestures = [(a,b,p["analogy_step"]) for a,b,p in timed_facts if (p.get("analogy_step") or {}).get("gesture")]
+    # In one camera shot, establish the demonstrator’s framing during the lead-in
+    # so a hand already in motion is visible before its next verbal label.
+    for a,b,page in timed_facts:
+        if page.get("analogy_step") and not page["analogy_step"].get("gesture"):
+            next_gesture = next((step for lo,hi,step in gestures if lo == b), None)
+            if next_gesture:
+                shot = next((s for s in tshots if s["t0"] <= (b-LEAD_F)/FPS < s["t1"]), None)
+                if shot:
+                    gestures.append((max(a,round(shot["t0"]*FPS)+LEAD_F),b,next_gesture))
     dated_spans = {(a,b) for a,b,p in timed_facts if any(f.get("record") for f in p["facts"])}
     live_citations.update(dated_spans)
     comparison_landings = {word_frame(p["sequence"][-1]["at"]): b for a,b,p in timed_facts
                            if p.get("sequence_kind") == "comparison"}
+    comparison_landings.update({a:b for a,b,p in timed_facts if p.get("analogy_step")})
     if source_pages:
         ins, _ = _director().hold_take(ins, source_pages, min_f=1, fps=FPS)
     # Bind the compact editorial reading to the selected source slices, after device holds.
@@ -1445,6 +1453,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         layout_edges.extend(f for span in reactions+returns for f in span)
         layout_edges.append(turn_f if turn_f is not None else f_last)
         layout_edges.extend(f for span in report_spans for f in span)
+        layout_edges.extend(f for lo,hi,_ in gestures for f in (lo,hi))
         layout_edges.extend(comparison_landings)
         layout_edges.extend(f for start,(end,_,_) in live_beats.items() for f in (start,end))
         layout_edges.extend(f for lo,hi,_ in speakers for f in (lo,hi))
@@ -1473,6 +1482,19 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                            speaker_panel=True,caption_baseline=.88)
                     cut_pts.append(fa)
                     continue
+            gesture = next((step for lo,hi,step in gestures if lo <= fa < hi), None)
+            if gesture:
+                from scene.motion import fit_panel
+                crop = gesture.get("box")
+                if not (isinstance(crop,list) and len(crop)==4 and all(type(v) in (int,float) for v in crop)
+                        and 0 <= crop[0] < crop[2] <= 1 and 0 <= crop[1] < crop[3] <= 1):
+                    crop = [0,0,1,1]
+                box = fit_panel(crop,(take["w"],take["h"]),(W,H),[0,.05,1,.58])
+                P.page([fa,fb],"#14171B",grain=0)
+                P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],source_frame=True,
+                       source_ink=[box],caption_baseline=.88)
+                cut_pts.append(fa)
+                continue
             if thought_role == "citation":
                 P.page([fa,fb], "#EFE9DD", grain=.015)
                 bright.append((fa,fb))
@@ -2139,6 +2161,13 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     record_accent = None
     for a, b, page in timed_facts:
         facts = page["facts"]
+        if page.get("analogy_step"):
+            step = page["analogy_step"]
+            wf1_display.reading_card(P,[a,b],step["label"],"Hypothetical", "",pal,
+                                     centre=.65,max_height=.19,group="analogy")
+            fact_pages.append(dict(page,f=[a,b]))
+            P.events.append(a)
+            continue
         if page.get("principle_plate"):
             wf1_display.reading_card(P,[a,b],facts[0]["value"],page["heading"],page["credit"],pal,
                                      centre=.635, max_height=.26,group="principle")
@@ -2227,7 +2256,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             P.events.append(a)
             continue
         if page.get("episode_example") or page.get("gloss"):
-            label = "e.g." if page.get("episode_example") else facts[0]["chain"].get("subject") or "Definition"
+            label = "e.g." if page.get("episode_example") else facts[0]["chain"].get("term") or facts[0]["chain"].get("subject") or "Definition"
             wf1_display.reading_card(P, [a,b], facts[0]["value"], label, "", pal,
                                      centre=.67, max_height=.19, group="interview-note")
             fact_pages.append(dict(page, f=[a,b]))
@@ -2536,9 +2565,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                    text_group=f"picture-credit-{pic}-{a}")
     cue_starts = {step["at"] for _,_,page in timed_facts if page.get("sequence_kind") == "comparison"
                   for step in page["sequence"]}
+    reveal_words = {p["first"] for _,_,p in timed_facts if (p.get("analogy_step") or {}).get("reveal")}
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
                             hold=reading_spans, omit=omit, phrase_ends=d.get("caption_ends") or (),
-                            accents=d.get("caption_accents") or (), accent_ink=pal["accent"], cue_starts=cue_starts)
+                            accents=d.get("caption_accents") or (), accent_ink=pal["accent"], cue_starts=cue_starts, reveal_words=reveal_words)
     for word in list(P.items):
         if word.get("role") == "cap":
             # On the scale comparison its spoken cue is the graphic. Enlarge that

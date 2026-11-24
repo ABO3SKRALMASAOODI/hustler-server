@@ -559,3 +559,27 @@ def test_repeated_document_reframe_changes_the_drawn_card(tmp_path, quiet_engine
     assert wf.framing_key(repaired, 40, 77) != finding["framing_key"]
     assert wf.unrepaired(dict(picture, reframed=True), findings)
     assert not wf.unrepaired(beats["pictures"][0], findings)
+
+
+def test_conditional_analogy_reveals_full_caption_on_the_spoken_image(tmp_path, quiet_engines, monkeypatch):
+    import wf1_coverage
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *args: ([], []))
+    pack = _sup(tmp_path, [])
+    tokens = "I believe if it keeps getting better who stays in control if goals diverge we become pets".split()
+    words = [dict(w=w,start=.1+i*.37,end=.4+i*.37,seg=0) for i,w in enumerate(tokens)]
+    pack["words"]["words"] = pack["coverage"]["words"] = words
+    comparison = dict(first=2,last=16,premise="If goals diverge",consequence="We could become pets",
+                      reveal=16,steps=[dict(at=2,label="If capability grows",gesture=True),
+                                      dict(at=7,label="Who stays in control?"),dict(at=11,label="If goals diverge")])
+    pack["coverage"]["comparisons"] = [comparison]
+    script = dict(title="Control", segments=[dict(say=" ".join(tokens), pictures=[])])
+    report = dict(first=7,last=10,facts=[dict(source=dict(url="episode"), value="Could lose control",
+                  chain=dict(speaker="Guest",subject="Guest",interview="episode"))])
+    scene, _ = film.build(script, pack, "archive-reel", dict(coverage_final=True,
+                          display_facts=[report], caption_ends=[1,6,10,13,16]))
+    reveal = film.Clock.f(words[-1]["start"] + film.LEAD_F/film.FPS)
+    texts = [it for it in scene["items"] if it["k"] == "word"]
+    assert all(it["f"][0] >= reveal for it in texts if "pets" in it["t"].lower())
+    assert any(it["t"].lower() == "we become pets" and it["role"] == "cap" for it in texts)
+    assert any(it.get("source_frame") and it["f"][0] <= 45 < it["f"][1] for it in scene["items"])
+    assert any("who stays in control" in it["t"].lower() for it in texts)

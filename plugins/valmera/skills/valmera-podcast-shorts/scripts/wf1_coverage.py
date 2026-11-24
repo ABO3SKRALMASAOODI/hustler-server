@@ -68,7 +68,7 @@ def story_context(script):
                 episode_start=(script.get("window") or [0])[0])
 
 
-def plan(words, title, work, llm, named=None, off_camera=None, frames=None, story=None, speaking_turns=None):
+def plan(words, title, work, llm, named=None, off_camera=None, frames=None, story=None, speaking_turns=None, *, timing_only=False):
     """named: the script stage's resolved referents (script.named), the director's subjects from the start.
     off_camera: [{first, last, t0, t1}] word spans the show's own camera holds a listener while the voice speaks
     (wf1_speaker): the director plans pictures over them like any other words, so no line plays on a listener."""
@@ -79,8 +79,12 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None, stor
     off_camera = [dict(first=int(r['first']), last=int(r['last'])) for r in off_camera or []]
     if os.path.exists(path):
         old = json.load(open(path))
-        if (old.get('contract') == CONTRACT and old.get('words') == words and (old.get('named') or []) == named
+        if (old.get('contract') == CONTRACT and (not old.get('comparisons') or old.get('comparison_clock'))
+                and (not timing_only or old.get('source_key') == source_key)
+                and old.get('words') == words and (old.get('named') or []) == named
                 and old.get('story') == story and old.get('speaking_turns') == speaking_turns and (old.get('off_camera') or []) == off_camera):
+            if timing_only:
+                return dict(old, spend=[])
             if frames and old.get('source_key') != source_key:
                 old['source_reading'] = source_frame.read(old,frames,llm,work)
                 old['source_key'] = source_key
@@ -102,7 +106,7 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None, stor
  "print_readings":[{"first":int,"last":int}],
  "interview_cues":[{"first":int,"last":int,"speaker":str,"label":str,"report":str,"stance":optional "recollection|characterization"}],
  "contextual_definitions":[{"start":number,"term":str,"gloss":str}],
- "comparisons":[{"first":int,"last":int,"premise":str,"consequence":str}],
+ "comparisons":[{"first":int,"last":int,"premise":str,"consequence":str,"reveal":int,"steps":[{"at":int,"label":str,"gesture":optional bool,"box":optional normalized xyxy}]}],
  "speaker_claims":[{"first":int,"last":int,"speaker":str,"stance":"concern|characterization|recollection|observation","report":str,"scope_question":str,"scope_kind":optional "dated_record"}],
  "moves":[{"word":int,"why":str}]}.
 named lists the referents the script stage resolved from the whole moment, each with the event-level
@@ -141,6 +145,14 @@ Preserve the complete spoken relationship in the running caption.
 Read story.claims, story.meaning and the editorial brief with the actual words. For an explicitly imagined analogy,
 give its whole vehicle (including the imagined consequence) ONE inclusive comparisons span. Write
 two concise graphic labels, premise and consequence, that explain its logic in the conditional.
+Set reveal to the word that first makes the closing image recognizable (the noun itself for a delayed
+metaphor). The complete spoken caption lands there. Where a hypothetical escalates over several clauses,
+start the comparison at its setup. Write short conditional steps on actual changes of thought, through
+the question about control or goals. On a demonstrative gesture use gesture=true and a box containing
+both face and moving hands from the source samples. Leave their movement in view. Keep other steps on
+their respective words. Give a term just its first useful gloss; let a qualified historical attribution
+stay in speech. A publication is context for the idea. Depict possible consequences as the speaker's
+conditional reasoning, never as footage of an event or instructions for implementing a system.
 An analogy is a single treatment: use a backed illustrative insert already in the source when it
 makes the relationship clear, otherwise the synchronous speaker with the two-label analogy graphic.
 Do not acquire its nouns, parts or imagined actions as separate documentary events. A real event or
@@ -312,7 +324,15 @@ an honest subject; never invent one.'''
         if (isinstance(row, dict) and type(row.get("first")) is int and type(row.get("last")) is int
                 and 0 <= row["first"] <= row["last"] < len(words)
                 and all(isinstance(row.get(k), str) and row[k].strip() for k in ("premise", "consequence"))):
-            comparisons.append({k: row[k] for k in ("first", "last", "premise", "consequence")})
+            comparison = {k: row[k] for k in ("first", "last", "premise", "consequence")}
+            reveal = row.get("reveal")
+            if type(reveal) is int and row["first"] <= reveal <= row["last"]:
+                comparison["reveal"] = reveal
+                steps = [step for step in (row.get("steps") or []) if isinstance(step,dict)
+                         and type(step.get("at")) is int and row["first"] <= step["at"] < reveal
+                         and isinstance(step.get("label"),str) and step["label"].strip()]
+                comparison["steps"] = sorted(steps,key=lambda step:step["at"])
+            comparisons.append(comparison)
     speaker_claims = [c for c in out.get("speaker_claims") or [] if isinstance(c, dict)
                       and type(c.get("first")) is int and type(c.get("last")) is int
                       and 0 <= c["first"] <= c["last"] < len(words)
@@ -332,7 +352,7 @@ an honest subject; never invent one.'''
             if ids and ids[0] <= claim["first"] <= claim["last"] <= ids[-1]:
                 claim.update(first=ids[0], last=ids[-1])
                 break
-    out.update(story=story, comparisons=comparisons, speaker_claims=speaker_claims, speaking_turns=speaking_turns)
+    out.update(story=story, comparisons=comparisons, comparison_clock=True, speaker_claims=speaker_claims, speaking_turns=speaking_turns)
     if frames:
         out['source_reading'] = source_frame.bind(dict(out, words=words, windows=windows), frames, dict(out,spend={}))
     # Reserve locally directed words before assigning indices to external research windows.
