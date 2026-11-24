@@ -55,6 +55,19 @@ quotation. Return authored_frames: [frame IDs] for interview split screens whose
 footer and source credits form one authored picture. Keep their complete original composition on
 screen. On the closing thought frame the presenter unless another participant has a visible reaction that
 adds meaning. Give reactions: [{first,last}] for just those word spans within authored two-shots.
+For two contrasted approaches followed by a physically acted example that returns to the same
+unfinished item, give acted_contrast with word IDs first, pivot (as the comparison turns),
+switch (the word naming the second approach), item_at (the hypothetical question or example),
+gesture (when the hands start to illustrate it), after (first word after the demonstration),
+return_at (the callback), last (inclusive). Optional example_at is the first word of an intervening
+spoken scenario already illustrated by an approved picture. Keep that passage until the gesture begins. Give short before and alternative labels, item (one
+illustrative object), state and outcome. Keep it hypothetical. Give subject and action boxes in
+normalized source coordinates enclosing the head, glasses and arms throughout each passage.
+Where both hands move toward one another, optional detail:{first,last,left,right} identifies
+the inclusive words and two source regions in their original left/right order throughout the
+inward motion. Use the real hands. Omit details if the source views do not establish both.
+Return caption_restarts:[{fragment,question,end}] when a false start is followed by a question.
+These word IDs name the final interrupted word, first restarted word, and final question word.
 On a voice change, compare the first aligned word (including short interjections) with the
 actual outgoing and incoming shots. If the outgoing single stays on the previous talker, return
 voice_entries:[{first,frame,speaker,listener,reaction}]. frame identifies that outgoing shot.
@@ -316,6 +329,11 @@ def bind(coverage, frames, result):
     # A retained pack already indexes its external windows. Only a fully covered
     # window can be retired without losing research on a different adjacent clause.
     covered = {i for row in inserts + (speakers if inserts or panels else []) for i in range(row['first'],row['last']+1)}
+    import wf1_acted_contrast as acted
+    contrast = acted.reading(result.get("acted_contrast"), len(words))
+    if contrast:
+        for lo,hi in acted.spans(contrast):
+            covered.update(range(lo,hi+1))
     if demo:
         covered.update(range(demo["first"],demo["last"]+1))
     replaces = [i for i,w in enumerate(windows) if all(j in covered for j in range(w['first'],w['last']+1))]
@@ -357,7 +375,9 @@ def bind(coverage, frames, result):
             entries.append(dict(first=first, shot=shot, speaker=speaker, listener=listener,
                                 reaction=row.get('reaction') is True))
     closing = [dict(first=r['first'], shot=shot, box=r['box']) for r,shot in identified('closing_views') if box(r.get('box'))]
-    return dict(live_demo=demo, voice_entries=entries, closing_views=closing, speaker_inserts=speakers, reactions=reactions, authored_shots=[list(span) for span in authored], inserts=sorted(inserts,key=lambda r:r['first']),replaces=replaces,
+    breaks = acted.restarts(result.get("caption_restarts"), len(words))
+    return dict(**({"acted_contrast":contrast} if contrast else {}),
+                **({"caption_restarts":breaks} if breaks else {}), live_demo=demo, voice_entries=entries, closing_views=closing, speaker_inserts=speakers, reactions=reactions, authored_shots=[list(span) for span in authored], inserts=sorted(inserts,key=lambda r:r['first']),replaces=replaces,
                 quote_segments=result.get('quote_segments') or [],spend=result.get('spend') or {})
 
 

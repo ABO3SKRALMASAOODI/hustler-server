@@ -1117,6 +1117,24 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         first, last = approval["first"], approval["last"]
         approval_span = (word_frame(first), word_frame(last+1) or f_end)
         pages = [part for page in pages for part in wf1_principle.outside(page, first, last)]
+    import wf1_acted_contrast as acted
+    contrast = acted.reading(d.get("acted_contrast", reading.get("acted_contrast")), len(clock.words))
+    contrast_span = None
+    contrast_entries = []
+    if contrast:
+        first, last = contrast["first"], contrast["last"]
+        contrast_span = word_frame(first), word_frame(last+1) or f_end
+        for lo,hi in acted.spans(contrast):
+            pages = [part for page in pages for part in wf1_principle.outside(page,lo,hi)]
+        # The incoming voice owns one cue while the source camera holds the smile.
+        # The example returns with the speaker's own picture at the source cut.
+        callback = word_frame(contrast["return_at"])
+        for row in reading.get("voice_entries", []):
+            lo, hi = row["shot"]
+            if lo*FPS+LEAD_F <= callback < hi*FPS+LEAD_F and row.get("reaction"):
+                contrast_entries.append((word_frame(row["first"]), round(hi*FPS)+LEAD_F, row))
+        entries = [entry for entry in entries if entry not in contrast_entries]
+        contrast_return = max([callback]+[hi for _,hi,_ in contrast_entries])
     # The take reader already located speakers in ordinary camera shots.
     # Screen-share presenter tiles are only one of the possible live returns.
     live_spans = [(round(sp["t0"]*FPS)+LEAD_F, round(sp["t1"]*FPS)+LEAD_F)
@@ -1230,6 +1248,14 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     if demo_span:
         comparison_spans.append(demo_span)
     comparison_spans.extend(source_pages)
+    if contrast:
+        # These are live pictures with type outside them. The original camera
+        # and its palette moves still own the reaction and the spoken snap.
+        live_example = [(contrast_span[0],word_frame(contrast.get("example_at",contrast["gesture"]))),
+                        (word_frame(contrast["gesture"]),word_frame(contrast["after"])),
+                        (contrast_return,contrast_span[1])]
+        source_pages.extend(live_example)
+        report_spans.extend(live_example)
     comparison_spans.extend((a,b) for a,b,page in timed_facts if page.get("sequence"))
     if (source_rows or comparison_spans) and dr:
         def separate_ask(ask):
@@ -1657,6 +1683,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         layout_edges.append(turn_f if turn_f is not None else f_last)
         layout_edges.extend(f for span in report_spans for f in span)
         layout_edges.extend(f for lo,hi,_ in gestures for f in (lo,hi))
+        if contrast:
+            layout_edges.extend(word_frame(contrast[k]) for k in ("item_at","gesture","after"))
+            layout_edges.append(contrast_return)
+            detail = contrast.get("detail")
+            if detail:
+                layout_edges.extend((word_frame(detail["first"]), word_frame(detail["last"]+1) or f_end))
         layout_edges.extend(f for lo,hi,_ in study_seats for f in (lo,hi))
         for start, end, dial in instrument_scenes:
             layout_edges.extend((start, end, word_frame(dial["at"]["w"]),
@@ -1691,6 +1723,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                    decode_region if portrait else None,presenter_insert=True,source_ink=[box],caption_baseline=.88)
                     cut_pts.append(fa)
                     continue
+            if contrast and any(lo <= fa < hi for lo,hi in live_example):
+                faces = [face["box"] for face in pieces[k]["faces"] if face.get("box")]
+                acted.live_picture(P,contrast,word_frame,[fa,fb],[t0,t1],pieces[k]["key"],take,
+                                   (W,H),faces,returning=fa >= contrast_return)
+                cut_pts.append(fa)
+                continue
             on_reporting = reporting_span and reporting_span[0] <= fa < reporting_span[1]
             on_approval = approval_span and approval_span[0] <= fa < approval_span[1]
             if on_reporting or on_approval or (demo_span and demo_span[0] <= fa < demo_span[1]):
@@ -2446,6 +2484,14 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     devices = []                                         # the palette's asks: rows whose type performs (laid at the render, chain.alien_bank)
     # An attributed claim carries the reading on the ground below its source picture.
     fact_pages = []
+    if contrast:
+        acted.draw(P,contrast,word_frame,contrast_span[1],contrast_return,pal,W)
+        for a,b,entry in contrast_entries:
+            P.word([a,b],entry["speaker"],"cap",.5,.78,pal["ink"],align="c",role="graphic",
+                   text_group="incoming-speaker")
+        fact_pages.append(dict(first=contrast["first"], last=contrast["last"], f=list(contrast_span),
+                               acted_contrast=contrast, facts=[dict(value=contrast["item"],
+                               source=dict(url=script.get("source_url")))]))
     if approval:
         a,b = approval_span
         wf1_approval.draw(P,approval,word_frame,b,pal,W)
@@ -2961,9 +3007,31 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         # As the speaker acts out the change and its consequence, ink each word
         # when heard. The next line can no longer print the end of a joke early.
         reveal_words.update(i for i in range(dial["at"]["w"], len(clock.words)) if word_frame(i) < end)
-    lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
-                            hold=reading_spans, omit=omit, phrase_ends=d.get("caption_ends") or (),
+    marks = acted.restarts(d.get("caption_restarts", reading.get("caption_restarts")), len(clock.words))
+    caption_clock, gaps = (acted.caption_clock(clock,marks,take["path"],sup["ffmpeg"],LEAD_F/FPS)
+                           if marks else (clock,[]))
+    ends = set(d.get("caption_ends") or ())
+    if marks and not ends:
+        phrase_tails = {id(ws[-1]) for _,_,_,ws in clock.phrases()}
+        ends.update(i for i,w in enumerate(clock.words) if id(w) in phrase_tails)
+    for mark in marks:
+        ends.difference_update(range(mark["question"], mark["end"]))
+        cue_starts.update((mark["fragment"], mark["question"]))
+        ends.update((mark["fragment"], mark["end"]))
+    if contrast:
+        cue_starts.add(contrast["pivot"])
+        reveal_words.add(contrast["switch"])
+    if marks and omit:
+        original_ids = {id(w) for w in omit}
+        omit = [caption_clock.words[i] for i,w in enumerate(clock.words) if id(w) in original_ids]
+    lines = F.caption_build(P, caption_clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
+                            hold=reading_spans, omit=omit, phrase_ends=sorted(ends),
                             accents=d.get("caption_accents") or (), accent_ink=pal["accent"], cue_starts=cue_starts, reveal_words=reveal_words)
+    for i,off in gaps:
+        onset = Clock.f(caption_clock.words[i]["t0"])-1
+        for cap in P.items:
+            if cap.get("role") == "cap" and cap["f"][0] <= onset+1 < cap["f"][1]:
+                cap["f"][1] = max(cap["f"][0]+1,min(cap["f"][1],Clock.f(off)))
     closing_phrase = any(p["last"] == len(clock.words)-1 and (p.get("analogy_step") or {}).get("reveal")
                          and not p["analogy_step"].get("label") for _,_,p in timed_facts)
     if closing_phrase:
