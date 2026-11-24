@@ -80,3 +80,31 @@ def closing_crops(path, views, size, fps):
         for j,scale,shift in reversed(chain):
             crops[j-1] = [(v-off)/scale for v,off in zip(crops[j],shift)]
     return crops
+
+
+def portrait_region(face, size, frame=None):
+    """A square around the tracked face, inside the visible feed of a letterboxed composite."""
+    import numpy as np
+    width, height = size
+    x,y,w,h = face[:4]
+    cx,cy = x+w/2,y+h/2
+    top,bottom = 0.,1.
+    if frame is not None:
+        ph,pw = frame.shape[:2]
+        # Measure the camera column inside the face's horizontal extent. Border
+        # credits may have a few bright pixels, but not a sustained textured row.
+        column = frame[:,max(0,int(x*pw)):min(pw,int((x+w)*pw)+1)]
+        if column.size:
+            active = np.mean(column.max(axis=2)>36,axis=1) > .52
+            mid = min(ph-1,max(0,round(cy*ph)))
+            edges = np.flatnonzero(~active)
+            above, below = edges[edges<mid], edges[edges>mid]
+            lo = (above[-1]+1)/ph if above.size else 0.
+            hi = below[0]/ph if below.size else 1.
+            if lo <= y and y+h <= hi:
+                top,bottom = lo,hi
+    side = min(bottom-top, width/height, max(.58,1.35*h))
+    dx = side*height/width
+    left = min(1.-dx,max(0.,cx-dx/2))
+    top = min(bottom-side,max(top,cy-side/2))
+    return [left,top,left+dx,top+side]

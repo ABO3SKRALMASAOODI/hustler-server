@@ -234,6 +234,10 @@ def split(l1, work, ask, sense_=None, pool=None):
                     y[a-lo+j] -= min(max(0,top),.08)*(1-u)
                 return dict(items=[dict(card,y=y)],events=[dict(f=a,what="interview panel settles",kind="panel",strength=.45)],
                             log=dict(panels=2,take=True,stacked=True))
+        if under and _same_take(l1, work, under, pics[0]):
+            # The matched-window fallback returned this very camera. Keep its
+            # authored crop, clock and any already composed documentary inset.
+            return dict(items=[], presentation="portrait", log=dict(panels=1, take=True))
     given = len([p for p in pics if p.chosen is not None])
     k = int(args.get("panels") or ((given + (1 if with_take else 0)) if given else (2 if with_take else min(max(len(pics), 2), 3))))
     k = min(max(k, 2), 3)

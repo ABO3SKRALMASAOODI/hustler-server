@@ -766,7 +766,7 @@ def apply(l1, work, asks=None, pool=None):
                 placed = [it["id"] for it in patch.get("items") or [] if it["f"][0] <= frame < it["f"][1]]
                 if placed:
                     picture_events.append(dict(event, items=placed, beat=row["beat"], id=row["id"], dev=dev, asked=asked))
-        log.append(dict(row, done=True, landed=dev, fallback=bool(tried), tried=tried, log=patch.get("log"),
+        log.append(dict(row, done=True, landed=patch.get("presentation", dev), fallback=bool(tried) or "presentation" in patch, tried=tried, log=patch.get("log"),
                         marks=patch.get("marks") or [], seat=patch.get("seat"), **({"replaced": sorted(echoes)} if echoes else {})))
     cur, trimmed = behind_on_take(cur)
     if "documentary_cuts" in cur:
