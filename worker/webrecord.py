@@ -3374,3 +3374,65 @@ def run_capture_job(worker_db, job):
         return got
     finally:
         _shutil.rmtree(workdir, ignore_errors=True)
+
+
+def passage_image(locator, words, focus=None):
+    """Reflow a literal range of the publisher's DOM at reading size, preserving inline markup."""
+    handle = locator.evaluate_handle("""(element, [words, focus]) => {
+      function locate(element, words) {
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        const chars = [], offsets = [];
+        for (let node; (node = walker.nextNode());) {
+            for (let i = 0; i < node.length; i++) {
+                const c = node.data[i];
+                if (/\\s/.test(c) && chars.at(-1) === ' ') continue;
+                chars.push(/\\s/.test(c) ? ' ' : c);
+                offsets.push([node, i]);
+            }
+        }
+        const exact = words.trim().replace(/\\s+/g, ' ');
+        const start = chars.join('').indexOf(exact);
+        if (!exact || start < 0) return null;
+        const range = document.createRange();
+        range.setStart(...offsets[start]);
+        const [endNode, last] = offsets[start + exact.length - 1];
+        range.setEnd(endNode, last + 1);
+        return range;
+      }
+        const range = locate(element, words);
+        if (!range) return null;
+        const copy = element.cloneNode(false);
+        copy.removeAttribute('id');
+        copy.appendChild(range.cloneContents());
+        if (focus) {
+            const subject = locate(copy, focus);
+            if (subject) {
+                const strong = document.createElement('strong');
+                strong.style.fontWeight = '750';
+                strong.appendChild(subject.extractContents());
+                subject.insertNode(strong);
+            }
+        }
+        const ink = getComputedStyle(element);
+        let bg = 'white';
+        for (let node = element; node; node = node.parentElement) {
+            const color = getComputedStyle(node).backgroundColor;
+            if (color !== 'transparent' && color !== 'rgba(0, 0, 0, 0)') { bg = color; break; }
+        }
+        // Keep the capture outside the hydrated article while its UI finishes mounting.
+        document.documentElement.appendChild(copy);
+        Object.assign(copy.style, {fontFamily:ink.fontFamily, fontWeight:ink.fontWeight,
+            color:ink.color, backgroundColor:bg, textAlign:ink.textAlign});
+        Object.assign(copy.style, {position:'relative', width:'min(19em, 90vw)',
+            maxWidth:'100%', height:'auto', padding:'.75em', margin:0,
+            fontSize:'22px', lineHeight:'1.4', boxSizing:'border-box'});
+        return copy;
+    }""", [words, focus])
+    excerpt = handle.as_element()
+    try:
+        if excerpt:
+            return excerpt.screenshot(type="png", animations="disabled")
+    finally:
+        if excerpt:
+            excerpt.evaluate("el => el.remove()")
+        handle.dispose()
