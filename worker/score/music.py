@@ -132,8 +132,8 @@ def profile_for(kind):
 
 # ----------------------------------------------------------------- the song's map
 
-def _decode(path, rate, ch):
-    r = subprocess.run([FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-i", path, "-map", "0:a:0", "-vn", "-ac", str(ch),
+def _decode(path, rate, ch, ffmpeg=None):
+    r = subprocess.run([ffmpeg or FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-i", path, "-map", "0:a:0", "-vn", "-ac", str(ch),
                         "-ar", str(rate), "-f", "f32le", "pipe:1"], capture_output=True, timeout=900)
     x = np.frombuffer(r.stdout, np.float32)
     return x.reshape(-1, ch).copy() if ch > 1 else x.copy()
@@ -846,11 +846,11 @@ def arrange(song, marks, profile=None, arc=None):
 
 # ----------------------------------------------------------------- the track
 
-def _tempo(x, factor):
+def _tempo(x, factor, ffmpeg=None):
     """x (n, 2) played `factor` times faster, pitch kept (ffmpeg atempo)."""
     if abs(factor - 1.0) < 0.002 or not len(x):
         return x
-    r = subprocess.run([FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "f32le", "-ar", str(SR), "-ac", "2", "-i", "pipe:0",
+    r = subprocess.run([ffmpeg or FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "f32le", "-ar", str(SR), "-ac", "2", "-i", "pipe:0",
                         "-af", f"atempo={factor:.6f}", "-f", "f32le", "-ar", str(SR), "-ac", "2", "pipe:1"],
                        input=np.asarray(x, np.float32).tobytes(), capture_output=True, timeout=900)
     y = np.frombuffer(r.stdout, np.float32).reshape(-1, 2).copy()
@@ -1715,7 +1715,7 @@ def to_ar(x):
     from . import sound as SD
     x = np.asarray(x, np.float32)
     ch = 2 if x.ndim > 1 else 1
-    r = subprocess.run([FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "f32le", "-ar", str(SR), "-ac", str(ch), "-i", "pipe:0",
+    r = subprocess.run([ffmpeg or FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "f32le", "-ar", str(SR), "-ac", str(ch), "-i", "pipe:0",
                         "-ac", "1", "-ar", str(SD.AR), "-f", "f32le", "pipe:1"], input=x.tobytes(), capture_output=True, timeout=600)
     return np.frombuffer(r.stdout, np.float32).copy()
 
@@ -1819,6 +1819,69 @@ def duck_spoken_words(music, voice, words):
     music[:length] *= curve.reshape((length,) + (1,) * (music.ndim-1))
 
 
+def card_phrase(path, start, tempo, frames, bar_s=None, ffmpeg=None):
+    """Continue on the source clock. If the edit runs into a rest or EOF,
+    move by whole bars to a sounding phrase before applying the brand duck."""
+    pcm = _decode(path, SR, 2, ffmpeg)
+    if not len(pcm):
+        raise ValueError(f"No audio samples in {path}")
+    # atempo consumes a little lookahead at the right edge.
+    length = math.ceil(frames * tempo) + round(.08 * SR)
+    hop = SR // 20
+    ends = np.arange(0, len(pcm), hop)
+    power = np.add.reduceat(np.einsum("ij,ij->i", pcm, pcm), ends)
+    power /= 2 * np.diff(np.r_[ends, len(pcm)])
+    # A recording's natural dynamics survive. Only a sustained fade/rest
+    # needs another edit, never a gain boost on near-silence.
+    track_power = np.percentile(power, 75)
+    wanted = round(start * SR)
+    if 0 <= wanted and wanted + length <= len(pcm):
+        local = power[wanted//hop:math.ceil((wanted+length)/hop)]
+        if local.min() > max(1e-10, np.median(local)*.05, track_power*.001):
+            direct = _tempo(pcm[wanted:wanted+length], tempo, ffmpeg)
+            if len(direct) >= frames:
+                return direct[:frames]
+    floor = track_power * .05
+    alive = power > max(1e-12, floor)
+    edges = np.diff(np.r_[False, alive, False].astype(int))
+    runs = [(a*hop, min(b*hop, len(pcm))) for a,b in
+            zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1))]
+    step = max(1, round((bar_s or 2.) * SR))
+    candidates = []
+    for a,b in runs:
+        if b-a < length:
+            continue
+        offset = min(max(wanted, a), b-length)
+        candidates.append((1, abs(offset-wanted), offset))
+        k0, k1 = math.ceil((a-wanted)/step), (b-length-wanted)//step
+        if k0 <= k1:
+            offset = wanted + min(max(0,k0),k1)*step
+            candidates.append((0, abs(offset-wanted), offset))
+    if candidates:
+        offset = min(candidates)[2]
+        phrase = pcm[offset:offset+length]
+    else:
+        # Short cue: loop its longest sounding section with a soft splice.
+        a,b = max(runs or [(0,len(pcm))], key=lambda r:r[1]-r[0])
+        phrase = pcm[a:b]
+    played = _tempo(phrase, tempo, ffmpeg)
+    if len(played) >= frames:
+        return played[:frames]
+    out = np.empty((frames,2), np.float32)
+    n = len(played)
+    out[:n] = played
+    overlap = min(round(.08*SR), n//3)
+    while n < frames:
+        start = n-overlap
+        count = min(len(played), frames-start)
+        if overlap:
+            ramp = np.linspace(0,1,overlap)[:,None]
+            out[start:n] = out[start:n]*(1-ramp) + played[:overlap]*ramp
+        out[n:start+count] = played[overlap:count]
+        n = start+count
+    return out
+
+
 def podcast_bed(music, voice, marks, song, plan, song_path, report):
     """Set the opening against the programme voice and locate the continuation on the final song edit."""
     if any(start < 1 for start,end in marks.get("words", [])):
@@ -1836,7 +1899,7 @@ def podcast_bed(music, voice, marks, song, plan, song_path, report):
             report["opening_bed_dbfs"] = round(float(10*np.log10(max(1e-12,np.mean(music[:first]**2)))), 2)
     duck_spoken_words(music, voice, marks.get("words", []))
     tempo = plan["segments"][-1].get("tempo") or plan["tempo"]
-    report["card_bed"] = dict(path=os.path.abspath(song_path), tempo=tempo,
+    report["card_bed"] = dict(path=os.path.abspath(song_path), tempo=tempo, bar_s=song.get("bar_s"),
                               at_s=song["bars"][plan["end_hit_bar"]]["t0"] +
                                    (marks["dur_s"]-plan["end_hit_s"])*tempo)
 
