@@ -478,3 +478,13 @@ def test_fast_speaker_changes_share_one_bed_ride():
         window = slice(round(a*sr),round(b*sr))
         assert 10*np.log10(np.mean(voice[window]**2)/np.mean(bed[window]**2)) >= 1.99
     assert np.min(gain_db) > -18
+
+
+def test_diecut_phrase_inside_spoken_line_uses_that_caption(tmp_path):
+    from scene.alien import diecut
+    cap = word("caption", "the data that comes out of that.", "cap", .1, .8, [350,405], "cap")
+    scene = dict(fps=30, frame=[1080,1920], dur_f=500, items=[cap], workflow_text_layout=True)
+    patch = diecut.plan(scene, str(tmp_path), dict(at=[383,404], t="COMES OUT", id="dr4"))
+    cue, = patch["items"]
+    assert (cue["id"], cue["t"], cue["f"]) == (cap["id"], cap["t"], cap["f"])
+    assert min(cue["y"]) < .8 and cue["y"][-1] == .8

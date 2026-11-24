@@ -100,6 +100,13 @@ def plan(l1, work, ask):
     captions = []
     workflow = l1.get("workflow_text_layout")
     if workflow:
+        from ..palette import kit
+        cue = kit.accent_cue(l1, a, z, text)
+        if cue and kit.norm(cue["t"]) != kit.norm(text):
+            # A fragment of a longer spoken line belongs to that line's ink.
+            start = max(a, cue["f"][0])
+            return dict(items=[cue], marks=[dict(f=start, what="diecut cue lands")],
+                        log=dict(cue=cue["id"], treatment="lift"))
         a, z, captions = caption_handoff(l1["items"], text, a, z, fps)
     voice = {"font": ask.get("font") or "InterDisplay-Black.ttf", "track": 0, "shadow": {"a": 0.5, "blur": 0.016}}
     voice["px"] = round(glyphs.fit_px(voice, text, float(ask.get("width") or 0.84) * W, cap_px=0.2 * H), 2)
