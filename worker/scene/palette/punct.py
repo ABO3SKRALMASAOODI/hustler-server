@@ -360,6 +360,20 @@ def blur_in(l1, work, ask, sense):
             "log": {"shot": sh["id"]}}
 
 
+def _print_contrast(tone, ink, mode):
+    from .kit import rgb
+    def linear(channel):
+        return channel / 12.92 if channel <= .04045 else ((channel + .055) / 1.055) ** 2.4
+    channels = rgb(ink)
+    if mode == "multiply":
+        channels = [tone * value for value in channels]
+    elif mode == "difference":
+        channels = [abs(tone - value) for value in channels]
+    printed = sum(weight * linear(value) for weight, value in zip((.2126, .7152, .0722), channels))
+    base = linear(tone)
+    return (max(base, printed) + .05) / (min(base, printed) + .05)
+
+
 def word_blend(l1, work, ask, sense):
     a, b = span(ask, l1)
     mode = next((m for m in (ask.get("blend"), ask.get("as")) if m in ("difference", "multiply")), "difference")
@@ -371,10 +385,36 @@ def word_blend(l1, work, ask, sense):
             return {"skip": "no matching lettering in the span"}
         return {"items": [cue], "events": [{"f": max(a, cue["f"][0]), "kind": "word_blend", "strength": .4}],
                 "log": {"cue": cue["id"], "treatment": "lift"}}
-    out = [dict({k: v for k, v in w.items() if not (mode == "difference" and k == "stroke")}, blend=mode,
-                ink="#FFFFFF" if mode == "difference" else w.get("ink")) for w in ws]
+    from . import kit as K
+    ground = K.Sense(l1, work, sense)
+    out = []
+    for word in ws:
+        lo, hi = word["f"]
+        # A solid scene page has no image file for Sense to sample.
+        shot = AS.shot_at(l1, (lo + hi) // 2) or {}
+        plate = shot.get("plate") or {}
+        if (shot.get("pic") == "plate" and plate.get("c0")
+                and plate.get("c1", plate["c0"]) == plate["c0"]):
+            tone = K.lum(plate["c0"])
+        else:
+            width, height = l1.get("frame") or [1080, 1920]
+            box = K.item_box(word, l1.get("voices"), width, height) or [0, 0, 1, 1]
+            tone, _ = ground.ground(box, lo, hi)
+        colour = "#FFFFFF" if mode == "difference" else word.get("ink") or K.LIGHT
+        item = dict(word, ink=colour, blend=mode)
+        if _print_contrast(tone, colour, mode) < 3:
+            if mode == "multiply" and _print_contrast(tone, K.DARK, mode) >= 3:
+                item["ink"] = K.DARK
+            else:
+                item.pop("blend")
+                item["ink"] = next((ink for ink in (colour, K.LIGHT, K.DARK) if _print_contrast(tone, ink, None) >= 3), K.LIGHT)
+                item["stroke"] = dict(c=K.DARK if K.lum(item["ink"]) > .5 else K.LIGHT, w=2)
+        if item.get("blend") == "difference":
+            item.pop("stroke", None)
+        out.append(item)
     return {"items": out, "events": [{"f": out[0]["f"][0], "kind": "word_blend", "strength": 0.4}],
-            "log": {"words": [w["id"] for w in out], "blend": mode}}
+            "log": {"words": [w["id"] for w in out], "blend": mode,
+                    "printed": [w.get("blend", "normal") for w in out]}}
 
 
 SPELLED = {"x_ray": "xray", "posterize": "posterise", "solarize": "solarise", "pixelate": "mosaic", "pixel": "mosaic",
