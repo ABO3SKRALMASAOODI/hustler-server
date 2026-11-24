@@ -260,3 +260,10 @@ def speed(crops):
         bx, by, bw = _cwz(b)
         out.append((math.hypot((bx - ax) / aw, (by - ay) / max(a[3] - a[1], 1e-9)), aw / bw - 1.0))
     return out
+
+
+def demonstration_panels(detail, source_size, canvas_size):
+    """Fit the original screen and a readable detail between the brand and captions."""
+    overview = fit_panel([0, 0, 1, 1], source_size, canvas_size, [.03, .075, .97, .37], align_y=1.)
+    enlarged = fit_panel(detail, source_size, canvas_size, [.035, .39, .965, .795])
+    return overview, enlarged
