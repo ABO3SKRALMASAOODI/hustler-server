@@ -61,7 +61,8 @@ def plan_of(value):
 def read(pages, coverage, work, llm, pictures=None, *, cached_only=False):
     sources = sources_of(pages)
     if not sources:
-        return {}, []
+        import wf1_scoped_reading
+        return wf1_scoped_reading.read(pages,coverage,work,llm,cached_only=cached_only)
     folder = Path(work, "publisher-readings")
     windows = [{k:w.get(k) for k in ("say","first","last")} for w in coverage["windows"]]
     words = [[w["w"], w["start"], w["end"]] for w in coverage["words"]]
@@ -174,6 +175,11 @@ def local_coverage(coverage, plan):
     """Keep stable window IDs and their exact passing insets, with camera through the gaps."""
     plan = plan_of(plan)
     indices = plan.get("camera_windows") or []
+    # The scored issuer example already supplies the picture on its exact clause.
+    if isinstance(indices,list):
+        spans = {(r["first"],r["last"]) for r in plan.get("readings") or [] if r.get("evidence")}
+        indices = indices + [i for i,w in enumerate(plan.get("windows") or [])
+                             if (w.get("first"),w.get("last")) in spans]
     snapshots = plan.get("windows") or []
     if not isinstance(indices, list) or not isinstance(snapshots, list) or not indices or not snapshots:
         return coverage
@@ -198,6 +204,10 @@ def compose(plan, span, row, palette):
         except ValueError:
             return value
     source = row["source"]
+    if row.get("credit"):
+        body = row.get("body") or "“"+row["quote"]+"”"
+        reading_card(plan,span,body,row["credit"],"",palette,centre=.635,max_height=.24)
+        return
     heading = source["publisher"] + " · " + stamp(source)
     footer = row.get("scope") or ""
     if row.get("followup"):

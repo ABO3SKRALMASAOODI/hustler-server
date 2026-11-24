@@ -1543,7 +1543,7 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
     # into the film's tail, so no short keeps a flat bed (round1 thin-sound)
     story_turn_s = round(beats["story_turn_f"] / F.FPS, 3) if beats.get("story_turn_f") is not None else None
     return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, last_word_s=last_word_s, story_turn_s=story_turn_s, turn_drop=turn_s is not None, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
-                publisher_read=True, field_report_read=True, thought_read=True, frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=reading_spend + ([d["spend"]] if d.get("spend") else []) +
+                scoped_read=True, publisher_read=True, field_report_read=True, thought_read=True, frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=reading_spend + ([d["spend"]] if d.get("spend") else []) +
                 [dict(u,stage='supply',what='primary documents') for research in pack.get('document_research',[]) for u in research.get('spend',[])] +
                 [dict(u,stage='supply',what='documentary research revision') for u in pack.get('research_spend',[])] +
                 [dict(stage="score", what="picture-to-words check", **u) for u in (beats.get("placement_check") or {}).get("spend", [])])
@@ -1758,7 +1758,7 @@ def restore_publisher_reading(ctx, sc, pages):
     override = ((getattr(ctx, "args", {}) or {}).get("direction") or {}).get("publisher_reading")
     if isinstance(override, dict):
         plan = override
-    elif sc.get("publisher_read") and reading.sources_of(pages):
+    elif sc.get("publisher_read") and (reading.sources_of(pages) or sc.get("scoped_read")):
         pack = wf3.load_pack(ctx)
         coverage = pack["coverage"]
         pages = reading.material(pages, coverage)
@@ -1792,7 +1792,9 @@ def render(ctx, script, sc):
     pages = (sc.get("direction") or {}).get("display_facts") or []
     restore_publisher_reading(ctx, sc, pages)
     needs_publisher = not (sc.get("publisher_read") or sc["beats"]["publisher_reading"]) and wf1_publisher_reading.sources_of(pages)
-    if rejected_plan or stale_captions or needs_reading or needs_account or needs_publisher:
+    import wf1_scoped_reading
+    needs_scoped = not sc.get("scoped_read") and all(wf1_scoped_reading.materials(pages))
+    if rejected_plan or stale_captions or needs_reading or needs_account or needs_publisher or needs_scoped:
         if history and rejected_plan:
             pictures = sc.get("beats", {}).get("pictures", [])
             _repair_window_boundaries(ctx, [r for r in history[-1]["placements"] if not r["ok"]
@@ -1910,7 +1912,7 @@ def _rebuild_motion(ctx, script, sc, report, defer=False):
     camera = {i for i,w in enumerate(local.get("windows", [])) if w.get("publisher_camera")}
     remaining = [row for row in report['placements']
                  if not (row.get('ok') and not row.get('unchecked') and
-                         (pics[row['id']].get('window') in camera or
+                         (pics[row['id']].get('window') in camera or pics[row['id']].get('projection') or
                           (pics[row['id']].get('reading') and (pics[row['id']].get('document') or {}).get('review')) or pics[row['id']].get('selected_archive_view') or
                           (pics[row['id']].get('mode') == 'document' and
                            (pics[row['id']].get('document') or {}).get('sha256') and
@@ -2059,7 +2061,7 @@ def hold_windows(measured, coverage, pictures, fps=None, lead=None):
             continue
         a, b = (round(w["t0"]*fps)+lead)/fps, (round(w["t1"]*fps)+lead)/fps
         placed = [p for p in pictures if p.get("window") == i]
-        if any(p.get("selected_archive_view") and p["f"][0] <= round(a*fps)
+        if any((p.get("selected_archive_view") or p.get("projection")) and p["f"][0] <= round(a*fps)
                and round(b*fps) <= p["f"][1] for p in placed):
             continue
         if w.get("single_action") is True and any(p.get("kind") == "clip" or
