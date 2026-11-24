@@ -4,6 +4,10 @@ import string
 
 
 WRITING = """Write the factual type for this passage from the attached source readings and editorial brief.
+record_example is an attributed scenario composed from the interview's actual words. Its opening
+belongs to the live storyteller, including pauses in an analogy. Compose other devices outside that
+passage. The cited line returns at the proposed benefit. Documentation can establish access to a
+connected, authorized source with a citation; a participant's private meaning remains an inference.
 For dated archive in archive_pictures, return archive_credits:[{picture: the supplied picture ID,
 source: the supporting URL in sources, label: compact original venue or event and its year}].
 For photographs, identify the artifact and its owner as a period example, distinguish a documented
@@ -127,7 +131,8 @@ def editorial(ctx, script, pack):
     definitions = {row["start"]: row.get("gloss") for row in coverage.get("contextual_definitions") or []
                    if isinstance(row, dict) and type(row.get("start")) in (int, float)}
     claims = []
-    for claim in script.get("claims") or []:
+    import wf1_record
+    for claim in wf1_record.source_claims(script.get("claims") or [], coverage):
         if claim.get("stance") == "definition" and claim.get("start") in definitions:
             gloss = definitions[claim["start"]]
             if isinstance(gloss, str) and gloss.strip():
@@ -195,7 +200,7 @@ def editorial(ctx, script, pack):
             source = sources.setdefault(src["url"], dict(url=src["url"], publisher=src["channel"], supports=[]))
             if action not in source["supports"]:
                 source["supports"].append(action)
-    return dict(handoffs=coverage.get("handoffs") or [], borrowed_estimates=list(borrowed.values()),
+    return dict(record_example=coverage.get("record_example"), handoffs=coverage.get("handoffs") or [], borrowed_estimates=list(borrowed.values()),
                 episode_examples=coverage.get("episode_examples") or [], callback=coverage.get("callback"), speaker_claims=speaker_claims, comparisons=coverage.get("comparisons") or [], story=coverage.get("story"), claims=claims, episode_start=(script.get("window") or [0])[0],
                 sources=sources, picture_windows=[{k:w[k] for k in ("first","last","name","claim","must_show","example") if k in w}
                                                   for w in coverage.get("windows", [])], speaker_inserts=[{k:r[k] for k in ('first','last')}

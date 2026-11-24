@@ -713,6 +713,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     coverage = sup.get("coverage")
     if not coverage:
         raise RuntimeError("podcast supply needs a word-addressed documentary coverage plan; refresh supply")
+    import wf1_record
+    record = coverage.get("record_example")
     thought = d.get("thought_experiment") or {}
     if thought:
         from wf1_experiment import local_windows
@@ -890,6 +892,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     reading_spans = []
     timed_facts = []
     pages = wf1_display.episode_pages(d.get("display_facts") or [], coverage, clock.words)
+    pages = wf1_record.pages(pages, record, coverage["words"],
+                             dict(url=script.get("source_url"), publisher=script.get("source_credit")),
+                             script.get("source_start", 0), dr.get("beats") or [], d.get("caption_ends") or [])
+    record_span = (word_frame(record["first"]), word_frame(record["last"]+1) or f_end) if record else None
     thought_spans = []
     if thought:
         first, cite, turn = (word_frame(thought[k]) for k in ("first","citation","turn"))
@@ -1035,7 +1041,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         rows = wf1_display.typeset(facts, P.R, DISPLAY_W * W, str.upper if st["upper"] else str)
         return len(rows) > 4
 
-    report_spans = [(a, b) for a, b, page in timed_facts if page.get("scope_cue") or page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"])]
+    report_spans = [(a, b) for a, b, page in timed_facts if page.get("record_role") or page.get("scope_cue") or page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"])]
 
     # A remembered figure or reversal can live in the spoken cue and the show's own
     # shot. Release the timeline on the authored word, preserving the entire source frame.
@@ -1071,6 +1077,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                    r["speaker"] == c["speaker"] and r["last"] < c["first"] for r in coverage.get("handoffs") or [])
                and not any(w["last"] >= c["first"] for w in coverage["windows"] if not w.get("on_take"))}
     returns = [(frame,f_end) for frame in return_voices]
+    if record_span:
+        comparison_spans.append(record_span)
     comparison_spans.extend(returns)
     comparison_spans.extend(source_pages)
     comparison_spans.extend((a,b) for a,b,page in timed_facts if page.get("sequence"))
@@ -1204,7 +1212,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     composed_spans = [r[:2] for r in ins] + [[lo,hi] for lo,hi,_ in speakers] + [list(span) for span in source_pages]
     composed_spans.extend([a,b] for a,b in returns)
     composed_spans.extend([a,b] for a,b,p in timed_facts if p.get("scope_cue") or p.get("sequence_kind") == "handoff")
-    if (thought and all(w.get("on_take") for w in coverage["windows"])) or (coverage.get("episode_examples") and not coverage["windows"]) or (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
+    if (record and not coverage["windows"]) or (thought and all(w.get("on_take") for w in coverage["windows"])) or (coverage.get("episode_examples") and not coverage["windows"]) or (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
             and any(r[4].get("episode_excerpt") for r in ins)):
         # Both the local demo and the remaining camera passages landed on their directed words.
         resolved_moves,move_spend = coverage.get("moves", []), []
@@ -1395,6 +1403,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         reactions = [(word_frame(r["first"]), Clock.f(clock.words[r["last"]]["t1"]))
                      for r in reading.get("reactions", [])]
         layout_edges = [round(t*FPS)+LEAD_F for shot in authored for t in shot]
+        if record_span:
+            layout_edges.extend((*record_span, word_frame(record["question"][0])))
         layout_edges.extend(f for start,end,_ in thought_spans for f in (start,end))
         layout_edges.extend(f for span in reactions+returns for f in span)
         layout_edges.append(turn_f if turn_f is not None else f_last)
@@ -1410,6 +1420,23 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             on_report = any(lo <= fa < hi for lo,hi in report_spans)
             live = next((role for lo,(hi,role,_) in live_beats.items() if lo <= fa < hi), None)
             thought_role = next((role for lo,hi,role in thought_spans if lo <= fa < hi), None)
+            # Give the take's measured speaking face the setup and the space above its record.
+            in_record = record_span and record_span[0] <= fa < record_span[1]
+            if in_record and pieces[k]["who"] == "speaker" and (on_report or fa < word_frame(record["question"][0])):
+                from scene.motion import Cam
+                info = meta[pieces[k]["key"]]
+                if info["faces"]:
+                    face = info["faces"][0]
+                    split = any(lo <= (t0+t1)/2 < hi for lo,hi in authored)
+                    height = .43 if on_report else .55 if split else .79
+                    box = [0, .065, 1, .065+height]
+                    camera = Cam(info["pw"], info["ph"], W/(height*H), W, info["max_up"])
+                    crop = camera.on_face(face[:4], height=.77 if split else .65, eyes=face[4])
+                    P.page([fa,fb], "#14171B", grain=0)
+                    P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],source_ink=[box],
+                           speaker_panel=True,caption_baseline=.88)
+                    cut_pts.append(fa)
+                    continue
             if thought_role == "citation":
                 P.page([fa,fb], "#EFE9DD", grain=.015)
                 bright.append((fa,fb))
@@ -1487,7 +1514,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     publisher=script.get("source_credit"),start=script.get("source_start",0)+t0,box=box))
                 cut_pts.append(fa)
                 continue
-            if pieces[k]["who"] == "listener" and quote_panel(fa,fb,t0):
+            if pieces[k]["who"] == "listener" and not in_record and quote_panel(fa,fb,t0):
                 cut_pts.append(fa)
                 continue
             stack = next((span for span in stacks if span[0] <= fa < span[1]), None)
@@ -2005,6 +2032,19 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     for a,b,body,title,credit in report_cards:
         wf1_display.reading_card(P,[a,b],body,title,credit,pal,centre=.64,max_height=.22,group="field-report")
         P.events.append(a)
+    if record_span:
+        for pc in pieces:
+            lo, hi = max(record_span[0],pc["f"][0]), min(record_span[1],pc["f"][1])
+            if pc["who"] != "listener" or hi <= lo:
+                continue
+            # The show's reaction remains live. Credit the voice from the timed
+            # episode turns, including an interjection by the other participant.
+            for turn in script.get("speaking_turns") or []:
+                a = max(lo, round((turn["start"]-script["source_start"])*FPS)+LEAD_F)
+                b = min(hi, round((turn["end"]-script["source_start"])*FPS)+LEAD_F)
+                if a < b and turn["speaker"] == record["speaker"]:
+                    wf1_display.reading_card(P,[a,b],"","Voice · "+turn["speaker"],"",pal,
+                                             centre=.76,max_height=.09,group="interview-voice")
     for lo,hi in returns:
         owner = return_voices[lo]
         for pc in pieces:
@@ -2029,8 +2069,51 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             wf1_display.reading_card(P,[a,b],"",byline,"",pal,centre=.602 if role=="scale" else .747,
                                      max_height=.08,group="speaker-example")
         P.events.append(a)
+    record_accent = None
     for a, b, page in timed_facts:
         facts = page["facts"]
+        if page.get("record_role"):
+            role = page["record_role"]
+            fact = facts[0]
+            stamp = int(fact["time_s"])
+            locator = f'{fact["source"].get("publisher") or "Interview"} · {stamp//60}:{stamp%60:02d}'
+            if role in ("wording","return","qualification"):
+                heading = "Example · " + fact["attribution"]
+                body = "“" + fact["value"] + "”"
+                credit = locator
+                if role == "return":
+                    heading = "Example · Recheck the wording"
+                    credit = locator
+                elif role == "qualification":
+                    heading = fact["attribution"] + "’s qualification"
+                    credit = ""
+                if role in ("wording", "qualification"):
+                    lo,hi = fact["word_ids"]
+                    reading_spans.append((a, min(b,word_frame(hi+1) or b)))
+                    omit.extend(clock.words[lo:hi+1])
+            else:
+                heading = "Inference" if role == "inference" else "Recollection"
+                body = record[role+"_label"]
+                # The spoken question is already the caption. A short source
+                # label carries its epistemic status without printing it twice.
+                said_here = " ".join(w["w"] for w in clock.words[page["first"]:page["last"]+1])
+                if F.norm_word(body) in F.norm_word(said_here):
+                    body = ""
+                credit = fact["attribution"] + "’s hypothesis" if role == "inference" else ""
+            begin = len(P.items)
+            wf1_display.reading_card(P,[a,b],body,heading,credit,pal,centre=.645,max_height=.28,group="record-"+role)
+            if role == "return":
+                hit = word_frame(record["accent"])
+                rows = [it for it in P.items[begin:] if it.get("v") == "quote_body" and it["f"][0] <= hit < it["f"][1]]
+                if rows:
+                    # Mark the substantial line of the returned record when a
+                    # short trailing word wraps to the next line.
+                    target = max(rows, key=lambda it: P.R.width(it["v"], it["t"]))
+                    record_accent = dict(id="record-return-"+str(a), dev="highlight", f=[hit,target["f"][1]],
+                                         t=target["t"],target_id=target["id"],style="under",c=pal["accent"])
+            fact_pages.append(dict(page,f=[a,b],body=body,heading=heading,credit=credit))
+            P.events.append(a)
+            continue
         if page.get("route_example"):
             fact = facts[0]
             picture = next((pc for pc in P.pictures if a < pc["f"][1] and pc["f"][0] < b
@@ -2260,6 +2343,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             b = min(b,min(next_subject))
         if b - a < 14 or on_evidence(a,b):
             continue
+        if record_span and a < record_span[1] and record_span[0] < b:
+            continue
         if thought and a < (word_frame(thought["last"]+1) or f_end) and word_frame(thought["first"]) < b:
             continue
         if any(a < page["f"][1] and page["f"][0] < b for page in fact_pages):
@@ -2486,6 +2571,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                       target_role="cap", style="under", c=ink)
         asks.append(accent)
         l1.setdefault("devices", []).append(accent)
+    if record_accent:
+        asks.append(record_accent)
+        l1.setdefault("devices", []).append(record_accent)
     why = notes
     changes = sorted({it["f"][0] for it in l1["items"] if it["k"] == "shot"})
     for s_ in l1.get("sound") or []:

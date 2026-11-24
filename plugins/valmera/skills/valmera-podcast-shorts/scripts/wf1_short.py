@@ -125,6 +125,8 @@ def script(ctx, ideas_out):
               "window and quote its exact closing words.")
     system += '\n\nReturn JSON only: {"in": seconds (0.15-0.3 s before the first word), "out": seconds (0.3-0.8 s after the last word; the clip is 18-55 s), "title": the film\'s title in at most five words, a headline a stranger stops for, written from the words between your in and out only: it promises nothing the clip does not deliver (a count or a list it names is whole inside the clip), "hook_line": the exact words heard first, "close_line": the exact last words, "speakers": number of people heard, "named": [the real people, companies, places, products and events this clip names or plainly points to, that a camera has filmed; each {"name": its usual English name, "is": person|company|place|product|event|thing, "must_show": one plain sentence on what footage of it must visibly show, as it was at the time he speaks of}; never this conversation itself, which is on screen already; when he tells of something he did himself, that filmed moment of him (a livestream, a keynote, his training, an event he took part in) is an event to name like any other], "brief": two sentences on the story and its mood, for the editor who chooses the music}.'
     system += (" Attribute concerns and competitive characterizations to the speaker in the brief. "
+               "For an enacted example use the interview as the source of the speaker's questions and hypothesis. "
+               "A record preserves wording; attribute an interpretation to its speaker. Introduce a product claim only on the words that support it. "
                "Separate demonstrated capabilities from predicted outcomes. Include claims for any nested speech or forecast: [{start,end,speaker,subject,event,report}]. "
                "Set interview_only=true for private reported conversations whose only source is this speaker. Use absolute episode seconds bounding just that claim. speaker is the person actually heard "
                "(use The host or The guest when the name is uncertain); subject is whose statement is described "
@@ -267,7 +269,8 @@ def supply(ctx, script):
                                  off_camera=off_camera(cuts, words), frames=frames, story=wf1_coverage.story_context(script),
                                  speaking_turns=local_turns(script))
     wf1_source_frame.place_callback(ctx.source, coverage, sup_dir, PX.FF)
-    coverage['claims'] = script.get('claims') or []
+    import wf1_record
+    coverage['claims'] = wf1_record.source_claims(script.get('claims') or [], coverage)
     original = coverage.get('source_reading') or {}
     coverage['windows'] = [w for i,w in enumerate(coverage['windows']) if i not in original.get('replaces',[])]
     if original:

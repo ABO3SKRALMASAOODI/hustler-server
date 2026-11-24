@@ -7,7 +7,9 @@ import importlib.util
 import subprocess
 from pathlib import Path
 
-CONTRACT = 12
+import wf1_record
+
+CONTRACT = 13
 
 
 class CoverageError(RuntimeError):
@@ -231,6 +233,7 @@ pictured evidence. For the scenario, write question as the speaker's open questi
 about the present case and its missing input, ideally 6–10 words. These are separate situations:
 do not suggest the earlier demo used or needed information from the later anecdote. Preserve anonymity. Choose the zero-based verified view that best shows the action. Omit view
 if the transcript alone explains it. Keep this passage on the supplied local evidence."""
+    prompt += "\n" + wf1_record.PROMPT
     if off_camera:
         prompt += '''
 off_camera lists the inclusive word spans where the show's own camera holds a LISTENER while these words are
@@ -318,6 +321,15 @@ an honest subject; never invent one.'''
         if not isinstance(callback.get("action"), str):
             callback.pop("action", None)
         out["callback"] = callback
+    record = wf1_record.reading(out.pop("record_example", None), words)
+    if record:
+        out["record_example"] = record
+        # A recalled demonstration is a different occurrence from an imagined record.
+        if out.get("callback") and not wf1_record.outside([out["callback"]], record):
+            out.pop("callback")
+        comparisons = out["comparisons"] = wf1_record.outside(comparisons, record)
+        examples = out["episode_examples"] = wf1_record.outside(examples, record)
+        speaker_claims = out["speaker_claims"] = wf1_record.outside(speaker_claims, record)
     print_readings = [r for r in out.get("print_readings") or []
                       if isinstance(r,dict) and type(r.get("first")) is int and type(r.get("last")) is int
                       and 0 <= r["first"] <= r["last"] < len(words)]
@@ -344,7 +356,7 @@ an honest subject; never invent one.'''
     out["borrowed_estimates"] = [r for r in out.get("borrowed_estimates") or []
                                  if has_span(r) and text_fields(r,"speaker","question","application_label")
                                  and type(r.get("application")) is int and r["first"] < r["application"] <= r["last"]]
-    for c in [*routes, *print_readings, *([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
+    for c in [*([record] if record else []), *routes, *print_readings, *([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
         remaining = []
         for w in windows:
             if c in routes and w.get("evidence_role") in ("example","independent"):
