@@ -153,6 +153,15 @@ Preserve the complete spoken relationship in the running caption.
 Read story.claims, story.meaning and the editorial brief with the actual words. For an explicitly imagined analogy,
 give its whole vehicle (including the imagined consequence) ONE inclusive comparisons span. Write
 two concise graphic labels, premise and consequence, that explain its logic in the conditional.
+When the speaker names a physical indicator and acts out its reading changing, the comparison can
+supply an original, unnumbered dial illustration. Give it instrument:{enter,change,leave,trend},
+with integer word IDs: enter on the specific instrument or brand as named, change on the adjective
+or verb where the reading changes, leave on the last word before the speaker proposes a cause.
+trend is "up" or "down". Give the comparison the whole imagined passage from its opening premise
+to the end of its example. The episode and this original illustration supply those pictures.
+Keep a speculative opening on the speaking presenter even when a previous chart remains on the feed.
+Use speaker_inserts on the correct clean tile from the very first word; check the entire tile boundary.
+Let a proposed cause and a joke emerge in the speaker's actual caption and performance.
 Set reveal to the word that first makes the closing image recognizable (the noun itself for a delayed
 metaphor). For opposing hypothetical cases, place the second case label on the first word of its clause,
 even when the distinguishing verb comes later. Keep its short conditional label through the implication.
@@ -344,6 +353,12 @@ an honest subject; never invent one.'''
                          and type(step.get("at")) is int and row["first"] <= step["at"] <= row["last"]
                          and isinstance(step.get("label"),str) and step["label"].strip()]
                 comparison["steps"] = sorted(steps,key=lambda step:step["at"])
+            instrument = row.get("instrument")
+            if isinstance(instrument, dict):
+                cues = [instrument.get(k) for k in ("enter", "change", "leave")]
+                if (all(type(i) is int for i in cues) and row["first"] <= cues[0] < cues[1] <= cues[2] <= row["last"]
+                        and instrument.get("trend") in ("up", "down")):
+                    comparison["instrument"] = {k: instrument[k] for k in ("enter", "change", "leave", "trend")}
             comparisons.append(comparison)
     speaker_claims = [c for c in out.get("speaker_claims") or [] if isinstance(c, dict)
                       and type(c.get("first")) is int and type(c.get("last")) is int

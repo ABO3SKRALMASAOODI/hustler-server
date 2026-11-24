@@ -1054,8 +1054,16 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     projects = wf1_display.research_phases(story, clock.words,
                   dict(url=script.get("source_url"), publisher=script.get("source_credit")))
     research_views = []
+    instrument_scenes = []
+    dial_asks = [ask for ask in dr.get("asks", []) if ask["dev"] == "analogy_dial"]
     for comparison in coverage.get("comparisons") or []:
         first, last = comparison["first"], comparison["last"]
+        dial = next((ask for ask in dial_asks if first <= ask["at"]["w"] <= last), None)
+        if dial:
+            from wf1_principle import outside
+            pages = [part for page in pages for part in outside(page, first, last)]
+            instrument_scenes.append((word_frame(first), word_frame(last+1) or f_end, dial))
+            continue
         episode = story.get("episode_start", 0) + coverage["words"][first]["end"]
         project = next((p for p in projects if p["last"] < first and
                         all(type(p["claim"].get(k)) in (int,float) for k in ("example_start","example_end"))
@@ -1215,6 +1223,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             b = (word_frame((ask.get('until') or ask['at'])['w']) or a or 0) + 1
             if a is None:
                 return False
+            if any(ask is dial for _, _, dial in instrument_scenes):
+                return True
             return (not any(a < hi and lo < b for lo,hi in comparison_spans)
                     and (ask['dev'] == 'contour' or not on_evidence(a,b)))
         dr = dict(dr,asks=[ask for ask in dr.get('asks',[]) if separate_ask(ask)])
@@ -1631,6 +1641,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         layout_edges.extend(f for span in report_spans for f in span)
         layout_edges.extend(f for lo,hi,_ in gestures for f in (lo,hi))
         layout_edges.extend(f for lo,hi,_ in study_seats for f in (lo,hi))
+        for start, end, dial in instrument_scenes:
+            layout_edges.extend((start, end, word_frame(dial["at"]["w"]),
+                                 word_frame((dial.get("until") or dial["at"])["w"]+1) or end))
         layout_edges.extend(comparison_landings)
         layout_edges.extend(f for start,(end,_,_) in live_beats.items() for f in (start,end))
         layout_edges.extend(f for lo,hi,_ in speakers for f in (lo,hi))
@@ -1639,6 +1652,28 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         for fa, fb in zip(edges, edges[1:]):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
+            instrument = next((dial for lo,hi,dial in instrument_scenes if lo <= fa < hi), None)
+            if instrument:
+                active = word_frame(instrument["at"]["w"]) <= fa < (
+                    word_frame((instrument.get("until") or instrument["at"])["w"]+1) or f_end)
+                portrait = next((r for r in reading.get("speaker_inserts", [])
+                                 if r["shot"][0] <= (t0+t1)/2 < r["shot"][1]
+                                 and word_frame(r["first"]) <= fa < (word_frame(r["last"]+1) or f_end)), None)
+                if portrait or active:
+                    from scene.motion import fit_panel
+                    from wf1_source_frame import presenter_card
+                    tile = portrait["tile"] if portrait else [0,0,1,1]
+                    x,y,r,bottom = tile
+                    # Leave a small inset inside the documented feed, clear of adjacent webcams.
+                    dx,dy = .024*(r-x), .024*(bottom-y)
+                    crop = [x+dx, y+dy, r-dx, bottom-dy] if portrait else tile
+                    seat = [0,.09,1,.49] if active else [0,.13,1,.73]
+                    box = fit_panel(crop,(take["w"],take["h"]),(W,H),seat)
+                    P.page([fa,fb],"#152126",grain=0)
+                    presenter_card(P,[fa,fb],pieces[k]["key"],box,tile,crop,[t0,t1],sup["work"],sup["ffmpeg"],
+                                   decode_region if portrait else None,presenter_insert=True,source_ink=[box],caption_baseline=.88)
+                    cut_pts.append(fa)
+                    continue
             on_reporting = reporting_span and reporting_span[0] <= fa < reporting_span[1]
             if on_reporting or (demo_span and demo_span[0] <= fa < demo_span[1]):
                 from scene.motion import fit_panel
@@ -2407,6 +2442,15 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     source=dict(url=rec["page"],publisher=rec.get("credit")),supporting_sources=sources)
         fact_pages.append(dict(first=read["first"],last=read["last"],f=[lo,hi],facts=[fact]))
 
+    for start,end,dial in instrument_scenes:
+        cue = word_frame(dial["at"]["w"])
+        finish = min(cue, start + 3*FPS)
+        if finish > start:
+            origin = script.get("source_start", 0) + (start-LEAD_F)/FPS
+            speaker = next((t["speaker"] for t in script.get("speaking_turns") or []
+                            if t["start"] < origin + (finish-start)/FPS and origin < t["end"]), "")
+            wf1_display.reading_card(P,[start,finish],speaker,"Thought experiment","",pal,
+                                     centre=.685,max_height=.14,group="analogy-intro")
     for a,b,body,title,credit in report_cards:
         wf1_display.reading_card(P,[a,b],body,title,credit,pal,centre=.64,max_height=.22,group="field-report")
         P.events.append(a)
@@ -2889,6 +2933,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     reveal_words = {p["first"] for _,_,p in timed_facts if (p.get("analogy_step") or {}).get("reveal")
                     and (p["analogy_step"].get("label") or p["last"] < len(clock.words)-1)}
     reveal_words.update(c["reveal"] for _,_,c in research_views)
+    for _,end,dial in instrument_scenes:
+        # As the speaker acts out the change and its consequence, ink each word
+        # when heard. The next line can no longer print the end of a joke early.
+        reveal_words.update(i for i in range(dial["at"]["w"], len(clock.words)) if word_frame(i) < end)
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
                             hold=reading_spans, omit=omit, phrase_ends=d.get("caption_ends") or (),
                             accents=d.get("caption_accents") or (), accent_ink=pal["accent"], cue_starts=cue_starts, reveal_words=reveal_words)

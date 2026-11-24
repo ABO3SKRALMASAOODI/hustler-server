@@ -2463,10 +2463,11 @@ def caption_contrast(film, l1, ffmpeg):
         r = subprocess.run([ffmpeg, "-v", "error", "-ss", f"{(f + 0.5) / F.FPS:.3f}", "-i", film, "-frames:v", "1", "-vf", "scale=270:480",
                             "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True)
         g = np.frombuffer(r.stdout, np.uint8)[:270 * 480].reshape(480, 270) / 255.0
-        y = float(it["y"][-1] if isinstance(it["y"], list) else it["y"])
+        offset = f - it["f"][0]
+        y = float(it["y"][min(offset, len(it["y"])-1)] if isinstance(it["y"], list) else it["y"])
         # under the word itself (its own box: the pool is laid on the inked words, reel.caption_pool), else the seat's middle
         try:
-            x0 = float(it["x"][-1] if isinstance(it["x"], list) else it["x"])
+            x0 = float(it["x"][min(offset, len(it["x"])-1)] if isinstance(it["x"], list) else it["x"])
             x1 = x0 + Rl.width(it["v"], it["t"]) / F.W
             c0, c1 = max(int(x0 * 270), 0), min(max(int(x1 * 270), int(x0 * 270) + 2), 270)
         except Exception:  # noqa: BLE001
@@ -2605,7 +2606,14 @@ def check_once(ctx, rd, sc):
                         render=rd.get("engine_check"), measured=sc["beats"].get("measured"), style=sc["beats"].get("style"))
     rec = json.load(open(os.path.join(ctx.supply, "pack.json")))["record"]
     c["stories"]["narration"] = dict(seconds=rec.get("narration_s"), voice=rec.get("voice"), gate=rec.get("gate"))
-    c["stories"]["caption_contrast"] = caption_contrast(rd["film"], scene, pack["ffmpeg"])
+    caption_scene = scene
+    if sc.get("composed_l1") and scene.get("workflow_text_layout"):
+        # The renderer moves captions around sources and palette illustrations. Measure
+        # their final ink seat, including word reveals whose seat changes within a phrase.
+        from scene.compile import compile as compile_scene
+        with open(sc["composed_l1"]) as stream:
+            caption_scene = compile_scene(json.load(stream), ctx.supply, tier="master", segment=False).doc
+    c["stories"]["caption_contrast"] = caption_contrast(rd["film"], caption_scene, pack["ffmpeg"])
     c["ok"] = bool(c["ok"] and sc["taste"]["ok"] and c["stories"]["caption_contrast"]["ok"])
     c["stories"]["voices"] = voices_record(ctx, pack)
     if ctx.workflow == "wf3":

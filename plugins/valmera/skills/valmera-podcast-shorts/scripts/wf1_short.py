@@ -170,6 +170,10 @@ def script(ctx, ideas_out):
                "Title the clip for the research question or stage in plain language. Attribute the project to the interview. "
                "A general discovery overview supplies stage context only. Keep a hypothetical example and a forecast "
                "distinct from identified results, performance measurements, or clinical outcomes.")
+    system += (" When the speaker opens by imagining a future, attribute the premise to that speaker from the first "
+               "word. A screen left over from a preceding demonstration is context only. In the brief identify any "
+               "physical analogy, the words naming its object, the words changing its state, and the speaker's "
+               "proposed explanation. Let any closing joke arrive in the recorded performance.")
     anchors = (f"# The moment's anchors, measured on the words\nThe hook opens at {float(idea['t0']):.2f} s: {idea.get('hook') or ''}\n"
                f"Candidate closing boundary at {float(idea['t1']):.2f} s: {idea.get('payoff') or ''}\n"
                f"Measured length: {float(idea['t1']) - float(idea['t0']):.1f} s\n\n")
@@ -1606,7 +1610,7 @@ def render_revision(sc):
     if worker:
         for rel in ('score/music.py','score/audibility.py','score/sound.py','score/sfx_quality.json','scene/pace.py','scene/compile.py','scene/runtime.py','scene/text_layout.py','scene/run.py',
                     'scene/segments.py','scene/alien/answer.py','scene/alien/diecut.py','scene/palette/kit.py','scene/palette/match.py','scene/palette/layout.py','scene/palette/rhythm.py','scene/palette/__init__.py','scene/palette/behind.py',
-                    'scene/palette/matte.py','scene/palette/type.py','scene/palette/sense.py','scene/palette/punct.py'):
+                    'scene/palette/matte.py','scene/palette/type.py','scene/palette/sense.py','scene/palette/punct.py','scene/palette/instrument.py'):
             path=os.path.join(worker,rel)
             if os.path.isfile(path):digest.update(open(path,'rb').read())
     digest.update(file_digest(brand.__file__).encode())

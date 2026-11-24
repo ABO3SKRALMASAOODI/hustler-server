@@ -116,8 +116,13 @@ For each optional sound beat give sound_partner with the dependencies its reason
 after are exact contact-sheet picture IDs at a substitution (use "take" for the speaker), device is the requested device on
 this beat, text is the exact line for a display landing. Include both picture IDs when the change is
 from one illustration into another, even if a device also participates. Omit unused fields.
-comparisons already have a speaker graphic with the premise and consequence (or the source insert).
-Keep other illustration, display and device asks for the factual beats outside those word spans.
+Comparisons can be acted out on the same live take. For a named instrument with a qualitative
+change, use analogy_dial: at the word naming the physical instrument or brand, args.change at
+the word changing its reading, args.trend up or down, until the last word before the proposed
+explanation. The comparison's instrument addresses are its word clock. The original diagram
+illustrates the speaker's hypothetical, with no invented measurements. Give the following
+explanation and payoff their actual speech timing, leaving those captions on the speaker.
+Other comparisons have a speaker graphic with premise and consequence or a source insert.
 For a qualitative comparison in the interview, the coverage notes say what each side means and
 whether it is hypothetical. When it helps, use one compact staircase with both labels on the same
 seat, each entering on its own spoken cue and standing together through the question. A direction
@@ -759,6 +764,16 @@ def bind(direction, editorial, words):
         # The episode establishes the premise. The label is the editor's hypothetical illustration.
         fact = dict(source=sources["interview"], value=example["label"], relation="Illustrative example")
         pages.append(dict(first=a, last=b, episode_example=True, facts=[fact]))
+    for comparison in editorial.get("comparisons") or []:
+        instrument = comparison.get("instrument")
+        if instrument and not any(a["dev"] == "analogy_dial" and comparison["first"] <= a["at"]["w"] <= comparison["last"]
+                                  for a in asks):
+            # The story reader already directed this change. Preserve its word clock when
+            # the display writer leaves its illustration to the compositor.
+            def addr(index):
+                return dict(w=index, word=words[index]["w"], seg=words[index]["seg"])
+            asks.append(dict(dev="analogy_dial", at=addr(instrument["enter"]), until=addr(instrument["leave"]),
+                             args=dict(change=instrument["change"], trend=instrument["trend"])))
     pages = testimony_pages(pages, dict(editorial,borrowed_estimates=list(estimates.values()),handoffs=list(routes.values())))
     pages.sort(key=lambda page: page["first"])
     example = wf1_principle.bind(direction.get("principle_example"), sources, words)
