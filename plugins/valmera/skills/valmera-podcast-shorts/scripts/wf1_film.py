@@ -947,11 +947,11 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     reading_spans = []
     timed_facts = []
     import wf1_publisher_reading
-    publisher = d.get("publisher_reading") or {}
-    coverage = wf1_publisher_reading.local_coverage(coverage, publisher)
+    reading_plan = wf1_publisher_reading.plan_of(d.get("publisher_reading"))
+    coverage = wf1_publisher_reading.local_coverage(coverage, reading_plan)
     originals = d.get("display_facts") or []
-    readings = publisher.get("readings") or []
-    retired = set(publisher.get("camera_pages") or []) | {r["page"] for r in readings}
+    readings = reading_plan.get("readings") or []
+    retired = set(reading_plan.get("camera_pages") or []) | {r["page"] for r in readings}
     pages = wf1_display.episode_pages([p for i,p in enumerate(originals) if i not in retired],
         dict(coverage, interview_cues=[dict(c,interview=script.get("source_url")) for c in coverage.get("interview_cues") or []
                                       if isinstance(c,dict)]), clock.words)
@@ -1082,7 +1082,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             from wf1_principle import outside
             pages = [part for page in pages for part in outside(page, first, last)] + cases
             research_views.append((word_frame(project["last"]+1), word_frame(last+1) or f_end, comparison))
-        elif not publisher:
+        elif not reading_plan:
             pages = wf1_display.comparison_pages(pages, comparison, clock.words)
             if comparison.get("application"):
                 # Widen on the consequence to keep the original performance and
@@ -1423,7 +1423,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     composed_spans = [r[:2] for r in ins] + [[lo,hi] for lo,hi,_ in speakers] + [list(span) for span in source_pages]
     composed_spans.extend([a,b] for a,b in returns)
     composed_spans.extend([a,b] for a,b,p in timed_facts if p.get("scope_cue") or p.get("sequence_kind") == "handoff")
-    if (reporting_span == (0,f_end)) or (demo and demo["first"] == 0 and demo["last"] == len(clock.words)-1 and not coverage["windows"]) or (publisher and all(w.get("publisher_camera") or w.get("on_take") for w in coverage["windows"])) or (record and not coverage["windows"]) or (thought and all(w.get("on_take") for w in coverage["windows"])) or (coverage.get("episode_examples") and not coverage["windows"]) or (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
+    if (reporting_span == (0,f_end)) or (demo and demo["first"] == 0 and demo["last"] == len(clock.words)-1 and not coverage["windows"]) or (reading_plan and all(w.get("publisher_camera") or w.get("on_take") for w in coverage["windows"])) or (record and not coverage["windows"]) or (thought and all(w.get("on_take") for w in coverage["windows"])) or (coverage.get("episode_examples") and not coverage["windows"]) or (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
             and any(r[4].get("episode_excerpt") for r in ins)):
         # Both the local demo and the remaining camera passages landed on their directed words.
         resolved_moves,move_spend = coverage.get("moves", []), []
@@ -1907,7 +1907,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 cut_pts.append(fa)
                 continue
             returning = any(lo <= fa < hi for lo,hi in returns)
-            if (publisher and authored_span and pieces[k]["who"] == "speaker" and not on_report
+            if (reading_plan and authored_span and pieces[k]["who"] == "speaker" and not on_report
                     and (closing_speaker or authored_span[0] == 0) and meta[pieces[k]["key"]]["faces"]):
                 # In a show's composite, keep the live portrait above a separate caption seat.
                 # A portrait cover of the whole landscape would also magnify the show's lower third.
@@ -3201,7 +3201,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                | {e["f"] for e in dev_events if 0 <= e["f"] < f_end}),
                  device_events=dev_events,
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=CAPTION_CONTRACT, display=[dict(f=[a, b], text=t) for a, b, t in shown],
-                 display_facts=fact_pages, publisher_reading=publisher, field_report=report, thought_experiment=thought,
+                 display_facts=fact_pages, publisher_reading=reading_plan, field_report=report, thought_experiment=thought,
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t, pic=pic) for a, b, t, pic in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=(sorted(set(layouts_used)) if dr and len(set(layouts_used)) > 1 else (layouts_used[0] if dr and layouts_used else st["layout"])), placement_check=placement_report, coverage=coverage_report,

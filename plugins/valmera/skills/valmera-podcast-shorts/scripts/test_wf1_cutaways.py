@@ -206,7 +206,9 @@ def test_every_style_cuts_a_small_clip_full_bleed_with_its_size_on_record(tmp_pa
     monkeypatch.setattr(placement_check, "check", check)
     import wf1_coverage
     monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *a, **k: ([], []))      # no model: the speaker's holds stay
-    l1, beats = film.build(script, sup, style, dict(coverage_final=True))
+    plan = dict(readings=[], camera_pages=[], camera_windows=[], windows=[])
+    l1, beats = film.build(script, sup, style, dict(coverage_final=True, publisher_reading=plan))
+    assert beats["publisher_reading"] == plan
     clips = [p for p in beats["pictures"] if p["kind"] == "clip"]
     assert clips and all(p["mode"] == "bleed" for p in clips)
     assert not [it for it in l1["items"] if it["k"] == "card"]

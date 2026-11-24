@@ -53,17 +53,16 @@ def material(pages, coverage):
     return pages
 
 
-def read(pages, coverage, work, llm, pictures=None):
+def plan_of(value):
+    """Older beats can hold the last archive credit in the reading-plan slot."""
+    return value if isinstance(value, dict) else {}
+
+
+def read(pages, coverage, work, llm, pictures=None, *, cached_only=False):
     sources = sources_of(pages)
     if not sources:
         return {}, []
-    from wf1_documents import cached_document, download, webpage
-    from writer import _both, has_words
-    import httpx
-    import openai_budget
-    from net_fetch import FetchError
     folder = Path(work, "publisher-readings")
-    folder.mkdir(exist_ok=True)
     windows = [{k:w.get(k) for k in ("say","first","last")} for w in coverage["windows"]]
     words = [[w["w"], w["start"], w["end"]] for w in coverage["words"]]
     data = dict(words=words, pages=[{k:p[k] for k in ("first","last","facts")} for p in pages], windows=windows)
@@ -80,9 +79,17 @@ def read(pages, coverage, work, llm, pictures=None):
                                      for url,stock in insets.items()}
     result = folder / (key_of([PROMPT,data]) + ".json")
     if result.is_file():
-        saved = json.loads(result.read_text())
-        if all(not r.get("path") or Path(r["path"]).is_file() for r in saved.get("readings", [])):
+        saved = plan_of(json.loads(result.read_text()))
+        if saved and (cached_only or all(not r.get("path") or Path(r["path"]).is_file() for r in saved.get("readings") or [])):
             return saved, []
+    if cached_only:
+        return {}, []
+    from wf1_documents import cached_document, download, webpage
+    from writer import _both, has_words
+    import httpx
+    import openai_budget
+    from net_fetch import FetchError
+    folder.mkdir(exist_ok=True)
     texts, originals, spend = {}, {}, []
     manifest = Path(work, "document-sources", "manifest.json")
     retained = json.loads(manifest.read_text()) if manifest.is_file() else []
@@ -165,11 +172,15 @@ def read(pages, coverage, work, llm, pictures=None):
 
 def local_coverage(coverage, plan):
     """Keep stable window IDs and their exact passing insets, with camera through the gaps."""
-    if not plan:
+    plan = plan_of(plan)
+    indices = plan.get("camera_windows") or []
+    snapshots = plan.get("windows") or []
+    if not isinstance(indices, list) or not isinstance(snapshots, list) or not indices or not snapshots:
         return coverage
     windows = list(coverage.get("windows") or [])
-    for i in plan.get("camera_windows", []):
-        if i < len(windows) and {k:windows[i].get(k) for k in ("say","first","last")} == plan["windows"][i]:
+    for i in indices:
+        if (type(i) is int and 0 <= i < min(len(windows), len(snapshots))
+                and {k:windows[i].get(k) for k in ("say","first","last")} == snapshots[i]):
             windows[i] = dict(windows[i], publisher_camera=True)
     return dict(coverage, windows=windows)
 
@@ -188,9 +199,9 @@ def compose(plan, span, row, palette):
             return value
     source = row["source"]
     heading = source["publisher"] + " · " + stamp(source)
-    footer = row["scope"]
+    footer = row.get("scope") or ""
     if row.get("followup"):
-        footer = " · ".join(filter(None,(footer, row["followup_label"]+" "+stamp(row["followup"]))))
+        footer = " · ".join(filter(None,(footer, (row.get("followup_label") or "Follow-up")+" "+stamp(row["followup"]))))
     if not row.get("path"):
         reading_card(plan,span,"“"+row["quote"]+"”",heading,footer,palette,centre=.64)
         return

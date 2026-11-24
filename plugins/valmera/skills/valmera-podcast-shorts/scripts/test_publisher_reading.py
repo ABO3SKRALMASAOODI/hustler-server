@@ -19,6 +19,9 @@ def test_publishers_read_over_exact_retained_insets_without_scouting_neighbour(t
     prior = dict(path=str(asset),sha256=digest,source="publication", f=[70,162],clause=camera["say"],
                  clause_t=[0.,9.], approved_crop=crop,approved_media=digest)
     coverage = dict(windows=windows,passed_placements={"0":[prior]})
+    for legacy in ("Andrew Lear", None, {}, dict(camera_windows=[0]),
+                   dict(camera_windows=None, windows=None), dict(camera_windows=[1, -1], windows=[camera])):
+        assert local_coverage(coverage, legacy) == coverage
     seated = local_coverage(coverage, selected)
     photos = {"Interview":[dict(path=str(asset),page="publication"),dict(path="/unused.png")]}
     rows = proposals(seated,{},photos)
@@ -61,6 +64,17 @@ def test_a_cached_source_reading_reuses_its_publisher_pixels_and_dates(tmp_path,
     plan,cost=reading.read(pages,coverage,tmp_path,llm)
     assert plan["readings"][0]["followup"]["publication_date"] == "2026-09-03"
     assert cost and reading.read(pages,coverage,tmp_path,None)==(plan,[])
+    (tmp_path/"pack.json").write_text(json.dumps(dict(pack=dict(coverage=coverage))))
+    legacy = dict(beats=dict(publisher_reading="Andrew Lear"), publisher_read=True)
+    ctx = SimpleNamespace(supply=str(tmp_path))
+    wf.restore_publisher_reading(ctx, legacy, pages)
+    assert legacy["beats"]["publisher_reading"] == plan
+    for cache in (tmp_path/"publisher-readings").glob("*.json"):
+        cache.unlink()
+    excerpt = plan["readings"][0]
+    legacy["beats"] = dict(display_facts=[dict(publisher_excerpt=excerpt)])
+    wf.restore_publisher_reading(ctx, legacy, pages)
+    assert legacy["beats"]["publisher_reading"] == dict(readings=[excerpt])
     assert calls==[s["url"] for s in sources]
 
 

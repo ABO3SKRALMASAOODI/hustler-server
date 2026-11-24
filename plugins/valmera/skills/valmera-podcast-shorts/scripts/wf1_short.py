@@ -1432,7 +1432,7 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
             (pack.get("referent_research") or {}).get("references", []), pages, ctx.supply, _llm(), pack["ffmpeg"])
         reading_spend.extend(usage)
     if publisher:
-        knobs.update(publisher_reading=publisher, display_facts=pages)
+        knobs["display_facts"] = pages
     if knobs.get("principle_example"):
         from wf1_principle import finish_reading
         knobs["principle_example"], setup_spend = finish_reading(
@@ -1440,7 +1440,10 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
         reading_spend.extend(setup_spend)
     if thought:
         knobs["thought_experiment"] = thought
-    knobs.update({k: v for k, v in ((ctx.args or {}).get("direction") or {}).items()})
+    overrides = dict((ctx.args or {}).get("direction") or {})
+    selected = overrides.pop("publisher_reading", None)
+    knobs["publisher_reading"] = selected if isinstance(selected, dict) else publisher
+    knobs.update(overrides)
     # The composed review's findings, each local to its window: a contradiction gives that window's slot to its next
     # candidate, a crop through a face is framed again (never a global, permanent drop: round 1, 19 Nov).
     found = current_rejections(ctx.supply)
@@ -1740,6 +1743,31 @@ def repair_options(pack, wanted):
     return options
 
 
+def restore_publisher_reading(ctx, sc, pages):
+    """Recover an older score's reading from its original inputs without a new study."""
+    import wf1_publisher_reading as reading
+    beats = sc.setdefault("beats", {})
+    if isinstance(beats.get("publisher_reading"), dict):
+        return
+    override = ((getattr(ctx, "args", {}) or {}).get("direction") or {}).get("publisher_reading")
+    if isinstance(override, dict):
+        plan = override
+    elif sc.get("publisher_read") and reading.sources_of(pages):
+        pack = wf3.load_pack(ctx)
+        coverage = pack["coverage"]
+        pages = reading.material(pages, coverage)
+        plan, _ = reading.read(pages, coverage, ctx.supply, None, pack.get("pictures"), cached_only=True)
+    else:
+        plan = {}
+    if not plan and not isinstance(override, dict):
+        # A copied score may retain the placed excerpt even when its study cache is gone.
+        excerpts = [page["publisher_excerpt"] for page in beats.get("display_facts") or []
+                    if isinstance(page.get("publisher_excerpt"), dict)]
+        if excerpts:
+            plan = dict(readings=excerpts)
+    beats["publisher_reading"] = plan
+
+
 def render(ctx, script, sc):
     """The product repairs rejected placements before branding and music, never a delivered film."""
     history_path = os.path.join(ctx.supply, "render_reviews.json")
@@ -1755,8 +1783,9 @@ def render(ctx, script, sc):
     import wf1_field_report
     needs_account = not sc.get("field_report_read") and wf1_field_report.account(sc.get("direction") or {})
     import wf1_publisher_reading
-    needs_publisher = not sc.get("publisher_read") and wf1_publisher_reading.sources_of(
-        (sc.get("direction") or {}).get("display_facts") or [])
+    pages = (sc.get("direction") or {}).get("display_facts") or []
+    restore_publisher_reading(ctx, sc, pages)
+    needs_publisher = not (sc.get("publisher_read") or sc["beats"]["publisher_reading"]) and wf1_publisher_reading.sources_of(pages)
     if rejected_plan or stale_captions or needs_reading or needs_account or needs_publisher:
         if history and rejected_plan:
             pictures = sc.get("beats", {}).get("pictures", [])
