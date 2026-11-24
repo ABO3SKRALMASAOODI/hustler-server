@@ -106,6 +106,9 @@ summary or an event link alone supports no direct quotation. Otherwise show the 
 For a speaker illustrating a personal estimate by comparing two scales, use args.sequence_kind="comparison"
 and args.sequence over the claim. Address each state on the first word that actually discloses it, including
 the final multiplier. Label the scenarios briefly and leave the final quantity to the spoken caption.
+For two approximate alternatives, copy each complete spoken quantity with its unit as the label;
+keep the first visible when the second lands. The following qualification belongs to this same example.
+For a concluding personal scale assessment, set args.lands to the word voicing its quantity.
 A standalone estimate gets one readable statement in its own interval.
 Use claim.stance (discussed_estimate or personal_estimate), a short indirect report and the actual speaker.
 For a long exact quotation required as evidence, use its whole word span. Let this card carry the reading;
@@ -505,6 +508,24 @@ def model_pages(pages, phases):
     return sorted(pages, key=lambda page: page["first"])
 
 
+def spoken_alternatives(steps, words, first, last):
+    """Bind each quoted alternative to the whole contiguous phrase containing its scored beat."""
+    def tokens(text):
+        return [t.casefold().strip(string.punctuation) for t in text.split()]
+    spoken = [tokens(w["w"]) for w in words]
+    bound = []
+    for step in steps:
+        label = tokens(step["label"])
+        left = max(first, step["at"]-len(label)+1, bound[-1]["last"]+1 if bound else first)
+        for a in range(left, min(step["at"], last-len(label)+1)+1):
+            if spoken[a:a+len(label)] == [[t] for t in label]:
+                bound.append(dict(step, at=a, last=a+len(label)-1))
+                break
+        else:
+            return []
+    return bound
+
+
 def bind(direction, editorial, words):
     """Compile the writer's selected statements into complete display blocks. Addresses are spoken word IDs."""
     sources = editorial["sources"]
@@ -598,6 +619,15 @@ def bind(direction, editorial, words):
                         state["at"] = phrase
                     previous = state["at"]
             comparison = args.get("sequence_kind") == "comparison"
+            local_claim = args["claim"] if isinstance(args.get("claim"),dict) else {}
+            alternatives = []
+            if comparison and (local_claim or claim or {}).get("stance") == "personal_estimate":
+                alternatives = spoken_alternatives(sequence, words, first, last)
+                if alternatives:
+                    sequence = alternatives
+                    if ends:
+                        ends = [i for i in ends if not any(s["at"] <= i < s["last"] for s in sequence)]
+                        ends.extend(s["last"] for s in sequence)
             if comparison:
                 estimate = next((c for c in overlapping if c.get("stance") == "personal_estimate"), None)
                 if estimate:
@@ -608,8 +638,9 @@ def bind(direction, editorial, words):
                     displayed.add(span)
                 if ends:
                     ends = sorted(set(ends) | {step["at"]-1 for step in sequence if step["at"] > 0})
-            speaker = (claim or {}).get("speaker") or args.get("speaker") or "Speaker"
+            speaker = local_claim.get("speaker") or (claim or {}).get("speaker") or args.get("speaker") or "Speaker"
             pages.append(dict(first=first, last=last, sequence=sequence,
+                              **({"spoken_estimate":True} if alternatives else {}),
                               **({"sequence_kind":args["sequence_kind"]} if comparison or args.get("sequence_kind") in ("history","process") else {}), facts=[
                 dict(attribution=speaker, source=sources["interview"], value=sequence[0]["label"])]))
             continue
@@ -651,6 +682,14 @@ def bind(direction, editorial, words):
             start = editorial.get("episode_start", 0) + words[first]["t0"]
             claim = dict(local, first=first, last=last, start=start)
             claims.append(claim)
+        landing = args.get("lands")
+        if (isinstance(local,dict) and local.get("stance") == "personal_estimate" and local.get("speaker")
+                and type(landing) is int and first <= landing <= last and last == len(words)-1):
+            pages.append(dict(first=first,last=last,estimate_landing=landing,facts=[dict(
+                attribution=local["speaker"],value=local.get("heard") or local["report"],source=sources["interview"])]))
+            if claim:
+                displayed.add((claim["first"],claim["last"]))
+            continue
         if claim and (args.get("facts") or local or ask["dev"] == "counter"):
             span = claim["first"], claim["last"]
             if span not in displayed:
@@ -1001,7 +1040,7 @@ def episode_pages(pages, coverage, words):
             if hi < a or b < lo:
                 retained.append(page)
                 continue
-            if page.get("sequence") or any(f.get("record") or f.get("excerpt") or f.get("program_entry")
+            if page.get("sequence") or page.get("estimate_landing") is not None or any(f.get("record") or f.get("excerpt") or f.get("program_entry")
                                           for f in page["facts"]):
                 retained.append(page)
                 protected.append((lo,hi))
@@ -1029,6 +1068,25 @@ def episode_pages(pages, coverage, words):
             fact = dict(attribution=cue["speaker"],value=cue["report"],chain=chain,
                         source=dict(url=cue.get("interview")))
             result.append(dict(first=x,last=y-1,facts=[fact]))
+    # An estimate and its spoken qualification share one display. A stale claim clock
+    # can put the same quoted alternatives several seconds after their actual utterance.
+    for page in [p for p in result if p.get("spoken_estimate")]:
+        speaker = page["facts"][0]["attribution"]
+        def tokens(text):
+            return [w.casefold().strip(string.punctuation) for w in text.split()]
+        quoted = tokens(" ".join(step["label"] for step in page["sequence"]))
+        for other in list(result):
+            fact = other["facts"][0]
+            chain = fact.get("chain") or {}
+            if chain.get("speaker") != speaker or len(other["facts"]) != 1:
+                continue
+            if chain.get("stance") == "personal_estimate" and tokens(chain.get("heard","")) == quoted:
+                result.remove(other)
+            elif (chain.get("stance") == "interview_cue" and other["first"] == page["last"]+1 and
+                  any(c.get("first") == page["first"] and c.get("last") == other["last"]
+                      and c.get("speaker") == speaker for c in coverage.get("interview_cues",[]))):
+                page["last"] = other["last"]
+                result.remove(other)
     return sorted(result,key=lambda row:row["first"])
 
 

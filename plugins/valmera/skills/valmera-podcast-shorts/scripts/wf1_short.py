@@ -319,7 +319,9 @@ def supply(ctx, script):
                 footage=[], title=script.get("title"), coverage=coverage,
                 referent_research=primary_direction["references"], research_spend=primary_direction["spend"])
     import wf1_documents
+    import wf1_review_frame
     wf1_documents.linked_examples(pack, sup_dir)
+    wf1_review_frame.add_reviews(pack, sup_dir, _llm())
     # Keep the original window numbering for placement and recovery. Search only the windows still needing media.
     video_windows = [i for i,w in enumerate(windows) if not w.get("reuse_excerpt")]
     # Inventory records what was said; windows specify what can truthfully be photographed.
@@ -1087,7 +1089,9 @@ def refill(ctx, script, pack, shortage):
             shortage = dict(shortage, **{k:[i for i in shortage.get(k, []) if i in wanted]
                                          for k in ("weak_windows","missing_windows")})
     import wf1_documents
-    if wf1_documents.linked_examples(pack, ctx.supply):
+    import wf1_review_frame
+    linked = wf1_documents.linked_examples(pack, ctx.supply)
+    if wf1_review_frame.add_reviews(pack, ctx.supply, _llm()) or linked:
         save_pack(ctx, pack)
         if any(windows[i].get("reuse_excerpt") and windows[i]["reuse_excerpt"] != previous_excerpts[i]
                for i in wanted):
@@ -1379,7 +1383,9 @@ def score(ctx, script):
     if pack.get('composed_requirement_windows') and pack.get('coverage_catalog_revision')!=1:
         pack['coverage_context_rescout_pending']=True;refresh=True
     import wf1_context
-    if wf1_context.complete_editorial(ctx, script, pack, _llm()) or refresh:
+    import wf1_review_frame
+    new_frame = wf1_review_frame.add_reviews(pack, ctx.supply, _llm(), retained_only=True)
+    if wf1_context.complete_editorial(ctx, script, pack, _llm()) or new_frame or refresh:
         path=os.path.join(ctx.supply,'pack.json');stored=json.load(open(path));stored['pack']=pack
         with open(path,'w') as f:json.dump(stored,f,indent=1)
     if (ctx.args or {}).get('identity'):
@@ -1904,7 +1910,8 @@ def _rebuild_motion(ctx, script, sc, report, defer=False):
     camera = {i for i,w in enumerate(local.get("windows", [])) if w.get("publisher_camera")}
     remaining = [row for row in report['placements']
                  if not (row.get('ok') and not row.get('unchecked') and
-                         (pics[row['id']].get('window') in camera or pics[row['id']].get('selected_archive_view') or
+                         (pics[row['id']].get('window') in camera or
+                          (pics[row['id']].get('reading') and (pics[row['id']].get('document') or {}).get('review')) or pics[row['id']].get('selected_archive_view') or
                           (pics[row['id']].get('mode') == 'document' and
                            (pics[row['id']].get('document') or {}).get('sha256') and
                            pics[row['id']]['document'].get('url') in records)))]
@@ -2055,7 +2062,8 @@ def hold_windows(measured, coverage, pictures, fps=None, lead=None):
         if any(p.get("selected_archive_view") and p["f"][0] <= round(a*fps)
                and round(b*fps) <= p["f"][1] for p in placed):
             continue
-        if w.get("single_action") is True and any(p.get("kind") == "clip" for p in placed):
+        if w.get("single_action") is True and any(p.get("kind") == "clip" or
+                (p.get("reading") and (p.get("document") or {}).get("review")) for p in placed):
             continue
         meaningful = min(1.4,b-a)
         if any(min(h1,b)-max(h0,a) >= meaningful for h0,h1 in measured.get("holds") or []):

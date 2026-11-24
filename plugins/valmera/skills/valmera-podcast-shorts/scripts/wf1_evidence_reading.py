@@ -31,12 +31,22 @@ def seat(rows, coverage, references, word_frame, word_count, end):
             if (len(ids) == 3 and all(type(v) is int for v in ids) and 0 <= ids[0] <= ids[1] <= ids[2] < word_count
                     and example.get("source") == rec.get("page")):
                 history = history_for(references, i, rec["page"])
+                review = (rec.get("document") or {}).get("review")
+                if review != example.get("review"):
+                    review = None
+                if review:
+                    from scene.motion import readable_row_crop
+                    from film import W, H
+                    crop = readable_row_crop(review["crop"], review["mark"], (rec["w"],rec["h"]), (W,H))
+                    rec = dict(rec,action_box=crop,mark_box=review["mark"])
                 marked = (example.get("figure_url") == (rec.get("document") or {}).get("url")
                           and valid_detail(rec.get("action_box")) and valid_detail(rec.get("mark_box")))
                 if history or marked:
                     read = dict(history=history, at=word_frame(ids[1]), first=ids[0], last=ids[2],
                                 text=example.get("visible_statement") or example.get("statement") or "",
                                 owner=clock.get("speaker") if isinstance(clock.get("speaker"),str) else "")
+                    if review and marked:
+                        read.update(job=review["job"],operation=review["operation"],intro=word_frame(review["intro_first"]))
                     a, b = word_frame(ids[0]), word_frame(ids[2]+1) if ids[2]+1 < word_count else end
         planned.append([a,b,kind,name,dict(rec,spoken_reading=read,audit_until=b) if read else rec])
     for j,row in enumerate(planned):
@@ -70,6 +80,8 @@ def compose(plan, span, key, rec, palette, size):
     if hit < span[1]:
         plan.block([hit,span[1]],mark,palette["accent"],z=2)
     credit = " · ".join(filter(None, (rec.get("credit"), "Example")))
-    reading_card(plan,span,read["text"],credit,"",palette,centre=.63,max_height=.23,group="source-result")
+    operation = "Reviewer · " + read["operation"] if read.get("operation") else ""
+    reading_card(plan,span,read["text"],credit,operation,palette,
+                 centre=.65,max_height=.26,group="source-result")
     if read["owner"]:
         reading_card(plan,span,"",read["owner"]+" replies","",palette,centre=.22,max_height=.10,group="reply")

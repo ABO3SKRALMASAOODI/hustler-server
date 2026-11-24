@@ -1192,7 +1192,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             b = f_end
         # A speaker-led explanation already carries its report in voice and captions.
         # A quotation from an original or a qualified estimate has its own evidentiary work.
-        qualified = page.get("model_phase") or page.get("principle_plate") or page.get("sequence") or page.get("scope_cue") or any((f.get("chain") or {}).get("stance") in wf1_display.CONTEXT_LABELS or f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
+        qualified = page.get("estimate_landing") is not None or page.get("model_phase") or page.get("principle_plate") or page.get("sequence") or page.get("scope_cue") or any((f.get("chain") or {}).get("stance") in wf1_display.CONTEXT_LABELS or f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
                         (f.get("chain") or {}).get("stance") in wf1_display.ESTIMATE_LABELS or
                         (f.get("chain") or {}).get("original") for f in facts)
         narrated = all(f.get("chain") and not f.get("relation") for f in facts)
@@ -1274,6 +1274,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                         (f.get("chain") or {}).get("stance") == "framework" for f in p["facts"]))
         comparison_spans.append((word_frame(principle["setup"]),word_frame(principle["last"]+1) or f_end))
     comparison_spans.extend(model_spans)
+    for window in coverage["windows"]:
+        review = (window.get("example") or {}).get("review")
+        if review:
+            comparison_spans.append((word_frame(review["intro_first"]),word_frame(review["last"]+1) or f_end))
     comparison_spans.extend(returns)
     if demo_span:
         comparison_spans.append(demo_span)
@@ -1520,6 +1524,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     live_citations.update(dated_spans)
     comparison_landings = {word_frame(p["sequence"][-1]["at"]): b for a,b,p in timed_facts
                            if p.get("sequence_kind") == "comparison"}
+    hypotheticals = [w["interview_hypothetical"] for w in coverage["windows"] if w.get("interview_hypothetical")]
+    closing_estimates = {word_frame(p["estimate_landing"]): f_end for _,_,p in timed_facts
+                         if p.get("estimate_landing") is not None}
     comparison_landings.update({a:b for a,b,p in timed_facts if p.get("analogy_step")})
     if source_pages:
         pinned = [row for row in ins if row[4].get("approved_crop") and
@@ -1728,6 +1735,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         layout_edges.extend(end for _,end in depth_spans)
         layout_edges.extend(frame for span in case_payoffs for frame in span)
         layout_edges.extend(comparison_landings)
+        layout_edges.extend(closing_estimates)
         layout_edges.extend(f for start,(end,_,_) in live_beats.items() for f in (start,end))
         layout_edges.extend(f for lo,hi,_ in speakers for f in (lo,hi))
         # Only follow the closing presenter while their tracked face is still on camera.
@@ -1744,6 +1752,26 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         for fa, fb in zip(edges, edges[1:]):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
+            if (any(start <= fa < word_frame(p["estimate_landing"]) for start,_,p in timed_facts
+                    if p.get("estimate_landing") is not None) and pieces[k]["who"] == "speaker"):
+                face = max(meta[pieces[k]["key"]].get("faces",[]),key=lambda r:r[2]*r[3],default=None)
+                if face:
+                    from scene.motion import fit_panel
+                    crop = F.cover_crop(take["w"],take["h"],1.02,(face[0]+face[2]/2,.5),(.5,.5))
+                    box = fit_panel(crop,(take["w"],take["h"]),(W,H),[0,.065,1,.63])
+                    P.page([fa,fb],"#14171B",grain=0)
+                    P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],speaker_panel=True,
+                           source_ink=[box],caption_baseline=.88)
+                    continue
+            if any(lo <= fa < hi for lo,hi in closing_estimates.items()):
+                from scene.motion import fit_panel
+                # Let the verdict land on its spoken quantity, with the original
+                # shoulders and hands in view and the source running at unit speed.
+                box = fit_panel([0,0,1,1], (take["w"],take["h"]), (W,H), [0,.15,1,.67])
+                P.page([fa,fb],"#14171B",grain=0)
+                P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],crop=[0,0,1,1],
+                       speaker_panel=True,source_ink=[box],caption_baseline=.88)
+                continue
             instrument = next((dial for lo,hi,dial in instrument_scenes if lo <= fa < hi), None)
             if instrument:
                 active = word_frame(instrument["at"]["w"]) <= fa < (
@@ -2579,6 +2607,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                attribution=reporting["speaker"], source=dict(url=script.get("source_url")))]))
     for lo,hi,rec in readings:
         read = rec["spoken_reading"]
+        if read.get("job") and read["intro"] < lo:
+            wf1_display.reading_card(P,[read["intro"],lo],read["job"],rec.get("name") or rec.get("credit"),"",pal,
+                                     centre=.65,max_height=.17,group="review-job")
         sources = [row["source"] for row in read["history"]]
         statement = " · ".join(row["stamp"]+" "+row["label"] for row in read["history"]) or read["text"]
         fact = dict(value=statement,statement=statement,relation="Example",example=True,
@@ -2758,6 +2789,13 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             fact_pages.append(dict(page, f=[a,b]))
             P.events.append(a)
             continue
+        if page.get("estimate_landing") is not None:
+            hypothetical = any(lo <= page["estimate_landing"] <= hi for lo,hi in hypotheticals)
+            credit = facts[0]["attribution"] + (" · Hypothetical" if hypothetical else " · Personal estimate")
+            wf1_display.reading_card(P,[a,f_end],"",credit,"",pal,
+                                     centre=.70,max_height=.10,group="estimate-close")
+            fact_pages.append(dict(page,f=[a,f_end]))
+            continue
         if page.get("sequence"):
             fact = facts[0]
             steps = page["sequence"]
@@ -2777,6 +2815,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 heading = fact["attribution"]+" · Scenario"
                 if page.get("sequence_kind") == "comparison":
                     # The final quantity lands in the verbatim cue on its own first word.
+                    if page.get("spoken_estimate"):
+                        wf1_display.reading_card(P,[start,end],"",fact["attribution"]+" · Estimate","",pal,
+                            centre=.65,max_height=.23,group="comparison",
+                            steps=[(s["label"],j==i) for j,s in enumerate(steps[:i+1])])
+                        P.events.append(start)
+                        continue
                     final = i == len(steps)-1
                     wf1_display.reading_card(P, [start,end], "" if final else steps[i]["label"],
                                              fact["attribution"]+" · Hypothetical comparison", "", pal,
@@ -3084,9 +3128,17 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     caption_clock, gaps = (acted.caption_clock(clock,marks,take["path"],sup["ffmpeg"],LEAD_F/FPS)
                            if marks else (clock,[]))
     ends = set(d.get("caption_ends") or ())
-    if marks and not ends:
+    groups = [(step["at"],step["last"]) for _,_,page in timed_facts if page.get("spoken_estimate")
+              for step in page["sequence"]]
+    if (marks or groups or hypotheticals) and not ends:
         phrase_tails = {id(ws[-1]) for _,_,_,ws in clock.phrases()}
         ends.update(i for i,w in enumerate(clock.words) if id(w) in phrase_tails)
+    for first,last in [*groups,*hypotheticals]:
+        cue_starts.add(first)
+        if last+1 < len(clock.words):
+            cue_starts.add(last+1)
+        ends.difference_update(range(first,last))
+        ends.add(last)
     for mark in marks:
         ends.difference_update(range(mark["question"], mark["end"]))
         cue_starts.update((mark["fragment"], mark["question"]))
@@ -3126,7 +3178,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         if word.get("role") == "cap":
             # On the scale comparison its spoken cue is the graphic. Enlarge that
             # single line in the reserved reading area without setting it twice.
-            if any(role in ("scale","landing") and a <= (sum(word["f"])/2) < b for a,b,role in thought_spans):
+            closing_quantity = any(word["f"][0] == word_frame(first) for first,_ in hypotheticals)
+            if closing_quantity or any(role in ("scale","landing") and a <= (sum(word["f"])/2) < b for a,b,role in thought_spans):
                 line = word["t"]
                 size = P.R.fit_px("cap",line,(2*F.RAIL_X-1)*W,86)
                 voice = "scale-cue-" + str(size)
