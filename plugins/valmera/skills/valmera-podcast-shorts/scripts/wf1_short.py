@@ -2230,7 +2230,7 @@ def _repair_window_boundaries(ctx, rejected):
 def can_widen_source(picture):
     # Older scores marked a document reframed while still drawing its clipped detail.
     return picture.get("source_crop") != [0,0,1,1] and (
-        not picture.get("reframed") or picture.get("mode") == "document" or bool(picture.get("field_example")))
+        not picture.get("reframed") or picture.get("mode") == "document" or bool(picture.get("field_example") or picture.get("dialog_crop")))
 
 
 def _rebuild_rejected(ctx, script, sc, report, defer=False):

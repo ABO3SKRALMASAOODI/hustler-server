@@ -225,6 +225,34 @@ def case_excerpt(pack, window, reference, supply, originals):
     return True
 
 
+def figure_windows(coverage, references):
+    """Address the researched figure to its named product, including on a saved coverage plan."""
+    words, windows = coverage["words"], coverage["windows"]
+    for ref in references:
+        cue = ref.get("figure_cue")
+        if not isinstance(cue, dict):
+            continue
+        a, b, at = (cue.get(k) for k in ("first", "last", "entity_word"))
+        if (not all(type(i) is int for i in (a,b,at)) or not 0 <= a <= at <= b < len(words)
+                or any(w.get("first", len(words)) <= b and a <= w.get("last", -1) for w in windows)
+                or any(w.get("t0", float("inf")) < words[b]["end"]
+                       and words[a]["start"] < w.get("t1", 0) for w in windows)):
+            continue
+        entity = next((e for e in coverage.get("entities", []) if e.get("is") == "product"
+                       and at in e.get("word_ids", [])), None)
+        source = next((s for s in ref.get("sources", []) if s.get("url") == cue.get("source")
+                       and s.get("figure_url") and s.get("figure_title")), None)
+        if not (entity and source and cue.get("credit")):
+            continue
+        example = dict(source=source["url"], figure_url=source["figure_url"],
+                       statement=source["figure_title"], credit=cue["credit"])
+        ref["windows"] = [*(ref.get("windows") or []), len(windows)]
+        windows.append(dict(first=a, last=b, t0=words[a]["start"], t1=words[b]["end"],
+            say=" ".join(w["w"] for w in words[a:b+1]), external=True, single_action=True,
+            name=entity["name"], must_show=entity["must_show"], claim=source["figure_title"],
+            example=example, rung=0))
+
+
 def linked_examples(pack, supply):
     """Put the publisher figure chosen during referent research on the ordinary picture shelf."""
     from placement_check import file_digest
@@ -232,6 +260,8 @@ def linked_examples(pack, supply):
     references = (pack.get("referent_research") or {}).get("references") or []
     if not references:
         return 0
+    if any(r.get("figure_cue") for r in references):
+        figure_windows(pack["coverage"], references)
     manifest = Path(supply, "document-sources", "manifest.json")
     originals = json.loads(manifest.read_text()) if manifest.exists() else []
     pictures = pack["pictures"]

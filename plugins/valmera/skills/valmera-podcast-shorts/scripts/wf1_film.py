@@ -180,6 +180,11 @@ DARK_INK = "#0B0A09"
 INK_MIN = 3.0                 # the contrast a display word's ink keeps with the ground measured under it (large type)
 
 
+def caption_plate(ground, ink):
+    if contrast(ground, ink) < 4.5:
+        return max((DARK_INK, "#FFFFFF"), key=lambda colour: contrast(colour, ink))
+
+
 def contrast_ink(ground, prefer, others):
     """The ink a display word takes on the ground measured under it: the designed ink while it holds INK_MIN against
     that ground, else whichever of the style's inks and dark ink reads best there. (ink, stroke colour)."""
@@ -460,6 +465,16 @@ def fill_size(rec, work, ffmpeg):
             return rec
         os.replace(dst + ".part.mp4", dst)
     return dict(rec, path=dst, w=w2, h=h2, upscaled_from=dict(path=path, w=int(rec["w"]), h=int(rec["h"]), up=round(up, 3)))
+
+
+def archive_credit(rec, credits):
+    # A fresh interval and an upscale keep the original source's editorial credit.
+    for path in (rec.get("document_origin"), rec.get("path"), (rec.get("upscaled_from") or {}).get("path")):
+        if path in credits:
+            return credits[path]
+    url = (rec.get("source") or {}).get("url")
+    matches = [c for c in credits.values() if url and c.get("source", {}).get("url") == url]
+    return matches[0] if matches and all(c == matches[0] for c in matches) else {}
 
 
 def archive_event(rec):
@@ -1190,7 +1205,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     # Retained directions can predate the claims chain. A dense attributed block
     # still gets a reading interval, with all its authored copy and provenance.
     def opinion_byline(facts):
-        return len(facts) == 1 and (facts[0].get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS
+        if len(facts) != 1:
+            return False
+        stance = (facts[0].get("chain") or {}).get("stance")
+        return stance in wf1_display.OPINION_LABELS or (
+            stance == "personal_estimate" and facts[0]["source"].get("url") == script.get("source_url")
+            and not facts[0].get("excerpt"))
 
     def needs_reading_page(facts):
         if opinion_byline(facts):
@@ -1446,6 +1466,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     if dr:
         DR = _director()
         pre, _ = DR.palette_asks(dr, word_frame, seg_span, None, f_end)
+    # Preserve the director's depth shot before opening the wider tracked portrait.
+    depth_spans = [ask["f"] for ask in pre if ask.get("dev") == "behind" and isinstance(ask.get("f"), list)]
     if pre and take.get("on_camera") is not False:
         held = DR.take_spans(pre, f_end)
         if held:
@@ -1703,10 +1725,20 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         for start, end, dial in instrument_scenes:
             layout_edges.extend((start, end, word_frame(dial["at"]["w"]),
                                  word_frame((dial.get("until") or dial["at"])["w"]+1) or end))
+        layout_edges.extend(end for _,end in depth_spans)
         layout_edges.extend(frame for span in case_payoffs for frame in span)
         layout_edges.extend(comparison_landings)
         layout_edges.extend(f for start,(end,_,_) in live_beats.items() for f in (start,end))
         layout_edges.extend(f for lo,hi,_ in speakers for f in (lo,hi))
+        # Only follow the closing presenter while their tracked face is still on camera.
+        tail_frame = None
+        if closing and closing[-1][1] >= f_end and meta[pieces[-1]["key"]].get("track"):
+            last_sample = meta[pieces[-1]["key"]]["track"][-1][0]
+            tail_frame = round(last_sample * FPS) + LEAD_F
+            if f_voice_end <= tail_frame < f_end:
+                layout_edges.append(tail_frame)
+            else:
+                tail_frame = None
         edges = sorted({a, b, *(f for f in layout_edges if a < f < b), *[c for c in tcuts + joins + list(panel) if a+3 <= c <= b-3],
                         *(f for span in stacks for f in span[:2] if a < f < b)})
         for fa, fb in zip(edges, edges[1:]):
@@ -1768,6 +1800,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 from scene.motion import fit_panel
                 # A fixed square seat shows the same moving face before and after the source-wide cut.
                 crop = close_crop
+                if tail_frame is not None and fa >= tail_frame:
+                    t0 = t1 = last_sample
                 box = fit_panel(crop, (take["w"],take["h"]), (W,H), [.02,.16,.98,.73])
                 P.page([fa,fb],"#14171B",grain=0)
                 P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],speaker_panel=True,
@@ -1947,12 +1981,18 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             # A landscape single already in close-up cannot fit shoulders and gestures in
             # the portrait cover. Keep the camera's own composition in a fitted live panel.
             cover = min(1., (W/H) / (info["pw"]/info["ph"]))
+            from scene.continuity import tracked_head_span
+            head = None if any(lo < fb and fa < hi for lo,hi in depth_spans) else tracked_head_span(info.get("track", []), t0, t1)
             if (cover < .65 and not active_panel and not any(not r.get("episode_excerpt") for r in reading.get("inserts", [])) and pieces[k]["who"] == "speaker" and
-                    any(face[2] > .82*cover for face in info["faces"])):
+                    (any(face[2] > .82*cover for face in info["faces"]) or (head and head[1]-head[0] > cover))):
                 from scene.motion import fit_panel
                 face = max(info["faces"], key=lambda f:f[2]*f[3])
                 width = min(1., max(cover, 2*face[2]))
-                left = max(0., min(1.-width, face[0]+face[2]/2-width/2))
+                centre = face[0]+face[2]/2
+                if head:
+                    width = max(width, head[1]-head[0])
+                    centre = sum(head)/2
+                left = max(0., min(1.-width, centre-width/2))
                 full = [left, 0., left+width, 1.]
                 box = fit_panel(full, (info["pw"],info["ph"]), (W,H), [0,.10,1,.56 if on_report else .80])
                 P.page([fa,fb], "#171B23", "#0D1015", grain=.018)
@@ -2100,11 +2140,18 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         from wf1_documents import valid_detail
         detail = rec.get("action_box")
         checked_crop = rec.get("approved_crop")
-        if (valid_detail(detail) or valid_detail(checked_crop)) and not rec.get("reframe"):
+        dialog = None
+        if (kind == "clip" and valid_detail(detail) and not rec.get("full_source")
+                and archive_credit(rec, d.get("archive_credits") or {}) and rec.get("action_caption")
+                and not any(r.get("window") == rec.get("window") and r.get("path") == rec["path"]
+                            for r in d.get("reframe", []) if isinstance(r, dict))):
+            from scene.continuity import enclosing_window
+            dialog = enclosing_window(rec["path"], sum(rec["src"])/2, detail)
+        if dialog or ((valid_detail(detail) or valid_detail(checked_crop)) and not rec.get("reframe")):
             from scene.motion import fit_panel
             # The frame reader located the action on these same moving source pixels.
-            crop = list(checked_crop or detail)
-            if not checked_crop and rec.get("action_caption"):
+            crop = list(dialog or checked_crop or detail)
+            if not dialog and not checked_crop and rec.get("action_caption"):
                 # Include the adjacent changing rows when the result is a single line of UI.
                 pad = .04*(crop[2]-crop[0])
                 crop[0], crop[2] = max(0.,crop[0]-pad), min(1.,crop[2]+pad)
@@ -2122,6 +2169,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             P.card([action_end,f1], key, [x0,y0,x1,y1], **dict(kw,src=[held,hi],op=1.))
         note(f0, f1, kind, name, rec, "window")
         P.pictures[-1]["source_crop"] = kw["crop"]
+        if dialog:
+            P.pictures[-1]["dialog_crop"] = dialog
 
     def document(f0, f1, kind, name, rec, key):
         from scene.motion import fit_panel
@@ -2251,6 +2300,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             note(f0,f1,kind,name,rec,"print")
 
     document_pics = set()
+    archive_labels = d.get("archive_credits") or {}
     pos, labelled, labels, flashes = 0, set(), [], []
     from scene.text_layout import shared_source_credits
     views = []
@@ -2260,12 +2310,17 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         page = next((p for lo,hi,p in timed_facts if lo <= a and b <= hi and any(
             url in (fact.get("also_sources") or []) or url == fact["source"].get("url")
             for fact in p["facts"])), None)
-        credit = (d.get("archive_credits") or {}).get(rec["path"]) or {}
+        credit = archive_credit(rec, archive_labels)
+        if kind == "clip" and url and credit.get("label") and not credit.get("credit"):
+            views.append((a,b,(url,credit["label"]),src.get("channel"),credit["label"]))
+            continue
         if kind == "clip" and url and page and src.get("channel") and not credit.get("credit"):
             views.append((a,b,(url,rec.get("window"),page["first"],page["last"]),src["channel"],credit.get("label")))
     shared_credits = shared_source_credits(views)
     for lo,hi,credit in shared_credits:
-        wf1_display.reading_card(P,[lo,hi],"","",credit,pal,centre=.12,group="figure-credit")
+        archived = any(archive_credit(r[4],archive_labels).get("label") == credit for r in ins if r[0] == lo)
+        wf1_display.reading_card(P,[lo,hi],"","",credit,pal,centre=.64 if archived else .12,
+                                 group="archive-credit" if archived else "figure-credit")
     runs = _runs(ins)
     layouts_used = []
     for run in runs:
@@ -2365,6 +2420,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             elif rec.get("provider") == "primary-document":
                 document(f0, f1, kind, name, rec, keys[rec["path"]])
                 document_pics.add(keys[rec["path"]])
+                figure = (rec.get("example") or {}).get("figure_url")
+                if figure and figure == (rec.get("document") or {}).get("url"):
+                    P.pictures[-1]["selected_archive_view"] = True
             elif any(page.get("scope_cue") and a < f1 and f0 < b for a,b,page in timed_facts):
                 from scene.motion import fit_panel
                 size = rec["w"],rec["h"]
@@ -2387,16 +2445,16 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             cut_pts.append(f0)
             P.events.append(f0)
             label = rec.get("name_super") or (rec.get("attribution") if d.get("labels") else None)
-            archive_credit = (d.get("archive_credits") or {}).get(rec.get("document_origin") or rec["path"])
+            placed_credit = archive_credit(rec, archive_labels)
             if rec.get("film_example"):
-                archive_credit = dict(archive_credit or {}, label="Film example · "+rec["film_example"])
-            if archive_credit:
-                P.pictures[-1]["archive_credit"] = archive_credit
-            if archive_credit and archive_credit.get("credit"):
+                placed_credit = dict(placed_credit or {}, label="Film example · "+rec["film_example"])
+            if placed_credit:
+                P.pictures[-1]["archive_credit"] = placed_credit
+            if placed_credit and placed_credit.get("credit"):
                 i = rec.get("window")
                 if isinstance(i, int) and any(rec["path"] in group for group in coverage["windows"][i].get("archive_views", [])):
                     P.pictures[-1]["selected_archive_view"] = True
-                wf1_display.reading_card(P, [f0,f1], "", archive_credit["label"], archive_credit["credit"],
+                wf1_display.reading_card(P, [f0,f1], "", placed_credit["label"], placed_credit["credit"],
                                          pal, centre=.68, group="archive-credit")
                 continue
             if any(lo <= f0 and f1 <= hi for lo,hi,_ in shared_credits):
@@ -2408,12 +2466,15 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                             if any((fact["source"].get("url") or "").split("#")[0] in urls
                                    for fact in page["facts"])]
                 from wf1_documents import screen_credit
-                credit = archive_credit["label"] if archive_credit else screen_credit(rec)
+                credit = placed_credit["label"] if placed_credit else (rec.get("example") or {}).get("credit") or screen_credit(rec)
+                if (rec.get("example") or {}).get("figure_url") and credit:
+                    wf1_display.reading_card(P,[f0,f1],"","",credit,pal,centre=.72,group="publication")
+                    continue
                 if credit:
                     intervals, _ = _director().hold_take([ins[k]], credited, min_f=14)
                     labels.extend((lo, hi, credit, keys[rec["path"]]) for lo, hi, *_ in intervals)
                 continue
-            event=archive_credit["label"] if archive_credit else archive_event(rec)
+            event=placed_credit["label"] if placed_credit else archive_event(rec)
             if event:
                 label=" · ".join(s for s in (rec.get("name_super"),event) if s)
                 labels.append((f0,f1,label,keys[rec["path"]]))
@@ -2758,7 +2819,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                          centre=.63,max_height=.31,group="interview-note")
                 fact_pages.append(dict(page,f=[a,b]))
                 continue
-            byline = claim["speaker"] + " · " + (claim.get("label") or wf1_display.OPINION_LABELS[claim["stance"]])
+            byline = claim["speaker"] + " · " + (claim.get("label") or wf1_display.OPINION_LABELS.get(claim["stance"]) or wf1_display.ESTIMATE_LABELS[claim["stance"]])
             if (clock.words[page["first"]]["seg"] == clock.words[page["last"]]["seg"]
                     and clock.words[page["first"]]["seg"] in (reading.get("quote_segments") or [])):
                 byline = "Voice · " + claim["speaker"]
@@ -3048,17 +3109,19 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                          and not p["analogy_step"].get("label") for _,_,p in timed_facts)
     applied_close = any(p.get("case_phase") == "application" and p["last"] == len(clock.words)-1
                         for _,_,p in timed_facts)
-    if closing_phrase or applied_close:
+    if closing_phrase or applied_close or closing:
         captions = [it for it in P.items if it.get("role") == "cap"]
         if captions:
             last_caption = max(captions,key=lambda it:it["f"][1])
             if last_caption["f"][1] >= f_voice_end-1:
-                if applied_close:
+                if applied_close or closing:
                     # The subtitle owns the complete sentence and its reading breath.
                     # End it on the first card-join frame after the source word releases.
                     last_caption["f"][1] = caption_handoff
                 else:
                     last_caption["f"][1] = f_end
+    take_keys = {pc["key"] for pc in pieces}
+    live_shots = [it["f"] for it in P.items if it.get("k") == "shot" and it.get("pic") in take_keys]
     for word in list(P.items):
         if word.get("role") == "cap":
             # On the scale comparison its spoken cue is the graphic. Enlarge that
@@ -3069,6 +3132,11 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 voice = "scale-cue-" + str(size)
                 P.voices[voice] = dict(P.voices["cap"],px=size,track=0)
                 word.update(v=voice,x=.5-P.R.width(voice,line)/(2*W))
+            if word.get("ink") == pal["accent"] and any(
+                    a < word["f"][1] and word["f"][0] < b for a,b in live_shots):
+                ground = ground_at(word["f"][0], cap_y-.06, cap_y+.02)
+                if plate := caption_plate(ground, word["ink"]):
+                    word["backplate"] = plate
             word["chunk"] = f'caption-{word["f"][1]}'
             for cue,(end,role,index) in live_beats.items():
                 a,b = word["f"]
