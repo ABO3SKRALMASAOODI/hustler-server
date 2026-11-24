@@ -749,3 +749,21 @@ def test_line_treatment_leaves_the_verified_source_label_and_title_clear(tmp_pat
         assert rect[3]<=box[1] or rect[1]>=box[3]
         assert rect[3]<=.62 or rect[1]>=.68
         assert rect[3]-rect[1]>.1
+
+
+def test_archive_staircase_tracks_exact_picture_through_fade_and_return(tmp_path):
+    scene = film(tmp_path, dur=150)
+    scene["items"].append(dict(k="card", id="portrait", pic="p3", f=[53,76],
+                               w=.8, h=.6, x=.5, y=.5, op=[1.]*20+[.7,.3,0.]))
+    scene["items"].append(dict(k="card", id="next", pic="p2", z=-1, f=[73,97],
+                               w=.8, h=.6, x=.5, y=.5))
+    scene["documentary_cuts"] = [
+        dict(f=[53,76], pic="p3", name_super="Nick Bostrom", source_evidence=dict(url="talk")),
+        dict(f=[76,97], pic="p2", name_super="Nick Bostrom, professor", source_evidence=dict(url="interview"))]
+    ask = dict(id="archive", dev="staircase", at=72,
+               args=dict(lines=[dict(t="Nick", at=72), dict(t="Bostrom", at=99)]))
+    out, _ = laid(scene, tmp_path, [ask])
+    titles = [it for it in mine(out, "archive") if it["k"] == "word"]
+    assert [it["t"] for it in titles] == ["NICK"]
+    assert titles[0]["f"] == [72,75]
+    assert all(0 < it["op"][-1] <= .3 for it in titles)

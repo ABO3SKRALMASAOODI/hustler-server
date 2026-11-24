@@ -272,6 +272,12 @@ def staircase(l1, work, ask, sense=None):
         return {"skip": "staircase needs lines"}
     full = " ".join(x["t"] for x in lines)
     a, z, hit = K.span(l1, ask, need=int(o.get("hold", 36)), text=full)
+    # A director may letter an archive name as stairs instead of a name super.
+    # Match the checked lettering at its cut, then carry that exact asset ID through composition.
+    source = next((row for row in l1.get("documentary_cuts", [])
+                   if row["f"][0] <= a < row["f"][1] and row.get("pic")
+                   and K.norm(full) in {K.norm(row.get("name") or ""),
+                                        K.norm((row.get("name_super") or "").partition(",")[0])}), None)
     font = pal["font"]      # palette_of resolves the ask's font word
     big = [i for i, x in enumerate(lines) if x.get("size", "big") == "big"] or [0]
     vb = K.voice(font, 100, track=-1, shadow=0.5)
@@ -318,6 +324,11 @@ def staircase(l1, work, ask, sense=None):
         ink_i = pal["accent"] if (i in big and tone < 0.55) else ink
         items.append(K.word(f"{ask['id']}.r{i}", (f0, z), x["t"], vn, px, ylist, ink_i, z=8, role="big", on=f0,
                             op=[round(min(1.0, (q + 1) / 2), 3) for q in range(n)]))
+    if source:
+        z = min(z, source["f"][1])
+        # Preserve the authored entrances. A later line remains in the spoken
+        # caption on the return rather than flashing for one frame at the cut.
+        items = [dict(K.cut(item, a, z), name_picture=source["pic"]) for item in items if item["f"][0] < z]
     lands = sorted(it["f"][0] for it in items)
     return {"items": items, "voices": voices, "marks": [m for f in lands for m in _marks(f, "stair lands", 0.6)],
             "seat": {"x": x0, "y": base, "w": wmax, "h": bh, "f": [a, z]}, "log": {"lines": [r[0]["t"] for r in rows], "stairs": stairs}}

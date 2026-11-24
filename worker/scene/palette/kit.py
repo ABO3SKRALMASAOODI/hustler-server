@@ -701,23 +701,49 @@ def cut(it, a, b, new_id=None):
     return out
 
 
-def picture_spans(l1, pic, a, b):
-    """Intervals where the identified asset is the visible picture after device cuts."""
+def picture_weights(l1, pic, a, b):
+    """Visibility of an identified picture on the final shot/card timeline, including card fades."""
     layers = [v for v in l1["items"] if v["k"] in ("shot", "card") and v.get("pic")
-              and v["f"][0] < b and v["f"][1] > a]
-    edges = sorted({a, b, *(f for v in layers for f in v["f"] if a < f < b)})
+              and v["pic"] not in ("palette_gate", "palette_crt") and v["f"][0] < b and a < v["f"][1]]
+    cards = sorted((v for v in layers if v["k"] == "card"), key=lambda v:(v.get("z",0),v.get("id","")))
+    shots = [v for v in layers if v["k"] == "shot"]
+    weights = []
+    for frame in range(a, b):
+        front = []
+        for v in cards:
+            start, end = v["f"]
+            if start <= frame < end and A(v.get("s",1.),frame,start) > 0:
+                alpha = A(v.get("op",1.),frame,start)
+                if alpha > 0:
+                    front.append((v,alpha))
+        if not front:
+            shot = next((v for v in reversed(shots) if v["f"][0] <= frame < v["f"][1]), {})
+            weights.append(float(shot.get("pic") == pic))
+            continue
+        if len(front) > 1:
+            # Distinct cards in a montage share no single portrait credit. Cards
+            # crossfading in the same seat do: follow each asset's contribution.
+            seats = {tuple(A(v.get(k,default),frame,v["f"][0]) for k,default in
+                           (("x",.5),("y",.5),("w",.5),("h",.5),("s",1.),("rot",0.))) for v,_ in front}
+            if len(seats) > 1:
+                weights.append(max(alpha for _,alpha in front) if all(v["pic"] == pic for v,_ in front) else 0.)
+                continue
+        weight = 0.
+        for v,alpha in front:
+            weight = weight*(1.-alpha) + (alpha if v["pic"] == pic else 0.)
+        weights.append(weight)
+    return weights
+
+
+def picture_spans(l1, pic, a, b, *, weights=None):
+    """Intervals where the identified asset is the visible picture after device cuts."""
     spans = []
-    for start, end in zip(edges, edges[1:]):
-        live = [v for v in layers if v["f"][0] <= start < v["f"][1]]
-        # A source document can be a card over the interview. A montage with
-        # more than one foreground subject cannot identify a single portrait.
-        subjects = [v for v in live if v["pic"] not in ("palette_gate", "palette_crt")]
-        front = [v for v in subjects if v["k"] == "card"] or subjects
-        if front and all(v["pic"] == pic for v in front):
-            if spans and spans[-1][1] == start:
-                spans[-1][1] = end
+    for f, alpha in enumerate(picture_weights(l1, pic, a, b) if weights is None else weights, a):
+        if alpha > 0:
+            if spans and spans[-1][1] == f:
+                spans[-1][1] += 1
             else:
-                spans.append([start, end])
+                spans.append([f, f+1])
     return spans
 
 

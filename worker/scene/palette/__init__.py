@@ -770,12 +770,18 @@ def apply(l1, work, asks=None, pool=None):
                         marks=patch.get("marks") or [], seat=patch.get("seat"), **({"replaced": sorted(echoes)} if echoes else {})))
     cur, trimmed = behind_on_take(cur)
     if "documentary_cuts" in cur:
-        from .kit import cut, picture_spans
+        from .kit import A, cut, picture_spans, picture_weights
         items = []
         for item in cur["items"]:
             if item.get("name_picture"):
-                for a, b in picture_spans(cur, item["name_picture"], *item["f"]):
-                    items.append(item if [a, b] == item["f"] else cut(item, a, b, f"{item['id']}~{a}"))
+                pic = item["name_picture"]
+                start, end = item["f"]
+                weights = picture_weights(cur, pic, start, end)
+                for a, b in picture_spans(cur, pic, start, end, weights=weights):
+                    part = item if [a, b] == item["f"] else cut(item, a, b, f"{item['id']}~{a}")
+                    if any(w < 1 for w in weights[a-start:b-start]):
+                        part = dict(part, op=[A(item.get("op", 1.), f, start)*weights[f-start] for f in range(a,b)])
+                    items.append(part)
             else:
                 items.append(item)
         cur = dict(cur, items=items)
