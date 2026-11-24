@@ -743,3 +743,40 @@ def test_parent_resumes_pruned_music_after_exchange(tmp_path, monkeypatch):
     assert manifest["shorts"][0]["music"]["title"] == "Chosen"
     assert set(folder.parent.iterdir()) == {folder, valid}
     assert {f.name: (f.stat().st_ino, f.read_bytes()) for f in valid.iterdir()} == prior
+
+
+def test_refit_keeps_original_score_on_interrupted_remux(tmp_path, monkeypatch):
+    import wf1_staged_music as finish
+
+    folder = tmp_path / "films" / "accepted"
+    folder.mkdir(parents=True)
+    prior = dict(cid="same", source_sha256="source", clean_export="film_clean.mp4",
+                 does=dict(encoded_balance={"lag_ms": 0}))
+    doc = dict(run_id="work", music=prior, rules={"music_picked": True})
+    finish.write_json(folder / "film.json", doc)
+    finish.write_json(tmp_path / "music_used.json", ["same"])
+    (folder / "film_clean.mp4").write_bytes(b"clean")
+    (folder / "film.mp4").write_bytes(b"first score")
+    run = SimpleNamespace(state={}, p=tmp_path.joinpath, log=lambda msg: None, refit_staged_music={"work"})
+    accepted = dict(id="m36", ok=True, folder=folder)
+    attempts = []
+
+    def remux(clean, output, receipt, used, scratch):
+        assert clean.read_bytes() == b"clean" and receipt["music"] == prior and used == ["same"]
+        attempts.append(output)
+        output.write_bytes(b"partial" if len(attempts) == 1 else b"second score")
+        if len(attempts) == 1:
+            raise OSError("interrupted remux")
+        return dict(prior, staged_mix_version=2)
+
+    monkeypatch.setattr(finish, "score_copy", remux)
+    with pytest.raises(OSError, match="interrupted remux"):
+        finish.recover(run, accepted)
+    assert (folder / "film.mp4").read_bytes() == b"first score"
+    assert json.loads((folder / "film.json").read_text()) == doc
+    finish.recover(run, accepted)
+    finish.recover(run, accepted)
+    assert len(attempts) == 2
+    assert (folder / "film.mp4").read_bytes() == b"second score"
+    assert (folder / "film_clean.mp4").read_bytes() == b"clean"
+    assert json.loads((tmp_path / "music_used.json").read_text()) == ["same"]

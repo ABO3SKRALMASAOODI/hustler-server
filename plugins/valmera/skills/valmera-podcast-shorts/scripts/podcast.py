@@ -1051,6 +1051,8 @@ def main():
     ap.add_argument("--test-out", default=None,
                     help="a test run: may reuse a delivered source, writes only here, never to a delivery folder or the ledger")
     ap.add_argument("--lanes", type=int, default=LANES, help=argparse.SUPPRESS)
+    ap.add_argument("--refit-staged-music", action="append", default=[], metavar="WORK_ID",
+                    help="Refit an earlier private recovery using its saved cue and clean export (repeatable).")
     ap.add_argument("--keep-work", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
     if a.test_out and a.out:
@@ -1068,6 +1070,7 @@ def main():
             return 4
     work, resumed = find_run(a.link, test)
     run = Run(a.link, work)
+    run.refit_staged_music = set(a.refit_staged_music)
     run.state["test"] = test
     if test:run.state['audit_root']=os.path.join(out_root,'evidence')
     run.state["pid"] = os.getpid()
