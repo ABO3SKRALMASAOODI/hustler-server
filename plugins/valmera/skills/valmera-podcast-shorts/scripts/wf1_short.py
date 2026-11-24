@@ -1031,6 +1031,7 @@ def refill(ctx, script, pack, shortage):
     inventory = hashlib.sha256(json.dumps(sorted(catalog)).encode()).hexdigest()
     def brief(i):
         return [i,windows[i]["say"],windows[i]["must_show"],inventory]
+    previous_excerpts = {i: windows[i].get("reuse_excerpt") for i in wanted}
     unread = [i for i in wanted if brief(i) not in read]
     if unread and (catalog or pack.get("research_revision",0) < 7):
         excerpts = [dict(id=i,path=path,sha256=digest,kind=kind,subject=name,shows=rec.get("shows"),
@@ -1042,7 +1043,8 @@ def refill(ctx, script, pack, shortage):
         pack.setdefault("research_spend",[]).append(usage)
         pack["research_revision"] = 7
         read.extend(brief(i) for i in unread)
-        local = [i for i in unread if windows[i].get("reuse_excerpt")]
+        local = [i for i in unread if windows[i].get("reuse_excerpt")
+                 and windows[i]["reuse_excerpt"] != previous_excerpts[i]]
         save_pack(ctx,pack)
         if local:
             ctx.log(f"returning original excerpts to windows {local} for placement")
@@ -1054,7 +1056,11 @@ def refill(ctx, script, pack, shortage):
     import wf1_documents
     if wf1_documents.linked_examples(pack, ctx.supply):
         save_pack(ctx, pack)
-        return
+        if any(windows[i].get("reuse_excerpt") and windows[i]["reuse_excerpt"] != previous_excerpts[i]
+               for i in wanted):
+            return
+        # The reader already tried these exact pixels. Continue looking for
+        # another detail from the original on this recovery pass.
     added=0
     # A still cannot repair a motion deficit. Preserve existing documentary
     # evidence, but spend this recovery pass on moving originals first.

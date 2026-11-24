@@ -136,6 +136,9 @@ identify the interview owner once, then change the short label on the words stat
 recollection into two adjacent interview_cues: the remembered setup and the result (e.g. "Funds set aside" and
 "Some went unused"). Finish with the speaker's interpretation on its own words. Keep figures in the audio.
 Set stance=recollection on remembered events, characterization on an interpretation.
+If the closing interpretation points back to a mechanism defined earlier, give its interview_cue a referent:
+a short concrete restatement of the earlier mechanism on the returning words. Keep a proposed cycle conditional,
+including how one round would affect the next. Keep the speaker and full caption.
 For contextual_definitions use a stable term for repeated definitions; gloss it once when useful. Use the
 public announcement once on its documented policy. Its financing amount and search notes do not establish
 private reserves, take-up or universal sentiment. Keep the public policy and private outcome on separate words.
@@ -821,6 +824,8 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
                     (chosen[2].get("document") or {}).get("url") == figure_url and path != chosen[2]["path"]):
                 continue
             url = (rec.get("source") or {}).get("url") or rec.get("page")
+            if chosen and chosen in pool and window.get("single_action") and path != chosen[2]["path"]:
+                continue
             if ("source" in prior and url!=prior["source"]) or any(same_picture(rec, old) for old in used):
                 continue
             rec = dict(rec)
@@ -1001,6 +1006,8 @@ example:{source: exact primary_research URL, statement: roughly six to nine plai
 Write statement so it stands on its own over the interview. When pointing to a specific pictured example,
 copy figure_url from its primary source and give visible_statement for those pixels alone. Use ordinary
 language for the action, the qualified price and its unit. Give a technical name its meaning on first use.
+For a facility illustrating wider resource claims, name the site and what it supported in this one
+example. Give example.credit as the compact publisher/site credit when the scope matters on screen.
 Keep the scope specific to the applications or activity the publisher describes. Name the actual object of
 the claim. Put source, page and standing qualifications in the research record. The on-screen line should
 read within the word interval; the film already labels its publisher and status as an example. Prefer the primary source that documents the relevant operation or process. Use a dated lab talk to show the lab's work or a legible detail of the

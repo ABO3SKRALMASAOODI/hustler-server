@@ -165,6 +165,49 @@ def screen_credit(record):
     return host.removeprefix("www.") if host else record.get("credit")
 
 
+def case_excerpt(pack, window, reference, supply, originals):
+    """Capture the selected publisher mark once, keeping its window and citation together."""
+    from wf1_display import selected_excerpt
+    from placement_check import file_digest
+
+    reading = reference.get("case_reading")
+    selected = selected_excerpt(reference, reading)
+    if not selected or not isinstance(reading.get("statement"), str) or not reading["statement"].strip():
+        return False
+    source, quote = selected
+    url, words = source["url"], quote["words"]
+    focus = reading.get("focus") or ""
+    pictures = pack["pictures"]
+    rec = next((r for rows in pictures.values() for r in rows if r.get("page") == url
+                and (doc := r.get("document", {})).get("words") == words
+                and doc.get("focus", "") == focus and doc.get("original_sha256") == quote["sha256"]
+                and os.path.isfile(r["path"])), None)
+    if rec is None:
+        identity = json.dumps([url, quote["sha256"], words, focus]).encode()
+        folder = Path(supply, "primary-documents", hashlib.sha256(identity).hexdigest()[:20])
+        folder.mkdir(parents=True, exist_ok=True)
+        images = webpage(url, str(folder), cached=cached_document(url, originals), words=words, focus=focus)
+        if not images or images[0].info.get("selected_words") != words:
+            return False
+        im = images[0]
+        path = folder / "excerpt.png"
+        im.save(path)
+        credit = " · ".join(filter(None, (source.get("publisher"), source.get("publication_date"))))
+        rec = dict(name=window["name"], path=str(path), w=im.width, h=im.height, faces=[],
+                   provider="primary-document", title=quote["event"], shows=words, page=url, url=url,
+                   credit=source.get("author") or quote["speaker"], licence="source document, not licensed",
+                   document=dict(url=url, page=1, box=[0,0,1,1], detail=[0,0,1,1], words=words,
+                                 focus=focus, original_sha256=quote["sha256"],
+                                 sha256=file_digest(str(folder / "original.html")), publication=credit))
+        pictures.setdefault(window["name"], []).append(rec)
+        pack.setdefault("credits", []).append(dict(kind="document", name=window["name"], title=rec["title"],
+            credit=rec["credit"], licence=rec["licence"], page=url, source_page=1))
+    screen = reading.get("credit") or rec["document"].get("publication") or source.get("publisher")
+    window.update(example=dict(source=url, statement=reading["statement"], credit=screen),
+                  reuse_excerpt=dict(path=rec["path"], sha256=file_digest(rec["path"])), single_action=True)
+    return True
+
+
 def linked_examples(pack, supply):
     """Put the publisher figure chosen during referent research on the ordinary picture shelf."""
     from placement_check import file_digest
@@ -179,7 +222,18 @@ def linked_examples(pack, supply):
     for i, window in enumerate(pack["coverage"]["windows"]):
         example = window.get("example") or {}
         page = example.get("source")
-        if not page or window.get("on_take") or window.get("reuse_excerpt"):
+        if window.get("on_take") or window.get("reuse_excerpt"):
+            continue
+        case = next((r for r in references if i in (r.get("windows") or []) and isinstance(r.get("case_reading"), dict)
+                     and (not page or r["case_reading"].get("source") == page)), None)
+        if case:
+            try:
+                if case_excerpt(pack, window, case, supply, originals):
+                    added += 1
+                    continue
+            except Exception as exc:  # The ordinary acquisition path retries a missing capture.
+                pack.setdefault("document_research", []).append(dict(errors=[dict(window=i, error=str(exc)[:200])]))
+        if not page:
             continue
         source = next((src for ref in references if i in (ref.get("windows") or [])
                        for src in ref.get("sources") or [] if src.get("url") == page and src.get("figure_url")

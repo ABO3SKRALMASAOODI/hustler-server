@@ -603,3 +603,46 @@ def test_published_phase_absorbs_its_overlapping_spoken_definition_and_setup():
              page(8,15,"Feedback","definition")]
     assert display.model_claim_start(pages, dict(first=14)) == 3
     assert display.model_claim_start(pages, dict(first=16)) == 16
+
+
+def test_case_reading_reuses_literal_on_its_addressed_window(tmp_path, monkeypatch):
+    import wf1_documents as docs
+    from PIL import Image
+    url = "https://www.mercor.com/blog/expert-data-drives-model-performance/"
+    words = "874 expert-labeled tasks"
+    source = dict(url=url, publisher="Mercor", publication_date="2026-01-23",
+                  quotations=[dict(words=words, sha256="digest", speaker="Mercor", event="Expert data", locator="Results")])
+    ref = dict(windows=[0], sources=[source], case_reading=dict(source=url, words=words,
+               statement="Experts supplied tasks for post-training."))
+    pack = dict(coverage=dict(windows=[dict(name="Expert work"), dict(name="Facility")]), pictures={}, credits=[],
+                referent_research=dict(references=[ref]))
+    calls = []
+    def capture(url, folder, cached, words, focus):
+        calls.append(url)
+        from pathlib import Path
+        Path(folder, "original.html").write_text(words)
+        im = Image.new("RGB", (610, 130), "white")
+        im.info["selected_words"] = words
+        return [im]
+    monkeypatch.setattr(docs, "webpage", capture)
+    assert docs.linked_examples(pack, tmp_path) == 1
+    window, other = pack["coverage"]["windows"]
+    rec, = pack["pictures"]["Expert work"]
+    assert window["reuse_excerpt"]["path"] == rec["path"] and window["single_action"]
+    assert window["example"]["statement"] == ref["case_reading"]["statement"]
+    assert rec["document"]["words"] == words and rec["page"] == url
+    assert "example" not in other
+    window.pop("reuse_excerpt")
+    assert docs.linked_examples(pack, tmp_path) == 1
+    assert calls == [url] and len(pack["credits"]) == 1
+
+
+def test_interview_callback_names_the_referent_on_the_live_cue():
+    import wf1_display
+    words = [dict(w=t, seg=0) for t in "we are getting into this loop".split()]
+    cue = dict(first=0, last=5, speaker="Ali Ghodsi", label="Assessment", stance="characterization",
+               report="He doubts training is self-reinforcing.", referent="Better models, faster and cheaper",
+               interview=INTERVIEW)
+    page, = wf1_display.episode_pages([], dict(interview_cues=[cue]), words)
+    assert page["facts"][0]["chain"]["label"] == cue["referent"]
+    assert (page["first"], page["last"]) == (0, 5)

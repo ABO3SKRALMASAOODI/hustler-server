@@ -179,7 +179,13 @@ speaker's analogy. Keep it separate from the original finding.
 Research each window in the service of the claim in the passage. Resolve it against story.hook and the whole
 spoken explanation when the initial visual brief substituted a neighboring fact. For an illustrative example
 find a first-party account of the operation itself, state exactly which applications or processes it covers and
-identify it as an example. For a program entry record the exact talk title, speaker and session date.
+identify it as an example. Where a primary case documents human work and its subsequent use,
+address each relevant window to that same case. For a readable publisher mark on the contribution,
+give a reference for that window with case_reading:{source,words,focus,statement,credit}. Put the same exact short
+words, event, speaker and locator in the source quotations. Select the operative words of the task or
+scoring criterion and state what experts contributed in one short line. Credit the partners and date. Distinguish training from held-out evaluation.
+A facility can illustrate the equipment used at that site. Attribute wider timing trends to the speaker.
+For a program entry record the exact talk title, speaker and session date.
 Research the supplied picture windows and scope_checks. For a recalled historical trend, use contemporary
 records to say what happened, when and to whom. Some documented early users can qualify a recollection
 about wider adoption. For policy scope use the original policy, regulator explainer or announcement.

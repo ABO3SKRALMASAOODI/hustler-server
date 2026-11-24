@@ -697,6 +697,8 @@ def bind(direction, editorial, words):
                 retained.append(dict(page, first=last+1))
         pages = retained
         fact = dict(value=statement, statement=statement, relation="Example", source=source, example=True)
+        if isinstance(example.get("credit"), str) and example["credit"].strip():
+            fact["credit"] = example["credit"].strip()
         if example.get("figure_url") and example.get("visible_statement"):
             fact.update(figure_url=example["figure_url"], visible_statement=example["visible_statement"])
         pages.extend(dict(first=a, last=b, facts=[fact]) for a,b in spans)
@@ -918,6 +920,8 @@ def episode_pages(pages, coverage, words):
             chain = dict(cue, first=x, last=y-1, stance="interview_cue")
             if witness:
                 chain["witness"] = witness
+                if isinstance(cue.get("referent"), str) and cue["referent"].strip():
+                    chain["label"] = cue["referent"].strip()
             heard = " ".join(word["w"] for word in words[x:y] if word.get("w"))
             if heard:
                 chain["heard"] = heard

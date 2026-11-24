@@ -2382,7 +2382,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     citation = "Talk by " + entry["speaker"] + " · " + entry["date"]
                 elif fact.get("example"):
                     body = statement
-                    label = source + " · Example"
+                    label = fact.get("credit") or source + " · Example"
                     citation = ""
                 elif excerpt:
                     body = "“" + excerpt["words"] + "”"
