@@ -41,6 +41,18 @@ def fit_panel(crop, source_size, canvas_size, seat, align_y=.5):
     return [x, y, x + width, y + height]
 
 
+def gesture_region(gestures, faces):
+    """One source crop enclosing the moving hands and head across a camera shot."""
+    regions = [box for box in [*gestures, *faces] if isinstance(box,(tuple,list)) and len(box)==4
+               and all(isinstance(v,(int,float)) for v in box)
+               and 0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1]
+    if not regions:
+        return [0.,0.,1.,1.]
+    left,top,right,bottom = [f(box[i] for box in regions) for i,f in enumerate((min,min,max,max))]
+    margin_x, margin_y = .05*(right-left), .08*(bottom-top)
+    return [max(0.,left-margin_x), max(0.,top-margin_y), min(1.,right+margin_x), min(1.,bottom+margin_y)]
+
+
 def document_figure(crop, source_size, canvas_size, bottom=.79, top=.15):
     """Give the selected figure one reading area between the credit and the spoken caption or card."""
     return fit_panel(crop, source_size, canvas_size, [.055,top,.945,bottom])
