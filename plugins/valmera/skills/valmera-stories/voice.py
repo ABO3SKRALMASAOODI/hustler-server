@@ -223,9 +223,15 @@ def cadence_bonus(cad, stops_kept):
 class Read:
     def __init__(self, N, LN, PF, prosody):
         self.N, self.LN, self.PF, self.prosody = N, LN, PF, prosody
+        self.generated_takes = 0
+        self.group_offset = 0
+        self.picks = []
+        self.reset_context()
+
+    def reset_context(self):
+        self.prior_voices = []
         self.last_end = None          # semitones of the last kept generation's end, against the read's running median
         self.f0s = []
-        self.picks = []
         self.stops = []               # the kept takes' full-stop falls (semitones against their phrase), in order
 
     def generate_phonon(self, job, out, log, seed0=7):
@@ -247,13 +253,14 @@ class Read:
                 dd = LN.retake_dd(k, base)
                 tts.set_conditions({"duration_delta": dd} if dd else {})
                 temp = FREE_TEMP if (k % base) >= base // 2 else None
-                kw = dict(voice=job["voice"], seed=seed0 + 101 * k + 7 * i)
+                kw = dict(voice=job["voice"], seed=seed0 + 101 * k + 7 * (i + self.group_offset))
                 if temp:
                     kw["temperature"] = temp
                 x = tts.synth(ln["text"], **kw)
                 sf.write(f, np.asarray(x, np.float32), tts.sample_rate, subtype="FLOAT")
                 cond[f.name] = {"duration_delta": dd, "temperature": temp or 0.3}
                 n += 1
+                self.generated_takes += 1
         tts.set_conditions({})
         cp.write_text(json.dumps(cond))
         log(f"phonon {job['voice']}: {n} takes in {time.time() - t0:.1f}s (stories read)")
@@ -271,7 +278,7 @@ class Read:
         PF = self.PF
         ref = float(np.median(self.f0s)) if self.f0s else None
         for t in takes:
-            t["drift"] = PF.drift_penalty(t["voice"], kept_voices)
+            t["drift"] = PF.drift_penalty(t["voice"], self.prior_voices + kept_voices)
             rng = float((t.get("feat") or {}).get("range_st") or 0.0)
             bonus = 3.0 * min(max(rng - 9.0, 0.0), 6.0)
             s0, _ = self.ends(t)
@@ -285,16 +292,17 @@ class Read:
             t["bonus"] = round(bonus, 1)
             t["net"] = round(t["score"] - t["drift"] + bonus, 1)
         best = min(takes, key=lambda t: (t["errs"], -t["net"]))
-        s0, s1 = self.ends(best)
-        if s0 and s1:
-            self.f0s += [s0, s1]
-            ref = float(np.median(self.f0s))
-            self.last_end = 12 * math.log2(s1 / ref)
-        self.stops += [c[1] for c in best.get("cadence") or [] if c[0] == "stop"]
+        self.keep_contour(self.ends(best), best.get("cadence"))
         self.picks.append(dict(file=best.get("file"), net=best["net"], bonus=best.get("bonus"), restart_st=best.get("restart_st"),
                                range_st=(best.get("feat") or {}).get("range_st"), cadence=best.get("cadence"),
                                cadence_bonus=best.get("cadence_bonus")))
         return best
+
+    def keep_contour(self, ends, cadence):
+        if ends and all(ends):
+            self.f0s.extend(ends)
+            self.last_end = 12 * math.log2(ends[1] / float(np.median(self.f0s)))
+        self.stops.extend(c[1] for c in cadence or [] if c[0] == "stop")
 
     def join_lines(self, kept, segments, sr):
         """The generations joined with this read's gaps (0.22 s, 0.40 s at a turn), the takes' own floor between."""
@@ -323,8 +331,6 @@ def render(a):
     out.mkdir(parents=True, exist_ok=True)
     groups = groups_of(script["segments"])
     gs = group_script(script, groups)
-    gp = out / "_generations.json"
-    gp.write_text(json.dumps(gs, ensure_ascii=False, indent=1))
     rd = Read(N, LN, PF, prosody)
     LN.generate_phonon = rd.generate_phonon
     LN.join_lines = rd.join_lines
@@ -339,10 +345,26 @@ def render(a):
             j["cadence"], j["cadence_error"] = [], repr(e)[:120]
         return j
     PF.judge = judge
-    args = argparse.Namespace(script=str(gp), out=str(out), voice=None, takes=TAKES, steps=10, cfg=2.0, seed=1, pace_tol=0.10,
+    args = argparse.Namespace(out=str(out), voice=None, takes=TAKES, steps=10, cfg=2.0, seed=1, pace_tol=0.10,
                               tempo_anchor=True, lufs=None, engine=None, chunk_words=None, no_master=False, band=a.band)
-    N.render(args)
-    finish(out, script, groups, rd.picks)
+
+    def read_block(folder, local, local_groups, grouped, offset=0):
+        gp = folder / "_generations.json"
+        gp.write_text(json.dumps(grouped, ensure_ascii=False, indent=1))
+        rd.group_offset = offset
+        rd.picks.clear()
+        N.render(argparse.Namespace(**dict(vars(args), script=str(gp), out=str(folder))))
+        finish(folder, local, local_groups, rd.picks, max_tempo=LN.MAX_TEMPO)
+
+    previous = os.environ.get("STORIES_PREVIOUS_READ")
+    if previous and N.pick_engine(args, gs) == "phonon":
+        import timing_audio
+        (out / "_generations.json").write_text(json.dumps(gs, ensure_ascii=False, indent=1))
+        voice = "phonon:" + LN.phonon_voice(args, gs)
+        if timing_audio.repair(Path(previous), out, script, gs, groups, a.band, voice, rd, read_block):
+            return
+        rd.reset_context()
+    read_block(out, script, groups, gs)
 
 
 # ----------------------------------------------------------------- the finish on the mastered read
@@ -566,7 +588,7 @@ def word_db(x, sr, w):
     return 10 * math.log10(max(float((seg ** 2).mean()), 1e-12)) if len(seg) > 0.03 * sr else None
 
 
-def finish(out, script, groups, picks=None, tone_fn=None):
+def finish(out, script, groups, picks=None, tone_fn=None, max_tempo=1.0):
     """words.json back on the film's segments; focus words to +4.3 dB; lines by beat to a 3.3 LU range; room tone; -14 LUFS."""
     import soundfile as sf
     import master as MST
@@ -583,7 +605,7 @@ def finish(out, script, groups, picks=None, tone_fn=None):
             w["seg"] = si
         for p in wj.get("phrases") or []:
             p["seg"] = next((w["seg"] for w in words if abs(w["start"] - p["start"]) < 1e-3), p.get("seg"))
-    rep = dict(generations=[dict(segments=g, text_words=sum(len(segs[i]["text"].split()) for i in g)) for g in groups], picks=picks or [])
+    rep = dict(max_tempo=max_tempo, generations=[dict(segments=g, text_words=sum(len(segs[i]["text"].split()) for i in g)) for g in groups], picks=picks or [])
     # pauses: a sentence 0.20 s, a turn 0.40 s, a comma the voice holds up CONT_S, any other comma nothing a listener
     # counts; the times of everything after move with them
     try:

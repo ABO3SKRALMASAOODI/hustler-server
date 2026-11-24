@@ -508,21 +508,25 @@ def for_the_ear(ctx, sc, rep, spend):
     return sc2, (dict(rep2, settle=rep["settle"]) if rep.get("settle") else rep2)
 
 
-def narrate_script(ctx, sc, out):
+def narrate_script(ctx, sc, out, previous=None):
     """The stories read of this script (voice.py: Phonon Easton) into `out` (narration.wav, words.json); a folder whose
     read is of other words is cleared first, so a read is only ever reused for its own script."""
     import shutil
     band = writer.FORMS[FORM]["band"]
     ns = writer.narration_script(sc, band)
     sp = os.path.join(out, "narration_script.json")
-    if os.path.exists(os.path.join(out, "words.json")) and os.path.exists(sp):     # (a given narration carries no script)
+    if os.path.exists(sp):     # (a given narration carries no script)
         try:
             old = json.load(open(sp))
         except (OSError, ValueError):
             old = {}
-        if [x.get("text") for x in old.get("segments") or []] != [x["text"] for x in ns["segments"]]:
+        if {k: v for k, v in old.items() if k != "title"} != {k: v for k, v in ns.items() if k != "title"}:
             shutil.rmtree(out, ignore_errors=True)
     env = dict(os.environ, TMPDIR=ctx.tmp)
+    if previous:
+        env["STORIES_PREVIOUS_READ"] = os.path.abspath(previous)
+    else:
+        env.pop("STORIES_PREVIOUS_READ", None)
     return PX.narrate(ns, out, band=band, label=f"wf3-narrate-{ctx.run_id}", env=env, reader=os.path.join(HERE, "voice.py"))
 
 
@@ -544,7 +548,7 @@ def timed(ctx, sc, rep, spend, narrate=None, rewrite=None, final=None):
         return sc, rep
     import shutil
     asks = 0
-    narrate = narrate or (lambda sc_, out: narrate_script(ctx, sc_, out))
+    previous = None
     rewrite = rewrite or (lambda sc_, m, notes: timing.rewrite(sc_, m, notes=notes, log=ctx.log))
     final = final or (lambda sc_, rep_: final_gate(ctx, sc_, rep_, spend, record=f"script_timing_final{asks}.json"))
     os.makedirs(ctx.supply, exist_ok=True)
@@ -556,7 +560,8 @@ def timed(ctx, sc, rep, spend, narrate=None, rewrite=None, final=None):
             k = len(rounds)
             out = os.path.join(ctx.supply, f"narration_t{k}")
             try:
-                nar = narrate(cur, out)
+                nar = narrate(cur, out) if narrate else narrate_script(ctx, cur, out, previous)
+                previous = out
                 m = timing.measure(nar["words"], cur)
             except Exception as e:  # noqa: BLE001 - a read that failed is read again by supply itself
                 ctx.log(f"timing: read {k} failed: {e!r}"[:300])

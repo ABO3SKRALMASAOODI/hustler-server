@@ -188,16 +188,21 @@ def _phonon_catalog():
     return [{"name": v} for v in PHONON_PIN["voices"]]
 
 
+def phonon_source():
+    d = MODELS / "phonon"
+    weights = ENGINES["phonon"].get("weights", "model.q8.gguf")
+    if (d / "config.json").exists() and (d / weights).exists():
+        catalog = d / "voices.jsonl"
+        return str(d), str(catalog) if catalog.exists() else PHONON_PIN["voice_catalog"]
+    return PHONON_PIN["model"], PHONON_PIN["voice_catalog"]
+
+
 def phonon_tts():
-    """the loaded model, once per process: the folder on disk, else the pinned Hub revisions (downloaded once, cached)"""
+    """The loaded model, once per process: the folder on disk, else the pinned Hub revisions (downloaded once, cached)"""
     if "tts" not in _PHONON:
         import ptts
         c = ENGINES["phonon"]
-        d = MODELS / "phonon"
-        if (d / "config.json").exists() and (d / c.get("weights", "model.q8.gguf")).exists():
-            model, cat = str(d), str(d / "voices.jsonl") if (d / "voices.jsonl").exists() else PHONON_PIN["voice_catalog"]
-        else:
-            model, cat = PHONON_PIN["model"], PHONON_PIN["voice_catalog"]
+        model, cat = phonon_source()
         _PHONON["tts"] = ptts.TTS(model, lang=c["lang"], quant=c["quant"], voice_catalog=cat)
         _PHONON["src"] = model
     return _PHONON["tts"]
@@ -514,6 +519,7 @@ def render_lines(args, script, vid, out, N):
         N.log(f"line {i + 1}/{len(script['segments'])}: kept {best['file']} errs {best['errs']} score {best['score']} tempo x{f:.2f}")
     gate = gate_repair(N, eng, job, takes_dir, script, band, names, sr0, kept, kept_v, chosen, pool, report)
     for i, r in enumerate(report):
+        r["kept_voice"] = kept_v[i]  # register and brightness of the final take, including gate repairs
         r["takes"] = [{k: v for k, v in t.items() if k not in ("_x", "_sr", "voice")} for t in pool[i]]
     x, bounds, chunks = join_lines(kept, script["segments"], sr0)
     rep = {"engine": f"lines:{eng}", "model": _PHONON.get("src") if ENGINES[eng].get("inproc") else model_dir(eng),
