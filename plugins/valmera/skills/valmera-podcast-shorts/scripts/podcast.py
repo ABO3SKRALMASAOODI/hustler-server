@@ -775,8 +775,7 @@ def shorts(run, fetched, sel, lanes):
     import wf1_film
     ms = sel["moments"]
     import wf1_staged_music
-    for m in ms:
-        wf1_staged_music.recover(run, jload(run.p("shorts", m["id"], "done.json")))
+    wf1_staged_music.recover_all(run, [jload(run.p("shorts", m["id"], "done.json")) for m in ms])
     with cf.ThreadPoolExecutor(max_workers=max(1, lanes)) as pool:
         recs = list(pool.map(lambda m: build_short(run, m, fetched, sel.get("podcast") or {}), ms))
     for wait in WALL_WAITS:                                # the wall lifts by itself: wait, then continue the walled shorts
@@ -959,8 +958,7 @@ def deliver(run, fetched, sel, built, out_root, test=False):
     made = {r["id"]: r for r in built["made"]}
     rows = []
     import wf1_staged_music
-    for record in made.values():
-        wf1_staged_music.recover(run, record)
+    wf1_staged_music.recover_all(run, made.values())
     for m in sel["moments"]:
         r = made.get(m["id"])
         f = jload(os.path.join(r["folder"], "film.json")) if r else None
@@ -1051,6 +1049,8 @@ def main():
     ap.add_argument("--test-out", default=None,
                     help="a test run: may reuse a delivered source, writes only here, never to a delivery folder or the ledger")
     ap.add_argument("--lanes", type=int, default=LANES, help=argparse.SUPPRESS)
+    ap.add_argument("--repair-duplicate-music", action="store_true",
+                    help="Keep the first use of each cue and rescore later duplicates from their private clean exports.")
     ap.add_argument("--refit-staged-music", action="append", default=[], metavar="WORK_ID",
                     help="Refit an earlier private recovery using its saved cue and clean export (repeatable).")
     ap.add_argument("--keep-work", action="store_true", help=argparse.SUPPRESS)
@@ -1070,6 +1070,7 @@ def main():
             return 4
     work, resumed = find_run(a.link, test)
     run = Run(a.link, work)
+    run.repair_duplicate_music = a.repair_duplicate_music
     run.refit_staged_music = set(a.refit_staged_music)
     run.state["test"] = test
     if test:run.state['audit_root']=os.path.join(out_root,'evidence')

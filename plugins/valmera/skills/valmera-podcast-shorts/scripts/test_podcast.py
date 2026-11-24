@@ -7,6 +7,7 @@ import os
 import sys
 
 import pytest
+from pathlib import Path
 from types import SimpleNamespace
 
 os.environ["PODCAST_NO_REEXEC"] = "1"
@@ -780,3 +781,57 @@ def test_refit_keeps_original_score_on_interrupted_remux(tmp_path, monkeypatch):
     assert (folder / "film.mp4").read_bytes() == b"second score"
     assert (folder / "film_clean.mp4").read_bytes() == b"clean"
     assert json.loads((tmp_path / "music_used.json").read_text()) == ["same"]
+
+
+def test_parent_replaces_only_second_use_and_resumes_exchanged_receipt(tmp_path, monkeypatch):
+    import wf1_staged_music as finish
+
+    (tmp_path / "films").mkdir()
+    records = []
+    for moment, cid in [("m05", "mk-595"), ("m06", "pb-243799"), ("m45", "pb-243799"), ("m46", "mk-595")]:
+        folder = tmp_path / "films" / moment
+        _film(folder, moment, "prints")
+        doc = json.loads((folder / "film.json").read_text())
+        doc["music"].update(cid=cid, clean_export="film_clean.mp4")
+        doc["rules"] = {"music_picked": True}
+        finish.write_json(folder / "film.json", doc)
+        records.append(dict(ok=True, id=moment, folder=str(folder)))
+        finish.write_json(tmp_path / "shorts" / moment / "done.json", records[-1])
+    run = podcast.Run("https://youtu.be/abcdefghijk", str(tmp_path))
+    run.repair_duplicate_music = True
+    monkeypatch.setattr(podcast, "ENV_FILE", str(tmp_path / "no.env"))
+    monkeypatch.setenv("FOOTAGE_PACE_DIR", str(tmp_path / "pace"))
+    def resume(records):
+        return podcast.shorts(run, dict(video="cached", info={}), dict(moments=records), lanes=1)
+
+    ledger = tmp_path / "music_used.json"
+    finish.write_json(ledger, ["mk-595", "pb-243799", "in-flight"])
+    calls = []
+
+    def score(clean, out, doc, used, scratch, *, replace_cue=False):
+        assert replace_cue and doc["music"]["cid"] in used
+        calls.append(list(used))
+        out.write_bytes(b"fresh")
+        return dict(doc["music"], cid="new-" + doc["script"]["title"])
+
+    monkeypatch.setattr(finish, "score_copy", score)
+    write = finish.write_json
+
+    def interrupt(path, value):
+        if path == ledger:
+            raise OSError("ledger interrupted")
+        write(path, value)
+
+    monkeypatch.setattr(finish, "write_json", interrupt)
+    with pytest.raises(OSError, match="ledger interrupted"):
+        resume(records[::-1])
+    monkeypatch.setattr(finish, "write_json", write)
+    resume(records[::-1])
+    resume(records)
+    assert calls == [["mk-595", "pb-243799", "in-flight"],
+                     ["mk-595", "pb-243799", "in-flight", "new-m45"]]
+    assert json.loads(ledger.read_text()) == calls[1] + ["new-m46"]
+    for rec in records:
+        folder = Path(rec["folder"])
+        assert (folder / "film_clean.mp4").read_bytes() == b"mp4:film_clean.mp4"
+        assert (folder / "film.mp4").read_bytes() == (b"fresh" if rec["id"] in {"m45", "m46"} else b"mp4:film.mp4")

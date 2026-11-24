@@ -13,7 +13,7 @@ import delivered
 from wf1_storage import _swap_dirs, write_json
 
 
-def score_copy(clean, output, doc, used, scratch):
+def score_copy(clean, output, doc, used, scratch, *, replace_cue=False):
     """Use the licensed audition and the podcast mix on the clock of the retained picture."""
     import numpy as np
     import rescore_music
@@ -37,13 +37,16 @@ def score_copy(clean, output, doc, used, scratch):
     dry = brand._pcm(clean, end=whole, total=whole)
     take = dry[:boundary]
     cues = checks.get("music_cues") or {"payoff_s": checks.get("stories", {}).get("turn_s")}
+    prior = doc.get("music") or {}
+    if replace_cue:
+        cues = prior.get("does", {}).get("marks") or cues
     measured = checks["podcast"].get("measured") or {}
     marks = dict(dur_s=programme, words=music.voice_spans(take),
                  cuts=[a for a, b in measured.get("holds", []) if 0 < a < programme],
                  turn_s=cues.get("turn_s"), payoff_s=cues.get("payoff_s"), turn_drop=cues.get("payoff_s") is not None)
     profile = music.profile_for("podcast")
     choice = doc.get("music")
-    if choice:
+    if choice and not replace_cue:
         # The recovered film already owns its cue, licence and entry point.
         import music_choose
         source = music_choose.find(choice["cid"])
@@ -57,8 +60,18 @@ def score_copy(clean, output, doc, used, scratch):
     else:
         script = doc["script"]
         brief = " ".join(str(script.get(k) or "") for k in ("title", "hook_line", "direction"))
-        facts = music_film.facts("podcast", marks, brief=brief)
-        choice, track, tried = music_film.choose(facts, marks, str(scratch), used=used, profile=profile)
+        arc = cues.get("arc") or {}
+        if arc:
+            marks["story_arc"] = {k: arc[k] for k in music.ARC_PARTS if k in arc}
+            marks["close_s"] = arc.get("close_s")
+        marks["tone"] = cues.get("tone")
+        facts = music_film.facts("podcast", marks, brief=brief, mood=cues.get("mood"))
+        call = music_film.openai_call() if replace_cue else None
+        choice, track, tried = music_film.choose(facts, marks, str(scratch), used=used, call=call, profile=profile)
+        if replace_cue and (not choice or choice["cid"] in used):
+            return None  # All fresh recordings were unavailable. The accepted score still plays.
+        if replace_cue:
+            choice = dict(choice, spend_usd=music_film.spend(call))
         if not choice:
             raise RuntimeError(f"Licensed music audition could not finish: {tried}")
     marks = music_film.arranged(marks, choice)
@@ -120,11 +133,41 @@ def sync_path(path):
         os.close(fd)
 
 
-def recover(run, record):
+def private_folder(run, record):
     if not record or not record.get("ok") or run.state.get("delivered") or Path(run.p("deliver.json")).exists():
-        return
+        return None
     folder = Path(record["folder"]).resolve()
-    if folder.parent != Path(run.p("films")).resolve() or delivered.in_delivery_root(str(folder)):
+    if folder.parent == Path(run.p("films")).resolve() and not delivered.in_delivery_root(str(folder)):
+        return folder
+    return None
+
+
+def recover_all(run, records):
+    if not getattr(run, "repair_duplicate_music", False):
+        for record in records:
+            recover(run, record)
+        return
+    # Moment ids follow selection order. Physical folder order can differ when
+    # sibling workers finish concurrently. The earliest moment owns each cue.
+    first = set()
+    ordered = []
+    for record in sorted((r for r in records if r and r.get("ok")), key=lambda r: int(r["id"][1:])):
+        folder = private_folder(run, record)
+        if folder is None:
+            continue
+        music = json.loads((folder / "film.json").read_text()).get("music") or {}
+        cid = music.get("cid")
+        duplicate = cid if cid in first and music.get("clean_export") == "film_clean.mp4" else None
+        ordered.append((record, duplicate))
+        if cid:
+            first.add(cid)
+    for record, duplicate in ordered:
+        recover(run, record, duplicate=duplicate, reserved=first)
+
+
+def recover(run, record, *, duplicate=None, reserved=()):
+    folder = private_folder(run, record)
+    if folder is None:
         return
     staged = folder.with_name("." + folder.name + ".music-finish")
     receipt = folder / "film.json"
@@ -137,7 +180,7 @@ def recover(run, record):
                 and prior.get("clean_export") == "film_clean.mp4" and (folder / "film_clean.mp4").is_file())
 
     rules = doc.get("rules") or {}
-    if not staged.exists() and not needs_refit(doc) and (
+    if not duplicate and not staged.exists() and not needs_refit(doc) and (
             rules.get("music_picked") is not False or doc.get("music") or doc.get("song")
             or (folder / "film_clean.mp4").exists()):
         return
@@ -146,7 +189,10 @@ def recover(run, record):
         fcntl.flock(lock, fcntl.LOCK_EX)
         doc = json.loads(receipt.read_text())
         used = json.loads(ledger.read_text()) if ledger.exists() else []
-        if not doc.get("music") or needs_refit(doc):
+        reservations = list(dict.fromkeys([*used, *sorted(reserved)]))
+        prior = doc.get("music") or {}
+        replace_cue = bool(duplicate and prior.get("cid") == duplicate and (folder / "film_clean.mp4").is_file())
+        if not prior or replace_cue or needs_refit(doc):
             run.log(f"{record['id']} finishing music from the staged branded master")
             # Same-volume directory exchange keeps both versions intact across termination.
             if staged.exists():
@@ -159,23 +205,33 @@ def recover(run, record):
                 # The staged files are hard links. Install a fresh inode only
                 # after the complete remux and its encoded checks have finished.
                 candidate = Path(scratch) / "film.mp4"
-                doc["music"] = score_copy(clean, candidate, doc, used, Path(scratch))
-                os.replace(candidate, staged / "film.mp4")
-            doc["rules"]["music_picked"] = True
-            if doc.get("platform_music") and doc["platform_music"].get("upload") != clean.name:
-                doc["platform_music"]["upload"] = clean.name
-                write_json(staged / "platform_music.json", doc["platform_music"])
-            write_json(staged / "film.json", doc)
-            sync_path(staged / "film.mp4")
-            sync_path(staged)
-            if not _swap_dirs(staged, folder):
-                raise OSError(f"Could not atomically exchange the private staging folder {folder}")
-            sync_path(folder.parent)
+                if replace_cue:
+                    result = score_copy(clean, candidate, doc, reservations, Path(scratch), replace_cue=True)
+                else:
+                    result = score_copy(clean, candidate, doc, reservations, Path(scratch))
+                if result is None:
+                    run.log(f"{record['id']} retained its audible score after exhausting fresh cues")
+                else:
+                    doc["music"] = result
+                    os.replace(candidate, staged / "film.mp4")
+            if result is not None:
+                doc["rules"]["music_picked"] = True
+                if doc.get("platform_music") and doc["platform_music"].get("upload") != clean.name:
+                    doc["platform_music"]["upload"] = clean.name
+                    write_json(staged / "platform_music.json", doc["platform_music"])
+                write_json(staged / "film.json", doc)
+                sync_path(staged / "film.mp4")
+                sync_path(staged)
+                if not _swap_dirs(staged, folder):
+                    raise OSError(f"Could not atomically exchange the private staging folder {folder}")
+                sync_path(folder.parent)
         # If the process stopped after the exchange, the receipt has the chosen id
         # and the sibling still holds the original. Complete the ledger first.
         cid = doc["music"]["cid"]
-        if cid not in used:
-            write_json(ledger, used + [cid])
+        if cid not in reservations:
+            reservations.append(cid)
+        if reservations != used:
+            write_json(ledger, reservations)
             sync_path(ledger.parent)
         if staged.exists():
             shutil.rmtree(staged)

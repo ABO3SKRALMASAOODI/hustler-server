@@ -775,14 +775,12 @@ def music_version(ctx, rd, sc):
             rep = json.load(open(report)) if os.path.exists(report) else {}
             if not rep.get("ok") or not os.path.exists(out + ".part.mp4"):
                 raise RuntimeError(json.dumps({k: rep.get(k) for k in ("why", "tried")}, ensure_ascii=False)[:600])
-            os.replace(out + ".part.mp4", out)
             if ledger:
-                try:
-                    cid = (json.load(open(report)).get("choice") or {}).get("cid")
-                    if cid and str(cid) not in used:
-                        json.dump(used + [str(cid)], open(ledger, "w"))
-                except (OSError, ValueError):
-                    pass
+                from shell import jsave
+                cid = (rep.get("choice") or {}).get("cid")
+                if cid and str(cid) not in used:
+                    jsave(ledger, used + [str(cid)])
+            os.replace(out + ".part.mp4", out)
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             ctx.log(f"{tag} version skipped: {str(e)[:300]}")
             return None
