@@ -12,6 +12,25 @@ from .plan import A, AR
 from .runtime import plane_hom
 
 
+def shared_source_credits(views):
+    """One continuous publisher credit across adjacent views of the same cited event."""
+    runs = []
+    for _, group in groupby(views, key=lambda view: (view[2], view[3])):
+        run = []
+        for view in group:
+            if not run or run[-1][1] != view[0]:
+                run = []
+                runs.append(run)
+            run.append(view)
+    credits = []
+    for run in runs:
+        if len(run) > 1:
+            events = {view[4] for view in run if view[4]}
+            label = events.pop() if len(events) == 1 else run[0][3]
+            credits.append((run[0][0], run[-1][1], label))
+    return credits
+
+
 def proof_bounds(card, frame, width, height):
     """The projected evidence page, or its cited line when the camera fills the phone."""
     at = card["f"][0]
