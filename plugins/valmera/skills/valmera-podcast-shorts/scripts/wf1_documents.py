@@ -76,7 +76,7 @@ def cached_document(url, sources):
     return None
 
 
-def webpage(url,folder,cached=None,words=None,focus=None):
+def webpage(url,folder,cached=None,words=None,focus=None, *, offline=False):
     """Actual publisher pixels, read-only and headless. A page is still evidence, never video."""
     from PIL import Image
     from playwright.sync_api import sync_playwright
@@ -86,18 +86,21 @@ def webpage(url,folder,cached=None,words=None,focus=None):
         browser=p.chromium.launch(headless=True)
         try:
             context=browser.new_context(viewport=dict(width=900,height=1200),device_scale_factor=2 if words else 1,
-                                        service_workers='block',accept_downloads=False)
+                                        service_workers='block',accept_downloads=False,java_script_enabled=not offline)
             guard=webrecord._guard_router({})
             def route(request):
                 if cached is not None and request.request.url==url and request.request.is_navigation_request():
                     request.fulfill(status=200,content_type='text/html; charset=utf-8',body=cached)
+                elif offline:request.abort()
                 else:guard(request)
             context.route('**/*',route)
             page=context.new_page();response=page.goto(url,wait_until='domcontentloaded',timeout=45000)
             if response and response.status>=400:raise ValueError('publisher page HTTP '+str(response.status))
-            page.wait_for_timeout(1000)
+            if not offline:
+                page.wait_for_timeout(1000)
             height=min(9600,int(page.evaluate('document.documentElement.scrollHeight')))
-            with open(os.path.join(folder,'original.html'),'w') as f:f.write(page.content())
+            if not offline:
+                with open(os.path.join(folder,'original.html'),'w') as f:f.write(page.content())
             if words:
                 hit = page.get_by_text(words, exact=False).last
                 if hit.count():
@@ -106,6 +109,8 @@ def webpage(url,folder,cached=None,words=None,focus=None):
                         im = Image.open(io.BytesIO(data)).convert("RGB")
                         im.info["selected_words"] = words
                         return [im]
+                if offline:
+                    return []
             out=[]
             for y in range(0,height,1200):
                 data=page.screenshot(full_page=True,clip=dict(x=0,y=y,width=900,height=min(1200,height-y)))

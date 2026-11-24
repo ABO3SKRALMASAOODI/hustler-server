@@ -1382,7 +1382,13 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
             retiming_spend = timed.get("spend") or []
     thought, reading_spend = wf1_experiment.read(d, pack["coverage"]["words"], ctx.supply, _llm())
     reading_spend.extend(retiming_spend)
+    import wf1_publisher_reading
+    pages = wf1_publisher_reading.material(d.get("display_facts") or [], coverage)
+    publisher, usage = wf1_publisher_reading.read(pages, coverage, ctx.supply, _llm(), pack.get("pictures"))
+    reading_spend.extend(usage)
     knobs = film_direction(d)
+    if publisher:
+        knobs.update(publisher_reading=publisher, display_facts=pages)
     if knobs.get("principle_example"):
         from wf1_principle import finish_reading
         knobs["principle_example"], setup_spend = finish_reading(
@@ -1485,7 +1491,7 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
     # into the film's tail, so no short keeps a flat bed (round1 thin-sound)
     story_turn_s = round(beats["story_turn_f"] / F.FPS, 3) if beats.get("story_turn_f") is not None else None
     return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, last_word_s=last_word_s, story_turn_s=story_turn_s, turn_drop=turn_s is not None, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
-                field_report_read=True, thought_read=True, frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=reading_spend + ([d["spend"]] if d.get("spend") else []) +
+                publisher_read=True, field_report_read=True, thought_read=True, frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=reading_spend + ([d["spend"]] if d.get("spend") else []) +
                 [dict(u,stage='supply',what='primary documents') for research in pack.get('document_research',[]) for u in research.get('spend',[])] +
                 [dict(u,stage='supply',what='documentary research revision') for u in pack.get('research_spend',[])] +
                 [dict(stage="score", what="picture-to-words check", **u) for u in (beats.get("placement_check") or {}).get("spend", [])])
@@ -1630,7 +1636,6 @@ def retained_repairs(supply, pack, beats, wanted):
     from placement_check import file_digest
     from wf1_coverage import originals_of
     coverage = pack.get("coverage") or {}
-    windows = coverage.get("windows", [])
     pages = [p for p in beats.get("display_facts", []) if any(
         f.get("excerpt") or f.get("perspective") for f in p["facts"])]
     if beats.get("thought_experiment"):
@@ -1639,8 +1644,12 @@ def retained_repairs(supply, pack, beats, wanted):
     originals = originals_of(supply)
     footage = {line["i"]:line["clips"] for line in pack.get("footage", [])}
     shown = {p.get("origin") or p.get("path") for p in beats.get("pictures", [])}
+    import wf1_publisher_reading
+    windows = wf1_publisher_reading.local_coverage(coverage, beats.get("publisher_reading") or {}).get("windows", [])
     for i in sorted(set(wanted)):
         w = windows[i]
+        if w.get("publisher_camera"):
+            continue
         if any(p["first"] <= w.get("first", -1) and w.get("last", p["last"]+1) <= p["last"] for p in pages):
             continue
         witnesses = coverage.get("passed_placements", {}).get(str(i), [])
@@ -1702,7 +1711,10 @@ def render(ctx, script, sc):
     needs_reading = not sc.get("thought_read") and all(wf1_experiment.materials(sc.get("direction") or {}))
     import wf1_field_report
     needs_account = not sc.get("field_report_read") and wf1_field_report.account(sc.get("direction") or {})
-    if rejected_plan or stale_captions or needs_reading or needs_account:
+    import wf1_publisher_reading
+    needs_publisher = not sc.get("publisher_read") and wf1_publisher_reading.sources_of(
+        (sc.get("direction") or {}).get("display_facts") or [])
+    if rejected_plan or stale_captions or needs_reading or needs_account or needs_publisher:
         if history and rejected_plan:
             pictures = sc.get("beats", {}).get("pictures", [])
             _repair_window_boundaries(ctx, [r for r in history[-1]["placements"] if not r["ok"]
@@ -1814,9 +1826,13 @@ def _rebuild_motion(ctx, script, sc, report, defer=False):
     # of motion is already known. Other placements still receive their own repair.
     records = {fact["record"]["source"] for page in sc["beats"].get("display_facts", [])
                for fact in page["facts"] if fact.get("record")}
+    import wf1_publisher_reading
+    local = wf1_publisher_reading.local_coverage(pack.get("coverage") or {"windows":[]},
+                                                  sc["beats"].get("publisher_reading") or {})
+    camera = {i for i,w in enumerate(local.get("windows", [])) if w.get("publisher_camera")}
     remaining = [row for row in report['placements']
                  if not (row.get('ok') and not row.get('unchecked') and
-                         (pics[row['id']].get('selected_archive_view') or
+                         (pics[row['id']].get('window') in camera or pics[row['id']].get('selected_archive_view') or
                           (pics[row['id']].get('mode') == 'document' and
                            (pics[row['id']].get('document') or {}).get('sha256') and
                            pics[row['id']]['document'].get('url') in records)))]
@@ -1960,7 +1976,7 @@ def hold_windows(measured, coverage, pictures, fps=None, lead=None):
     from wf1_coverage import camera_remainder
     out = set()
     for i, w in enumerate(coverage.get("windows") or []):
-        if w.get('on_take') or camera_remainder(w):
+        if w.get('on_take') or w.get('publisher_camera') or camera_remainder(w):
             continue
         a, b = (round(w["t0"]*fps)+lead)/fps, (round(w["t1"]*fps)+lead)/fps
         placed = [p for p in pictures if p.get("window") == i]
@@ -2007,6 +2023,8 @@ def _rebuild_holds(ctx, script, sc, rd, defer=False):
     if sc["beats"].get("thought_experiment"):
         from wf1_experiment import local_windows
         coverage = dict(coverage, windows=local_windows(coverage, sc["beats"]["thought_experiment"]))
+    import wf1_publisher_reading
+    coverage = wf1_publisher_reading.local_coverage(coverage, sc["beats"].get("publisher_reading") or {})
     # Count the exact frames occupied by authored illustrations in the same coverage ruler.
     # Unillustrated portions of that clause can still ask for a picture.
     illustrations = (sc["beats"].get("field_report") or {}).get("illustrated") or []

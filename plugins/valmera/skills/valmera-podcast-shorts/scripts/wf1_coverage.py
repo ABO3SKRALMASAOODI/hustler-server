@@ -113,6 +113,9 @@ named lists the referents the script stage resolved from the whole moment, each 
 picture it needs as it was at the time (must_show). For each with identifiable external evidence, plan a
 window on the words that speak of it, under its resolved name (a full name, never a pronoun or first
 name alone), with its event-level must_show. Words may refer to them by pronoun or first name.
+For sensitive deployment concerns, keep the synchronous speaker. Use speaker_claims and its scope_question
+for a dated issuer record. An issuer's ranking plan illustrates its stated choice. Keep a passing joke on the
+episode. Avoid reenactments, cases, methods, simulated interfaces and autoplay for these concerns.
 Decide what would establish the spoken proposition before accepting a named item's draft must_show.
 If the interview uses the present activity as an example of a general principle, the recording can
 establish that example. A dramatization cited as an analogy gets one short film-example window. A named book cover is its
@@ -842,7 +845,7 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
             out.append([lo,hi,kind,name,dict(rec,window=i,illustration=window["must_show"],clause=window.get("say"),
                                             claim=window.get("claim"), example=window.get("example"), clause_t=[window["t0"], window["t1"]],
                                             **({"association":window["must_show"]} if window.get("association") else {}))])
-        if pins and window.get("single_action"):
+        if window.get("publisher_camera") or (pins and window.get("single_action")):
             continue
         if camera_remainder(window):
             known = window["camera_remainder"].get("sources", [])
@@ -1104,7 +1107,7 @@ def require_coverage(ins, coverage, duration, fps=30, final=False):
         motion = row[2]=='clip' and row[4].get('verified_motion') is True and row[4].get('placed_motion_p90',0)>=1.
         return max(0,min(row[1],row[4].get('action_end',row[1]))-row[0]) if motion else 0
     moving = sum(moving_frames(r) for r in ins)/fps
-    missing = [i for i,w in enumerate(coverage['windows']) if not w.get('on_take') and not camera_remainder(w) and not any(r[4].get('window')==i for r in ins)]
+    missing = [i for i,w in enumerate(coverage['windows']) if not (w.get('on_take') or w.get('publisher_camera')) and not camera_remainder(w) and not any(r[4].get('window')==i for r in ins)]
     named = sum(w['t1']-w['t0'] for w in coverage['windows'])
     unique=[]
     for row in ins:
@@ -1113,7 +1116,7 @@ def require_coverage(ins, coverage, duration, fps=30, final=False):
     held_actions = {r[4].get("window") for r in ins if r[2] == "clip"}
     weak = [i for i,w in enumerate(coverage['windows'])
             if not (w.get("single_action") is True and i in held_actions)
-            if not w.get('on_take') and not camera_remainder(w) and (sum(r[1]-r[0] for r in ins if r[4].get('window')==i)/fps < .8*(w['t1']-w['t0'])
+            if not (w.get('on_take') or w.get('publisher_camera')) and not camera_remainder(w) and (sum(r[1]-r[0] for r in ins if r[4].get('window')==i)/fps < .8*(w['t1']-w['t0'])
             or sum(moving_frames(r) for r in ins if r[4].get('window')==i)/fps < .6*(w['t1']-w['t0']))]
     report = dict(real_seconds=real,moving_seconds=moving,required_real_seconds=.45*duration,required_moving_seconds=.6*max(real,.45*duration),named_seconds=named,new_per_10s=rate,new_pictures=len(unique),repeated_pictures=len(ins)-len(unique),weak_windows=weak,missing_windows=missing)
     short = bool(real/max(duration,.01)<.45 or moving/max(real,.01)<.60 or rate<6 or missing)

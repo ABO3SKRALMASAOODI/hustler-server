@@ -372,7 +372,7 @@ def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, str
             if url and clip.get("time_range"):
                 taken.setdefault(url, []).append(tuple(clip["time_range"]))
     for i, window in enumerate(coverage["windows"]):
-        if window.get('on_take') or camera_remainder(window):
+        if window.get('on_take') or window.get('publisher_camera') or camera_remainder(window):
             continue
         if window.get("single_action") and any(r[2]=="clip" and r[4].get("window")==i for r in ins):
             continue
@@ -900,12 +900,20 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     import wf1_display
     reading_spans = []
     timed_facts = []
-    pages = wf1_display.episode_pages(d.get("display_facts") or [],
+    import wf1_publisher_reading
+    publisher = d.get("publisher_reading") or {}
+    coverage = wf1_publisher_reading.local_coverage(coverage, publisher)
+    originals = d.get("display_facts") or []
+    readings = publisher.get("readings") or []
+    retired = set(publisher.get("camera_pages") or []) | {r["page"] for r in readings}
+    pages = wf1_display.episode_pages([p for i,p in enumerate(originals) if i not in retired],
         dict(coverage, interview_cues=[dict(c,interview=script.get("source_url")) for c in coverage.get("interview_cues") or []
                                       if isinstance(c,dict)]), clock.words)
     pages = wf1_record.pages(pages, record, coverage["words"],
                              dict(url=script.get("source_url"), publisher=script.get("source_credit")),
                              script.get("source_start", 0), dr.get("beats") or [], d.get("caption_ends") or [])
+    pages.extend(dict(first=r["first"], last=r["last"], publisher_excerpt=r,
+                      facts=originals[r["page"]]["facts"]) for r in readings)
     record_span = (word_frame(record["first"]), word_frame(record["last"]+1) or f_end) if record else None
     thought_spans = []
     if thought:
@@ -1004,7 +1012,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         if len(steps)>1 and steps[-1]["source"] == interview and any(s["source"] != interview for s in steps[:-1]):
             pages[n] = dict(page, last=steps[-1]["at"]-1, sequence=steps[:-1])
     pages.sort(key=lambda p: p["first"])
-    for comparison in coverage.get("comparisons") or []:
+    for comparison in ([] if publisher else coverage.get("comparisons") or []):
         pages = wf1_display.comparison_pages(pages, comparison, clock.words)
     import wf1_principle
     principle = d.get("principle_example")
@@ -1071,11 +1079,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 end = word_frame(steps[i+1]["at"]) if i+1 < len(steps) else b
                 if a <= start < end <= b:
                     live_beats[start] = (end,step["beat"],step["at"])
+    publisher_spans = {(a,b) for a,b,p in timed_facts if p.get("publisher_excerpt")}
     phase_spans = [(a,b) for a,b,p in timed_facts if p.get("model_phase")]
     source_pages = phase_spans + [(a,b) for a,b,p in timed_facts if any(f.get("excerpt") or f.get("perspective") for f in p["facts"])]
     if source_pages:
         coverage = dict(coverage, windows=[
-            dict(w, on_take=True) if any(lo <= round(w["t0"]*FPS)+LEAD_F+1 and
+            dict(w, on_take=True) if not w.get("publisher_camera") and any(lo <= round(w["t0"]*FPS)+LEAD_F+1 and
                 round(w["t1"]*FPS)+LEAD_F <= hi+1 for lo,hi in source_pages) else w
             for w in coverage["windows"]])
     # A retained Director can predate the source reading. The original takes its word's
@@ -1258,7 +1267,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     composed_spans = [r[:2] for r in ins] + [[lo,hi] for lo,hi,_ in speakers] + [list(span) for span in source_pages]
     composed_spans.extend([a,b] for a,b in returns)
     composed_spans.extend([a,b] for a,b,p in timed_facts if p.get("scope_cue") or p.get("sequence_kind") == "handoff")
-    if (record and not coverage["windows"]) or (thought and all(w.get("on_take") for w in coverage["windows"])) or (coverage.get("episode_examples") and not coverage["windows"]) or (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
+    if (publisher and all(w.get("publisher_camera") or w.get("on_take") for w in coverage["windows"])) or (record and not coverage["windows"]) or (thought and all(w.get("on_take") for w in coverage["windows"])) or (coverage.get("episode_examples") and not coverage["windows"]) or (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
             and any(r[4].get("episode_excerpt") for r in ins)):
         # Both the local demo and the remaining camera passages landed on their directed words.
         resolved_moves,move_spend = coverage.get("moves", []), []
@@ -1313,12 +1322,16 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     gestures.append((max(a,round(shot["t0"]*FPS)+LEAD_F),b,next_gesture))
     dated_spans = {(a,b) for a,b,p in timed_facts if any(f.get("record") for f in p["facts"])}
     live_citations.update(phase_spans)
+    live_citations.update(publisher_spans)
     live_citations.update(dated_spans)
     comparison_landings = {word_frame(p["sequence"][-1]["at"]): b for a,b,p in timed_facts
                            if p.get("sequence_kind") == "comparison"}
     comparison_landings.update({a:b for a,b,p in timed_facts if p.get("analogy_step")})
     if source_pages:
-        ins, _ = _director().hold_take(ins, source_pages, min_f=1, fps=FPS)
+        pinned = [row for row in ins if row[4].get("approved_crop") and
+                  any(lo < row[1] and row[0] < hi for lo,hi in publisher_spans)]
+        ins, _ = _director().hold_take([row for row in ins if row not in pinned], source_pages, min_f=1, fps=FPS)
+        ins = sorted(ins+pinned, key=lambda row:row[0])
     import wf1_evidence_reading
     references = (sup.get("referent_research") or coverage.get("research_context") or {}).get("references", [])
     ins = wf1_evidence_reading.seat(ins, coverage, references, word_frame, len(clock.words), f_end)
@@ -1447,6 +1460,21 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         coverage_report.setdefault("quoted_source", []).append(dict(record, f=[fa,fb], credit=credit,
                                                                       url=script.get("source_url")))
         return True
+
+    from functools import lru_cache
+    @lru_cache(maxsize=8)
+    def composite_frame(shot):
+        try:
+            import cv2
+        except ImportError:
+            return None
+        capture = cv2.VideoCapture(take["path"])
+        try:
+            capture.set(cv2.CAP_PROP_POS_MSEC, 500*sum(shot))
+            ok, frame = capture.read()
+            return cv2.resize(frame,(320,180)) if ok else None
+        finally:
+            capture.release()
 
     def take_shot(a, b):
         """The take between pictures: each framing on the one who speaks it, cut where the show cut and where the
@@ -1582,6 +1610,23 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                        speaker_panel=True,caption_baseline=.87)
                 cut_pts.append(fa)
                 continue
+            if any(lo <= fa < hi for lo,hi in publisher_spans):
+                # The shot reader selected the speaking face, including its tile in a wide shot.
+                from scene.motion import Cam, fit_panel
+                info = meta[pieces[k]["key"]]
+                face = next(iter(info["faces"]), None)
+                box = [.04,.035,.96,.42]
+                if face:
+                    cam = Cam(info["pw"], info["ph"], .92*W/(.385*H), .92*W, info["max_up"])
+                    crop = cam.on_face(face[:4], height=.64, eyes=face[4])
+                else:
+                    crop = [0,0,1,1]
+                    box = fit_panel(crop,(take["w"],take["h"]),(W,H),box)
+                P.page([fa,fb],"#14171B",grain=0)
+                P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],speaker_panel=True,
+                       source_ink=[box],caption_baseline=.89)
+                cut_pts.append(fa)
+                continue
             if any(lo <= fa < hi for lo, hi in dated_spans) and pieces[k]["who"] == "speaker":
                 # Keep the full camera height for the gesture, beside the short source reading.
                 face = max(meta[pieces[k]["key"]].get("faces", []), key=lambda q: q[2]*q[3], default=None)
@@ -1632,6 +1677,20 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 cut_pts.append(fa)
                 continue
             returning = any(lo <= fa < hi for lo,hi in returns)
+            if (publisher and authored_span and pieces[k]["who"] == "speaker" and not on_report
+                    and (closing_speaker or authored_span[0] == 0) and meta[pieces[k]["key"]]["faces"]):
+                # In a show's composite, keep the live portrait above a separate caption seat.
+                # A portrait cover of the whole landscape would also magnify the show's lower third.
+                from scene.motion import fit_panel
+                face = meta[pieces[k]["key"]]["faces"][0]
+                from scene.continuity import portrait_region
+                crop = portrait_region(face, (take["w"],take["h"]), composite_frame(tuple(authored_span)))
+                box = fit_panel(crop,(take["w"],take["h"]),(W,H),[0,.08,1,.79])
+                P.page([fa,fb],"#14171B",grain=0)
+                P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],speaker_panel=True,
+                       source_ink=[box],caption_baseline=.87)
+                cut_pts.append(fa)
+                continue
             if on_report or returning or (authored_span and not closing_speaker):
                 # The source cut is already a composition. Fit all panels and both original
                 # credit corners together, with an independent ground for the caption.
@@ -2244,6 +2303,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     record_accent = None
     for a, b, page in timed_facts:
         facts = page["facts"]
+        if page.get("publisher_excerpt"):
+            wf1_publisher_reading.compose(P,[a,b],page["publisher_excerpt"],pal)
+            fact_pages.append(dict(page,f=[a,b]))
+            continue
         if page.get("analogy_step"):
             step = page["analogy_step"]
             wf1_display.reading_card(P,[a,b],step["label"],"Hypothetical", "",pal,
@@ -2799,7 +2862,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                | {e["f"] for e in dev_events if 0 <= e["f"] < f_end}),
                  device_events=dev_events,
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=CAPTION_CONTRACT, display=[dict(f=[a, b], text=t) for a, b, t in shown],
-                 display_facts=fact_pages, field_report=report, thought_experiment=thought,
+                 display_facts=fact_pages, publisher_reading=publisher, field_report=report, thought_experiment=thought,
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t, pic=pic) for a, b, t, pic in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=(sorted(set(layouts_used)) if dr and len(set(layouts_used)) > 1 else (layouts_used[0] if dr and layouts_used else st["layout"])), placement_check=placement_report, coverage=coverage_report,
