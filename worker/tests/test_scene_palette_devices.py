@@ -259,3 +259,20 @@ def test_documentary_collage_and_proof_follow_checked_video_clock(tmp_path):
         assert not any(i.get("pic") == "mri" for i in patch["items"])
         assert patch["log"]["pictures"] == ["baylor","main"]
         assert all(i.get("id") not in patch.get("drop",[]) for i in film["items"])
+
+
+@pytest.mark.parametrize("picked", ["search", "text-cleared-search", "main"])
+def test_inset_on_its_own_documentary_card_keeps_one_source_clock(tmp_path, monkeypatch, picked):
+    from scene.palette import layout, picks
+    card = dict(k="card", id="results", pic="search", f=[179,225], src=[.02,1.55],
+                crop=[.10,.30,.60,.94], source_ink=[[.04,.21,.96,.59]], s=1)
+    scene = scene_of([card], 300)
+    scene["documentary_cuts"] = [dict(pic="search", f=card["f"])]
+    if picked == "main":
+        card.update(pic="main", source_ink=[])
+        scene["documentary_cuts"] = []
+    clip = picks.Pic(picked, "search.mp4", "video", 1920, 1080, 2)
+    monkeypatch.setattr(picks, "pictures", lambda *args, **kw: [clip])
+    result = layout.pip(scene, str(tmp_path), dict(id="dr2", f=[193,201], frames=8))
+    placed, = result["items"]
+    assert (placed["id"], placed["src"], placed["crop"]) == ("results", card["src"], card["crop"])

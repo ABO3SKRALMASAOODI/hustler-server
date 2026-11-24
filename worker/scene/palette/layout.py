@@ -517,11 +517,14 @@ def pip(l1, work, ask, sense_=None, pool=None):
     a, z = K.span(l1, args, default_s=1.2, least=8)
     # A request may cross the end of a checked source. The pool then offers
     # the synchronous take. Land the inset on the existing documentary card
-    # instead of covering its subject and detaching its identifying super.
-    if K.is_take(pic.aid):
-        checked = {row.get("pic") for row in l1.get("documentary_cuts", []) if row["f"][0] <= a < row["f"][1]}
-        window = next((it for it in l1["items"] if it["k"] == "card" and it.get("pic") in checked
-                       and it.get("source_ink") and it["f"][0] <= a < it["f"][1]), None)
+    # instead of covering its subject, including when the picker returns that card itself.
+    if "documentary_cuts" in l1:
+        # pictures() already resolved aliases (including text-cleared copies)
+        # to this timed cut, or returned the synchronous interview.
+        checked = {r["pic"] for r in l1["documentary_cuts"] if r["f"][0] <= a < r["f"][1]}
+        window = next((it for it in l1["items"] if it["k"] == "card" and it["f"][0] <= a < it["f"][1]
+                       and ((it.get("pic") in checked and it.get("source_ink"))
+                            or (K.is_take(pic.aid) and it.get("pic") == pic.aid))), None)
         if window:
             from ..plan import A
             lo, hi = window["f"]
