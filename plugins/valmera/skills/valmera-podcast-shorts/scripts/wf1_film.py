@@ -1089,6 +1089,13 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     keep.append(dict(page,first=first,last=last,demo_note=chain.get("term") or "Definition"))
                     break
         pages = keep + notes
+    import wf1_reporting
+    reporting = wf1_reporting.example(d.get("reporting_example"), len(clock.words), coverage.get("interview_cues", []))
+    reporting_span = None
+    if reporting:
+        first, last = reporting["first"], reporting["last"]
+        reporting_span = (word_frame(first), word_frame(last+1) or f_end)
+        pages = [part for page in pages for part in wf1_principle.outside(page, first, last)]
     # The take reader already located speakers in ordinary camera shots.
     # Screen-share presenter tiles are only one of the possible live returns.
     live_spans = [(round(sp["t0"]*FPS)+LEAD_F, round(sp["t1"]*FPS)+LEAD_F)
@@ -1162,6 +1169,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     publisher_spans = {(a,b) for a,b,p in timed_facts if p.get("publisher_excerpt")}
     phase_spans = [(a,b) for a,b,p in timed_facts if p.get("model_phase")]
     source_pages = phase_spans + [(a,b) for a,b,p in timed_facts if any(f.get("excerpt") or f.get("perspective") for f in p["facts"])]
+    if reporting_span:
+        source_pages.append(reporting_span)
+        report_spans.append(reporting_span)
     if source_pages:
         coverage = dict(coverage, windows=[
             dict(w, on_take=True) if not w.get("publisher_camera") and any(lo <= round(w["t0"]*FPS)+LEAD_F+1 and
@@ -1353,7 +1363,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     composed_spans = [r[:2] for r in ins] + [[lo,hi] for lo,hi,_ in speakers] + [list(span) for span in source_pages]
     composed_spans.extend([a,b] for a,b in returns)
     composed_spans.extend([a,b] for a,b,p in timed_facts if p.get("scope_cue") or p.get("sequence_kind") == "handoff")
-    if (demo and demo["first"] == 0 and demo["last"] == len(clock.words)-1 and not coverage["windows"]) or (publisher and all(w.get("publisher_camera") or w.get("on_take") for w in coverage["windows"])) or (record and not coverage["windows"]) or (thought and all(w.get("on_take") for w in coverage["windows"])) or (coverage.get("episode_examples") and not coverage["windows"]) or (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
+    if (reporting_span == (0,f_end)) or (demo and demo["first"] == 0 and demo["last"] == len(clock.words)-1 and not coverage["windows"]) or (publisher and all(w.get("publisher_camera") or w.get("on_take") for w in coverage["windows"])) or (record and not coverage["windows"]) or (thought and all(w.get("on_take") for w in coverage["windows"])) or (coverage.get("episode_examples") and not coverage["windows"]) or (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
             and any(r[4].get("episode_excerpt") for r in ins)):
         # Both the local demo and the remaining camera passages landed on their directed words.
         resolved_moves,move_spend = coverage.get("moves", []), []
@@ -1629,10 +1639,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         for fa, fb in zip(edges, edges[1:]):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
-            if demo_span and demo_span[0] <= fa < demo_span[1]:
+            on_reporting = reporting_span and reporting_span[0] <= fa < reporting_span[1]
+            if on_reporting or (demo_span and demo_span[0] <= fa < demo_span[1]):
                 from scene.motion import fit_panel
                 crop = [0,0,1,1]
-                box = fit_panel(crop, (take["w"],take["h"]), (W,H), [0,.09,1,.52])
+                seat = [0,.10,1,.48] if on_reporting else [0,.09,1,.52]
+                box = fit_panel(crop, (take["w"],take["h"]), (W,H), seat)
                 P.page([fa,fb],"#14171B",grain=0)
                 P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],source_frame=True,
                        source_ink=[box],caption_baseline=.89)
@@ -2381,6 +2393,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     devices = []                                         # the palette's asks: rows whose type performs (laid at the render, chain.alien_bank)
     # An attributed claim carries the reading on the ground below its source picture.
     fact_pages = []
+    if reporting:
+        a,b = reporting_span
+        wf1_reporting.draw(P,a,b,reporting,word_frame,pal,W,H)
+        fact_pages.append(dict(first=reporting["first"], last=reporting["last"], f=[a,b],
+                               reporting_example=reporting, facts=[dict(value=reporting["finding"],
+                               attribution=reporting["speaker"], source=dict(url=script.get("source_url")))]))
     for lo,hi,rec in readings:
         read = rec["spoken_reading"]
         sources = [row["source"] for row in read["history"]]

@@ -6,6 +6,16 @@ import wf1_principle
 
 
 WRITING = """Write the factual type for this passage from the attached source readings and editorial brief.
+When the speaker recounts a reporting chain and contrasts organizational depth with flatness, return a
+top-level reporting_example object: first and last word IDs for the whole recollection (question through
+payoff), speaker, question (concrete standalone paraphrase, e.g. "Who reports to whom?"), finding_at,
+finding (compact answer scoped to the part the speaker describes), flat_at (first word naming flatness),
+levels:[{at,label}] in the spoken order from person upwards, using the word naming each person, and
+counts:[{at,value}] with each voiced count in digits at its exact word. Supply a count's optional
+level_at (that level's word ID) ONLY if the speaker explicitly identifies the particular manager for it.
+A series of numbers in the same order or of the same length leaves the counts unassigned. Use short
+role labels, one credit, no extra names. The compositor builds this continuous illustration on the live
+take and preserves the spoken contrast. Keep the original caption phrases and other beats outside it.
 record_example is an attributed scenario composed from the interview's actual words. Its opening
 belongs to the live storyteller, including pauses in an analogy. Compose other devices outside that
 passage. The cited line returns at the proposed benefit. Documentation can establish access to a
