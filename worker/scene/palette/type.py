@@ -180,6 +180,75 @@ def counter(l1, work, ask, sense=None):
 
 # --------------------------------------------------------------------------- staircase and the two-size stack
 
+def handoff_route(group, span, steps, *, width, height, voice, ink, accent):
+    """Lay out a connected route once. Move the signal to the receiving station on its cue."""
+    start,end = span
+    name = group + ".label"
+    face = dict(voice, px=round(width*.043), track=0)
+    items, voices = [], {name:face}
+    # Wrap whole stations at their shaped widths. A long route continues on the next
+    # page at a spoken cue; it never shrinks the earlier steps into unreadable type.
+    fitted = []
+    for cue,label in steps:
+        v = K.fit(face,label,.83*width,cap_px=face["px"],floor_px=1)
+        fitted.append((cue,label,K.ink_box(v,label)[0]/width,v))
+    room = .83-sum(w for _,_,w,_ in fitted)
+    gap = max(.042,min(.085,room/max(1,len(fitted)-1)))
+    lines = [[]]
+    x = .085
+    for cue,label,w,v in fitted:
+        if lines[-1] and x+w > .92:
+            lines.append([])
+            x = .085
+        lines[-1].append((cue,label,x,w,v))
+        x += w+gap
+    for i in range(0,len(lines),2):
+        page = lines[i:i+2]
+        a = page[0][0][0] if i else start
+        b = lines[i+2][0][0] if i+2 < len(lines) else end
+        previous = None
+        stations = [(cue,label,x if row_index == 0 else 1-x-w,w,v,.63+.083*row_index)
+                    for row_index,row in enumerate(page) for cue,label,x,w,v in row]
+        for j,(cue,label,x,w,v,y) in enumerate(stations):
+            ident = f"{group}.{i}.{j}"
+            font = name
+            if v["px"] != face["px"]:
+                font = ident+".font"
+                voices[font] = v
+            attrs = dict(text_group=group,fact_type=True)
+            line_y = y+.013
+            after = stations[j+1][0] if j+1 < len(stations) else b
+            opacity = [.58]*(cue-a) + [1.]*(after-cue) + [.82]*(b-after)
+            items.append(K.word(ident,[a,b],label,font,x,y,ink,op=opacity,**attrs))
+            items.append(K.rect(ident+".rail",[a,b],[x,line_y,x+w,line_y+.0035],ink,.5,z=6))
+            if cue < b:
+                items.append(K.rect(ident+".traversed",[cue,b],[x,line_y,x+w,line_y+.0035],accent,.9,z=6))
+
+            if previous:
+                old_x,old_y,old_edge = previous
+                if old_y == line_y:
+                    left,right = sorted((old_edge,x if old_x < x else x+w))
+                    items.append(K.rect(ident+".link",[a,b],[left,line_y,right,line_y+.0025],ink,.65,z=6))
+                else:
+                    # The return bends outside the labels, from the outgoing row to the incoming one.
+                    bend = .948
+                    items.extend([K.rect(ident+".exit",[a,b],[old_edge,old_y,bend,old_y+.0025],ink,.65,z=6),
+                                  K.rect(ident+".bend",[a,b],[bend-.0025*height/width,old_y,bend,line_y],ink,.65,z=6),
+                                  K.rect(ident+".entry",[a,b],[x+w,line_y,bend,line_y+.0025],ink,.65,z=6)])
+
+            cx = x+w/2
+            if cue < after:
+                n = min(8,after-cue)
+                ox,oy = previous[:2] if previous else (cx,line_y)
+                def travel(old,new):
+                    return [round(old+(new-old)*t/n,5) for t in range(1,n+1)]+[new]*(after-cue-n)
+                items.append(dict(id=ident+".signal",k="card",pic="plate",f=[cue,after],z=7,
+                                  plate=dict(c0=accent,c1=accent,grain=0),w=.024,h=.014,
+                                  x=travel(ox,cx),y=travel(oy,line_y),handoff_marker=True))
+            previous = cx,line_y,x+w if y == .63 else x
+    return dict(items=items,voices=voices)
+
+
 def staircase(l1, work, ask, sense=None):
     """A figure as a two-size stack: each line lands on the word that says it, small lines carrying the big one,
     stepping across like stairs when there are three or more."""
