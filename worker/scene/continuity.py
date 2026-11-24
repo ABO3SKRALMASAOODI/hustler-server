@@ -72,7 +72,12 @@ def closing_crops(path, views, size, fps):
         offsets = (x,y,x,y)
         mapped = [s*v+off for v,off in zip(crops[i-1],offsets)]
         common = [op(a,b) for op,a,b in zip((max,max,min,min),mapped,crops[i])]
-        if common[2]<=common[0] or common[3]<=common[1]:
+        # A boundary sample can still be on the old camera. A tiny intersection
+        # would magnify a sliver of the selected portrait on both sides.
+        common_width = common[2]-common[0]
+        common_height = common[3]-common[1]
+        if (common_width < .75*min(mapped[2]-mapped[0], crops[i][2]-crops[i][0])
+                or common_height < .75*min(mapped[3]-mapped[1], crops[i][3]-crops[i][1])):
             chain.clear()
             continue
         crops[i] = _square(common,*size)
@@ -108,3 +113,49 @@ def portrait_region(face, size, frame=None):
     left = min(1.-dx,max(0.,cx-dx/2))
     top = min(bottom-side,max(top,cy-side/2))
     return [left,top,left+dx,top+side]
+
+
+def tracked_head_span(samples, start, end):
+    """Horizontal envelope of the moving head, with room beyond the detected face."""
+    boxes = [s for s in samples if start <= s[0] < end and s[3] > s[1]]
+    if boxes:
+        return (max(0., min(s[1] - .34*(s[3]-s[1]) for s in boxes)),
+                min(1., max(s[3] + .34*(s[3]-s[1]) for s in boxes)))
+
+
+def enclosing_window(path, seconds, action):
+    """Find a visible rectangular UI boundary containing the reader's verified action."""
+    try:
+        import cv2
+    except ImportError:
+        return None
+    capture = cv2.VideoCapture(path)
+    try:
+        capture.set(cv2.CAP_PROP_POS_MSEC, seconds*1000)
+        ok, frame = capture.read()
+    finally:
+        capture.release()
+    if not ok:
+        return None
+    h,w = frame.shape[:2]
+    width = min(720,w)
+    height = round(h*width/w)
+    gray = cv2.resize(cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY),(width,height))
+    edges = cv2.morphologyEx(cv2.Canny(gray,25,75), cv2.MORPH_CLOSE,
+                             cv2.getStructuringElement(cv2.MORPH_RECT,(3,3)))
+    contours,_ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    regions = []
+    for contour in contours:
+        x,y,dx,dy = cv2.boundingRect(contour)
+        if dx*dy >= .85*width*height or cv2.contourArea(contour) < .90*dx*dy:
+            continue
+        box = [x/width,y/height,(x+dx)/width,(y+dy)/height]
+        if box[0] <= action[0] < action[2] <= box[2] and box[1] <= action[1] < action[3] <= box[3]:
+            regions.append((dx*dy,box))
+    if regions:
+        _, inner = min(regions)
+        # Adjacent borders of the same width can surround the title bar as well.
+        l,t,r,b = max((row for row in regions if row[1][0] <= inner[0] and row[1][2] >= inner[2]
+                       and row[1][2]-row[1][0] <= 1.15*(inner[2]-inner[0])
+                       and row[1][3]-row[1][1] <= 1.55*(inner[3]-inner[1])),default=(0,inner))[1]
+        return [max(0,l-.02),max(0,t-.025),min(1,r+.02),min(1,b+.025)]

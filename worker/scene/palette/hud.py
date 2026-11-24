@@ -257,6 +257,17 @@ def fineprint(l1, work, ask, sense=None):
     if not lines:
         return {"skip": "fineprint needs words"}
     a, z, hit = K.span(l1, ask, need=int(o.get("hold", 60)))
+    groups = {}
+    for item in l1.get("items", []):
+        group = item.get("text_group", "")
+        if group.startswith("archive-credit-") and item["f"][0] <= a+1 and a < item["f"][1]:
+            groups.setdefault(group, []).append(item)
+    for group, rows in groups.items():
+        text = " ".join(row["t"] for row in rows).upper()
+        if all(line in text for line in lines):
+            return {"items": [dict(row, id=f"{ask['id']}.credit.{i}") for i,row in enumerate(rows)],
+                    "drop": [row["id"] for row in rows], "marks": [],
+                    "log": {"source_credit": group, "lines": lines}}
     asked = o.get("corner") if o.get("corner") in CORNERS else K.rng_of(l1, ask).choice(CORNERS)
     v = K.mono(o.get("px", 36))
     lh = 1.35 * v["px"] / H
