@@ -102,7 +102,7 @@ def plan(words, title, work, llm, named=None, off_camera=None, frames=None, stor
  "print_readings":[{"first":int,"last":int}],
  "contextual_definitions":[{"start":number,"gloss":str}],
  "comparisons":[{"first":int,"last":int,"premise":str,"consequence":str}],
- "speaker_claims":[{"first":int,"last":int,"speaker":str,"stance":"concern|characterization|recollection","report":str,"scope_question":str}],
+ "speaker_claims":[{"first":int,"last":int,"speaker":str,"stance":"concern|characterization|recollection|observation","report":str,"scope_question":str,"scope_kind":optional "dated_record"}],
  "moves":[{"word":int,"why":str}]}.
 named lists the referents the script stage resolved from the whole moment, each with the event-level
 picture it needs as it was at the time (must_show). For each with identifiable external evidence, plan a
@@ -151,6 +151,12 @@ or partnership materially qualifies it, give the precise scope_question for a te
 Where a speaker imagines granting a tool broad access, a first-party documentation excerpt can illustrate
 scoped permissions. Put that question on their concern. Reserve the hypothetical size comparison for the
 interview, using its comparisons span. Prefer the checked document and original voices to generic coverage.
+When the host gives a rough chronology as background, mark stance=observation and let the full captions carry it.
+When the historical mechanism answers the hook, ask what the dated primary record actually establishes,
+scope_kind=dated_record, on the complete spoken claim. A tender illustrates how existing holders could sell
+while a company was private. A future listing is the host's inference. Give a named financier's punchline its
+own dated_record scope question about identity, financing and earlier holders, with no inference about the
+speaker's personal sale. Keep the gesture and the exact joke in the interview.
 Otherwise omit scope_question. Keep the real demo or partnership on its own factual clause.
 Inventory the concrete entities and quantities actually named in the passage. An inventory entry need not become a new external window.
 Do not inventory an abstract feeling, rhetorical connective or this interview itself as a concrete
@@ -295,7 +301,7 @@ an honest subject; never invent one.'''
     speaker_claims = [c for c in out.get("speaker_claims") or [] if isinstance(c, dict)
                       and type(c.get("first")) is int and type(c.get("last")) is int
                       and 0 <= c["first"] <= c["last"] < len(words)
-                      and c.get("stance") in ("concern", "characterization", "recollection")
+                      and c.get("stance") in ("concern", "characterization", "recollection", "observation")
                       and all(isinstance(c.get(k), str) and c[k].strip() for k in ("speaker", "report"))]
     # Restore the full, timed first-person claim when the picture reading addresses only its conclusion.
     # Its conditional lead-in names the parties the concern applies to, not another filmed event.
@@ -362,6 +368,9 @@ an honest subject; never invent one.'''
     for c in [*([record] if record else []), *routes, *print_readings, *([out["callback"]] if out.get("callback") else []), *speaker_claims, *comparisons, *examples, *local.get('inserts', []), *local.get('speaker_inserts', [])]:
         remaining = []
         for w in windows:
+            if c.get("stance") == "observation" and not c.get("scope_question"):
+                remaining.append(w)
+                continue
             if c in routes and w.get("evidence_role") in ("example","independent"):
                 remaining.append(w)
                 continue

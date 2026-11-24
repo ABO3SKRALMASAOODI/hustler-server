@@ -12,6 +12,9 @@ passage. The cited line returns at the proposed benefit. Documentation can estab
 connected, authorized source with a citation; a participant's private meaning remains an inference.
 For dated archive in archive_pictures, return archive_credits:[{picture: the supplied picture ID,
 source: the supporting URL in sources, label: compact original venue or event and its year}].
+For adjacent views of one dated event, use its same verified venue and date across the shot.
+On a speaker's observation or recollection, the caption carries the exact chronology or joke. A dated_record
+carries the independent event, the actual parties and its time. Leave their future intentions with the speaker.
 For photographs, identify the artifact and its owner as a period example, distinguish a documented
 original from a replica, and date the event separately from the photograph. Use the exact image page
 or its supporting source. The on-screen label is a short museum caption: institution · artifact (event
@@ -124,6 +127,24 @@ on other beats. Use short lines readable in the available speech. The attached m
 WRITING += "\n" + wf1_principle.PROMPT
 
 
+def dated_record(ref):
+    """Bind the reader's selected action and date to a verified span on that exact source."""
+    record = ref.get("record")
+    if not isinstance(record, dict) or not all(isinstance(record.get(k), str) and record[k].strip()
+                                               for k in ("source", "heading", "event_date", "words")):
+        return None
+    sources = [s for s in ref.get("sources") or [] if isinstance(s, dict)]
+    identifier = record.get("identifier_source")
+    supporting = [identifier] if identifier != record["source"] and any(s.get("url") == identifier for s in sources) else []
+    for src in sources:
+        if src.get("url") == record["source"]:
+            for q in src.get("quotations") or []:
+                if q.get("sha256") and q.get("words") == record["words"]:
+                    return dict(source=src["url"], also_sources=supporting, excerpt=q,
+                                statement=ref.get("statement"), record=record)
+    return None
+
+
 def editorial(ctx, script, pack):
     args = getattr(ctx, "args", None) or {}
     moment = args.get("moment") or {}
@@ -171,13 +192,22 @@ def editorial(ctx, script, pack):
         cited = [(src["url"], q) for src in ref.get("sources") or [] if isinstance(src, dict)
                  and src.get("url") in sources for q in src.get("quotations") or []
                  if q in sources[src["url"]].get("quotations", [])]
+        selection = ref.get("selection") or {}
         for claim in claims:
             if ref.get("claim_start") is None or claim.get("start") != ref["claim_start"]:
                 continue
-            for url, q in cited:
-                if q["speaker"].casefold() == str(claim.get("subject")).casefold():
-                    claim.setdefault("primary_excerpt", dict(source=url, quote=q["words"]))
-                    break
+            matches = [(url, q) for url,q in cited
+                       if q["speaker"].casefold() == str(claim.get("subject")).casefold()]
+            if isinstance(selection, dict) and selection:
+                matches = [(url,q) for url,q in matches
+                           if url == selection.get("source") and q["words"] == selection.get("words")]
+            if len(matches) == 1:
+                url,q = matches[0]
+                original = dict(source=url, quote=q["words"])
+                if selection:
+                    claim["primary_excerpt"] = original
+                else:
+                    claim.setdefault("primary_excerpt", original)
         # The same source reader can supply the scoped line when direction chooses the live camera.
         statement = ref.get("statement")
         if isinstance(statement, str) and statement.strip() and type(ref.get("scope_for")) is int:
@@ -185,12 +215,24 @@ def editorial(ctx, script, pack):
             for claim in speaker_claims:
                 if urls and claim["first"] == ref["scope_for"] and claim.get("scope_question"):
                     scoped = dict(source=urls[0], also_sources=urls[1:], statement=statement)
+                    selected = dated_record(ref)
+                    if selected:
+                        claim["scope_fact"] = selected
+                        continue
+                    if claim.get("scope_kind") == "dated_record" or (claim.get("scope_fact") or {}).get("record"):
+                        continue
                     entry = ref.get("program_entry")
                     if isinstance(entry, dict) and all(isinstance(entry.get(k), str) and entry[k].strip()
                                                        for k in ("title","speaker","date")):
                         scoped["program_entry"] = {k:entry[k] for k in ("title","speaker","date")}
-                    if cited:
-                        url, excerpt = cited[0]
+                    # A verified span on a profile can still concern a different proposition.
+                    # Keep legacy single-excerpt readings for direct policy questions.
+                    chosen = [(u,q) for u,q in cited if isinstance(selection, dict) and
+                              u == selection.get("source") and q["words"] == selection.get("words")]
+                    if not selection and len(cited) == 1 and claim.get("stance") == "concern":
+                        chosen = cited
+                    if len(chosen) == 1:
+                        url, excerpt = chosen[0]
                         scoped.update(source=url, also_sources=[u for u in urls if u != url], excerpt=excerpt)
                     if scoped.get("program_entry") or scoped.get("excerpt") or not claim.get("scope_fact"):
                         claim["scope_fact"] = scoped
@@ -235,11 +277,15 @@ def claim_windows(editorial, words):
         if ids and all(isinstance(claim.get(k), str) and claim[k].strip() for k in ("speaker", "report")):
             spans.append(dict(claim, first=ids[0], last=ids[-1]))
     # The picture director has aligned these narrower judgments to the final word clock.
-    return list(editorial.get("speaker_claims") or []) + spans
+    local = list(editorial.get("speaker_claims") or [])
+    return local + [span for span in spans if not any(
+        row["speaker"] == span["speaker"] and row["first"] <= span["first"] and span["last"] <= row["last"]
+        and (row.get("stance") == "observation" or row.get("scope_kind") == "dated_record")
+        for row in local)]
 
 
 CONTEXT_LABELS = {"framework": "Framework", "definition": "Definition"}
-OPINION_LABELS = {"concern": "Concern", "characterization": "Opinion", "recollection": "Recollection"}
+OPINION_LABELS = {"observation": "Observation", "concern": "Concern", "characterization": "Opinion", "recollection": "Recollection"}
 ESTIMATE_LABELS = {"discussed_estimate": "Estimate under discussion", "personal_estimate": "Personal estimate"}
 
 
@@ -263,6 +309,8 @@ def claim_fact(claim, fact, sources, words):
         fact = claim["scope_fact"]
     elif claim.get("primary_excerpt"):
         fact = claim["primary_excerpt"]
+    if claim.get("scope_kind") == "dated_record" and not fact.get("record"):
+        return dict(source=interview, attribution=claim["speaker"], value=claim["report"], chain=chain)
     key = fact.get("source")
     source = sources.get(key) if isinstance(key, str) else None
     if claim.get("stance") in OPINION_LABELS:
@@ -281,6 +329,7 @@ def claim_fact(claim, fact, sources, words):
             return dict(statement=statement, value=statement, source=source, supporting_sources=supporting,
                         **({"program_entry": fact["program_entry"]} if fact.get("program_entry") else {}),
                         **({"excerpt": excerpt} if verified else {}),
+                        **({"record": fact["record"]} if verified and fact.get("record") else {}),
                         perspective=dict(speaker=claim["speaker"], stance=claim["stance"],
                                          report=claim["report"], interview=interview.get("url")))
         return dict(source=interview, attribution=claim["speaker"], value=claim["report"], chain=chain)

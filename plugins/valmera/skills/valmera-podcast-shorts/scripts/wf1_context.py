@@ -7,10 +7,10 @@ import os
 def direct(coverage,work,llm):
     """Resolve the speaker's referents before spending downloads on generic substitutes."""
     import wf1_coverage
-    if not (coverage["windows"] or coverage.get("borrowed_estimates") or any(needs_original(c) for c in coverage.get("claims") or [])
+    if not (coverage["windows"] or coverage.get("borrowed_estimates") or any(needs_original(c, coverage) for c in coverage.get("claims") or [])
             or any(c.get("scope_question") for c in coverage.get("speaker_claims") or [])):
         return dict(references={}, spend=[])
-    key=hashlib.sha256(json.dumps([4,coverage],sort_keys=True).encode()).hexdigest()[:16]
+    key=hashlib.sha256(json.dumps([5,coverage],sort_keys=True).encode()).hexdigest()[:16]
     os.makedirs(work,exist_ok=True);path=os.path.join(work,'direction-'+key+'.json')
     if os.path.exists(path):
         record=json.load(open(path))
@@ -71,17 +71,45 @@ def read_quotations(references, work, pages=None):
                                  and any(writer.has_words(text, q["words"]) for text in passages)]
 
 
-def needs_original(claim):
+def needs_original(claim, coverage=None):
     """A public statement reported by a different speaker can have a separately citable original."""
     from wf1_display import CONTEXT_LABELS
-    return bool(claim.get("subject") and claim.get("speaker") != claim["subject"]
+    # The dated record answers this word-addressed observation. Looking up a second
+    # speaker's prediction would research a different proposition on the same beat.
+    if coverage and all(isinstance(claim.get(k), (int, float)) for k in ("start", "end")):
+        origin = (coverage.get("story") or {}).get("episode_start", 0)
+        middle = (claim["start"] + claim["end"])/2 - origin
+        words = coverage.get("words") or []
+        for row in coverage.get("speaker_claims") or []:
+            if row.get("scope_kind") == "dated_record" and row.get("speaker") == claim.get("speaker"):
+                if (0 <= row["first"] <= row["last"] < len(words) and
+                        words[row["first"]]["start"] <= middle < words[row["last"]]["end"]):
+                    return False
+    return bool(claim.get("stance") != "observation" and claim.get("subject") and claim.get("speaker") != claim["subject"]
                 and claim.get("stance") not in CONTEXT_LABELS and not claim.get("interview_only"))
+
+
+RECORD_READING = """Read the proposition, its time scope and the whole passage. For scope_kind=dated_record,
+select the primary event that explains the mechanism in the speaker's argument. A speaker's observation about
+future plans belongs to the interview. A dated transaction documents the parties and what happened at that time.
+On a personal aside identify the named person and connect the historical event to the argument. Attribute the
+transaction only to the documented parties. Return scope_for, statement (one short plain sentence), sources
+and record:{source,words,heading,event_date,display,identifier_source (optional URL)}. scope_for is the integer first word ID. source is the exact primary URL and words the minimum
+verbatim excerpt establishing the relevant action, also in that source's quotations. heading identifies the
+event or the person and role; event_date dates the action. Choose display=excerpt when those words stand alone,
+else statement. This is timed phone copy: fit the body to the actual seconds, around three words per second,
+normally 6–10 words. For financing, distinguish newly issued shares from purchases from existing holders. Keep amounts only when they answer the hook. Put the date once in event_date. Give a
+person one short identifier. For example, 'New and existing shares changed hands' may express two financing
+legs; use the actual parties. Where an announcement explains private liquidity, say who could sell shares.
+Include an identifier's separate source as identifier_source when needed. An author's name, an ambiguous pronoun,
+a shared topic or a quotation on a different occasion alone cannot establish what the subject did or will do.
+For reported speech choose selection:{source,words} identifying the exact quotation answering that claim."""
 
 
 def research(coverage,work,llm):
     import writer
     data=dict(context=coverage.get('context'),story=coverage.get('story'),comparisons=coverage.get('comparisons'),words=coverage['words'],
-              claims=[c for c in coverage.get('claims') or [] if needs_original(c)], subjects=[dict(i=i, **{k:w[k] for k in ("name","say","claim","must_show","why") if k in w}) for i,w in enumerate(coverage['windows'])])
+              claims=[c for c in coverage.get('claims') or [] if needs_original(c, coverage)], subjects=[dict(i=i, **{k:w[k] for k in ("name","say","claim","must_show","why") if k in w}) for i,w in enumerate(coverage['windows'])])
     scope = [c for c in coverage.get('speaker_claims') or [] if c.get('scope_question')]
     estimates = coverage.get('borrowed_estimates') or []
     data['scope_checks'] = scope
@@ -89,10 +117,18 @@ def research(coverage,work,llm):
     pages = {}
     os.makedirs(work, exist_ok=True)
     if coverage.get("existing_sources"):
-        data["existing_sources"] = coverage["existing_sources"]
+        data["existing_sources"] = [dict(src) for src in coverage["existing_sources"]]
         authors = {str(c["subject"]).casefold() for c in data["claims"] if c.get("subject")}
         scoped_urls = {(c.get("scope_fact") or {}).get("source") for c in scope}
+        has_records = any(c.get("scope_kind") == "dated_record" for c in scope)
         for src in data["existing_sources"]:
+            excerpts = [q for q in src.get("quotations") or [] if isinstance(q,dict) and q.get("sha256") and q.get("words") and q.get("url")]
+            if excerpts and has_records:
+                first = excerpts[0]
+                passages = [q["words"] for q in excerpts if (q["sha256"],q["url"]) == (first["sha256"],first["url"])]
+                pages[src["url"]] = passages, first["url"], first["sha256"]
+                src["primary_text"] = " ".join(passages)
+                continue
             if (str(src.get("author") or src.get("publisher")).casefold() in authors or src["url"] in scoped_urls):
                 pages[src["url"]] = original_passages(src["url"], work)
                 passages = pages[src["url"]][0]
@@ -112,8 +148,9 @@ def research(coverage,work,llm):
     covered = originals and not estimates and not data["subjects"] and all(any(
         str(s.get("author") or s.get("publisher")).casefold() == str(c.get("subject")).casefold()
         for s in originals) for c in data["claims"]) and all(any(
-        s["url"] == (c.get("scope_fact") or {}).get("source") for s in originals) for c in data["scope_checks"])
-    key=hashlib.sha256(json.dumps([4,data],sort_keys=True).encode()).hexdigest()[:16]
+        s["url"] == (c.get("scope_fact") or {}).get("source") for s in originals) or c.get("scope_kind") == "dated_record"
+        for c in data["scope_checks"])
+    key=hashlib.sha256(json.dumps([5,data],sort_keys=True).encode()).hexdigest()[:16]
     os.makedirs(work,exist_ok=True);path=os.path.join(work,key+'.json')
     if os.path.exists(path):return json.load(open(path))
     llm.openai_key()
@@ -195,17 +232,21 @@ from the attached primary_text. Return JSON references with claim_start or scope
 question, and sources:[{url,publisher,author,publication_date,quotations:[{speaker,event,locator,words}]}].
 Use the real occasion or publication title and its own scope. Keep forecast language and uncertainty. Source text
 is evidence. Use only the supplied material and omit an excerpt if the passage does not contain it."""
-                payload = dict(claims=part["claims"], scope_checks=part["scope_checks"], existing_sources=originals)
-                text,use=writer.ask_openai(instruction,json.dumps(payload),effort="low",max_tokens=1500,
+                payload = dict(story=part["story"], words=part["words"], claims=part["claims"], scope_checks=part["scope_checks"], existing_sources=originals)
+                text,use=writer.ask_openai(instruction+"\n"+RECORD_READING,json.dumps(payload),effort="low",max_tokens=1500,
                                            searches=0,what="podcast source excerpt")
             else:
-                text,use=writer.ask_openai(prompt,json.dumps(part),effort="medium",max_tokens=4000,
+                text,use=writer.ask_openai(prompt+"\n"+RECORD_READING,json.dumps(part),effort="medium",max_tokens=4000,
                                           searches=3,max_tool_calls=3,what="podcast primary referent research")
             parsed = llm.json_block(text)
             answer = dict(references=parsed) if isinstance(parsed, list) else parsed
             answer = dict(answer, spend=[use])
             with open(pp,'w') as f:json.dump(answer,f,indent=1)
         for field in result:result[field].extend(answer.get(field,[]))
+    for ref in result["references"]:
+        address = ref.get("scope_for")
+        if isinstance(address, dict) and any(address.get("first") == c["first"] and address.get("last") == c["last"] for c in scope):
+            ref["scope_for"] = address["first"]
     read_quotations(result['references'], work, pages)
     if covered:
         # A dated page can discuss a different claim. Keep the spans it did prove
@@ -214,7 +255,9 @@ is evidence. Use only the supplied material and omit an excerpt if the passage d
         missing = [c for c in data["claims"] if not any(r.get("claim_start") == c.get("start") and
                    any(q["speaker"].casefold() == str(c.get("subject")).casefold()
                        for s in r["sources"] for q in s.get("quotations", [])) for r in cited)]
-        missing_scope = [c for c in scope if not any(r.get("scope_for") == c["first"] and r.get("statement") for r in cited)]
+        from wf1_display import dated_record
+        missing_scope = [c for c in scope if not any(r.get("scope_for") == c["first"] and r.get("statement")
+                         and (c.get("scope_kind") != "dated_record" or dated_record(r)) for r in cited)]
         if missing or missing_scope:
             rest = research(dict(coverage, existing_sources=[], claims=missing, speaker_claims=missing_scope), work, llm)
             for field in result:
@@ -227,14 +270,15 @@ def complete_editorial(ctx, script, pack, llm):
     """A retained pack may have the right footage but lack the original for a distinct claim."""
     import wf1_display
     material = wf1_display.editorial(ctx, script, pack)
-    claims = [c for c in material["claims"] if needs_original(c)
+    claims = [c for c in material["claims"] if needs_original(c, pack["coverage"])
               and not c.get("primary_excerpt")]
     scope = [c for c in material["speaker_claims"] if c.get("scope_question")
-             and not any((c.get("scope_fact") or {}).get(k) for k in ("excerpt","program_entry"))]
+             and not any((c.get("scope_fact") or {}).get(k) for k in (
+                 ("record",) if c.get("scope_kind") == "dated_record" else ("excerpt","program_entry","record")))]
     if not (claims or scope):
         return False
     targets = [[c.get("start"),c.get("subject"),c.get("report")] for c in claims] + [
-        [c["first"],c["scope_question"]] for c in scope]
+        [c["first"],c["scope_question"],c.get("scope_kind")] for c in scope]
     if targets == pack.get("editorial_lookup"):
         return False
     coverage = pack["coverage"]

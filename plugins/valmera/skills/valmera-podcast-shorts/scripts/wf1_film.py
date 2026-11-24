@@ -1038,7 +1038,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
 
     def needs_reading_page(facts):
         if opinion_byline(facts):
-            return False
+            return facts[0]["chain"].get("stance") == "observation"
         if any(f.get("excerpt") or f.get("chain") or wf1_display.source_statement(f, script.get("source_url")) for f in facts):
             return True
         if not any(f.get("attribution") for f in facts):
@@ -1287,6 +1287,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     live_citations.update((a,b) for a,b,p in timed_facts if len(p["facts"]) == 1
                           and p["facts"][0].get("perspective", {}).get("stance") == "concern"
                           and p["facts"][0].get("excerpt"))
+    dated_spans = {(a,b) for a,b,p in timed_facts if any(f.get("record") for f in p["facts"])}
+    live_citations.update(dated_spans)
     comparison_landings = {word_frame(p["sequence"][-1]["at"]): b for a,b,p in timed_facts
                            if p.get("sequence_kind") == "comparison"}
     if source_pages:
@@ -1492,6 +1494,18 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                        speaker_panel=True,caption_baseline=.86)
                 cut_pts.append(fa)
                 continue
+            if any(lo <= fa < hi for lo, hi in dated_spans) and pieces[k]["who"] == "speaker":
+                # Keep the full camera height for the gesture, beside the short source reading.
+                face = max(meta[pieces[k]["key"]].get("faces", []), key=lambda q: q[2]*q[3], default=None)
+                if face and len(tshots[pieces[k]["cut"]].get("faces") or []) <= 1 and not reading.get("inserts"):
+                    focus = (face[0] + face[2]/2, .5)
+                    box = [0, .025, 1, .515]
+                    crop = F.cover_crop(take["w"],take["h"],W/(.49*H),focus,(.5,.5))
+                    P.page([fa,fb],"#14171B",grain=0)
+                    P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],speaker_panel=True,
+                           source_ink=[box],caption_baseline=.88)
+                    cut_pts.append(fa)
+                    continue
             if any(lo <= fa < hi and (lo,hi) not in live_citations for lo,hi in source_pages):
                 P.page([fa,fb],"#14171B",grain=0)
                 cut_pts.append(fa)
@@ -1861,6 +1875,20 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
 
     document_pics = set()
     pos, labelled, labels, flashes = 0, set(), [], []
+    from scene.text_layout import shared_source_credits
+    views = []
+    for a,b,kind,name,rec in ins:
+        src = rec.get("source") or {}
+        url = src.get("url")
+        page = next((p for lo,hi,p in timed_facts if lo <= a and b <= hi and any(
+            url in (fact.get("also_sources") or []) or url == fact["source"].get("url")
+            for fact in p["facts"])), None)
+        credit = (d.get("archive_credits") or {}).get(rec["path"]) or {}
+        if kind == "clip" and url and page and src.get("channel") and not credit.get("credit"):
+            views.append((a,b,(url,rec.get("window"),page["first"],page["last"]),src["channel"],credit.get("label")))
+    shared_credits = shared_source_credits(views)
+    for lo,hi,credit in shared_credits:
+        wf1_display.reading_card(P,[lo,hi],"","",credit,pal,centre=.12,group="figure-credit")
     runs = _runs(ins)
     layouts_used = []
     for run in runs:
@@ -1968,6 +1996,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     P.pictures[-1]["selected_archive_view"] = True
                 wf1_display.reading_card(P, [f0,f1], "", archive_credit["label"], archive_credit["credit"],
                                          pal, centre=.68, group="archive-credit")
+                continue
+            if any(lo <= f0 and f1 <= hi for lo,hi,_ in shared_credits):
                 continue
             if rec.get("provider") == "primary-document":
                 # The figure and the supporting statement may have different sources.
@@ -2278,7 +2308,20 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 body = str(fact["value"])
                 statement = wf1_display.source_statement(fact, script.get("source_url"))
                 excerpt = fact.get("excerpt")
-                if fact.get("program_entry"):
+                if fact.get("record"):
+                    record = fact["record"]
+                    label = record["heading"]
+                    body = statement if record.get("display") == "statement" else "“" + excerpt["words"] + "”"
+                    date = record["event_date"]
+                    from datetime import datetime
+                    for pattern, style in (("%Y-%m-%d", "%d %b %Y"), ("%Y-%m", "%b %Y")):
+                        try:
+                            date = datetime.strptime(date, pattern).strftime(style)
+                            break
+                        except ValueError:
+                            continue
+                    citation = source + " · " + date
+                elif fact.get("program_entry"):
                     entry = fact["program_entry"]
                     body, label = entry["title"], source
                     citation = "Talk by " + entry["speaker"] + " · " + entry["date"]

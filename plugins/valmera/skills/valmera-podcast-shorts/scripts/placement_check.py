@@ -531,7 +531,9 @@ def media_key(row, frames):
         parts = [(sha, f-lo) for f in samples for lo,hi,sha in frames if lo <= f < hi]
         if len(parts)==len(samples):
             return ["encoded", fps, parts]
-        return None
+        # A branded mux has no segment map. An identical file and sample clock
+        # can still reuse its composed reading before starting a decoder.
+        return ["file", file_digest(rec["path"]), fps, samples]
     view = visible_slice(rec, kind)
     # The image sent by evidence() is this integer crop, even when the subject
     # tracker returns subpixel differences on a retry.

@@ -134,7 +134,7 @@ def script(ctx, ideas_out):
                "report is a short card line (aim for 6–12 words). A separate byline names the reporter: omit that "
                "name from the line. Name the subject, use conditional language for a personal forecast, and preserve "
                "uncertainty, timing and scope. For estimates, include stance (discussed_estimate when a speaker questions or cites an estimate, "
-               "personal_estimate for their own assessment). A hypothetical with two linked figures is one thought: keep the "
+               "personal_estimate for their own assessment). Use observation for incidental recollected chronology. A hypothetical with two linked figures is one thought: keep the "
                "quantity, consequence and uncertainty together in one concise report. A challenge to an estimate can be a "
                "plain question on the card. Distinguish apparent precision from evidence. In a first-person assessment "
                "let the byline identify its author. Describe both the stakes and how the "
@@ -1775,8 +1775,14 @@ def _rebuild_motion(ctx, script, sc, report, defer=False):
     pics=sc['beats'].get('pictures') or []
     # The director selected this specific still as documentary evidence. Its lack
     # of motion is already known. Other placements still receive their own repair.
+    records = {fact["record"]["source"] for page in sc["beats"].get("display_facts", [])
+               for fact in page["facts"] if fact.get("record")}
     remaining = [row for row in report['placements']
-                 if not (row.get('ok') and pics[row['id']].get('selected_archive_view'))]
+                 if not (row.get('ok') and not row.get('unchecked') and
+                         (pics[row['id']].get('selected_archive_view') or
+                          (pics[row['id']].get('mode') == 'document' and
+                           (pics[row['id']].get('document') or {}).get('sha256') and
+                           pics[row['id']]['document'].get('url') in records)))]
     stills={pics[row['id']]['path'] for row in remaining if row.get('motion_ok') is not True
             and pics[row['id']].get('mode') != 'source-insert'}
     previous=set(pack.get('composed_stills') or [])
