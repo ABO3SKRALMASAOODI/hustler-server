@@ -1171,6 +1171,9 @@ def build(script, sup, style_id, direction=None):
                         for r in d.get("reframe", []) if isinstance(r, dict))
             if not rec.get("approved_crop") or exact:
                 row[4] = dict(rec,reframe=True)
+                if rec.get("provider") == "primary-document":
+                    from wf1_documents import uncropped_image
+                    row[4] = uncropped_image(row[4])
     for row in ins:                                      # a clip the check cut clear of another editor's text is a new file
         if row[4]["path"] not in keys:
             keys[row[4]["path"]] = (P.video if row[2] == "clip" else P.image)(asset_id("v" if row[2]=="clip" else "p",row[4]), row[4])
@@ -1496,7 +1499,7 @@ def build(script, sup, style_id, direction=None):
         # origin: the candidate this picture is (a copy the check cut clear of another editor's text is placed under a
         # new path). The composed review's findings are keyed on it, so its repair reaches the candidate the next build
         # proposes (adversarial review, 20 Nov: findings keyed on the cleared path never matched and the short was lost).
-        origin = (rec.get("text_cleared") or {}).get("from_path") or rec["path"]
+        origin = rec.get("document_origin") or (rec.get("text_cleared") or {}).get("from_path") or rec["path"]
         P.pictures.append(dict(f=[f0, f1], visible_f=[f0, rec.get("audit_until", f1)], kind=kind, name=name, path=rec["path"], origin=origin,
                                shows=rec.get("shows"), mode=mode, pic=keys[rec["path"]], source_slice=rec.get("src"),
                                window=rec.get("window"), claim=rec.get("claim"), example=rec.get("example"), clause=rec.get("clause"), clause_t=rec.get("clause_t"), fit=rec.get("fit"),
@@ -1605,7 +1608,7 @@ def build(script, sup, style_id, direction=None):
         literal = rec.get("attribution") or ""
         detail = (rec.get("document") or {}).get("detail")
         figure = valid_detail(detail)
-        if not figure:
+        if not figure and not rec.get("reframe"):
             detail = recorded_detail(rec["path"], literal)
         P.page(span, "#171B23", "#0D1015", grain=.018)
 
@@ -1614,11 +1617,12 @@ def build(script, sup, style_id, direction=None):
             P.card(during, key, box, crop=crop, source_ink=[box], caption_baseline=.88, **kw)
 
         full = [0., 0., 1., 1.]
-        if figure:
+        crop = detail if figure and not rec.get("reframe") else full
+        if figure or rec.get("reframe"):
             from scene.motion import document_figure
             below = .50 if any(lo < f1 and f0 < hi for lo,hi in report_spans) else .79
-            box = document_figure(detail, size, (W,H), bottom=below)
-            P.card(span, key, box, crop=detail, source_ink=[box], caption_baseline=.88, document_excerpt=True)
+            box = document_figure(crop, size, (W,H), bottom=below)
+            P.card(span, key, box, crop=crop, source_ink=[box], caption_baseline=.88, document_excerpt=True)
         elif detail:
             # Legacy OCR supplies the heading alone. Keep the artifact that gives that label meaning.
             view(full, [.055,.15,.945,.30], span)
@@ -1630,7 +1634,7 @@ def build(script, sup, style_id, direction=None):
         else:
             view(full, [.055, .198, .945, .48], span)
         note(f0, f1, kind, name, rec, "document")
-        P.pictures[-1].update(source_crop=detail if figure else full, document=rec.get("document"), excerpt_crop=detail)
+        P.pictures[-1].update(source_crop=crop, document=rec.get("document"), excerpt_crop=detail)
 
     def bleed(f0, f1, kind, name, rec, key):
         source_ink = clipped_source_ink(rec) if kind == "clip" else []

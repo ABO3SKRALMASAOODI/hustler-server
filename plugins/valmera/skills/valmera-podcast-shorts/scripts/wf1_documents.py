@@ -111,6 +111,25 @@ def valid_detail(box):
             and 0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1)
 
 
+def uncropped_image(rec):
+    """Restore the verified publisher frame behind an acquired image crop, if retained."""
+    from PIL import Image
+    from placement_check import file_digest
+
+    doc = rec.get("document") or {}
+    path = Path(rec["path"]).with_name("original-image")
+    if not valid_detail(doc.get("box")) or doc["box"] == [0, 0, 1, 1] or not path.is_file():
+        return rec
+    if file_digest(str(path)) != doc.get("sha256"):
+        return rec
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+    except OSError:
+        return rec
+    return dict(rec, path=str(path), w=width, h=height, document_origin=rec["path"])
+
+
 @lru_cache(maxsize=64)
 def recorded_detail(path, literal):
     """Locate the placement reader's literal in a retained crop that predates authored detail boxes."""

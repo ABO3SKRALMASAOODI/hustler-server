@@ -836,3 +836,23 @@ def test_only_identical_unwidened_composed_findings_recover_the_original_crop(tm
     (tmp_path/"render_reviews.json").write_text(json.dumps([dict(contract=CONTRACT, placements=rows)]))
     found = wf.current_rejections(str(tmp_path))
     assert [r["review_key"] for r in found] == ["first","different"]
+
+
+def test_identical_recomposed_score_reuses_its_mux_and_mix(tmp_path, monkeypatch):
+    ctx = SimpleNamespace(supply=str(tmp_path), run_dir=str(tmp_path))
+    scene = tmp_path/"l1.json"
+    scene.write_text(json.dumps(dict(items=[])))
+    sc = dict(l1=str(scene), beats={})
+    (tmp_path/"render_revision.json").write_text(json.dumps(wf.render_revision(sc)))
+    mux, mix = tmp_path/"film_engine.mp4", tmp_path/"sound.m4a"
+    mux.write_bytes(b"drawn frames")
+    mix.write_bytes(b"programme mix")
+    monkeypatch.setattr(wf, "recompose", lambda *args: dict(l1=str(scene), beats={}))
+    wf._rescore(ctx, {}, sc)
+    def render(*args):
+        assert mux.read_bytes() == b"drawn frames" and mix.read_bytes() == b"programme mix"
+        return dict(film=str(mux))
+    monkeypatch.setattr(wf.wf3, "render", render)
+    monkeypatch.setattr(wf, "_render_review", lambda *args: dict(rejected=0, moving_share=1., placements=[]))
+    monkeypatch.setattr(wf, "_rebuild_holds", lambda *args, **kw: False)
+    wf.render(ctx, {}, sc)

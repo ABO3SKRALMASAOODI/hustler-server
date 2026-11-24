@@ -1638,7 +1638,8 @@ def render(ctx, script, sc):
         rebuilt['spend']=previous_spend+[u for u in rebuilt.get('spend',[]) if u not in previous_spend]
         sc.clear();sc.update(rebuilt)
         json.dump(sc,open(os.path.join(ctx.run_dir,'score.json'),'w'),indent=1)
-        invalidate_render(ctx)
+        if not sc.get("l1"):
+            invalidate_render(ctx)
     while True:
         prepare_picture_mix(ctx, sc)
         revision=render_revision(sc)
@@ -1863,7 +1864,9 @@ def _rescore(ctx, script, sc):
     sc.clear()
     sc.update(rebuilt)
     json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
-    invalidate_render(ctx)
+    # The render loop compares the rebuilt scene and mix to the persisted revision.
+    if not sc.get("l1"):
+        invalidate_render(ctx)
 
 
 def hold_windows(measured, coverage, pictures, fps=None, lead=None):
@@ -2001,7 +2004,8 @@ def unrepaired(picture, found):
         if (picture.get("approved_crop") and r.get("fault") == "reframe" and r.get("f")
                 and (r["f"] != picture.get("f") or r.get("source_slice") != picture.get("source_slice"))):
             continue
-        if r.get("fault") != "reframe" or not picture.get("reframed"):
+        if (r.get("fault") != "reframe" or not picture.get("reframed")
+                or (picture.get("mode") == "document" and can_widen_source(picture))):
             return True
     return False
 
@@ -2043,7 +2047,9 @@ def _repair_window_boundaries(ctx, rejected):
 
 
 def can_widen_source(picture):
-    return picture.get("source_crop") != [0,0,1,1] and not picture.get("reframed")
+    # Older scores marked a document reframed while still drawing its clipped detail.
+    return picture.get("source_crop") != [0,0,1,1] and (
+        not picture.get("reframed") or picture.get("mode") == "document")
 
 
 def _rebuild_rejected(ctx, script, sc, report, defer=False):

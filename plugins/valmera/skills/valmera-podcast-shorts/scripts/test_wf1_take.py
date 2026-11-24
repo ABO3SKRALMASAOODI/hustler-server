@@ -511,3 +511,51 @@ def test_close_landscape_speaker_keeps_the_sides_of_the_head(tmp_path, quiet_eng
     scene,_ = film.build(script,pack,"archive-reel",dict(coverage_final=True))
     assert any(it.get("source_frame") and it.get("crop") and it["crop"][0] < .27 and it["crop"][2] > .61
                and it.get("src") and it["f"][0]<=44<it["f"][1] for it in scene["items"])
+
+
+def test_repeated_document_reframe_changes_the_drawn_card(tmp_path, quiet_engines, monkeypatch):
+    import json
+    from PIL import Image
+    import placement_check
+    import wf1_coverage
+    import wf1_short as wf
+
+    pack = _sup(tmp_path, cuts_two_shot())
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *args: ([], []))
+    words = pack["words"]["words"]
+    script = dict(title="Search", segments=[
+        dict(say=" ".join(w["w"] for w in words if w["seg"] == seg), pictures=[]) for seg in (0, 1)])
+    path = tmp_path / "answer-and-citation.jpg"
+    Image.new("RGB", (720, 616)).save(path)
+    original = tmp_path / "original-image"
+    Image.new("RGB", (842, 842), "navy").save(original, format="PNG")
+    detail = [.009, .407, .991, .995]
+    rec = dict(path=str(path), w=720, h=616, faces=[], provider="primary-document", page="publisher/search",
+               window=1, document=dict(page=1, detail=detail, box=[.065,.067,.921,.798],
+                                       sha256=placement_check.file_digest(str(original))))
+    pack["pictures"] = {"AI chatbots": [rec]}
+    pack["archived_placement_plan"] = dict(run_id="copy", rows=[[40, 77, "photo", "AI chatbots", rec]],
+                                           report=dict(contract=placement_check.CONTRACT, spend=[]))
+    def compose(findings):
+        return film.build(script, pack, "footage-cut", dict(coverage_final=True, reframe=findings))
+
+    previous, beats = compose([])
+    picture, = beats["pictures"]
+    finding = dict(window=1, path=str(path), source_crop=detail, f=picture["f"], fault="reframe",
+                   origin_sha256=placement_check.file_digest(str(path)), source=rec["page"],
+                   review_key="first", framing_key=wf.framing_key(previous, 40, 77))
+    retry = dict(finding, fault="contradiction", reframed=True, review_key="again")
+    (tmp_path/"render_rejected.json").write_text(json.dumps([finding, retry, retry]))
+    (tmp_path/"render_rejected_contract.json").write_text(json.dumps(placement_check.CONTRACT))
+    reviews = [dict(key=k, fault="reframe", ok=False) for k in ("first", "again")]
+    (tmp_path/"render_reviews.json").write_text(json.dumps([dict(contract=placement_check.CONTRACT, placements=reviews)]))
+    findings = wf.current_rejections(str(tmp_path))
+    assert findings == [finding]
+    repaired, beats = compose(findings)
+    card, = [it for it in repaired["items"] if it.get("document_excerpt")]
+    assert card["crop"] == beats["pictures"][0]["source_crop"] == [0., 0., 1., 1.]
+    assert repaired["assets"][card["pic"]]["path"] == str(original)
+    assert beats["pictures"][0]["origin"] == str(path)
+    assert wf.framing_key(repaired, 40, 77) != finding["framing_key"]
+    assert wf.unrepaired(dict(picture, reframed=True), findings)
+    assert not wf.unrepaired(beats["pictures"][0], findings)
