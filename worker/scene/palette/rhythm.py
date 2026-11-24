@@ -746,9 +746,39 @@ def snap(l1, work, ask, sense_=None, pool=None):
         return {"skip": "no picture under the word"}
     lo, hi = sh["f"]
     size = float(args.get("size", 1.3))
+    panel = sh["k"] == "card"
+    if panel and sh.get("fit_motion"):
+        # The crop already encloses moving hands and the head. Use the matte
+        # around this fitted picture as the zoom room, including the overshoot.
+        e = min(hi, f + max(4, int(args.get("hold") or hi-f)))
+        scales = []
+        for frame in range(lo, hi):
+            scale = A(sh.get("s", 1), frame, lo)
+            if frame >= f and (frame < e or not args.get("back")):
+                x, y = A(sh["x"], frame, lo), A(sh["y"], frame, lo)
+                room = min(2*min(x,1-x)/A(sh["w"],frame,lo),
+                           2*min(y,1-y)/A(sh["h"],frame,lo))
+                requested = scale * size * (1 + .045*math.exp(-(frame-f)/1.6))
+                scale = min(requested, room)
+            scales.append(round(scale, 5))
+        # A full-width view has no space beyond its edges. Give it a small
+        # anticipation inside the matte, then land on the full gesture.
+        initial_scale = A(sh.get("s", 1), f, lo)
+        if size > 1 and scales[f-lo] <= initial_scale:
+            inset = 1 / min(size, 1.25)
+            if f > lo:
+                for frame in range(max(lo, f-4), f):
+                    u = 1 - (f-1-frame)/4
+                    scales[frame-lo] *= 1 - (1-inset)*u
+            else:
+                for frame in range(f, min(e, f+4)):
+                    scales[frame-lo] *= 1 - (1-inset)*(1-(frame-f)/4)
+        return dict(items=[dict(sh, s=scales)], drop=[sh["id"]], assets={},
+                    events=[dict(f=f, what="snap zoom", kind="punch", strength=.7)],
+                    log=dict(shot=sh["id"], f=f, size=round(scales[f-lo]/A(sh.get("s",1),f,lo),3),
+                             until=e, back=bool(args.get("back")), fitted=True))
     pic = K.pic_of_asset(l1, work, sh.get("pic"))
     cs = K.crops(l1, work, sh)
-    panel = sh["k"] == "card"
     drawn_width = W * sh.get("w", .5) if panel else W
     if panel and pic and not sh.get("crop"):
         cs = [sense.cover(pic.w, pic.h, drawn_width, H * sh.get("h", .5))] * (hi - lo)
