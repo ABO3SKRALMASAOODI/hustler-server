@@ -392,6 +392,9 @@ SYSTEM = (
     "For a matching source, set full_source=true when the full frame establishes the action but the phone slice "
     "cuts its visible result, source interface, file label, or diagram. If even the full frames cannot illustrate "
     "the clause, mark the candidate false and give the missing evidence. "
+    "For a selected UI result in a publisher figure, give mark_box around its precise result or location "
+    "and action_box around only the file heading and enough adjacent rows to read it on a phone. "
+    "Keep unrelated findings and technical advisory text outside this excerpt. "
     "For a readable demonstration give action_box=[left,top,right,bottom] in full-source fractions around "
     "the changing control or result rows, tight enough for their text to be read on a phone. Exclude unrelated task history and editor chrome. Give action_caption as a short plain description of that visible change. Leave the box null for a broad physical scene. "
     "If the publisher's own moving title is partially occluded inside the full original, identify "
@@ -479,7 +482,7 @@ def _decision(decision, review, menu=None):
     from wf1_documents import valid_detail
     action = decision.get("action_box")
     foreign = decision.get("foreign_text") is True
-    return dict(action_box=action if valid_detail(action) else None, action_caption=str(decision.get("action_caption") or "").strip()[:100], full_source=decision.get("full_source") is True, ok=ok, fit=min(max(fit, 0), 10), subject_x=sx, fault=fault, reason=decision.get("reason", ""), model=MODEL,
+    return dict(mark_box=decision.get("mark_box") if valid_detail(decision.get("mark_box")) else None, action_box=action if valid_detail(action) else None, action_caption=str(decision.get("action_caption") or "").strip()[:100], full_source=decision.get("full_source") is True, ok=ok, fit=min(max(fit, 0), 10), subject_x=sx, fault=fault, reason=decision.get("reason", ""), model=MODEL,
                 motion_ok=decision.get("motion_ok") is True, motion_reason=decision.get("motion_reason", ""),
                 attribution_text=str(decision.get("attribution_text") or "")[:120],
                 name_super=" ".join(str(decision.get("name_super") or "").split())[:60],
@@ -494,7 +497,7 @@ def _foley(answer, menu):
     return fam if menu and fam in menu else None
 
 
-KEPT = ("action_box", "action_caption", "ok", "full_source", "fit", "subject_x", "fault", "reason", "model", "motion_ok", "motion_reason", "attribution_text", "name_super",
+KEPT = ("mark_box", "action_box", "action_caption", "ok", "full_source", "fit", "subject_x", "fault", "reason", "model", "motion_ok", "motion_reason", "attribution_text", "name_super",
         "foreign_text", "text_box", "text_reason", "foley")
 
 
@@ -764,6 +767,8 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
             if decision.get("action_box"):
                 rec["action_box"] = decision["action_box"]
                 rec["action_caption"] = decision.get("action_caption") or ""
+                if decision.get("mark_box"):
+                    rec["mark_box"] = decision["mark_box"]
             rec["full_source"] = decision.get("full_source") is True
             rec["attribution"] = decision.get("attribution_text") or ""
             rec["name_super"] = decision.get("name_super") or ""      # drawn under the picture (wf1_film labels): identity reaches the viewer

@@ -1322,6 +1322,8 @@ def score(ctx, script):
     # indices and read only the original take when the pack predates source framing.
     previous = coverage.get('source_reading') or {}
     needs_source = 'authored_shots' not in previous or (previous.get('inserts') and 'speaker_inserts' not in previous)
+    if len(script.get("speaking_turns") or []) > 1 and "voice_entries" not in previous:
+        needs_source = True
     if needs_source and os.path.isfile(os.path.join(ctx.supply,'index.json')):
         import wf1_source_frame
         idx = json.load(open(os.path.join(ctx.supply,'index.json')))

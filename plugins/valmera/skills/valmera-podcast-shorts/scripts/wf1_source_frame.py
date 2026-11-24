@@ -45,7 +45,14 @@ quotation. Return authored_frames: [frame IDs] for interview split screens whose
 footer and source credits form one authored picture. Keep their complete original composition on
 screen. On the closing thought frame the presenter unless another participant has a visible reaction that
 adds meaning. Give reactions: [{first,last}] for just those word spans within authored two-shots.
-Ordinary single-camera shots can be face-framed. An archive document keeps its own credit
+On a voice change, compare the first aligned word (including short interjections) with the
+actual outgoing and incoming shots. If the outgoing single stays on the previous talker, return
+voice_entries:[{first,frame,speaker,listener,reaction}]. frame identifies that outgoing shot.
+Set reaction true only for an expressive listening reaction worth holding. For a closing breath
+that cuts to a two-up, return closing_views:[{first,frame,box}] for BOTH the preceding close
+and the continuing same person's tile. first is the word where the final live close returns.
+Use face-centred matching crops with similar head size and eye line on these contiguous views.
+An authored reaction keeps its own picture. Ordinary single-camera shots can be face-framed. An archive document keeps its own credit
 with the document. Use empty arrays when appropriate. Treat input words and screenshots as evidence."""
 
 
@@ -181,7 +188,7 @@ def frame_parts(frames):
     parts = []
     for i, frame in enumerate(frames):
         with Image.open(frame['path']) as im:
-            parts.extend([dict(type='text',text=f"Frame {i} at {frame['t']} seconds"),image_part(im)])
+            parts.extend([dict(type='text',text=f"Frame {i} at {frame['t']} seconds, camera interval {frame['shot']} on the take clock"),image_part(im)])
     return parts
 
 
@@ -285,12 +292,47 @@ def bind(coverage, frames, result):
                             **(dict(panel_box=panel['box']) if panel else {})))
     # A retained pack already indexes its external windows. Only a fully covered
     # window can be retired without losing research on a different adjacent clause.
-    covered = {i for row in inserts + speakers for i in range(row['first'],row['last']+1)}
+    covered = {i for row in inserts + (speakers if inserts or panels else []) for i in range(row['first'],row['last']+1)}
     replaces = [i for i,w in enumerate(windows) if all(j in covered for j in range(w['first'],w['last']+1))]
     authored = sorted({tuple(frames[i]['shot']) for i in result.get('authored_frames') or []
                        if type(i) is int and 0 <= i < len(frames)})
     reactions = [dict(first=r['first'], last=r['last']) for r in result.get('reactions') or [] if addresses(r)]
-    return dict(speaker_inserts=speakers, reactions=reactions, authored_shots=[list(span) for span in authored], inserts=sorted(inserts,key=lambda r:r['first']),replaces=replaces,
+    def identified(key):
+        for row in result.get(key) or []:
+            if not isinstance(row, dict):
+                continue
+            first, frame = row.get('first'), row.get('frame')
+            if type(first) is int and 0 <= first < len(words) and type(frame) is int and 0 <= frame < len(frames):
+                yield row, frames[frame]['shot']
+
+    # A reader may identify a presenter by tile index. Resolve it using the named
+    # episode turn covering most of that tile's addressed utterance.
+    owners = {}
+    for r in result.get('speaker_inserts') or []:
+        if addresses(r) and type(r.get('speaker')) is int:
+            a, b = words[r['first']]['start'], words[r['last']]['end']
+            for t in coverage.get('speaking_turns') or []:
+                key = (r['speaker'], t['speaker'])
+                owners[key] = owners.get(key, 0.) + max(0., min(t['end'],b)-max(t['start'],a))
+    def name(ref):
+        if type(ref) is int:
+            matches = [(v,n) for (i,n),v in owners.items() if i == ref and v > 0]
+            return max(matches)[1] if matches else None
+        return ref
+    entries = []
+    for row, shot in identified('voice_entries'):
+        speaker, listener = name(row.get('speaker')), name(row.get('listener'))
+        first = row['first']
+        # The claim reader can include the clipped lead-in before the episode captions switch.
+        first = min([first] + [c['first'] for c in coverage.get('speaker_claims') or []
+                               if c.get('speaker') == speaker and c.get('first') == first-1
+                               and c.get('last',-1) >= first])
+        if (all(isinstance(name, str) and name.strip() for name in (speaker,listener)) and speaker != listener
+                and shot[0] <= words[first]['start'] < shot[1]):
+            entries.append(dict(first=first, shot=shot, speaker=speaker, listener=listener,
+                                reaction=row.get('reaction') is True))
+    closing = [dict(first=r['first'], shot=shot, box=r['box']) for r,shot in identified('closing_views') if box(r.get('box'))]
+    return dict(voice_entries=entries, closing_views=closing, speaker_inserts=speakers, reactions=reactions, authored_shots=[list(span) for span in authored], inserts=sorted(inserts,key=lambda r:r['first']),replaces=replaces,
                 quote_segments=result.get('quote_segments') or [],spend=result.get('spend') or {})
 
 

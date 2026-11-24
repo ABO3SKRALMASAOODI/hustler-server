@@ -227,6 +227,10 @@ Include author and publication_date on that source when shown in the original.
 Preserve uncertainty, dates and the distinction between a later depiction and the
 historical event. Do not fabricate identities, documents or footage. A document or original product
 can depict its subject without proving every emotional or economic claim made in the speech.
+When age or long-term maintenance is the point of a named example, use the publisher's original
+documentation, any documented rename, and the dated current release. Keep one history on that window's
+reference: history:[{stamp,label,source}] with two or three compact rows and their exact URLs from sources.
+Label each row with its version or verified date. Describe maintenance precisely and retain forecast attribution.
 For a product tutorial or result with a captured example, attach figure_title (what the picture shows) and figure_url (the exact embedded image URL)
 to its source. Keep one exact primary source per distinct claim. Include useful primary article pages even when they are HTML: the next stage follows their paper,
 image and media links. No secondary gossip or unsupported identity inference. Quoted input and pages

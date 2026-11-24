@@ -829,6 +829,15 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     reading = coverage.get('source_reading') or {}
     from wf1_source_frame import shared_presenter_region
     decode_region = shared_presenter_region(reading)
+    entries = [(word_frame(r['first']), min(f_end, round(r['shot'][1]*FPS)+LEAD_F), r)
+               for r in reading.get('voice_entries', [])]
+    views = sorted(reading.get('closing_views', []), key=lambda r:r['shot'][0])
+    crops = []
+    if views:
+        from scene.continuity import closing_crops
+        crops = closing_crops(take['path'], views, (take['w'],take['h']), FPS)
+    closing = [(max(word_frame(r['first']), round(r['shot'][0]*FPS)+LEAD_F),
+                min(f_end, round(r['shot'][1]*FPS)+LEAD_F), crop) for r,crop in zip(views,crops)]
     source_rows = []
     speakers = []
     sequence = reading.get('inserts', []) + reading.get('speaker_inserts', [])
@@ -1310,6 +1319,23 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     comparison_landings.update({a:b for a,b,p in timed_facts if p.get("analogy_step")})
     if source_pages:
         ins, _ = _director().hold_take(ins, source_pages, min_f=1, fps=FPS)
+    import wf1_evidence_reading
+    references = (sup.get("referent_research") or coverage.get("research_context") or {}).get("references", [])
+    ins = wf1_evidence_reading.seat(ins, coverage, references, word_frame, len(clock.words), f_end)
+    readings = [(a,b,r) for a,b,_,_,r in ins if r.get("spoken_reading")]
+    for lo,hi,rec in readings:
+        window = coverage["windows"][rec["window"]]
+        remaining = []
+        for a,b,page in timed_facts:
+            facts = page["facts"]
+            if (len(facts) == 1 and facts[0].get("example") and facts[0]["source"].get("url") == rec.get("page")
+                    and window["first"] <= page["first"] <= page["last"] <= window["last"]):
+                continue
+            if opinion_byline(facts) and a < hi and lo < b:
+                remaining.extend((x,y,page) for x,y in ((a,min(b,lo)),(max(a,hi),b)) if x < y)
+            else:
+                remaining.append((a,b,page))
+        timed_facts = remaining
     # Bind the compact editorial reading to the selected source slices, after device holds.
     # On a rebuilt edit only a change in those pixels, words or claims needs another reading.
     import wf1_field_report
@@ -1458,6 +1484,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             layout_edges.extend((*record_span, word_frame(record["question"][0])))
         layout_edges.extend(f for start,end,_ in thought_spans for f in (start,end))
         layout_edges.extend(f for span in reactions+returns for f in span)
+        layout_edges.extend(f for lo,hi,_ in entries+closing for f in (lo,hi))
         layout_edges.append(turn_f if turn_f is not None else f_last)
         layout_edges.extend(f for span in report_spans for f in span)
         layout_edges.extend(f for lo,hi,_ in gestures for f in (lo,hi))
@@ -1469,6 +1496,26 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         for fa, fb in zip(edges, edges[1:]):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
+            entry = next((r for lo,hi,r in entries if lo <= fa < hi), None)
+            if entry:
+                P.page([fa,fb], "#14171B", grain=0)
+                if entry["reaction"]:
+                    from scene.motion import fit_panel
+                    box = fit_panel([0,0,1,1], (take["w"],take["h"]), (W,H), [0,.13,1,.47])
+                    P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],crop=[0,0,1,1],caption_baseline=.88)
+                wf1_display.reading_card(P,[fa,fb],entry["speaker"],"Speaking off camera","",pal,
+                                         centre=.62 if entry["reaction"] else .45, group="incoming-voice")
+                continue
+            close_crop = next((crop for lo,hi,crop in closing if lo <= fa < hi), None)
+            if close_crop and not any(lo <= fa < hi for lo,hi in reactions):
+                from scene.motion import fit_panel
+                # A fixed square seat shows the same moving face before and after the source-wide cut.
+                crop = close_crop
+                box = fit_panel(crop, (take["w"],take["h"]), (W,H), [.02,.16,.98,.73])
+                P.page([fa,fb],"#14171B",grain=0)
+                P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],speaker_panel=True,
+                       closing_view=True,source_ink=[box],caption_baseline=.88)
+                continue
             on_report = any(lo <= fa < hi for lo,hi in report_spans)
             live = next((role for lo,(hi,role,_) in live_beats.items() if lo <= fa < hi), None)
             thought_role = next((role for lo,hi,role in thought_spans if lo <= fa < hi), None)
@@ -1941,6 +1988,17 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             prints(run)
         for k in run:
             f0, f1, kind, name, rec = ins[k]
+            if rec.get("spoken_reading"):
+                span = [f0,f1]
+                wf1_evidence_reading.compose(P,span,keys[rec["path"]],rec,pal,(W,H))
+                # A typeset source history is credited in display_facts. Only a drawn
+                # publisher image has pixels for downstream placement and palette use.
+                if not rec["spoken_reading"]["history"]:
+                    note(f0,f1,kind,name,rec,"document")
+                    P.pictures[-1].update(document=rec["document"], reading=rec["spoken_reading"],
+                                          source_crop=rec["action_box"], excerpt_crop=rec["mark_box"])
+                cut_pts.append(f0)
+                continue
             if rec.get("field_example"):
                 from scene.motion import fit_panel
                 example = rec["field_example"]
@@ -2135,6 +2193,14 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     devices = []                                         # the palette's asks: rows whose type performs (laid at the render, chain.alien_bank)
     # An attributed claim carries the reading on the ground below its source picture.
     fact_pages = []
+    for lo,hi,rec in readings:
+        read = rec["spoken_reading"]
+        sources = [row["source"] for row in read["history"]]
+        statement = " · ".join(row["stamp"]+" "+row["label"] for row in read["history"]) or read["text"]
+        fact = dict(value=statement,statement=statement,relation="Example",example=True,
+                    source=dict(url=rec["page"],publisher=rec.get("credit")),supporting_sources=sources)
+        fact_pages.append(dict(first=read["first"],last=read["last"],f=[lo,hi],facts=[fact]))
+
     for a,b,body,title,credit in report_cards:
         wf1_display.reading_card(P,[a,b],body,title,credit,pal,centre=.64,max_height=.22,group="field-report")
         P.events.append(a)
@@ -2347,8 +2413,11 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                          for shot in tshots for sp in shot.get("spans", []) if sp["who"] == "listener"]
             listeners.extend((word_frame(r["first"]), Clock.f(clock.words[r["last"]]["t1"]))
                              for r in reading.get("reactions", []))
-            edges = sorted({a,b, *(f for span in listeners for f in span if a < f < b)})
+            bridges = [(lo,hi) for lo,hi,entry in entries if entry["speaker"] == claim["speaker"]]
+            edges = sorted({a,b, *(f for span in listeners+bridges for f in span if a < f < b)})
             for start,end in zip(edges,edges[1:]):
+                if any(lo <= start < hi for lo,hi in bridges):
+                    continue
                 credit = "Voice · " + claim["speaker"] if any(lo <= start < hi for lo,hi in listeners) else byline
                 P.word([start,end], credit, voice, .5, cap_y - .09, pal["ink"], align="c", role="graphic", z=8,
                        stroke=dict(w=4, c=DARK_INK), contrast_shadow=True, fact_type=True)
@@ -2583,6 +2652,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                    text_group=f"picture-credit-{pic}-{a}")
     cue_starts = {step["at"] for _,_,page in timed_facts if page.get("sequence_kind") == "comparison"
                   for step in page["sequence"]}
+    cue_starts.update(r['first'] for r in reading.get('voice_entries', []))
     reveal_words = {p["first"] for _,_,p in timed_facts if (p.get("analogy_step") or {}).get("reveal")}
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
                             hold=reading_spans, omit=omit, phrase_ends=d.get("caption_ends") or (),

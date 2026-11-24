@@ -1004,7 +1004,11 @@ named entity in the speech. When it only demonstrates an adjacent scale comparis
 operational example through that window. For a primary source illustrating an unnamed category, return
 example:{source: exact primary_research URL, statement: roughly six to nine plain words about the documented case}.
 Write statement so it stands on its own over the interview. When pointing to a specific pictured example,
-copy figure_url from its primary source and give visible_statement for those pixels alone. Use ordinary
+For a selected result figure or verified history, add example.reading:{first,at,last,speaker} using
+zero-based spoken word IDs. Open the figure on the incoming reply, mark its result on the action word and
+allow reading time into the connective phrase. Start the compact history on the word naming the old thing,
+then return to the speaker on the concluding clause. speaker is the replying voice if applicable.
+For a figure, copy figure_url from its primary source and give visible_statement for those pixels alone. Use ordinary
 language for the action, the qualified price and its unit. Give a technical name its meaning on first use.
 For a facility illustrating wider resource claims, name the site and what it supported in this one
 example. Give example.credit as the compact publisher/site credit when the scope matters on screen.
@@ -1063,7 +1067,7 @@ Do not change any spoken words, window boundaries, or numerical quality targets.
         # The director selects by number; filesystem paths and byte hashes stay local.
         research["excerpts"] = [{k:v for k,v in item.items() if k not in ("path","sha256")}
                                 for item in research["excerpts"]]
-    content=json.dumps(dict(context=coverage.get('context'),story=coverage.get('story'), comparisons=coverage.get('comparisons'),resolved_referents=research_names(coverage),primary_research=coverage.get('research_context'),spoken_words=coverage.get('words'),windows=[dict(coverage['windows'][i],i=i) for i in wanted],research=research))
+    content=json.dumps(dict(context=coverage.get('context'),story=coverage.get('story'), comparisons=coverage.get('comparisons'),resolved_referents=research_names(coverage),primary_research=coverage.get('research_context'),spoken_words=[dict(w,id=i) for i,w in enumerate(coverage.get('words') or [])],windows=[dict(coverage['windows'][i],i=i) for i in wanted],research=research))
     text,use=llm.ask(system,content,effort='medium')
     for row in llm.json_block(text).get('windows',[]):
         i=row.get('i')
