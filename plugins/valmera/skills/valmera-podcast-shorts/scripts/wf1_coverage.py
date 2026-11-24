@@ -588,6 +588,15 @@ def excerpt_catalog(footage, pictures):
     return catalog
 
 
+def alternate_views(window, available):
+    """The director ordered interchangeable photos for these particular words."""
+    spare = set()
+    for group in window.get("archive_views", []):
+        remaining = [path for path in group if path in available]
+        spare.update(remaining[1:])
+    return spare
+
+
 def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=None, originals=None, cut_dir=None, ffmpeg=None):
     """Only the semantic window can place a picture; a sentence start cannot. The candidates of a window go in the order
     the picture check ranked them for that clause (fits[(window, path)], best first), then moving footage first; each
@@ -638,12 +647,19 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
         blocked={r['source'] for r in coverage.get('blocked_sources',[]) if r['window']==i}
         pool=[row for row in candidates if not is_rejected(rejected,i,row[2])
               and ((row[2].get('source') or {}).get('url') or row[2].get('page')) not in blocked]
+        photos = {r["path"] for kind,_,r in pool if kind == "photo"}
+        alternates = alternate_views(window, photos)
+        pool = [row for row in pool if row[2]["path"] not in alternates]
         by_path = {row[2]["path"]: row for row in pool}
         pins = []
         for prior in sorted(priorities, key=lambda item: (item.get("motion_ok") is not True,
                                                           -item.get("fit", 0) if window.get("single_action") else 0,
                                                           not bool(item.get("attribution") or item.get("attribution_text")) if window.get("single_action") else False,
                                                           item["f"])):
+            # A photo reserved for the old montage can now carry its entire clause.
+            # Re-proposing a still on the same words reuses its exact placement verdict.
+            if any(prior["path"] in group for group in window.get("archive_views", [])):
+                continue
             if pins and window.get("single_action"):
                 break
             if prior.get("motion_ok") is False and i in coverage.get("motion_windows",[]):

@@ -95,7 +95,8 @@ def _record(c, got, name):
     return dict(name=name, path=got["path"], w=int(got.get("width") or 0), h=int(got.get("height") or 0),
                 provider=c.get("provider"), title=c.get("title"), licence=c.get("license"), credit=c.get("credit"),
                 licence_url=c.get("license_url"), page=c.get("page_url") or c.get("page"), url=c.get("_url"), shows=c.get("shows"),
-                note=c.get("license_note"))
+                note=c.get("license_note"), description=c.get("description"), image_date=c.get("image_date"),
+                source_note=c.get("_source_note"), grade=c.get("_grade"))
 
 
 def pictures(named, out, per=4, min_px=700):

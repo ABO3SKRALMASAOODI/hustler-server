@@ -638,6 +638,12 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         media = media_key(row, indices.get(rec["path"], []))
         images = None
         key = _review_key(review, media, said) if media is not None else None
+        if (media is not None and key not in cache and review == "placement" and
+                said.get("story_hook") and said["story_hook"] == said["context"]):
+            # Older checks already saw this entire hook as the surrounding sentence.
+            previous = _review_key(review, media, {k:v for k,v in said.items() if k != "story_hook"})
+            if previous in cache:
+                cache[key] = cache[previous]
         if media is not None and not rec.get("composed_fps") and key not in cache and media[-1]:
             prior_key = _review_key(review, [*media[:-1], visible_slice(rec,kind)], said)
             if prior_key in cache:

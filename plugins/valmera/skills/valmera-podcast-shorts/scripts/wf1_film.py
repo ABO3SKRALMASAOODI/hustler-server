@@ -359,7 +359,7 @@ FILL_GAP_S = 3.0          # no stretch of the take over about this long without 
 def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, stress, checker, rejected=(), composed_stills=(), rounds=3,
                originals=None, cut_dir=None, ffmpeg=None):
     """Fill long holds inside a planned clause using its own spare clips or source stills."""
-    from wf1_coverage import shared_candidates, same_picture, fresh_interval, camera_remainder
+    from wf1_coverage import shared_candidates, same_picture, fresh_interval, camera_remainder, alternate_views
     pool = shared_candidates(coverage, footage)
     for block in coverage.get("blocked_sources", []):
         i = block["window"]
@@ -393,7 +393,8 @@ def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, str
             def unused(rec):
                 return rec["path"] not in skip and not any(same_picture(rec, r[4]) for r in ins)
             clips = [c for c in pool[i] if unused(c)]
-            photos = {name: [r for r in pics.get(name, []) if unused(r)] for name in names}
+            alternates = alternate_views(window, {r["path"] for name in names for r in pics.get(name, []) if r["path"] not in skip})
+            photos = {name: [r for r in pics.get(name, []) if unused(r) and r["path"] not in alternates] for name in names}
             available = [("clip", c.get("subject"), c) for c in pool[i] if c["path"] not in skip]
             for _ in range(slots - len(clips) - sum(map(len, photos.values()))):
                 fresh = fresh_interval(available, taken, originals, cut_dir, 1.2 + 2 / FPS, ffmpeg, skip=skip)
@@ -712,6 +713,9 @@ def build(script, sup, style_id, direction=None):
     coverage = sup.get("coverage")
     if not coverage:
         raise RuntimeError("podcast supply needs a word-addressed documentary coverage plan; refresh supply")
+    if d.get("archive_views"):
+        coverage = dict(coverage, windows=[dict(w, archive_views=d["archive_views"].get(str(w["first"]), []))
+                                           for w in coverage["windows"]])
     d["band"] = dict(d["band"], motivated_frames=[round(coverage["words"][m["word"]]["start"]*FPS)+LEAD_F
                        for m in coverage.get("moves", []) if m.get("why") and 0 <= m.get("word", -1) < len(coverage["words"])])
     clock = Clock(sup["words"], script)
@@ -989,6 +993,17 @@ def build(script, sup, style_id, direction=None):
 
     report_spans = [(a, b) for a, b, page in timed_facts if page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"])]
 
+    # A remembered figure or reversal can live in the spoken cue and the show's own
+    # shot. Release the timeline on the authored word, preserving the entire source frame.
+    live_beats = {}
+    for a,b,page in timed_facts:
+        steps = page.get("sequence") or []
+        for i,step in enumerate(steps):
+            if step.get("beat") in ("figure", "turn"):
+                start = word_frame(step["at"])
+                end = word_frame(steps[i+1]["at"]) if i+1 < len(steps) else b
+                if a <= start < end <= b:
+                    live_beats[start] = (end,step["beat"],step["at"])
     source_pages = [(a,b) for a,b,p in timed_facts if any(f.get("excerpt") or f.get("perspective") for f in p["facts"])]
     if source_pages:
         coverage = dict(coverage, windows=[
@@ -1259,6 +1274,7 @@ def build(script, sup, style_id, direction=None):
         layout_edges.extend(f for span in reactions for f in span)
         layout_edges.append(turn_f if turn_f is not None else f_last)
         layout_edges.extend(f for span in report_spans for f in span)
+        layout_edges.extend(f for start,(end,_,_) in live_beats.items() for f in (start,end))
         layout_edges.extend(f for lo,hi,_ in speakers for f in (lo,hi))
         edges = sorted({a, b, *(f for f in layout_edges if a < f < b), *[c for c in tcuts + joins + list(panel) if a+3 <= c <= b-3],
                         *(f for span in stacks for f in span[:2] if a < f < b)})
@@ -1266,12 +1282,13 @@ def build(script, sup, style_id, direction=None):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
             on_report = any(lo <= fa < hi for lo,hi in report_spans)
+            live = next((role for lo,(hi,role,_) in live_beats.items() if lo <= fa < hi), None)
             if any(lo <= fa < hi and (lo,hi) not in live_citations for lo,hi in source_pages):
                 P.page([fa,fb],"#14171B",grain=0)
                 cut_pts.append(fa)
                 continue
             tile = next((tile for lo,hi,tile in speakers if lo <= fa < hi), None)
-            if tile:
+            if tile and not live:
                 from scene.motion import fit_panel
                 from wf1_source_frame import presenter_card
                 seat = [0,.04,1,.48] if on_report else [0,.08,1,.82]
@@ -1288,7 +1305,7 @@ def build(script, sup, style_id, direction=None):
                                     round(authored_span[1]*FPS)+LEAD_F >= f_voice_end)
                                and pieces[k]["who"] == "speaker" and meta[pieces[k]["key"]]["faces"]
                                and not any(lo <= fa < hi for lo, hi in reactions))
-            if closing_speaker and on_report:
+            if closing_speaker and on_report and not live:
                 # Keep the citation's reading surface below the live presenter.
                 from scene.motion import Cam
                 info = meta[pieces[k]["key"]]
@@ -1306,6 +1323,8 @@ def build(script, sup, style_id, direction=None):
                 # credit corners together, with an independent ground for the caption.
                 aspect = take["w"]/take["h"]
                 max_height, centre = (.38, .29) if on_report else (.70, .46)
+                if live == "turn":
+                    centre = .43
                 width = min(1., max_height * H / W * aspect)
                 height = width * W / H / aspect
                 box = [.5-width/2, centre-height/2, .5+width/2, centre+height/2]
@@ -1635,6 +1654,13 @@ def build(script, sup, style_id, direction=None):
             archive_credit = (d.get("archive_credits") or {}).get(rec["path"])
             if archive_credit:
                 P.pictures[-1]["archive_credit"] = archive_credit
+            if archive_credit and archive_credit.get("credit"):
+                i = rec.get("window")
+                if isinstance(i, int) and any(rec["path"] in group for group in coverage["windows"][i].get("archive_views", [])):
+                    P.pictures[-1]["selected_archive_view"] = True
+                wf1_display.reading_card(P, [f0,f1], "", archive_credit["label"], archive_credit["credit"],
+                                         pal, centre=.68, group="archive-credit")
+                continue
             if rec.get("provider") == "primary-document":
                 # The figure and the supporting statement may have different sources.
                 urls = {url for url in (rec.get("page"), rec.get("url")) if url}
@@ -1741,7 +1767,8 @@ def build(script, sup, style_id, direction=None):
         if page.get("sequence"):
             fact = facts[0]
             steps = page["sequence"]
-            cue = [a] + [word_frame(step["at"]) for step in steps[1:]] + [b]
+            first_cue = word_frame(steps[0]["at"]) if steps[0].get("beat") else a
+            cue = [first_cue] + [word_frame(step["at"]) for step in steps[1:]] + [b]
             for i,(start,end) in enumerate(zip(cue,cue[1:])):
                 if start >= end:
                     continue
@@ -1761,6 +1788,10 @@ def build(script, sup, style_id, direction=None):
                     heading = "Timeline"
                     footer = (fact["attribution"]+" · Recollection" if source == fact["source"]
                               else source.get("publisher") or source["url"])
+                if start in live_beats:
+                    wf1_display.reading_card(P, [start,end], "", "", footer, pal, centre=.50 if live_beats[start][1]=="figure" else .67, group="memory-credit")
+                    P.events.append(start)
+                    continue
                 wf1_display.reading_card(P, [start,end], "", heading,
                                          footer, pal, centre=.605,
                                          steps=[(s["label"],j==i) for j,s in enumerate(steps)
@@ -1994,9 +2025,14 @@ def build(script, sup, style_id, direction=None):
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
                             hold=reading_spans, omit=omit, phrase_ends=d.get("caption_ends") or (),
                             accents=d.get("caption_accents") or (), accent_ink=pal["accent"])
-    for word in P.items:
+    for word in list(P.items):
         if word.get("role") == "cap":
             word["chunk"] = f'caption-{word["f"][1]}'
+            for cue,(end,role,index) in live_beats.items():
+                a,b = word["f"]
+                if role == "figure" and a <= cue < b <= end and d.get("caption_ends"):
+                    wf1_display.figure_cue(P, word, clock, index, cue, pal)
+                    break
     P.items = inside(P.items, f_end)
     P.items = ink_by_ground(P.items, P.voices, bright)
     film = dict(grain=float(st["grain"]), vignette=float(st["vignette"]), over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))

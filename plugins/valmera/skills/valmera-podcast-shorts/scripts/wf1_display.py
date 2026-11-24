@@ -6,6 +6,16 @@ import string
 WRITING = """Write the factual type for this passage from the attached source readings and editorial brief.
 For dated archive in archive_pictures, return archive_credits:[{picture: the supplied picture ID,
 source: the supporting URL in sources, label: compact original venue or event and its year}].
+For photographs, identify the artifact and its owner as a period example, distinguish a documented
+original from a replica, and date the event separately from the photograph. Use the exact image page
+or its supporting source. The on-screen label is a short museum caption: institution · artifact (event
+year). Lead with the artifact's historical institution and specific role. Keep its present-day museum
+in the record unless that venue is the subject. Put the named photographer and derivative artist on
+one short credit line. Leave the venue history, photo dates and longer sourcing in the records.
+For photos proving the same assertion on one picture_window, return archive_views:[{first: window's
+first word, pictures: [picture IDs in order of preference]}]. Rank by documented identity, visible
+clarity and usable credit. Group equivalent evidence even across photographers and exhibits. A view
+with distinct evidence relevant on these words stands separately. Read prior checks in archive_pictures.
 Date the pictured edition or occasion from the primary reading. The publication date of a later
 account does not date its pictures. Credit a paper by venue and year; its full authors are in sources.
 Use picture_windows to tie the source and the displayed fact to the same proposition. Label an
@@ -267,6 +277,8 @@ def bind(direction, editorial, words):
             accents.update(ids)
         else:
             display.append(row)
+    beat_roles = {b.get("w"):b["role"] for b in direction.get("beats") or []
+                  if b.get("role") in ("figure", "turn")}
     displayed = set()
     for ask in direction["asks"]:
         args = ask["args"]
@@ -285,6 +297,9 @@ def bind(direction, editorial, words):
                 if args.get("sequence_kind") in ("history", "process"):
                     key = step.get("source")
                     state["source"] = sources.get(key, sources["interview"]) if isinstance(key, str) else sources["interview"]
+                    if (args["sequence_kind"] == "history" and key == "interview"
+                            and state["at"] in beat_roles):
+                        state["beat"] = beat_roles[state["at"]]
                 sequence.append(state)
         if len(sequence) >= 2:
             if args.get("sequence_kind") == "process" and ends:
@@ -540,6 +555,38 @@ def source_statement(fact, interview):
             # Preserve the source reader's prose, including abbreviations and qualifications.
             return readings[0].strip()
     return None
+
+
+def figure_cue(plan, caption, clock, index, frame, palette):
+    """Land the directed figure inside the complete spoken phrase, on its actual word."""
+    from scene.palette.kit import punch
+    from film import W
+    tokens = caption["t"].split()
+    words = [word["w"] for word in clock.words]
+    # Locate the particular spoken occurrence, including repeated words in the cue.
+    first = next((i for i in range(max(0,index-len(tokens)+1),index+1)
+                  if words[i:i+len(tokens)] == tokens), None)
+    if first is None:
+        return
+    pos = index-first
+    before, number, after = " ".join(tokens[:pos]), tokens[pos], " ".join(tokens[pos+1:])
+    start,end = caption["f"]
+    if before and start < frame:
+        caption.update(t=before, f=[start,frame], x=.5-plan.R.width(caption["v"], before)/(2*W))
+    else:
+        plan.items.remove(caption)
+    span = [frame,end]
+    group = f"spoken-figure-{frame}"
+    for text,base,voice,size in ((before,.57,"cap",58), (number,.668,"dsp",152), (after,.719,"cap",58)):
+        if not text:
+            continue
+        name = f"{group}-{voice}-{base}"
+        px = plan.R.fit_px(voice, text, .78*W, size)
+        plan.voices[name] = dict(plan.voices[voice],px=px,track=0)
+        row = plan.word(span,text,name,.5,base,palette["accent"] if voice=="dsp" else palette["ink"],
+                        align="c", role="graphic", note=False, z=8, fact_type=True, text_group=group)
+        if voice == "dsp":
+            row["s"] = punch(end-frame)
 
 
 def reading_card(plan, span, body, byline, source, palette, *, centre=.64, max_height=.303, group="quote", steps=()):

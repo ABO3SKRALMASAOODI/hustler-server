@@ -719,9 +719,14 @@ def director_pictures(pack, most=36):
             if not p or p in seen:
                 continue
             seen.add(p)
+            source = None
+            if r.get("document"):
+                source = dict(url=r.get("page"), title=r.get("title"), document=r["document"])
+            elif r.get("page"):
+                fields = ("title", "description", "source_note", "image_date", "licence", "credit", "shows", "grade")
+                source = dict(url=r["page"], **{k:r[k] for k in fields if r.get(k)})
             out.append(dict(id=f"P{len(out)}", path=p, src=p, kind="document" if r.get("provider") == "primary-document" else "photo",
-                            archive_source=(dict(url=r.get("page"),title=r.get("title"),document=r["document"])
-                                            if r.get("document") else None),
+                            archive_source=source,
                             label=str(r.get("shows") or r.get("title") or name)[:60], faces=len(r.get("faces") or [])))
     out = out[:most]
     return out, {p["id"]: p["src"] for p in out}
@@ -757,6 +762,23 @@ def direction_of(ctx, script, pack):
     editorial = dict(writing=wf1_display.WRITING, material=wf1_display.editorial(ctx, script, pack))
     archive = {pic["id"]:pic["archive_source"] for pic in pics if pic.get("archive_source")}
     editorial["material"]["archive_pictures"] = archive
+    for pic in pics:
+        src = archive.get(pic["id"])
+        if pic["kind"] != "photo" or not src:
+            continue
+        editorial["material"]["sources"].setdefault(src["url"], dict(url=src["url"], publisher=src.get("credit"),
+            supports=[v for v in (src.get("description"), src.get("shows")) if v]))
+        coverage = pack.get("coverage") or {}
+        for window, priors in coverage.get("passed_placements", {}).items():
+            for prior in priors:
+                if (prior.get("source") == src["url"] and os.path.isfile(pic["src"])
+                        and prior.get("sha256") == file_digest(pic["src"])):
+                    src.setdefault("placements", []).append(dict(window=window, **{k:prior[k] for k in
+                        ("clause","clause_t","fit","attribution","reason") if k in prior}))
+                    if prior.get("reason") and any(w.get("say") == prior.get("clause")
+                            and [w["t0"],w["t1"]] == prior.get("clause_t") for w in coverage.get("windows", [])):
+                        # The score can read the verified view without opening another tile.
+                        pic["path"] = None
     coverage_contract = (pack.get("coverage") or {}).get("contract")
     intent = hashlib.sha256(json.dumps([DR.CONTRACT, coverage_contract, editorial,rows,stress,st,script.get("title"),script.get("direction"),
                                          script.get("hook_line"),script.get("close_line"),take.get("cuts")],
@@ -787,7 +809,21 @@ def direction_of(ctx, script, pack):
         picture, source, label = (credit.get(k) for k in ("picture","source","label"))
         if (isinstance(picture, str) and picture in archive and isinstance(source, str)
                 and source in sources and source != "interview" and isinstance(label,str) and label.strip()):
-            credits[ids[picture]] = dict(label=label.strip(), source=sources[source])
+            item = dict(label=label.strip(), source=sources[source])
+            photo = archive[picture]
+            if photo.get("licence") and photo.get("credit"):
+                item.update(credit=str(credit.get("credit") or photo["credit"]).strip(),
+                            image=photo["url"], licence=photo["licence"])
+            credits[ids[picture]] = item
+    photos = {p["id"]:p["src"] for p in pics if p["kind"] == "photo"}
+    groups = {}
+    for group in d.get("archive_views") or []:
+        if not isinstance(group, dict) or type(group.get("first")) is not int or not isinstance(group.get("pictures"), list):
+            continue
+        paths = list(dict.fromkeys(photos[k] for k in group["pictures"] if isinstance(k, str) and k in photos))
+        if len(paths) > 1:
+            groups.setdefault(str(group["first"]), []).append(paths)
+    d["archive_views"] = groups
     d["archive_credits"] = credits
     d["pictures"] = ids
     if d.get("by") == "model":
@@ -797,6 +833,8 @@ def direction_of(ctx, script, pack):
         if not refs.issubset(ids):
             return d
         used = {ids[pid] for pid in refs}
+        used.update(credits)
+        used.update(path for groups_at_word in groups.values() for group in groups_at_word for path in group)
         assets = {path:file_digest(path) for path in used if os.path.isfile(path)}
         if set(assets) == used:
             with open(choice_path+".part","w") as f:
@@ -1225,7 +1263,7 @@ def descend(ctx, script, pack, missing):
 
 def film_direction(d):
     """Carry the Director's authored fields into the picture and sound composers."""
-    knobs = {k: d.get(k) for k in ("display", "archive_credits", "caption_ends", "caption_accents", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
+    knobs = {k: d.get(k) for k in ("display", "archive_credits", "archive_views", "caption_ends", "caption_accents", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
     if d.get("beats") or d.get("sections") or d.get("asks"):
         knobs["director"] = {k: d.get(k) for k in ("beats", "sections", "asks", "arc", "pictures", "by", "seed")}
     return knobs
@@ -1599,7 +1637,8 @@ def render(ctx, script, sc):
                     passed.setdefault(str(pic.get("window")), []).append(
                         dict(path=path, sha256=file_digest(path), f=pic["f"], src=pic.get("source_slice"),
                              clause=pic.get("clause"), clause_t=pic.get("clause_t"), source=pic.get("source"),
-                             motion_ok=row.get("motion_ok"),
+                             motion_ok=row.get("motion_ok"), fit=pic.get("fit"),
+                             attribution=pic.get("attribution"), reason=row.get("reason"),
                              **({"fresh_clip":pic["fresh_clip"]} if pic.get("fresh_clip") else {})))
             coverage=pack.setdefault("coverage", {})
             for window,older in coverage.get("passed_placements",{}).items():
@@ -1665,10 +1704,14 @@ def _rebuild_motion(ctx, script, sc, report, defer=False):
     record keeps its measured moving share. Returns True when the film was rebuilt."""
     pack=wf3.load_pack(ctx)
     pics=sc['beats'].get('pictures') or []
-    stills={pics[row['id']]['path'] for row in report['placements'] if row.get('motion_ok') is not True
+    # The director selected this specific still as documentary evidence. Its lack
+    # of motion is already known. Other placements still receive their own repair.
+    remaining = [row for row in report['placements']
+                 if not (row.get('ok') and pics[row['id']].get('selected_archive_view'))]
+    stills={pics[row['id']]['path'] for row in remaining if row.get('motion_ok') is not True
             and pics[row['id']].get('mode') != 'source-insert'}
     previous=set(pack.get('composed_stills') or [])
-    weak = sorted({pics[row['id']].get('window') for row in report['placements']
+    weak = sorted({pics[row['id']].get('window') for row in remaining
                    if row.get('ok') and row.get('motion_ok') is False and isinstance(pics[row['id']].get('window'),int)})
     if pack.get("motion_recovered"):
         # A later boundary change can expose a static slice after acquisition already succeeded.
@@ -1736,6 +1779,9 @@ def hold_windows(measured, coverage, pictures, fps=None, lead=None):
             continue
         a, b = (round(w["t0"]*fps)+lead)/fps, (round(w["t1"]*fps)+lead)/fps
         placed = [p for p in pictures if p.get("window") == i]
+        if any(p.get("selected_archive_view") and p["f"][0] <= round(a*fps)
+               and round(b*fps) <= p["f"][1] for p in placed):
+            continue
         if w.get("single_action") is True and any(p.get("kind") == "clip" for p in placed):
             continue
         meaningful = min(1.4,b-a)
@@ -2001,6 +2047,7 @@ def check(ctx, rd, sc):
                       mode=p.get("mode"), window=p.get("window"), w=p.get("w"), h=p.get("h"), rung=p.get("rung"), how=p.get("how"),
                       source_size=p.get("source_size"), upscaled_from=p.get("upscaled_from"), reframed=p.get("reframed"),
                       origin=p.get("origin"), name_super=p.get("name_super"), attribution=p.get("attribution"),
+                      **({"archive_credit":p["archive_credit"]} if p.get("archive_credit") else {}),
                       pic=p.get("pic"), source_slice=p.get("source_slice"), source_evidence=p.get("source_evidence"),
                       **({k:p[k] for k in ("document","source_crop","excerpt_crop") if k in p}
                          if p.get("mode") == "document" else {}))
