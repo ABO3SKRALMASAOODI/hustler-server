@@ -42,7 +42,7 @@ def bridge(host, key):
                 until = time.monotonic() + 25
                 while not Path(socket).exists():
                     if process.poll() is not None or time.monotonic() >= until:
-                        raise RuntimeError('Local subscription SSH bridge did not start')
+                        raise ConnectionError('Local subscription SSH bridge did not start')
                     time.sleep(.1)
                 result = subprocess.run(options + ['-O', 'forward', '-R',
                     f'127.0.0.1:0:127.0.0.1:{local_port()}', host], check=True,

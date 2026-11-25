@@ -46,7 +46,7 @@ def patch_script(script,edits):
     return revised
 
 
-def propose(ctx,script,catalogue):
+def propose(ctx,script,catalogue,coverage=None):
     import cinema as C
     from wf4 import story
     root=Path(ctx.supply)/'archive-script';root.mkdir(exist_ok=True)
@@ -71,6 +71,13 @@ def propose(ctx,script,catalogue):
         dossier['facts'].append(fact);existing_ids.add(fact['id'])
     old_script=dict(title=script['script']['title'],chapters=script['script']['chapters'],
                     segments=[{k:s[k] for k in ('say','chapter','beat','facts') if k in s} for s in script['script']['segments']])
+    for i,segment in enumerate(old_script['segments']):
+        supply = (coverage or {}).get(str(i))
+        if supply:
+            segment['requested_visual'] = supply['requested']
+            segment['retained_archive_ids'] = [r['id'] for r in catalogue if r['usable'] and
+                any(r['clip']['source']['url']==c['url'] and r['clip']['time_range']==c['time_range']
+                    for c in supply['retained'])]
     review=Path(ctx.run_dir)/'editorial-review.json'
     critique=C.read(review) if review.exists() else None
     if critique:critique=critique.get('diagnosis',critique)
@@ -99,6 +106,8 @@ def propose(ctx,script,catalogue):
                 'Default to 10–20 minutes and 1900–2200 spoken words. A running time in the production brief takes precedence. '
                 'Write in 55–90 complete-sentence segments, with a hook in the first ten seconds and a real turn in each story chapter. '
                 'Each chapter comes from this story. Do not announce a question mechanically at every chapter or repeatedly explain what the audience will understand. '
+                'For draft lines with retained_archive_ids, use those verified alternatives where they fit. A primary passage can show the claim directly. '
+                'A requested_visual describes a search, never an acquired shot. For uncovered words choose a precise inspected replacement or rewrite around available evidence. '
                 'Use the actual available moving archive for most of the picture time, with original illustrations and cited records only where they genuinely explain an unfilmed event. '
                 'A picture may supply truthful context without visibly proving an invisible cause or motive; never imply that it depicts the wrong person, action, hardware, era or repair state. '
                 'Do not claim every decisive action was filmed. When an original drawing or a rehearsal stands in for the real event, its on-screen label says so; the narration does not. '
@@ -224,5 +233,5 @@ def conform(ctx,script,ft):
     if (root/'applied.json').exists():return script,ft
     from archive_catalog import catalogue
     rows=catalogue(ctx,ft)
-    proposal=propose(ctx,script,rows)
+    proposal=propose(ctx,script,rows,ft.get('prefill_coverage'))
     return apply(ctx,script,ft,proposal,rows)

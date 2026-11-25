@@ -8,6 +8,7 @@ import io
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import tarfile
@@ -242,6 +243,13 @@ if j.get('_voices'):
     (pathlib.Path(sys.argv[2])/'footage.json').write_text(json.dumps(result,indent=1))
     sys.exit(0)
 review_errors=[]
+rank_rounds=[]
+original_rank=plan.rank
+def traced_rank(subjects,hits,*args,**kwargs):
+    chosen,cost=original_rank(subjects,hits,*args,**kwargs)
+    rank_rounds.append(dict(candidates=sum(len(group) for group in hits.values()),selected=len(chosen)))
+    return chosen,cost
+plan.rank=traced_rank
 original_check=run.look.check
 def checked_research(*args,**kwargs):
     try:return original_check(*args,**kwargs)
@@ -253,10 +261,8 @@ result=find(j['lines'],j['named'],j['about'],sys.argv[2],1920,1080,
      max_sources=10, per=2, avoid=j.get('avoid'), strict_lines=True, motion_first=True, scout_motion=True,
      alloc='round', reassign_lost=True, whole_first=True, want_voices=False, log=lambda s:print(s,flush=True))
 result['research_errors']=review_errors
-result['research_complete']=not review_errors and result['counts']['frames_checked']>0 and result['counts']['sources_opened']>0
+result['rank_rounds']=rank_rounds
 (pathlib.Path(sys.argv[2])/'footage.json').write_text(json.dumps(result,indent=1))
-if not result['research_complete']:
-    raise RuntimeError('Archive picture research incomplete; unavailable model checks cannot establish scarce footage: '+str(review_errors))
 '''
 
 
@@ -341,10 +347,64 @@ def probe(idea):
         finally:cleanup_cache(td)
 
 
+def request_key(payload):
+    return hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()
+
+
+def rank_trace(logfile):
+    """Read the engine's numerical progress records, including pre-checkpoint runs."""
+    formats = (
+        (r'plan: (\d+) subjects, (\d+) searches', ('subjects','searches')),
+        (r'rank: (\d+) sources to open of (\d+) found', ('selected','candidates')),
+        (r'archive round: (\d+) sources would not open, (\d+) subjects had none; (\d+) archive sources to open',
+         ('open_failures','uncovered','archive_selected')),
+        (r'look: (\d+) frames checked, (?:([0-9]+) reused, )?(\d+) pass', ('checked','reused','passed')),
+    )
+    trace = {}
+    if logfile.exists():
+        with logfile.open(errors='replace') as stream:
+            for line in stream:
+                for pattern, fields in formats:
+                    match = re.fullmatch(pattern, line.rstrip())
+                    if match:
+                        trace.update(zip(fields,(int(n or 0) for n in match.groups())))
+                        break
+    return trace
+
+
+def ranked_empty(trace):
+    return (trace.get('subjects',0)>0 and trace.get('searches',0)>0 and trace.get('candidates',0)>0
+            and trace.get('uncovered')==trace['subjects']
+            and all(trace.get(k)==0 for k in ('selected','open_failures','archive_selected','checked','reused','passed')))
+
+
+def legacy_empty_trace(logfile):
+    if not logfile.exists():
+        return {}
+    with logfile.open('rb') as stream:
+        stream.seek(max(0,stream.seek(0,os.SEEK_END)-512))
+        last = stream.read().splitlines()
+    if last[-1:] != [b'RuntimeError: Archive picture research incomplete; unavailable model checks cannot establish scarce footage: []']:
+        return {}
+    trace = rank_trace(logfile)
+    return trace if ranked_empty(trace) else {}
+
+
+class PictureResearchUnavailable(RuntimeError):
+    def __init__(self, message, report=None):
+        super().__init__(message)
+        self.report = report
+
+
 def completed_research(result):
     counts=result.get('counts',{})
-    return bool(counts.get('frames_checked',0)>0 and counts.get('sources_opened',0)>0
-                and not result.get('research_errors') and result.get('research_complete') is not False)
+    if result.get('research_errors') or result.get('research_complete') is False:
+        return False
+    if counts.get('sources_opened',0)>0 and counts.get('frames_checked',0)+counts.get('frames_reused',0)>0:
+        return True
+    rounds = result.get('rank_rounds',[])
+    return (counts.get('sources_tried')==0 and counts.get('clips')==0
+            and any(r['candidates'] for r in rounds) and all(r['selected']==0 for r in rounds))
 
 
 def fetch(payload, out, log=print, _port=None):
@@ -357,7 +417,8 @@ def fetch(payload, out, log=print, _port=None):
         cached=json.loads(rec.read_text())
         stale_voice=payload.get('_voices') and not cached.get('voices') and cached.get('adapter_sha256')!=adapter
         incomplete=not probing and not payload.get('_voices') and not completed_research(cached)
-        if not stale_voice and not incomplete:return cached
+        matches = not cached.get('request_sha256') or cached['request_sha256']==request_key(payload)
+        if not stale_voice and not incomplete and matches:return cached
         prior=cached.get('adapter_sha256','unversioned')[:12]
         rec.rename(out/('footage-rejected-'+prior+'.json'))
         if (out/'fetch.log').exists():(out/'fetch.log').rename(out/('fetch-rejected-'+prior+'.log'))
@@ -369,7 +430,7 @@ def fetch(payload, out, log=print, _port=None):
     names = ssh("docker ps --format '{{.Names}}'", capture_output=True, text=True).stdout.splitlines()
     slot = next((n for n in names if n.startswith('vbox-batch')), None)
     if not slot:
-        raise RuntimeError('no box batch image available for footage')
+        raise PictureResearchUnavailable('no box batch image available for footage')
     scratch = '/tmp/wf4-' + uuid.uuid4().hex
     q = shlex.quote
     package = io.BytesIO()
@@ -394,8 +455,17 @@ def fetch(payload, out, log=print, _port=None):
         cmd = shlex.join(['python3', scratch + '/runner.py', slot, scratch, cache_path(out.parent),
                           container, str(_port) if _port else 'off',
                           os.environ.get('CODEX_PROXY_PROOF', ''), os.environ.get('VALMERA_RUN', '')])
-        with open(out / 'fetch.log', 'w') as f:
-            ssh(cmd, input=os.environ['OPENAI_API_KEY']+'\n', text=True, stdout=f, stderr=subprocess.STDOUT, timeout=7200)
+        try:
+            with open(out / 'fetch.log', 'w') as f:
+                ssh(cmd, input=os.environ['OPENAI_API_KEY']+'\n', text=True, stdout=f, stderr=subprocess.STDOUT, timeout=7200)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            if probing or payload.get('_voices'):
+                raise
+            with (out/'fetch.log').open('rb') as stream:
+                stream.seek(max(0,stream.seek(0,2)-2048))
+                tail = stream.read().decode(errors='replace').strip().splitlines()
+            detail = tail[-1][:500] if tail else type(exc).__name__
+            raise PictureResearchUnavailable('Archive acquisition failed: '+detail) from exc
         archive = out / 'transfer.tar'
         with open(archive, 'wb') as f:
             ssh(f'tar cf - -C {q(scratch)}/out .', stdout=f, timeout=600)
@@ -404,12 +474,22 @@ def fetch(payload, out, log=print, _port=None):
         archive.unlink()
         result = json.loads(rec.read_text())
         result['adapter_sha256']=adapter
+        picture = not probing and not payload.get('_voices')
+        if picture:
+            result['request_sha256'] = request_key(payload)
+            result['rank_trace'] = rank_trace(out/'fetch.log')
+            result['research_complete'] = completed_research(result)
         if payload.get('verification_owner'):
             result['verification_owner']=payload['verification_owner']
             result['research_candidates_only']=True
         if payload.get('narration_context'):
             result['narration_context']=payload['narration_context']
-        rec.write_text(json.dumps(result,indent=1))
+        pending = rec.with_suffix('.tmp')
+        pending.write_text(json.dumps(result,indent=1))
+        pending.replace(rec)
+        if picture and not result['research_complete']:
+            reasons = result.get('research_errors') or [s['error'] for s in result.get('sources',[]) if s.get('error')]
+            raise PictureResearchUnavailable('Archive research incomplete: '+str(reasons or result['counts']), result)
         log(f"box footage: {result.get('counts',dict(covered=result.get('covered'),clips=result.get('clips')))}")
         return result
     finally:

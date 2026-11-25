@@ -80,22 +80,27 @@ def chapter_footage(ctx, script, chapter, dest, avoided, known):
     lines = [dict(i=i, say=s['say'], pictures=s.get('pictures',[]), dur=len(s['say'].split())/2.5+1,
                   **({'visual':mixed[i]} if i in mixed else {}))
              for i,s in segments.items() if i not in documents or i in mixed]
-    def fetch_lines(request, folder):
-        return footage_box.fetch(dict(lines=request, named=script['dossier']['named'], avoid=avoided,
+    def payload(request):
+        return dict(lines=request, named=script['dossier']['named'], avoid=avoided,
             known_sources=known, about=sc['title']+': '+chapter['title']+
-            '. Find actual moving witnesses and observable actions for the supplied lines.'), folder, ctx.log)
+            '. Find actual moving witnesses and observable actions for the supplied lines.')
     # The raw box report remains the numerical record of its own search. It can
     # cover all lines on an older run or only the motion subset on a newer one.
     results = []
-    if footage_box.completed_research(prior):
+    signature = footage_box.request_key(payload(lines))
+    matches = (prior.get('request_sha256',signature)==signature and
+               all(r['i'] in segments and r.get('say',segments[r['i']]['say'])==segments[r['i']]['say']
+                   for r in prior.get('lines',[])))
+    if matches and footage_box.completed_research(prior):
         results.append((prior, dest))
         searched = {r['i'] for r in prior['lines']}
         missing = [ln for ln in lines if ln['i'] not in searched]
         if missing:
             folder = dest/('motion-'+hashlib.sha256(json.dumps(missing,sort_keys=True).encode()).hexdigest()[:16])
-            results.append((fetch_lines(missing, folder), folder))
+            results.append((footage_box.fetch(payload(missing),folder,ctx.log), folder))
     elif lines:
-        results.append((fetch_lines(lines, dest), dest))
+        folder = dest if matches else dest/('motion-'+signature[:16])
+        results.append((footage_box.fetch(payload(lines),folder,ctx.log),folder))
     rows = {i:dict(i=i,say=s['say'],clips=[]) for i,s in segments.items()}
     voices, credits, spend = [], [], {}
     for report, folder in results:
@@ -112,8 +117,11 @@ def chapter_footage(ctx, script, chapter, dest, avoided, known):
             spend[k] = spend.get(k,0)+v
     attach_documents(rows, segments, credits, documents, mixed)
     if documents:
-        save(dest/'document-supply.json', dict(lines=[rows[i] for i in documents],
-             motion_lines=[ln['i'] for ln in lines], box_reports=[str(f.relative_to(dest)) for _,f in results]))
+        manifest = dest/'document-supply.json'
+        supplied = dict(lines=[rows[i] for i in documents],motion_lines=[ln['i'] for ln in lines],
+                        box_reports=[str(f.relative_to(dest)) for _,f in results])
+        if not manifest.exists() or read(manifest)!=supplied:
+            save(manifest,supplied)
     return dict(lines=list(rows.values()), voices=voices, credits=credits, spend=spend)
 
 
@@ -166,6 +174,99 @@ def footage(ctx, script):
     return result
 
 
+def retained_visuals(row):
+    """Identify actual, checked pictures already assigned to these words."""
+    retained = []
+    for clip in row.get('clips', []):
+        path = Path(clip['path'])
+        if not path.is_file():
+            continue
+        if clip.get('primary_passage') and clip['source'].get('primary_context') and digest(path)==clip.get('content_hash'):
+            kind = 'primary_document'
+        elif (clip.get('verification') or {}).get('ok') and path.stat().st_size:
+            kind = 'verified_clip'
+        else:
+            continue
+        retained.append(dict(kind=kind,url=clip['source']['url'],time_range=clip['time_range']))
+    return retained
+
+
+def prefill_search(ctx, ft, payload, dest):
+    signature = footage_box.request_key(payload)
+    summary = dest/'coverage.json'
+    report = dest/'footage.json'
+    if summary.exists():
+        matches = read(summary)['request_sha256']==signature
+    elif report.exists():
+        saved = read(report)
+        # Pre-signature reports recorded the chapter, words, indices and rounded duration.
+        matches = (saved['request_sha256']==signature if saved.get('request_sha256') else
+                   saved.get('about')==payload.get('about') and
+                   [(r['i'],r.get('say'),r.get('dur')) for r in saved.get('lines',[])]==
+                   [(r['i'],r['say'],round(r['dur'],2)) for r in payload['lines']])
+    else:
+        matches = True
+    if not matches:
+        dest = dest.with_name(dest.name+'-'+signature[:16])
+        summary = dest/'coverage.json'
+    rows = {r['i']:r for r in ft['lines']}
+    lines = payload['lines']
+    def alternatives():
+        return {str(line['i']):retained_visuals(rows[line['i']]) for line in lines}
+    prior = read(summary) if summary.exists() else {}
+    rec = dest/'footage.json'
+    trace = {}
+    error = None
+    extra = None
+    # Older boxes deleted their remote JSON on this specific terminal error.
+    # The log has no input fingerprint. Reuse its history only when every
+    # current request has an independently verified, line-specific alternate.
+    logfile = dest/'fetch.log'
+    legacy = footage_box.legacy_empty_trace(logfile) if not prior and not rec.exists() else {}
+    recovered = prior.get('status') in ('retained_after_failure','retained_after_legacy_search')
+    if recovered:
+        available = alternatives()
+        extra = read(rec) if rec.exists() else None
+        for row in (extra or {}).get('lines',[]):
+            clips = [dict(c,path=str(dest/c['file'])) for c in row['clips']]
+            available[str(row['i'])].extend(retained_visuals(dict(clips=clips)))
+        recovered = all(available.values())
+    if recovered:
+        status,trace,error = prior['status'],prior['rank_trace'],prior.get('error')
+    elif legacy and all(alternatives().values()):
+        status,trace = 'retained_after_legacy_search',legacy
+    else:
+        if legacy:
+            # The historical trace is still evidence even if this request needs new media.
+            dest = dest.with_name(dest.name+'-'+signature[:16])
+            summary,logfile = dest/'coverage.json',dest/'fetch.log'
+        try:
+            extra = footage_box.fetch(payload,dest,ctx.log)
+            status = 'acquired' if any(r['clips'] for r in extra['lines']) else 'completed_empty'
+        except (footage_box.PictureResearchUnavailable, ConnectionError, subprocess.SubprocessError) as exc:
+            status, error, extra = 'retained_after_failure', str(exc), getattr(exc,'report',None)
+        trace = (extra or {}).get('rank_trace') or footage_box.rank_trace(logfile)
+    if extra:
+        add_footage(ft,extra,dest)
+    available = alternatives()
+    coverage = {}
+    for line in lines:
+        i = str(line['i'])
+        coverage[i] = dict(requested=line.get('visual') or rows[line['i']].get('show') or line['say'],
+                           retained=available[i])
+    missing = [row['requested'] for row in coverage.values() if not row['retained']]
+    if error and missing:
+        status = 'incomplete'
+    save(summary, dict(request_sha256=signature,status=status,rank_trace=trace,error=error,lines=coverage))
+    if status=='incomplete':
+        raise footage_box.PictureResearchUnavailable(f'{error}. Remaining picture request: {missing}',extra)
+    ft.setdefault('prefill_coverage',{}).update(coverage)
+    if status!='acquired':
+        ctx.log(f"{dest.name}: {status}; retained pictures for {sum(map(bool,available.values()))}/{len(lines)} lines"
+                + (f" ({error})" if error else ""))
+    return extra or dict(lines=[],voices=[])
+
+
 def prefill_footage(ctx,script,ft,pass_id=None):
     """Research obvious shortages while the narrator is still being made.
     This estimate only requests supply; the actual word clock decides coverage.
@@ -190,8 +291,10 @@ def prefill_footage(ctx,script,ft,pass_id=None):
         retained=[h for subject in script.get('idea_full',{}).get('supply',{}).get('subjects',[]) for h in subject['sources']]
         ranked=retained+[c['source'] for ln in ft['lines'] for c in ln['clips'] if c.get('kind')!='image']
         known=list({source['url']:source for source in ranked}.values())
-        extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title']+'. Find additional literal archive evidence; previous source seconds are reserved.',avoid=avoid,known_sources=known,want_voices=not bool(ft.get('voices'))),dest,ctx.log)
-        add_footage(ft,extra,dest)
+        payload=dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title']+
+                     '. Find additional literal archive evidence; previous source seconds are reserved.',
+                     avoid=avoid,known_sources=known,want_voices=not bool(ft.get('voices')))
+        extra=prefill_search(ctx,ft,payload,dest)
         avoid.extend(dict(url=c['source']['url'],time_range=c['time_range']) for ln in extra['lines'] for c in ln['clips'])
         avoid.extend(dict(url=v['source']['url'],time_range=v['time_range']) for v in extra.get('voices',[]))
 
