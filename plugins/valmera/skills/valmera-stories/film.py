@@ -1081,8 +1081,21 @@ def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", ac
                     P.voices[vk]["px"] = float(min(floor, wide))
                     if P.R.width(vk, shown) > max_w * W:
                         y_at = high_y              # wider than the seat beside the rail: set higher, clear of it
+            center = .5
             if fig and any(lo < b and a < hi for lo, hi in exhibits):
                 y_at = .70
+                # The exhibit occupies the upper half. Shape the figure for the
+                # space beside the buttons, keeping the original cap height.
+                left, right = SAFE[0] + .012, RAIL_X - .012
+                width = P.R.width(vk, shown) / W
+                if width > right - left:
+                    cap = P.R.cap(vk)
+                    P.voices[vk]["font"] = "Anton-Regular.ttf"
+                    P.voices[vk]["track"] = 0
+                    P.voices[vk]["px"] = math.ceil(P.voices[vk]["px"] * cap / P.R.cap(vk))
+                    P.voices[vk]["px"] = P.R.fit_px(vk, shown, (right - left) * W, P.voices[vk]["px"])
+                    width = P.R.width(vk, shown) / W
+                center = min(center, right - width / 2)
             n = b - a
             k = min(int(bake.BOUNCE["n"]), n)
             rise = bake.bounce(k, rest=0.0)
@@ -1090,7 +1103,7 @@ def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", ac
             bl = [round(float(q), 3) for q in bake.bounce_blur(k)] + [0.0] * (n - k)
             ops = [min(1.0, (q + 1) / 2) for q in range(n)]
             num = fig or any(ch.isdigit() for ch in shown)
-            placed.append([P.word([a, b], shown, vk, 0.5, ys, accent if num else ink, ops, align="c", z=3, blur=bl, role="big",
+            placed.append([P.word([a, b], shown, vk, center, ys, accent if num else ink, ops, align="c", z=3, blur=bl, role="big",
                                  stroke=dict(w=3.0, c="#0B0A09"))])
             if qualifier:
                 placed[-1][0]["display_text"] = text
@@ -1100,7 +1113,7 @@ def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", ac
                 P.voices[vs] = dict(P.voices[v])
                 P.voices[vs]["px"] = float(max(int(0.4 * P.voices[vk]["px"]), 38))
                 dy = -P.R.cap(vk) * 1.25 / H if qualifier else (P.R.cap(vs) * 1.9) / H
-                placed[-1].append(P.word([a, b], small, vs, 0.5, [r4(float(q) + dy) for q in ys], ink, ops, align="c", z=3, blur=bl, role="big",
+                placed[-1].append(P.word([a, b], small, vs, center, [r4(float(q) + dy) for q in ys], ink, ops, align="c", z=3, blur=bl, role="big",
                        stroke=dict(w=2.0, c="#0B0A09")))
             P.events.append(a)
             out.append((a, b, text))

@@ -421,10 +421,10 @@ def card_music(card_bed, overlap, n_out, ref):
     return music * (gain*env[:,None])
 
 
-def card_voice_duck(frames, at, end):
+def card_voice_duck(frames, at, end, gain=.25):
     import numpy as np
     return np.interp(np.arange(frames), [at - .35*SR, at, end, end + .90*SR],
-                     [1., .25, .25, 1.])[:, None]
+                     [1., gain, gain, 1.])[:, None]
 
 
 def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=True, last_word_s=None, sting=True, card_bed=None):
@@ -499,7 +499,13 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
     end = at + len(voice)
     duck = card_voice_duck(n_tail, at, end)
     acc *= duck
-    out *= duck
+    if card_bed and card_bed.get("speech_room_db") is not None:
+        # The continuing phrase already sits below the closing programme.
+        # Make just the remaining room for the recorded signature.
+        room = target - float(card_bed["speech_room_db"]) - _k_db(out[at:end])
+        out *= card_voice_duck(n_tail, at, end, gain=10 ** (min(0., room) / 20))
+    else:
+        out *= duck
     acc[at:end] += voice * 10 ** (gain / 20)
     info["voice"] = dict(at_s=(cut+at)/SR, end_s=(cut+end)/SR, target_lufs=round(target,1))
     # the closing section's true peak, kept under the ceiling by lowering the accent only (the programme is as it was)

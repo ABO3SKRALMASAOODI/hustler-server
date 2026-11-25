@@ -123,3 +123,85 @@ def test_a_quiet_directed_move_keeps_the_composed_payoff_accent(monkeypatch):
     sounds, report = film.replan_sound(scene, {})
     assert sounds == [dict(event_f=1823)] and report["directed_bindings"] == [None]
     assert film.replan_sound(dict(scene, story_cues=[]), {})[0] == []
+
+
+def test_first_repair_recovers_only_the_readable_rendered_window(tmp_path):
+    import wf3
+    from types import SimpleNamespace
+    pics = [dict(f=[0, 8], line=7, kind="clip", path="/original.mp4", src=[2, 2.267]),
+            dict(f=[8, 12], line=7, kind="clip", path="/other.mp4", src=[1, 1.133])]
+    checks = [dict(f=p["f"], drop="original.mp4@7", judged=True, fit=True, readable=True) for p in pics]
+    (tmp_path/"score.json").write_text(json.dumps(dict(beats=dict(pictures=pics))))
+    (tmp_path/"check_attempt.json").write_text(json.dumps(dict(checks=dict(stories=dict(picture_fit=dict(shots=checks))))))
+    ctx = SimpleNamespace(run_dir=str(tmp_path))
+    assert wf3.checked_render_shots(ctx, dict(rounds=1)) == pics[:1]
+    assert wf3.checked_render_shots(ctx, dict(rounds=2)) == []
+
+
+def test_score_topup_reads_only_uncovered_seconds_and_declared_originals(tmp_path, monkeypatch):
+    import wf3
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(supply=str(tmp_path))
+    (tmp_path/"sources").mkdir()
+    clip = tmp_path/"original.mp4"
+    clip.touch()
+    rows = [dict(subjects=[name], path=str(clip), url=url, id=url, channel="Sony", title=name, where="youtube")
+            for name, url in [("TPS-L2", "a"), ("factory", "b")]]
+    (tmp_path/"sources/manifest.json").write_text(json.dumps(rows))
+    words = [dict(w=w, start=i, end=i+.8, seg=1) for i,w in enumerate("show twin ports".split())]
+    pack = dict(words=dict(words=words, duration=3.), pictures={})
+    script = dict(script=dict(segments=[dict(say="setup"),dict(say="show twin ports", see=[dict(thing="TPS-L2", moment="plug in")])],
+                  named=[dict(name="TPS-L2"), dict(name="factory")]))
+    (tmp_path/"pack.json").write_text(json.dumps(dict(record={})))
+    calls = []
+    monkeypatch.setattr(wf3, "footage_voiced", lambda ctx, script, durs, **kw: calls.append((script,durs,kw)))
+    wf3.topup_from_score(ctx,script,pack,[0,1], windows=[dict(line=1,f=[33,87])])
+    assert len(calls) == 2 and calls[0][2]["source_only"] and not calls[1][2].get("source_only")
+    request, durations, kw = calls[0]
+    assert kw["lines"] == [1] and durations[1] == 1.8
+    sc = request["script"]
+    assert sc["segments"][1]["claim"] == "show twin ports"
+    assert sc["segments"][1]["say"] == "twin ports"
+    assert {s["url"] for n in sc["named"] for s in n.get("video_sources", [])} == {"a"}
+    assert "factory" not in [n["name"] for n in sc["named"]]
+
+
+def test_fresh_read_covers_only_the_remaining_part_of_a_failed_window():
+    import wf3
+    failed = [dict(line=7, f=[1090,1113])]
+    picked = [dict(line=7, f=[1077,1095]), dict(line=8, f=[1095,1113]),
+              dict(line=7, f=[1104,1108])]
+    assert wf3.uncovered_windows(failed, picked) == [
+        dict(line=7, f=[1095,1104]), dict(line=7, f=[1108,1113])]
+
+
+def test_interrupted_score_merge_reuses_completed_acquisition(tmp_path):
+    import wf3
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(supply=str(tmp_path))
+    request = dict(script=dict(segments=[dict(say="the Walkman", repair_windows=[[1090,1113]])], named=[]))
+    args = (request, [0], [.77], {}, dict(source_only=True), {}, [])
+    name = wf3.repair_pass(ctx, "footage7", *args)
+    folder = tmp_path / name
+    (folder/"one.mp4").write_bytes(b"staged original")
+    (folder/"footage.json").write_text(json.dumps(dict(lines=[dict(clips=[dict(file="one.mp4")])])))
+    assert wf3.repair_pass(ctx, "footage8", *args) == "footage7"
+    request["script"]["segments"][0]["repair_windows"] = [[1050,1065]]
+    assert wf3.repair_pass(ctx, "footage8", *args) == "footage8"
+
+
+def test_a_fitting_unused_take_is_placed_in_the_gap_before_a_new_read(tmp_path):
+    import wf3
+    held = dict(kind="clip", path="held", line=7, f=[0,30], src=[0.,1.], take=0)
+    failing = dict(kind="clip", path="wrong", line=7, f=[30,53], src=[0.,.767], take=0)
+    replacement = dict(path=str(tmp_path/"native.mp4"), seconds=.70, subject="TPS-L2", motion=dict(p90=3.))
+    (tmp_path/"native.mp4").touch()
+    verdict = dict(grade=4, fits_line=True, exact_thing=True, time_ok=True, version_ok=True, contradicts=False)
+    pack = dict(footage=[dict(i=7, clips=[replacement])], fit_verdicts={replacement["path"]:{0:{7:verdict}}})
+    knobs = {}
+    plan = wf3.repair_layout(dict(pictures=[held, failing]), [failing], knobs,
+                             lambda: ({},dict(pictures=knobs["checked_shots"])))
+    assert plan(pack, None) == []
+    a,b = knobs["checked_shots"]
+    assert a == held and b["path"] == replacement["path"] and b["f"] == [30,53]
+    assert abs((b["src"][1] - b["src"][0]) - .70) < .001

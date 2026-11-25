@@ -405,3 +405,19 @@ def test_card_continuation_crossing_a_mastered_fade_and_leading_rest(tmp_path):
     db = 10*np.log10(np.maximum(1e-12, np.mean(stem.reshape(50,SR//10,2)**2,axis=(1,2))))
     assert db.min() > -48, db
     assert np.median(db[5:16]) < np.median(db[32:45])-8
+
+
+def test_story_brand_line_keeps_room_already_present_in_its_bed(tmp_path):
+    t = np.arange(6*SR)/SR
+    programme = make_programme(tmp_path/"talk.mp4", .18*np.sin(2*np.pi*180*t))
+    track = make_programme(tmp_path/"cue.mp4", .12*np.sin(2*np.pi*440*t))
+    args = dict(prog_s=6, fps=30, j=9, outro_s=5, sting=False, last_word_s=5.6)
+    wav, cut, _ = brand.accent_tail(programme, str(tmp_path), **args)
+    dry = brand._pcm(wav)
+    wav, _, info = brand.accent_tail(programme, str(tmp_path), **args,
+        card_bed=dict(path=track, tempo=1., at_s=1., speech_room_db=9.))
+    bed = (brand._pcm(wav) - dry)[6*SR-cut:]
+    speech = bed[SR//2:SR]
+    rest = bed[3*SR:4*SR]
+    assert brand._k_db(speech) <= info["voice"]["target_lufs"] - 8.
+    assert brand._k_db(speech) > brand._k_db(rest) - 3.

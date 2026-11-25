@@ -16,6 +16,7 @@ render  the film's sound as one file (narration and the library's few sounds; ne
         (worker/scene), through heavy.sh
 check   the shell's brand finish and checks, then this workflow's: the mark on several frames, the credits
 """
+import hashlib
 import json
 import math
 import os
@@ -1537,7 +1538,8 @@ def topup_script(script, short, moments_only=False):
             if nm not in named and nm not in [e["name"] for e in extra]:
                 extra.append(dict(name=nm, **{"is": base.get("is") or "thing"}, must_show=x.get("must_show") or base.get("must_show"),
                                   searches=[q for q in (x.get("moment"), f"{x.get('thing')} {x.get('as_of')}", x.get("search")) if q][:3],
-                                  thing=x.get("thing"), as_of=x.get("as_of")))
+                                  thing=x.get("thing"), as_of=x.get("as_of"),
+                                  **({"video_sources": base["video_sources"]} if base.get("video_sources") else {})))
         s_["pictures"] = pics + [p for p in s_.get("pictures") or [] if p not in pics]
     sc["named"] = (sc.get("named") or []) + extra
     return dict(script, script=sc)
@@ -1622,7 +1624,45 @@ def judge_supply(ctx, sc, pack):
     return u, c
 
 
-def topup_once(ctx, script, pack, durs, short, spend, name, anchors, reel_kw, line_max=None, want_voices=None):
+def repair_pass(ctx, name, request, lines, durs, anchors, options, pack, records):
+    """Resume the same completed acquisition if scoring stopped before merging it."""
+    from pathlib import Path
+    root = Path(ctx.supply)
+    sc = request["script"]
+    # The planner sees every named row, and the reader sees the exact timed clauses.
+    query = dict(title=sc.get("title"), named=sc.get("named"), options=options, anchors=anchors,
+                 lines=[(i, sc["segments"][i], durs[i]) for i in lines],
+                 staged=sorted(c["path"] for ln in pack.get("footage") or [] for c in ln["clips"]))
+    base = hashlib.sha256(json.dumps(query, sort_keys=True, ensure_ascii=False).encode()).digest()
+    previous = {}
+    for path in map(Path, records):
+        looked = path.with_name("looked.json")
+        previous[path.parent.name] = hashlib.sha256(path.read_bytes() + (looked.read_bytes() if looked.is_file() else b"")).hexdigest()
+
+    def key(folder):
+        inputs = sorted((k,v) for k,v in previous.items() if k != folder)
+        return hashlib.sha256(base + json.dumps(inputs).encode()).hexdigest()
+
+    for marker in sorted(root.glob("footage*/score_request.json")):
+        folder = marker.parent
+        if (FIT._load(str(marker)) or {}).get("key") != key(folder.name):
+            continue
+        receipt = folder / "footage.json"
+        if not receipt.exists():
+            return folder.name
+        clips = [folder / c["file"] for ln in (FIT._load(str(receipt)) or {}).get("lines") or [] for c in ln["clips"]]
+        if clips and all(p.is_file() and p.stat().st_size for p in clips):
+            return folder.name
+    folder = root / name
+    folder.mkdir(exist_ok=True)
+    marker = folder / "score_request.json"
+    tmp = marker.with_suffix(".part")
+    tmp.write_text(json.dumps(dict(key=key(name))))
+    tmp.replace(marker)
+    return name
+
+
+def topup_once(ctx, script, pack, durs, short, spend, name, anchors, reel_kw, line_max=None, want_voices=None, request=None):
     """One footage top-up for the short lines (topup_script: per-moment searches), never cutting again what an earlier
     record holds; merged per line, measured and judged. line_max: the most clips a line asks for (the largest real
     deficit). want_voices (the stories' own top-ups): the sources it opens are heard for the people's own voices too,
@@ -1632,7 +1672,10 @@ def topup_once(ctx, script, pack, durs, short, spend, name, anchors, reel_kw, li
         reel_kw = dict(reel_kw, line_max=max(int(line_max), 1))
     records = [os.path.join(ctx.supply, n, "footage.json") for n in sorted(os.listdir(ctx.supply))
                if n.startswith("footage") and os.path.exists(os.path.join(ctx.supply, n, "footage.json"))]
-    tscript = topup_script(script, short)
+    tscript = topup_script(request or script, short)
+    if request:
+        name = repair_pass(ctx, name, tscript, short, durs, anchors, reel_kw, pack, records)
+        records = [p for p in records if os.path.basename(os.path.dirname(p)) != name]
     foot2 = footage_voiced(ctx, tscript, durs, anchors=anchors, out_name=name, lines=short, avoid=records, repair=bool(want_voices),
                            **footage_kw(reel_kw, **({"want_voices": want_voices} if want_voices is not None else {})))
     if not foot2:
@@ -1653,6 +1696,8 @@ def topup_once(ctx, script, pack, durs, short, spend, name, anchors, reel_kw, li
                                                      for c in foot2.get("credits") or []]
     spend.append(dict(stage="supply", provider="openai", model="gpt-6-sol low + gpt-4o-transcribe", what=f"footage top-up ({name})",
                       usd=(foot2.get("spend") or {}).get("usd") or 0))
+    if not added:
+        return 0
     for ln in pack["footage"]:
         for c in ln["clips"]:
             if c["path"] not in (pack.get("talking") or {}):
@@ -1848,6 +1893,22 @@ def env_path():
     return F.scene_worker() + os.pathsep + os.path.join(chain.SLICE, "pylib")
 
 
+def checked_render_shots(ctx, receipt):
+    """Recover the first render's exact windows for markers written before they carried the shots."""
+    if "checked_shots" in receipt:
+        return receipt["checked_shots"] or []
+    if receipt.get("rounds") != 1:
+        return []
+    attempt = _check_record(ctx, "check_attempt") or {}
+    fit = ((attempt.get("checks") or {}).get("stories") or {}).get("picture_fit") or {}
+    passed = {(tuple(r["f"]), r.get("drop")) for r in fit.get("shots") or []
+              if r.get("judged") and r.get("fit") and r.get("readable") is True}
+    score = _check_record(ctx, "score") or {}
+    return [p for p in (score.get("beats") or {}).get("pictures") or []
+            if p.get("kind") in ("clip", "photo") and p.get("tier") != "voice"
+            and (tuple(p["f"]), f"{os.path.basename(p['path'])}@{p.get('line')}") in passed]
+
+
 def score(ctx, script):
     pack = load_pack(ctx)
     d = direction_of(ctx)
@@ -1881,7 +1942,7 @@ def score(ctx, script):
     marker = os.path.join(ctx.supply, "render_repair.json")
     if os.path.isfile(marker):
         with open(marker) as receipt:
-            knobs["checked_shots"] = json.load(receipt).get("checked_shots") or []
+            knobs["checked_shots"] = checked_render_shots(ctx, json.load(receipt))
     knobs["source_evidence"] = ctx.workflow == "wf3"
     knobs.setdefault("bed", bool(ctx.args.get("song")) or chain.wants_music(ctx))       # the film gets music: the sounds are designed for a film with a bed
     reel = script["style"]["id"] in R.STYLES
@@ -2007,7 +2068,7 @@ def narrator_gaps(words, min_s=SWELL_GAP_S):
 def joints_of(sc, pack, beats=None):
     """[{t, kind, last_word_t, next_first_word_t, db}] at the story's section joints (the writer's beats), at most
     HOLES_MAX, ranked turn, close, payoff, then low, on the programme's clock from the narration's own words. The bed
-    dips across the preceding pause (0.5–0.8 s) and returns on the next section's first word; the close keeps the bed CLOSE_BED_DB down.
+    dips across the actual preceding pause (up to 0.8 s) and returns on the next section's first word; the close keeps the bed CLOSE_BED_DB down.
     {kind: voice, t0, t1, db} for each real voice cut in: a short one (VOICE_LONG_S or less) gets the full cut, a longer
     one keeps the bed VOICE_LONG_DB under it. {kind: swell, t, rise_s, db}: only a type page at a joint and a hole's
     exit earn one, each placed at the end of a narrator gap of SWELL_GAP_S or more near it, rising no longer than the
@@ -2022,7 +2083,7 @@ def joints_of(sc, pack, beats=None):
         if not prev or not cur:
             continue
         b = cur[0]["t0"]
-        start = min(max(prev[-1]["t1"], b - 0.8), b - 0.5)
+        start = min(max(prev[-1]["t1"], b - 0.8), b)
         j = dict(t=round(b, 3), kind=kind, last_word_t=round(start, 3), next_first_word_t=round(b, 3), seg=i, db=JOINT_HOLE_DB)
         if kind == "close":
             j["bed_db"] = CLOSE_BED_DB
@@ -2159,6 +2220,20 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
     rounds, failed, usd = [], [], 0.0
     defects = []
 
+    def topup(lines, windows):
+        if not knobs.get("source_evidence"):
+            return topup_from_score(ctx, script_rec, pack, lines)
+        def read(placed):
+            nonlocal usd
+            shots = planned_shots(dict(pictures=placed), pack, clock)
+            verdicts, cost = FIT.audit(shots, sc, work=os.path.join(ctx.tmp, "audit"),
+                                       cache_path=os.path.join(ctx.supply, "audit.json"), log=ctx.log, supply=pack.get("fit"))
+            usd += cost
+            return [p for p,r in zip(placed, verdicts) if r.get("judged") and r.get("fit")]
+        remaining = repair_layout(beats, windows, knobs, lambda: build(sc, pack, knobs),
+                                  read if ctx.args.get("audit", True) else None) if windows else None
+        return topup_from_score(ctx, dict(script_rec, script=sc), pack, lines, windows=windows, remaining=remaining)
+
     def audit_round():
         shots = planned_shots(beats, pack, clock)
         res, u = FIT.audit(shots, sc, work=os.path.join(ctx.tmp, "audit"), cache_path=os.path.join(ctx.supply, "audit.json"), log=ctx.log,
@@ -2198,11 +2273,11 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
             if bad and script_rec is not None and ctx.args.get("topup", True) is not False:
                 lines_bad = sorted({int(r["line"]) for r in bad})
                 try:
-                    tp = topup_from_score(ctx, script_rec, pack, lines_bad)
+                    tp = topup(lines_bad, bad)
                 except Exception as e:  # noqa: BLE001 - the top-up is a repair; the fill still follows
                     ctx.log(f"audit top-up: {e!r}"[:300])
                     tp = dict(error=repr(e)[:200])
-                if tp.get("clips"):
+                if tp.get("clips") or tp.get("reused_frames"):
                     l1, beats = build(sc, pack, knobs)
                     taste = F.taste_check(l1, beats)
                     res, u = audit_round()
@@ -2245,11 +2320,18 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
     want_lines = sorted({int(k) for k in pc["shortfall"]} | set(fill_over)) if (pace_fail and pc["shortfall"]) or fill_over else []
     if want_lines and script_rec is not None and ctx.args.get("topup", True) is not False:
         try:
-            topped = topup_from_score(ctx, script_rec, pack, want_lines)
+            windows = None
+            if knobs.get("source_evidence"):
+                # cut_fit's deficit predates the final exhibits and retained checked shots.
+                checked = {(p["path"], tuple(p["f"]), tuple(p.get("src") or [])) for p in knobs.get("checked_shots") or []}
+                windows = [p for p in beats.get("pictures") or [] if p.get("line") in want_lines
+                           and p.get("tier") in ("replay", "reframe", "designed")
+                           and (p["path"], tuple(p["f"]), tuple(p.get("src") or [])) not in checked]
+            topped = topup(want_lines, windows)
         except Exception as e:  # noqa: BLE001 - the top-up is a repair; its failure is recorded, the plan stands
             ctx.log(f"pace top-up: {e!r}"[:300])
             topped = dict(error=repr(e)[:200])
-        if topped and topped.get("clips"):
+        if topped and (topped.get("clips") or topped.get("reused_frames")):
             l1, beats = build(sc, pack, knobs)
             taste = F.taste_check(l1, beats)
             pc = pace_of(beats)
@@ -2418,20 +2500,179 @@ def placed_credits_only(pack):
     return [c for c in pack.get("credits") or [] if not c.get("voice") or (c.get("page"), tuple(c.get("time_range") or ())) in placed]
 
 
-def topup_from_score(ctx, script_rec, pack, lines):
+def score_search(ctx, script_rec, pack, windows, durs):
+    sc = json.loads(json.dumps(script_rec["script"]))
+    clock = F.Clock(pack["words"], sc)
+    by_line = {}
+    for p in windows:
+        by_line.setdefault(int(p["line"]), []).append(p["f"])
+    names = set()
+    for line, spans in by_line.items():
+        seg = sc["segments"][line]
+        merged = []
+        for a, b in sorted(spans):
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(b, merged[-1][1])
+            else:
+                merged.append([a, b])
+        words = clock.seg_words(line)
+        seg["claim"] = seg["say"]
+        seg["say"] = " ".join(w["w"] for w in words if any(w["t1"] > a/F.FPS and w["t0"] < b/F.FPS
+                                                           for a,b in merged)) or seg["claim"]
+        seg["repair_windows"] = merged
+        detail = [b["must_show"] for b in seg.get("see") or [] if b.get("must_show")]
+        seg["visual"] = " ".join(dict.fromkeys([seg.get("visual") or "", *detail])).strip()
+        durs[line] = sum(b-a for a,b in merged) / F.FPS
+        names.update(seg.get("pictures") or [])
+        for brief in seg.get("see") or []:
+            names.update((brief.get("thing"), brief.get("moment")))
+    names.discard(None)
+    manifest = FIT._load(os.path.join(ctx.supply, "sources", "manifest.json")) or []
+    sc["named"] = [n for n in sc.get("named") or [] if n.get("name") in names or n.get("thing") in names]
+    for n in sc["named"]:
+        aliases = {n["name"], n.get("thing")} - {None}
+        known = {r["url"]: r for r in n.get("video_sources") or []}
+        for r in manifest:
+            if aliases.intersection(r.get("subjects") or []) and r.get("path") and os.path.isfile(r["path"]):
+                known.setdefault(r["url"], {k:r[k] for k in ("url", "id", "where", "channel", "duration", "title") if k in r})
+        if known:
+            n["video_sources"] = list(known.values())
+    return dict(script_rec, script=sc)
+
+
+def uncovered_windows(windows, covered):
+    """Subtract placed frames on the same narration line, including partially supplied shots."""
+    out = []
+    for w in windows:
+        pos, end = w["f"]
+        for lo, hi in sorted(p["f"] for p in covered if p.get("line") == w["line"]):
+            if hi <= pos or end <= lo:
+                continue
+            if pos < lo:
+                out.append(dict(line=w["line"], f=[pos, lo]))
+            pos = max(pos, hi)
+        if pos < end:
+            out.append(dict(line=w["line"], f=[pos, end]))
+    return out
+
+
+def repair_layout(beats, windows, knobs, build, read=None):
+    """Retain the cut outside the repair. Measure coverage on the rebuilt timeline."""
+    locked = []
+    for p in beats.get("pictures") or []:
+        if p.get("kind") not in ("clip", "photo") or p.get("line") is None or p.get("tier") == "voice":
+            continue
+        a, b = p["f"]
+        for part in uncovered_windows([p], windows):
+            shot = dict(p, f=part["f"])
+            if p.get("src") and part["f"] != p["f"]:
+                lo, hi = p["src"]
+                shot["src"] = [lo + (hi-lo)*(f-a)/(b-a) for f in part["f"]]
+            locked.append(shot)
+    knobs["checked_shots"] = locked
+
+    excluded = {(p.get("path"), p["line"]) for p in windows}
+    gaps = list(windows)
+    def remaining(pack, paths):
+        nonlocal gaps
+        used = {(p.get("take_group") or p["path"], p.get("take")) for p in locked}
+        proposed = []
+        clips = [c for ln in pack.get("footage") or [] for c in ln["clips"]
+                 if paths is None or c["path"] in paths]
+        for gap in gaps:
+            line = gap["line"]
+            a, b = gap["f"]
+            choices = []
+            for c in clips:
+                path = c["path"]
+                if (path, line) in excluded or f"{os.path.basename(path)}@{line}" in (knobs.get("drop") or []):
+                    continue
+                verdicts = FIT._rows(pack.get("fit_verdicts", {}).get(path))
+                for ti, take in enumerate(R.Takes.of(c)):
+                    v = verdicts.get(ti, {}).get(line)
+                    group = (c.get("take_group") or path, ti)
+                    if FIT.usable(v) and group not in used and os.path.isfile(path):
+                        native = round((take[1] - take[0]) * F.FPS) >= b - a
+                        choices.append((v.get("grade") or 0, native, R.take_motion(c, take), path, ti, c, take, group))
+            for _, _, _, path, ti, clip, take, group in sorted(choices, key=lambda q: q[:5], reverse=True):
+                if group in used or a >= b:
+                    continue
+                frames = (take[1] - take[0]) * F.FPS
+                end = min(b, a + round(frames))
+                # The reel absorbs a one/two-frame tail into this same shot
+                # within its existing 0.8x playback range.
+                if b - end <= 2 and frames >= .8 * (b-a):
+                    end = b
+                if end <= a:
+                    continue
+                proposed.append(dict(kind="clip", line=line, f=[a,end], path=path, take=ti,
+                                     take_bounds=list(take), take_group=group[0], name=clip.get("subject"),
+                                     src=list(R.Takes.best(clip, take, (end-a)/F.FPS)), tier="line", use=1))
+                used.add(group)
+                a = end
+        if not proposed:
+            return gaps
+        knobs["checked_shots"] = locked + proposed
+        _, trial = build()
+        def which(p):
+            return p["path"], p.get("line"), tuple(p["f"])
+        asked = {which(p) for p in proposed}
+        placed = [p for p in trial["pictures"] if which(p) in asked]
+        if read and placed:
+            placed = read(placed)
+        locked.extend(placed)
+        knobs["checked_shots"] = list(locked)
+        gaps = uncovered_windows(gaps, placed)
+        return gaps
+    return remaining
+
+
+def topup_from_score(ctx, script_rec, pack, lines, windows=None, remaining=None):
     """The pace gate's repair: the short lines' footage top-up (topup_once) run from the score stage, the pack saved."""
     words = pack["words"] if isinstance(pack["words"], dict) else json.load(open(pack["words"]))
     durs = chain.seg_durs(words["words"], len(script_rec["script"]["segments"]))
+    reused_frames = 0
+    if windows is not None:
+        windows = [p for p in windows if p.get("line") in lines and p.get("f")]
+        if remaining and windows:
+            before = sum(b-a for a,b in (p["f"] for p in windows))
+            windows = remaining(pack, None)
+            reused_frames = before - sum(b-a for a,b in (p["f"] for p in windows))
+        lines = sorted({p["line"] for p in windows})
+        if not lines:
+            return dict(lines=[], clips=0, reused_frames=reused_frames)
+        request = score_search(ctx, script_rec, pack, windows, durs)
+    else:
+        request = script_rec
     anchors = {k: [r["path"] for r in v if r.get("path")] for k, v in (pack.get("pictures") or {}).items()}
-    k = 2 + sum(1 for n in os.listdir(ctx.supply) if n.startswith("footage") and os.path.isdir(os.path.join(ctx.supply, n)))
+    k = max([1] + [int(n[7:] or 1) for n in os.listdir(ctx.supply)
+                   if n == "footage" or (n.startswith("footage") and n[7:].isdigit())]) + 1
     spend = []
     # the voices were spliced once (splice_voices) before the score: this pace top-up cuts pictures only, so it spends no
     # pick on the provider's cap and leaves no voice cut but never placed (FOOTAGE_VOICES=0 for this one call)
     old = os.environ.get("FOOTAGE_VOICES")
     os.environ["FOOTAGE_VOICES"] = "0"
     try:
-        added = topup_once(ctx, script_rec, pack, durs, lines, spend, f"footage{k}", anchors,
-                           dict(preserve_source=True, shot_s=REEL_SHOT_S, line_max=REEL_LINE_MAX, per=REEL_PER))
+        options = dict(preserve_source=True, shot_s=REEL_SHOT_S, line_max=REEL_LINE_MAX, per=2 if windows else REEL_PER)
+        missing = list(lines)
+        added = 0
+        if windows and any(n.get("video_sources") for n in request["script"]["named"]):
+            previous = {c["path"] for ln in pack.get("footage") or [] for c in ln["clips"]}
+            added = topup_once(ctx, script_rec, pack, durs, lines, spend, f"footage{k}", anchors,
+                               dict(options, source_only=True), request=request)
+            k += 1
+            if added and remaining:
+                paths = {c["path"] for ln in pack["footage"] for c in ln["clips"]} - previous
+                windows = remaining(pack, paths)
+                missing = sorted({p["line"] for p in windows})
+        if missing:
+            previous = {c["path"] for ln in pack.get("footage") or [] for c in ln["clips"]}
+            fresh = topup_once(ctx, script_rec, pack, durs, missing, spend, f"footage{k}", anchors, options,
+                                **({"request": score_search(ctx, script_rec, pack,
+                                    [p for p in windows if p["line"] in missing], durs)} if windows else {}))
+            added += fresh
+            if fresh and remaining:
+                remaining(pack, {c["path"] for ln in pack["footage"] for c in ln["clips"]} - previous)
     finally:
         if old is None:
             os.environ.pop("FOOTAGE_VOICES", None)
@@ -2442,7 +2683,7 @@ def topup_from_score(ctx, script_rec, pack, lines):
     whole["pack"] = pack
     whole["record"].setdefault("spend", []).extend(spend)
     json.dump(whole, open(os.path.join(ctx.supply, "pack.json"), "w"), ensure_ascii=False, indent=1)
-    return dict(lines=lines, clips=added)
+    return dict(lines=lines, clips=added, reused_frames=reused_frames)
 
 
 def render(ctx, script, sc):

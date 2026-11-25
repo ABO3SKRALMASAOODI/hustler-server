@@ -806,6 +806,8 @@ def music_version(ctx, rd, sc):
                         track = next((r for r in json.load(f)["tracks"] if r["cid"] == choice["cid"]),None)
                     if track:
                         bed = dict(bed,path=os.path.join(library,track["file"]))
+            if bed and ctx.workflow == "wf3":
+                bed = dict(bed, speech_room_db=9.)
             brand.finish(out, final + ".part.mp4", ctx.tmp, card_bed=bed,
                          last_word_s=last_word(ctx, sc), **end_accent(ctx, sc))
             os.replace(final + ".part.mp4", final)

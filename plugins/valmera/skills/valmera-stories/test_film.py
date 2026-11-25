@@ -696,3 +696,19 @@ def test_a_story_reel_stops_after_fit_naming_what_was_searched_and_rejected(tmp_
     assert "only 0 of 3 named things have fitting pictures or footage" in msg and "John Lasseter: searched ['John Lasseter 1993']" in msg
     assert "footage: 1 clips found, 0 fit a line" in msg
     assert os.path.exists(os.path.join(ctx.supply, "refusal.json"))
+
+
+@pytest.mark.parametrize("text,old_right", [("186 MILLION", .900), ("ABOUT 220 MILLION", .917)])
+def test_exhibit_figure_fits_its_final_seat(text, old_right):
+    script, clock, plan = _type_setup(text=text)
+    end = F.Clock.f(clock.dur)
+    shown = F.display_words(plan, clock, script, "dsp", .627, end, anchored_only=True,
+                            cap_floor_px=108, exhibits=[(0, end)])
+    F.caption_build(plan, clock, "cap", .62, f_end=end, hold=[(a-1, b) for a,b,_ in shown])
+    word = next(it for it in plan.items if "MILLION" in it["t"])
+    width = plan.R.width(word["v"], word["t"]) / F.W
+    right = word["x"] + width
+    assert right < F.RAIL_X - .008, (right, old_right)
+    assert word["x"] > F.SAFE[0] and plan.R.cap(word["v"]) >= 108
+    assert not any(it.get("role") == "cap" and it["f"][0] < word["f"][1]
+                   and it["f"][1] > word["f"][0] for it in plan.items)
