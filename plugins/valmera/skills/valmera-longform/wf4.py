@@ -47,17 +47,28 @@ def probe(idea):
 
 
 def ideas(ctx):
-    able = able_cards(ctx)
-    if not able:
-        raise RuntimeError(f"no buildable style outside the last three ({ctx.styles_last()})")
-    card = able[0]
-    avoid = [r.get("idea") for r in ledger_rows(ctx) if r.get("idea")]
-    got, use = story.find_ideas(card, avoid=avoid, line=ctx.args.get("line"), delivered=DL.prompt_block(ctx.workflow))
-    for i in got:
-        i["style"] = card["id"]
-    got.sort(key=lambda i: -float(i.get("strength") or 0))
-    for i in got[:3]:
-        i["supply"] = probe(i)
+    from shell import jload, jsave
+
+    checkpoint = os.path.join(ctx.run_dir, "idea-research.json")
+    research = jload(checkpoint)
+    if research is None:
+        able = able_cards(ctx)
+        if not able:
+            raise RuntimeError(f"no buildable style outside the last three ({ctx.styles_last()})")
+        card = able[0]
+        avoid = [r.get("idea") for r in ledger_rows(ctx) if r.get("idea")]
+        got, use = story.find_ideas(card, avoid=avoid, line=ctx.args.get("line"), delivered=DL.prompt_block(ctx.workflow))
+        for i in got:
+            i["style"] = card["id"]
+        got.sort(key=lambda i: -float(i.get("strength") or 0))
+        research = dict(ideas=got, usage=use, probes=[])
+        jsave(checkpoint, research)
+    got, use, probes = [dict(idea) for idea in research["ideas"]], research["usage"], research["probes"]
+    for index, i in enumerate(got[:3]):
+        if index == len(probes):
+            probes.append(probe(i))
+            jsave(checkpoint, research)
+        i["supply"] = probes[index]
         ctx.log(f"probe {i.get('title')}: {i['supply']['covered']}/{len(i['supply']['subjects'])} subjects, {i['supply']['clips']} ranked footage sources")
     # Among the ideas with enough real footage, the story decides; footage only breaks a near tie (16 Nov: up to 4 points
     # of footage on a 10-point story scale let an archive-rich procedure beat a stronger story).

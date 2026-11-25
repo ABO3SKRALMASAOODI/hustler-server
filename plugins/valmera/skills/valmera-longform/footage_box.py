@@ -292,7 +292,7 @@ PROBE=PROBE.replace('__OFFLINE__',OFFLINE)
 
 
 RUNNER = r'''import json,os,sys,subprocess,pathlib
-slot,scratch,cache,name,port=sys.argv[1:]
+slot,scratch,cache,name,port,proof,run_id=sys.argv[1:]
 info=json.loads(subprocess.check_output(['docker','inspect',slot]))[0]
 allowed={'YTDLP_PROXY','YTDLP_PROXY_FALLBACK','YTDLP_REMOTE_COMPONENTS','YTDLP_FALLBACK_CLIENTS','YTDLP_POT_SERVER_HOME'}
 env=dict(os.environ)
@@ -310,7 +310,8 @@ if port!='off':
                 '-e','HF_HOME=/opt/hf','-e','HF_HUB_OFFLINE=1',
                 '-e','OPENAI_BASE_URL=http://127.0.0.1:'+port+'/v1',
                 '-e','PYTHONPATH='+scratch+'/client',
-                '-e','CODEX_PROXY_PROOF=wf4-box-'+name])
+                '-e','CODEX_PROXY_PROOF='+(proof or run_id or 'wf4-box-'+name)])
+    if run_id:cmd.extend(['-e','VALMERA_RUN='+run_id])
 for k in sorted(allowed):
     if k in env:cmd.extend(['-e',k])
 cmd.extend([info['Image'],'-u',scratch+'/fetch.py',scratch+'/input.json',scratch+'/out'])
@@ -373,11 +374,13 @@ def fetch(payload, out, log=print, _port=None):
     package = io.BytesIO()
     with tarfile.open(fileobj=package, mode='w') as tf:
         if _port is not None:
+            from brand import worker_dir
             from subscription_box import client_files
             files=client_files(_port)
             if not probing:files['box_hear.py']=Path(__file__).with_name('box_hear.py').read_bytes()
-            files['footage_ask.py']=(Path(__file__).resolve().parents[4]/'worker/footage/ask.py').read_bytes()
-            files['footage_hear.py']=(Path(__file__).resolve().parents[4]/'worker/footage/hear.py').read_bytes()
+            footage = Path(worker_dir()) / 'footage'
+            for helper in ('ask.py', 'hear.py'):
+                files['footage_' + helper] = (footage / helper).read_bytes()
             for name,data in files.items():
                 t=tarfile.TarInfo(name);t.size=len(data);tf.addfile(t,io.BytesIO(data))
         for name, data in [('input.json', json.dumps(payload).encode()), ('fetch.py', (PROBE if probing else REMOTE).encode()),('runner.py',RUNNER.encode())]:
@@ -387,7 +390,9 @@ def fetch(payload, out, log=print, _port=None):
     container='wf4-private-'+scratch.rsplit('-',1)[-1]
     try:
         ssh(f'tar xf - -C {q(scratch)}', input=package.getvalue(), capture_output=True)
-        cmd = f'python3 {q(scratch)}/runner.py {q(slot)} {q(scratch)} {q(cache_path(out.parent))} {q(container)} {q(str(_port) if _port else 'off')}'
+        cmd = shlex.join(['python3', scratch + '/runner.py', slot, scratch, cache_path(out.parent),
+                          container, str(_port) if _port else 'off',
+                          os.environ.get('CODEX_PROXY_PROOF', ''), os.environ.get('VALMERA_RUN', '')])
         with open(out / 'fetch.log', 'w') as f:
             ssh(cmd, input=os.environ['OPENAI_API_KEY']+'\n', text=True, stdout=f, stderr=subprocess.STDOUT, timeout=7200)
         archive = out / 'transfer.tar'

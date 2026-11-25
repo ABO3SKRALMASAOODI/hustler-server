@@ -42,12 +42,14 @@ def test_private_container_installs_guard_before_worker(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, 'check_output', lambda *a, **k:
         b'[{"Config":{"Env":["DATABASE_URL=never-inherit","YTDLP_PROXY=fetch-route"],"Image":"worker"},"Image":"sha256:installed"}]')
     monkeypatch.setattr(subprocess, 'call', lambda cmd, **kw: commands.append((cmd,kw)) or 0)
-    monkeypatch.setattr(sys, 'argv', ['runner.py','batch',str(tmp_path),str(tmp_path/'cache'),'own-job','44535'])
+    monkeypatch.setattr(sys, 'argv', ['runner.py','batch',str(tmp_path),str(tmp_path/'cache'),'own-job','44535','factory-proof','run-id'])
     with pytest.raises(SystemExit) as done:
         exec(compile(F.RUNNER, 'private_runner', 'exec'), {})
     assert done.value.code == 0
     cmd = commands[0][0]
     assert cmd[cmd.index('--network') + 1] == 'host'
+    assert 'CODEX_PROXY_PROOF=factory-proof' in cmd
+    assert 'VALMERA_RUN=run-id' in cmd
     assert 'CODEX_PROXY_LOCAL=1' in cmd
     assert 'PYTHONPATH='+str(tmp_path)+'/client' in cmd
     assert 'OPENAI_BASE_URL=http://127.0.0.1:44535/v1' in cmd

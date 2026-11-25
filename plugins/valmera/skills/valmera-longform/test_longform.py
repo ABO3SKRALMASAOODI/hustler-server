@@ -111,7 +111,7 @@ def test_the_ideas_prompt_carries_the_owners_rule_not_a_subject_ban(monkeypatch)
     assert "never the exact same idea told the same way" in seen["content"] and "new version of the same subject is welcome" in seen["content"]
 
 
-def test_among_ideas_with_enough_footage_the_story_decides(monkeypatch):
+def test_among_ideas_with_enough_footage_the_story_decides(tmp_path, monkeypatch):
     """16 Nov: up to four points of footage on a ten-point story scale let an archive-rich procedure beat a stronger story."""
     import wf4
     ideas = [dict(id="i1", title="Procedure with a big archive", strength=6, sources=[]),
@@ -124,13 +124,15 @@ def test_among_ideas_with_enough_footage_the_story_decides(monkeypatch):
     monkeypatch.setattr(wf4, "probe", lambda i: dict(ok=True, covered=10, subjects=[1] * 10, clips=clips[i["id"]]))
 
     class Ctx:
-        args, workflow = {}, "wf4"
+        args, workflow, run_dir = {}, "wf4", tmp_path
         def log(self, *a):
             pass
     got = wf4.ideas(Ctx())["ideas"]
     assert got[0]["id"] == "i2"
     # footage still breaks a near tie
     ideas[0]["strength"] = 9
+    Ctx.run_dir = tmp_path / "second-run"
+    Ctx.run_dir.mkdir()
     assert wf4.ideas(Ctx())["ideas"][0]["id"] == "i1"
 
 
@@ -193,3 +195,33 @@ def test_cli_topic_reaches_both_screenplay_writers_after_checkpoint(tmp_path, mo
     for stage in ("write", "WF4 archive-conformed screenplay"):
         assert topic in prompts[stage]
     assert wf4.story.production_brief(None) == ""
+
+
+def test_ideas_resume_after_box_failure(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import wf4
+
+    ctx = SimpleNamespace(run_dir=tmp_path, state_root=tmp_path, args={}, workflow='wf4', log=lambda msg: None)
+    monkeypatch.setattr(wf4, 'able_cards', lambda ctx: [dict(id='the-ledger')])
+    monkeypatch.setattr(wf4.DL, 'prompt_block', lambda workflow: '')
+    calls = []
+
+    def research(*args, **kwargs):
+        calls.append('writer')
+        return [dict(title=t, strength=5) for t in ('one', 'two', 'three')], dict(web_searches=4)
+
+    def probe(idea):
+        title = idea['title']
+        calls.append(title)
+        if calls == ['writer', 'one', 'two']:
+            raise ConnectionError('box disconnected')
+        return dict(ok=True, covered=1, clips=1, subjects=[title])
+
+    monkeypatch.setattr(wf4.story, 'find_ideas', research)
+    monkeypatch.setattr(wf4, 'probe', probe)
+    with pytest.raises(ConnectionError):
+        wf4.ideas(ctx)
+    result = wf4.ideas(ctx)
+    assert calls == ['writer', 'one', 'two', 'two', 'three']
+    assert result['source']['searches'] == 4
+    assert [idea['supply']['subjects'] for idea in result['ideas']] == [['one'], ['two'], ['three']]
