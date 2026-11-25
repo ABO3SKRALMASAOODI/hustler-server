@@ -62,6 +62,7 @@ EVENTS = frozenset({
  'proof_view', 'showcase_sound', 'before_after_toggle', 'demo_replay_start',
  'demo_replay_step', 'demo_replay_complete', 'starter_request_pick',
  'onboarding_example_view',
+ 'enterprise_email_open', 'enterprise_draft_copy',
 })
 
 def identity(data):
