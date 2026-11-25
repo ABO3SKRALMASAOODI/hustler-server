@@ -53,8 +53,13 @@ def worker_dir():
 
 def _worker():
     w = worker_dir()
-    if w not in sys.path:
+    if not sys.path or sys.path[0] != w:
+        if w in sys.path:
+            sys.path.remove(w)
         sys.path.insert(0, w)
+    # The chooser imports its score client lazily. Resolve the worker client
+    # while its own directory is first, including in a resumed shell process.
+    import llm
     import broll_source
     return broll_source
 
@@ -134,14 +139,14 @@ def pictures(named, out, per=4, min_px=700):
             if min(int(got.get("width") or 0), int(got.get("height") or 0)) < min_px * 0.6 or max(int(got.get("width") or 0), int(got.get("height") or 0)) < min_px:
                 fails.append(f"{c.get('id')}: {got.get('width')}x{got.get('height')} is too small")
                 continue
-            recs.append(_record(c, got, subj["name"]))
+            recs.append(dict(_record(c, got, subj["name"]), checked_brief=s["must_show"]))
         # the check's own evidence stays with the report: what each picture was judged against (must_show), its grade and
         # what it shows, and a check that could not run, so a refusal names why every picture was dropped
         checked = [{k: c.get(k) for k in ("id", "ok", "grade", "shows") if k in c} for c in rep.get("checked") or [] if isinstance(c, dict)]
         rep = {k: v for k, v in rep.items() if k in ("subject", "candidates", "kept", "say", "errors", "usd", "must_show", "searched", "check_error")}
         rep["checked"] = checked[:12]
         rep["downloaded"] = len(recs)
-        if subj.get("search_for"):
+        if subj.get("search_for") is not None:
             rep["search_for"] = subj["search_for"]
         if fails:
             rep["download_errors"] = fails[:6]
@@ -150,9 +155,16 @@ def pictures(named, out, per=4, min_px=700):
     res, reports, usd = {}, [], 0.0
     with ThreadPoolExecutor(max_workers=2) as pool:
         for name, recs, rep in pool.map(one, named):
-            have = {r["path"] for r in res.get(name) or []}
-            # several searches for one thing (one per line's moment, writer.annotate's see.search) gather under its name
-            res.setdefault(name, []).extend(r for r in recs if r["path"] not in have)
+            grouped = res.setdefault(name, [])
+            have = {r["path"]: r for r in grouped}
+            for rec in recs:
+                if rec["path"] in have:
+                    briefs = have[rec["path"]].setdefault("checked_briefs", [])
+                    if rec["checked_brief"] not in briefs:
+                        briefs.append(rec["checked_brief"])
+                else:
+                    grouped.append(rec)
+                    have[rec["path"]] = rec
             reports.append(rep)
             usd += float(rep.get("usd") or 0)
     return res, reports, round(usd, 4)

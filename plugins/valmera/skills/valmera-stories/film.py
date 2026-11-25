@@ -998,7 +998,7 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
 
 
 def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", accent="#F2C14E", gap_s=2.2, hold_s=1.15, max_w=0.70, px_max=190,
-                  dropped=None, roles_skip=(), figure_hold_s=1.7, anchored_only=False, cap_floor_px=None, wide_w=0.86, high_y=0.40):
+                  dropped=None, roles_skip=(), figure_hold_s=1.7, anchored_only=False, cap_floor_px=None, wide_w=0.86, high_y=0.40, exhibits=()):
     """The writer's display strings as large type on the caption seat, each landing on the word that says it (blur
     10 to 0, a rise of 0.03 h, a hair of overshoot, 9 frames: bake.BOUNCE): figures in the accent, names in ink.
     A string the film already prints elsewhere is left out (TASTE P7: say it once); two never come closer than gap_s.
@@ -1044,9 +1044,18 @@ def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", ac
                 drop("too close to the last" if a < f_end - 12 else "at the end")
                 continue
             b = int(min(a + (max(hold_s, figure_hold_s) if fig else hold_s) * FPS, f_end, Clock.f(clock.segs[i][1]) + (int(figure_hold_s * FPS) if fig else 10)))
+            if fig and isinstance(wi, int) and 0 <= wi < len(ws):
+                # The figure can take longer to say than the minimum reading hold.
+                forms = spoken_forms(text)
+                last_words = {form[-1] for form in forms}
+                window = ws[wi:wi + max(map(len, forms), default=0) + 3]
+                last_word = next((w for w in window if norm_word(w["w"]) in last_words), None)
+                if last_word:
+                    b = min(f_end, max(b, Clock.f(last_word["t1"]) + 1))
             if out and out[-1][1] > a:          # never two at once: the one before yields
                 out[-1] = (out[-1][0], a, out[-1][2])
-                placed[-1]["f"][1] = a
+                for layer in placed[-1]:
+                    layer["f"][1] = a
             if b - a < 14:
                 drop("no room")
                 continue
@@ -1057,14 +1066,23 @@ def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", ac
             shown = big or text
             P.voices[vk]["px"] = P.R.fit_px(vk, shown, max_w * W, px_max * (1.15 if fig else 1.0))
             y_at = y
+            qualifier = ""
             if cap_floor_px and (fig or big):
                 ratio = P.R.cap(vk) / max(float(P.voices[vk]["px"]), 1e-6)
                 floor = math.ceil(float(cap_floor_px) / max(ratio, 1e-6))
                 if P.voices[vk]["px"] < floor:
                     wide = P.R.fit_px(vk, shown, wide_w * W, 10 ** 4)
+                    if fig and not big and wide < floor:
+                        tokens = shown.split()
+                        number = next((i for i, w in enumerate(tokens) if any(ch.isdigit() for ch in w)), 0)
+                        if number:
+                            qualifier, shown = " ".join(tokens[:number]), " ".join(tokens[number:])
+                            wide = P.R.fit_px(vk, shown, wide_w * W, 10 ** 4)
                     P.voices[vk]["px"] = float(min(floor, wide))
                     if P.R.width(vk, shown) > max_w * W:
                         y_at = high_y              # wider than the seat beside the rail: set higher, clear of it
+            if fig and any(lo < b and a < hi for lo, hi in exhibits):
+                y_at = .70
             n = b - a
             k = min(int(bake.BOUNCE["n"]), n)
             rise = bake.bounce(k, rest=0.0)
@@ -1072,16 +1090,18 @@ def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", ac
             bl = [round(float(q), 3) for q in bake.bounce_blur(k)] + [0.0] * (n - k)
             ops = [min(1.0, (q + 1) / 2) for q in range(n)]
             num = fig or any(ch.isdigit() for ch in shown)
-            placed.append(P.word([a, b], shown, vk, 0.5, ys, accent if num else ink, ops, align="c", z=3, blur=bl, role="big",
-                                 stroke=dict(w=3.0, c="#0B0A09")))
-            small = str(item.get("small") or "").strip() if big else ""
+            placed.append([P.word([a, b], shown, vk, 0.5, ys, accent if num else ink, ops, align="c", z=3, blur=bl, role="big",
+                                 stroke=dict(w=3.0, c="#0B0A09"))])
+            if qualifier:
+                placed[-1][0]["display_text"] = text
+            small = str(item.get("small") or "").strip() if big else qualifier
             if small:
                 vs = f"{v}s{a}"
                 P.voices[vs] = dict(P.voices[v])
                 P.voices[vs]["px"] = float(max(int(0.4 * P.voices[vk]["px"]), 38))
-                dy = (P.R.cap(vs) * 1.9) / H
-                P.word([a, b], small, vs, 0.5, [r4(float(q) + dy) for q in ys], ink, ops, align="c", z=3, blur=bl, role="big",
-                       stroke=dict(w=2.0, c="#0B0A09"))
+                dy = -P.R.cap(vk) * 1.25 / H if qualifier else (P.R.cap(vs) * 1.9) / H
+                placed[-1].append(P.word([a, b], small, vs, 0.5, [r4(float(q) + dy) for q in ys], ink, ops, align="c", z=3, blur=bl, role="big",
+                       stroke=dict(w=2.0, c="#0B0A09")))
             P.events.append(a)
             out.append((a, b, text))
             last = a

@@ -28,6 +28,7 @@ The key comes from this process's environment (run under .valmera/claude_trial_e
 """
 import html
 import html.parser
+import math
 import json
 import os
 import re
@@ -521,7 +522,8 @@ PHRASE_MAX = 5
 ANNOTATE_SYSTEM = """You are the picture editor of a narrated vertical story film cut like the best documentary reels. The script is final and checked: you never change a word of it. You read it and write the data the cut needs.
 
 For each segment:
-- "see": one to four items, in the order the line says them: {"thing": exactly one name from the named list, "as_of": the story time of that thing as THIS line means it, a year plus its version or state (e.g. "the finished 1995 release, not the 1993 test reel"; "Pixar's Point Richmond office in 1993, not the later Emeryville campus"), "must_show": one sentence, only what must be VISIBLE in a picture for it to carry this line (who or what, doing what, in which version); never the film's treatment of it (colour, black and white, muted, grain, composition, framing): treatment belongs to "finish" alone, "moment": the scene or event the line describes when it describes one (e.g. "Woody knocking Buzz out of the window in the finished 1995 film"), else null, "search": one photo search an archivist would type to find a photograph of exactly this thing at this time (e.g. "John Lasseter 1995"; "Pixar Point Richmond 1993"), "still_only": true when the true picture of this line is still by its nature (a storyboard, a document, a drawing, a letter, a printed page), else false}. A line about a scene of a film names that scene as its moment, in the version the line means. The hook's first see item is the moment its collision names (the person in the scene, the crowd, the screen), the strongest picture of the film, never the figure the line says (a figure belongs to type).
+- "see": one to four items, in the order the line says them: {"thing": exactly one name from the named list, "as_of": the story time of that thing as THIS line means it, a year plus its version or state (e.g. "the finished 1995 release, not the 1993 test reel"; "Pixar's Point Richmond office in 1993, not the later Emeryville campus"), "must_show": one sentence, only what must be VISIBLE in a picture for it to carry this line (who or what, doing what, in which version); never the film's treatment of it (colour, black and white, muted, grain, composition, framing): treatment belongs to "finish" alone, "moment": the scene or event the line describes when it describes one (e.g. "Woody knocking Buzz out of the window in the finished 1995 film"), else null, "search": one photo search an archivist would type to find a photograph of exactly this thing at this time (e.g. "John Lasseter 1995"; "Pixar Point Richmond 1993"), "still_only": true when the true picture of this line is still by its nature (a storyboard, a document, a drawing, a letter, a printed page), else false, "word_i": the index of the first spoken word that needs this particular picture, "keep_full_frame": true for a detail, comparison or group whose evidence a tight crop could hide}. A line about a scene of a film names that scene as its moment, in the version the line means. The hook's first see item is the moment its collision names (the person in the scene, the crowd, the screen), the strongest picture of the film, never the figure the line says (a figure belongs to type).
+- "exhibit": the ID of a fact the segment cites and a short exact excerpt from its quote that shows the action or proof, as {"fact": id, "excerpt": verbatim text}. Use a clause that lets a viewer see the relationship, even if an archival image is unavailable. Within that excerpt, mark two or three successive exact phrases as "passages": [{"text": exact words from excerpt, "word_i": spoken anchor}]. Land a result or number only as the narrator reaches it; together the successive printed phrases should explain the evidence.
 - "list": true when the line itself reads as a list of several distinct things or a quick montage of them (the cut may burst through them in a few frames each), else false; "list_items": the things of the list, in order, as see things, when list is true.
 - "finish": bw|gate|crt|none and "finish_rank" (1 = the segment that most needs it). Black and white, a film gate or scanlines are a device for a memory, an early version, the past cut in, a low point; never a look for the whole film. The devices together cover 12 to 25 percent of the spoken words, never the payoff or the close, never a segment at or after the colour turn.
 - "show": the segment's display items, each {"text": as printed, "role": figure|name|key|chapter|ordinal (ordinal only for the numbers of a list the film itself counts out, "1.", "2.", from 1; a rank such as #1 is a figure), "word_i": the index of the spoken word it lands on (a figure: the first word of the spoken figure; a name: the first word of the name; a chapter: the first word of the segment), "big": the part of the text set large (e.g. "$362M"), "small": the rest set small under it (e.g. "box office, 1995"), or null}. Every item needs its word_i. Keep every given item's text exactly. You may add: the payoff's figure if it lacks one (a figure printed with digits only when the same figure stands in a fact's quote), a name item for each person (is=person) at the line that first says them, one key word where the story turns, and a chapter title only where the story truly changes subject (a film of about a minute and a half needs none, at most one). A chapter title is words a viewer reads as the story itself: exactly the spoken word or words of that segment, or the name of the thing it turns on, the way a key word is. Each segment's role in the story is given in plain words so you know the structure; those roles are the editor's private notes and never become words on the screen. Display type lands on about one picture in six across the film: a figure card for each verified figure, a name for each person, a key word or a spoken phrase where the story needs weight. At most three items a segment.
@@ -529,7 +531,7 @@ For each segment:
 
 And once for the film: "colour_turn": the index of the one segment from which the film stays in colour (the turn or the release); "true_pictures": for every named thing, where a faithful picture of it can exist: "stills" (a free photo archive holds true photographs of it: a real person, a building, an object), "footage" (it exists faithfully only in the work's own moving pictures: an animated film's characters and scenes, whose photographs are toys, rides, statues and costumes), or "both".
 
-Answer with one JSON object only: {"colour_turn": int, "true_pictures": {"<named thing>": "stills"|"footage"|"both", ...}, "segments": [{"i": int, "see": [...], "list": bool, "list_items": [...], "finish": ..., "finish_rank": int or null, "show": [...], "phrases": [[int, ...], ...]}]}"""
+Answer with one JSON object only: {"colour_turn": int, "true_pictures": {"<named thing>": "stills"|"footage"|"both", ...}, "segments": [{"i": int, "see": [...], "exhibit": {"fact": id, "excerpt": exact clause}, "list": bool, "list_items": [...], "finish": ..., "finish_rank": int or null, "show": [...], "phrases": [[int, ...], ...]}]}"""
 
 SEE_SYSTEM = """You are the picture editor of a narrated documentary film. The script is final; you never change a word. For the ONE segment you are given, write what a picture must show to carry it.
 
@@ -559,7 +561,7 @@ def _ann_content(sc, idea_full, problems=None):
         ws = str(s.get("say", "")).split()
         given = [dict(text=str(x.get("text") if isinstance(x, dict) else x), role=x.get("role") if isinstance(x, dict) else None)
                  for x in s.get("show") or []]
-        rows.append(f"{k}. role in the story: {beat_prose(s.get('beat'))}; era={s.get('era')} show={json.dumps(given, ensure_ascii=False)}\n   words: "
+        rows.append(f"{k}. role in the story: {beat_prose(s.get('beat'))}; era={s.get('era')} facts={s.get('facts') or []} show={json.dumps(given, ensure_ascii=False)}\n   words: "
                     + " ".join(f"{j}:{w}" for j, w in enumerate(ws)))
     named = [dict(name=n.get("name"), is_=n.get("is"), must_show=n.get("must_show")) for n in sc.get("named") or []]
     facts = [dict(id=f.get("id"), claim=f.get("claim"), quote=f.get("quote")) for f in sc.get("facts") or []]
@@ -581,7 +583,9 @@ def _clean_see(v, names):
         out.append(dict(thing=x["thing"], as_of=str(x["as_of"]).strip(), must_show=str(x.get("must_show") or "").strip(),
                         moment=str(m).strip() if isinstance(m, str) and m.strip() else None,
                         search=str(q).strip()[:120] if isinstance(q, str) and q.strip() else None,
-                        still_only=x.get("still_only") is True))
+                        still_only=x.get("still_only") is True,
+                        **({"keep_full_frame": True} if x.get("keep_full_frame") is True else {}),
+                        **({"word_i": x["word_i"]} if type(x.get("word_i")) is int else {})))
     return out[:4]
 
 
@@ -656,6 +660,25 @@ def _merge_ann(sc, got):
             s["list"] = g["list"]
             if g["list"]:
                 s["list_items"] = [x for x in g.get("list_items") or [] if x in names][:8]
+        excerpt = g.get("exhibit")
+        if isinstance(excerpt, dict) and excerpt.get("fact") in (s.get("facts") or []):
+            fact = next((f for f in out.get("facts") or [] if f.get("id") == excerpt["fact"]), {})
+            q = excerpt.get("excerpt")
+            if isinstance(q, str) and q.strip() and q.strip() in (fact.get("quote") or ""):
+                s["exhibit"] = dict(fact=excerpt["fact"], excerpt=q.strip())
+                passages, last, offset = [], -1, 0
+                for part in excerpt.get("passages") or []:
+                    if not isinstance(part, dict):
+                        continue
+                    text, wi = part.get("text"), part.get("word_i")
+                    if not isinstance(text, str) or not text.strip() or type(wi) is not int or not last < wi < len(s["say"].split()):
+                        continue
+                    loc = q.find(text.strip(), offset)
+                    if loc >= 0:
+                        passages.append(dict(text=text.strip(), word_i=wi))
+                        last, offset = wi, loc + len(text.strip())
+                if len(passages) >= 2:
+                    s["exhibit"]["passages"] = passages
         given = [dict(x) if isinstance(x, dict) else dict(text=str(x)) for x in s.get("show") or []]
         texts = [str(x.get("text") or "") for x in given]
         answer = [x for x in g.get("show") or [] if isinstance(x, dict) and str(x.get("text") or "").strip()]
@@ -1875,7 +1898,7 @@ Answer with one JSON object only: {"claims": [{"id": the claim id, "queries": [e
 
 EXTRACT_SYSTEM = """You copy sentences from web pages a script has already fetched, for the fact bank of a narrated documentary film. Every sentence you give is checked against the page text below word for word, so copy it exactly: the same words in the same order (you may leave out a footnote mark).
 
-For each claim, copy every sentence on these pages that states it (or the part of it the page states). Then copy the number of sentences asked for that tell the rest of this story: what happened, to whom, when, the figures, the turn, anyone's own words. Each one a whole sentence, or a clause of at least eight words that makes sense alone: never a heading, a caption, a short list item, a bare date or a number.
+For each claim, copy every sentence on these pages that states it (or the part of it the page states). Then copy the number of sentences asked for that tell the rest of this story: the original problem, what people actually tried, the public response, and how it changed the outcome. Prefer the first-hand account that adds a causal scene or clarifies an ambiguous date, size, name or market. Each one a whole sentence, or a clause of at least eight words that makes sense alone: never a heading, a caption, a short list item, a bare date or a number.
 
 For each sentence say whose statement it is (the court, the company, the newspaper, the author), the person whose own words it quotes when it quotes someone (else null), and when (the date of the event it states, as the page gives it, else null).
 
@@ -1956,7 +1979,7 @@ def _take(bank, cands, how, log):
         if old:
             old["for"] = sorted(set(old.get("for") or []) | set(c["for"]))
             continue
-        if len(bank["facts"]) >= BANK_MAX and not c["for"]:
+        if not c["for"] and sum(not f.get("for") for f in bank["facts"]) >= BANK_MAX:
             bank.setdefault("over_cap", 0)
             bank["over_cap"] += 1           # a story sentence past the cap; a quote found for a spine claim always joins
             continue
@@ -1969,7 +1992,7 @@ def _take(bank, cands, how, log):
     return added
 
 
-def extract_quotes(urls, claims, story=STORY_SENTENCES, ask=None):
+def extract_quotes(urls, claims, story=STORY_SENTENCES, ask=None, known=()):
     """([candidates], usage): one model call (no web) reads pages already fetched (their readable text, `_RAW`) and copies
     the sentences that state each claim, plus `story` sentences that tell the rest of the story; each is then verified
     word for word on its page like any quote."""
@@ -1981,6 +2004,12 @@ def extract_quotes(urls, claims, story=STORY_SENTENCES, ask=None):
     content = (f"# Claims\n{json.dumps([dict(id=c['id'], claim=c['claim']) for c in claims], ensure_ascii=False)}\n\n"
                f"# Sentences that tell the rest of the story: {story}\n\n" +
                "\n\n".join(f"# Page {k}: {u}\n{t[:EXTRACT_CHARS]}" for k, (u, t) in enumerate(pages)))
+    if known:
+        content += ("\n\n# Facts already on file\n" + json.dumps(known, ensure_ascii=False) +
+                    "\nRead through the end of each primary account. Copy new sentences that explain how the outcome "
+                    "happened and qualify competing accounts of dates, geographic scope or product changes. Select "
+                    "the demonstration, the response and the next action as a sequence. Give these new sources "
+                    "before repeated descriptions of the premise or sales totals.")
     text, use = ask(EXTRACT_SYSTEM, content)
     try:
         got = json_block(text)
@@ -1998,20 +2027,24 @@ def extract_quotes(urls, claims, story=STORY_SENTENCES, ask=None):
 def _extract(bank, urls, claims, story, ask, spend, log, how):
     """Pages read but not yet copied from (pictures' pages aside) go through extract_quotes; what verifies joins."""
     todo = [u for u in dict.fromkeys(urls) if u and u in _RAW and u not in bank["extracted"] and _host(u) not in SKIP_HOSTS]
-    todo = todo[:EXTRACT_PAGES]
-    if not todo:
-        return []
-    bank["extracted"] += todo
-    if story >= STORY_SENTENCES:
-        bank["story_copied"] += todo
-    try:
-        cands, use = extract_quotes(todo, claims, story=story, ask=ask)
-    except Exception as e:  # noqa: BLE001 - no copy from the pages: the research rounds still run
-        log(f"spine bank: extraction failed: {e!r}"[:200])
-        return []
-    if use:
-        spend.append(use)
-    return _take(bank, cands, how, log)
+    batches = [todo[i:i + EXTRACT_PAGES] for i in range(0, len(todo), EXTRACT_PAGES)]
+    found = []
+    for pages in batches:
+        try:
+            cands, use = extract_quotes(pages, claims, story=max(1, math.ceil(story / len(batches))), ask=ask,
+                                        known=[f["quote"] for f in bank["facts"]])
+        except Exception as exc:
+            log(f"spine bank: extraction failed: {exc!r}"[:200])
+            continue
+        bank["extracted"].extend(pages)
+        if story >= STORY_SENTENCES:
+            bank["story_copied"].extend(pages)
+        if use:
+            spend.append(use)
+        found.append(iter(cands))
+    # Share the remaining story slots across batches, including later archive pages.
+    from itertools import zip_longest
+    return _take(bank, [c for group in zip_longest(*found) for c in group if c], how, log)
 
 
 def _open_all(urls):
@@ -2254,7 +2287,7 @@ def write_from_bank(idea, card, form, bank, voices=None, notes=None, effort="hig
     system = ("You are the writer and voice director of Valmera's story workflow. You write narration spoken by a synthetic narrator "
               "over real footage and photographs of what it names, for a " + F["name"] + ". You write ONLY from the bank of verified "
               "facts you are given: each is a sentence found word for word on its page, with whose statement it is and when. "
-              "Nothing is invented, rounded or dramatised beyond them. You also direct the actor: pace, energy, melody, emphasis "
+              "Use the primary or contemporary account where it supplies the causal action or resolves a discrepancy. Preserve what the source actually measured and which event, date and market it describes. Narrow a contested detail to the scope supported by the primary account. Spend the middle on what people tried, the initial public response and the action that changed it. Use a second total only if the verified spine needs it. You also direct the actor: pace, energy, melody, emphasis "
               "and pauses per segment. Write for the ear: a thought runs on with commas and 'and', 'but', 'so' until it lands, a full stop only where it lands (the hook and the close excepted: each lands at once), lengths mixed (never three short sentences in a row, never a verbless fragment as a sentence), concrete nouns, numbers a listener can hold.")
     system += f"\n\n# The bar\n{references()}\n\n" + BANK_WRITE_RULES
     system += ("Return JSON only: {\"title\": a plain title, \"voice\": one voice id, \"pace\": slow|steady|brisk|fast, \"energy\": "
@@ -2282,7 +2315,7 @@ def write_from_bank(idea, card, form, bank, voices=None, notes=None, effort="hig
                f"reframes the hook on the hook's facts, and its own claim, when given, may support it)\n"
                f"{json.dumps(spine_view(bank), ensure_ascii=False, indent=1)}\n\n"
                f"# The bank: the only facts this film may state\n"
-               f"{json.dumps([dict(id=f['id'], quote=f['quote'], source=f.get('source'), speaker=f.get('speaker'), when=f.get('when')) for f in bank['facts']], ensure_ascii=False, indent=0)}\n\n" +
+               f"{json.dumps([dict(id=f['id'], quote=f['quote'], url=f['url'], source=f.get('source'), speaker=f.get('speaker'), when=f.get('when')) for f in bank['facts']], ensure_ascii=False, indent=0)}\n\n" +
                (f"# Notes from the last attempt\n{notes}\n\n" if notes else ""))
     text, use = ask(system, content)
     sc = json_block(text)

@@ -11,7 +11,21 @@ def checkpoint(path, default):
         return default
 
 
-def story_arc(script):
+def story_arc(script, *, cited=False):
+    if cited:
+        final = script.get("script") or {}
+        segs = final.get("segments") or []
+        beats = (script.get("spine") or {}).get("beats") or {}
+        facts = {row["id"]: row for row in final.get("facts") or []}
+        lines = []
+        for label, role in (("Setup", "hook"), ("Turn", "turn"), ("Payoff", "payoff")):
+            index = (beats.get(role) or {}).get("line")
+            seg = segs[index] if isinstance(index, int) and 0 <= index < len(segs) and segs[index].get("beat") == role else next(
+                (s for s in segs if s.get("beat") == role), {})
+            pages = dict.fromkeys(facts[f]["url"] for f in seg.get("facts") or [] if f in facts and facts[f].get("url"))
+            if seg.get("say"):
+                lines.append(f"- **{label}** — " + " ".join(seg["say"].split()) + " " + " ".join(f"<{u}>" for u in pages))
+        return lines
     plan = script.get("idea_full") or {}
     arc = plan.get("arc") if isinstance(plan.get("arc"), dict) else {}
     segments = (script.get("script") or {}).get("segments") or []

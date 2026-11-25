@@ -5,22 +5,58 @@ import tempfile
 from pathlib import Path
 
 
-def lookup(briefs, writer):
+def captioned_images(page, folder):
+    """Linked original images with the caption printed beside that image."""
+    from lxml import html
+    from urllib.parse import urljoin, urlsplit
+    path = folder / (identifier(page) + ".html")
+    if not path.exists():
+        with tempfile.NamedTemporaryFile(dir=folder, delete=False) as f:
+            temp = Path(f.name)
+        try:
+            download(page, temp, 4 << 20)
+            temp.replace(path)
+        finally:
+            temp.unlink(missing_ok=True)
+    doc = html.parse(str(path))
+    out = []
+    for im in doc.xpath("//img[@src][not(ancestor::nav or ancestor::header or ancestor::footer)]"):
+        url = urljoin(page, im.get("src"))
+        if urlsplit(url).scheme not in ("http", "https"):
+            continue
+        for parent in im.iterancestors():
+            if len(parent.xpath(".//img")) != 1:
+                break
+            caption = " ".join(parent.text_content().split())
+            if 8 <= len(caption) <= 360:
+                out.append(dict(page=page, url=url, caption=caption))
+                break
+    return out
+
+
+def lookup(briefs, writer, catalog=()):
     text, usage = writer.ask_web(
         'Find photographs for documentary editors at the cited publishers and their own press or archival collections. '
-        'Read the source page. Return original image URLs actually linked there, not invented URLs or web thumbnails. '
-        'Prefer the exact product, date and version. Distinguish a photograph date from an object date. '
+        'The supplied numbered catalogue contains pictures actually linked from the film’s cited pages. Select exact matches by catalogue number, including reference-only originals. When the page depicts a different event, search the publisher’s own collection and captioned reports. Read the source page. Return original image URLs actually linked there, not invented URLs or web thumbnails. '
+        'Use each line’s action and required detail. Search the publisher’s history, museum and captioned reports for the prototype, event or documented portrait. Use a captioned report to establish who is pictured and in which order. Seek an original with matching rights. Distinguish the photograph date from the object date. '
         'Look for an explicit asset licence permitting editorial reporting, or a freely licensed original. '
         'If the publisher permits research only or requires permission, retain its image for identification with its '
         'actual rights, then also find a freely licensed photograph of the identical object on Wikimedia Commons. '
         'Return JSON {"images":[{"name":"requested subject","page":"original caption page URL","url":"direct image URL",'
-        '"title":"original title","credit":"photographer or publisher","caption":"what the source says",'
+        '"catalogue":"number if selected from the catalogue","title":"original title","credit":"photographer or publisher","caption":"what the source says",'
         '"image_date":"photograph date, if known","publication_date":"date of source",'
         '"licence":"specific licence or rights statement","licence_url":"source of rights","commons_file":"File title if on Commons"}]}. '
         'At most three different source photographs per subject. Do not apply a site-wide text licence to a photograph.',
-        json.dumps(briefs, ensure_ascii=False), searches=6, fetches=6, max_tool_calls=6,
+        json.dumps(dict(briefs=briefs, catalogue=list(enumerate(catalog))), ensure_ascii=False), searches=6, fetches=6, max_tool_calls=6,
         effort='medium', max_tokens=3500, what='Stories archive photographs')
-    return writer.json_block(text).get('images') or [], usage
+    rows = writer.json_block(text).get("images") or []
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("catalogue", "")).isdigit():
+            index = int(row["catalogue"])
+            if 0 <= index < len(catalog):
+                row.update(catalog[index])
+                row.pop("commons_file", None)
+    return rows, usage
 
 
 def identifier(value):
@@ -108,24 +144,32 @@ def supply(script, subjects, got, out, per):
     briefs = []
     for s in subjects:
         i = s.get('search_for')
-        if got.get(s['name']) or not isinstance(i, int):
+        must = s.get("archive_brief") or s.get("must_show") or s["name"]
+        if not isinstance(i, int) or any(must in ([r.get("checked_brief")] + (r.get("checked_briefs") or [])) for r in got.get(s["name"], [])):
             continue
         sources = [facts[k] for k in script['segments'][i].get('facts', []) if k in facts]
         if sources:
-            briefs.append(dict(name=s['name'], must_show=s['must_show'], sources=sources))
+            briefs.append(dict(name=s['name'], must_show=must, line=i, as_of=s.get('as_of'), moment=s.get('moment'), searches=s.get('searches'), sources=sources))
     if not briefs:
         return [], []
     B = pictures._worker()
     import openai_budget
     root = Path(out)/'publisher'
     root.mkdir(parents=True, exist_ok=True)
-    plan = root/(identifier(briefs)+'.json')
+    cited = list(dict.fromkeys(f["url"] for f in facts.values()))
+    plan = root/(identifier([briefs, cited])+'.json')
     uses, reports = [], []
     try:
         images = json.loads(plan.read_text())
     except (FileNotFoundError, ValueError):
         try:
-            images, use = lookup(briefs, writer)
+            catalog = []
+            for page in cited:
+                try:
+                    catalog.extend(captioned_images(page, root))
+                except Exception as exc:
+                    openai_budget.propagate(exc)
+            images, use = lookup(briefs, writer, catalog)
         except Exception as exc:
             openai_budget.propagate(exc)
             return [dict(subject=b['name'], must_show=b['must_show'], errors=[str(exc)[:180]]) for b in briefs], uses
@@ -152,21 +196,29 @@ def supply(script, subjects, got, out, per):
                              image_date=rec.get('image_date'), publication_date=rec.get('publication_date'),
                              page_url=rec['page'], license=rec['licence'], license_url=rec['licence_url'], _url=rec['url']))
         for b in (b for b in briefs if b['name'] == name):
+            issues = list(errors)
             try:
                 kept, checked, usd = B.check_named(b, rows, str(root), local_photos=local) if rows else ([], [], 0)
             except Exception as exc:
                 openai_budget.propagate(exc)
-                errors.append(dict(error=str(exc)[:180]))
+                issues.append(dict(error=str(exc)[:180]))
                 kept, checked, usd = [], [], 0
             results = got.setdefault(name, [])
             have = {r['url'] for r in results}
+            before = len(results)
             for c in kept:
                 rec = eligible.get(c['id'])
-                if rec and rec['url'] not in have and len(results) < per:
-                    results.append(dict(rec, name=name, shows=c['shows'], grade=c['_grade']))
+                if rec and rec['url'] in have:
+                    existing = next(r for r in results if r['url'] == rec['url'])
+                    briefs_seen = existing.setdefault('checked_briefs', [])
+                    if b['must_show'] not in briefs_seen:
+                        briefs_seen.append(b['must_show'])
+                elif rec and sum(r.get('checked_brief') == b['must_show'] for r in results) < per:
+                    results.append(dict(rec, name=name, shows=c['shows'], grade=c['_grade'], checked_brief=b['must_show']))
                     have.add(rec['url'])
             reports.append(dict(subject=name, must_show=b['must_show'], sources=rows, checked=checked,
-                                candidates=len(rows), kept=len(results), downloaded=len(results), errors=errors))
+                                candidates=len(rows), kept=len(kept), downloaded=sum(c['id'] in eligible for c in kept),
+                                added=len(results) - before, errors=issues))
             if usd:
                 uses.append(dict(stage='supply', what='publisher photograph check', usd=usd))
     return reports, uses

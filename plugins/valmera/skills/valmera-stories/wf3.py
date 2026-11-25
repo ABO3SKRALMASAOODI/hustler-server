@@ -830,11 +830,15 @@ def photo_searches(sc, named):
         for x in s_.get("see") or []:
             n = by.get(x.get("thing"))
             q = x.get("search")
-            if not n or not q or (n["name"], q.lower()) in seen:
+            if not n or not q:
                 continue
-            seen.add((n["name"], q.lower()))
+            request = (n["name"], q.lower(), x.get("must_show"), x.get("as_of"))
+            if request in seen:
+                continue
+            seen.add(request)
             must = (n.get("must_show") or n["name"]) if is_person(n) else (x.get("must_show") or n.get("must_show") or n["name"])
-            out.append(dict(name=n["name"], key=n["name"], searches=[q], must_show=str(must).strip(), search_for=k, **{"is": n.get("is", "thing")}))
+            out.append(dict(name=n["name"], key=n["name"], searches=[q], must_show=str(must).strip(), search_for=k,
+                            archive_brief=x.get("must_show"), as_of=x.get("as_of"), moment=x.get("moment"), **{"is": n.get("is", "thing")}))
     searched = {o["name"] for o in out}
     return out + [n for n in named if n.get("name") not in searched]
 
@@ -951,23 +955,26 @@ def supply(ctx, script):
         # searched first: they are the engine's anchors for finding a person's own voice (footage voice.face_shows).
         people = [x for x in subj if is_person(x)]
         things = [x for x in subj if not is_person(x)]
-        got, reports, usd = PX.pictures(people, os.path.join(sup_dir, "pics"), per=per) if people else ({}, [], 0.0)
+        import publisher_pictures
+        def archives(briefs):
+            folder = os.path.join(sup_dir, "pics")
+            photos, reports, usd = PX.pictures(briefs, folder, per=per) if briefs else ({}, [], 0.0)
+            archive_reports, uses = publisher_pictures.supply(sc, briefs, photos, folder, per)
+            return photos, reports + archive_reports, usd, uses
+
+        got, reports, usd, uses = archives(people)
+        spend.extend(uses)
         anchors = {k: [r["path"] for r in v if r.get("path")] for k, v in got.items() if v}
         given_footage(ctx, os.path.join(sup_dir, "footage"))
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=1) as pool:
-            fut = pool.submit(PX.pictures, things, os.path.join(sup_dir, "pics"), per=per) if things else None
-            try:
-                foot = footage_voiced(ctx, first, durs, anchors=anchors, **footage_kw(reel_kw, want_voices=True))     # real video per line
-            finally:
-                got2, reports2, usd2 = fut.result() if fut else ({}, [], 0.0)
+            fut = pool.submit(archives, things)
+            foot = footage_voiced(ctx, first, durs, anchors=anchors, **footage_kw(reel_kw, want_voices=True))
+            got2, reports2, usd2, uses = fut.result()
         for k, v in got2.items():
             have = {r["path"] for r in got.get(k) or []}
             got.setdefault(k, []).extend(r for r in v if r["path"] not in have)
         reports, usd = reports + reports2, round(usd + usd2, 4)
-        import publisher_pictures
-        extra_reports, uses = publisher_pictures.supply(sc, subj, got, os.path.join(sup_dir, "pics"), per)
-        reports.extend(extra_reports)
         spend.extend(uses)
         keep_photos(pack, got, reports, usd, spend)
         searched = {x.get("key") or x["name"] for x in subj}
@@ -1775,8 +1782,16 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
         stress = []
     pics, ids = DR.film_pictures(l1, beats.get("pictures"), os.path.join(ctx.supply, "director_stills"), pack.get("ffmpeg") or "ffmpeg", F.FPS)
     st = script.get("style") or {}
+    palette = dict(id=st.get("id"), name=st.get("name"))
+    if ctx.workflow == "wf3":
+        palette["placed_evidence"] = [dict(frames=p["f"], picture=p.get("shows"), source=p.get("source"))
+                                      for p in beats.get("pictures") or [] if p.get("tier") in ("identity", "detail", "exhibit")]
+        palette["placed_type"] = beats.get("display") or []
+        palette["direction"] = ("The supplied names, figures and source exhibits are already printed at these frames, at 30 fps. "
+                                "Keep those faces, details and printed values readable as they are heard. Design around them. "
+                                "For an accent on existing type, use its exact visible text as the sound partner.")
     d = DR.direct(ctx.supply, [dict(i=k, text=str(seg.get("say") or "")) for k, seg in enumerate(sc["segments"])], rows, stress, pics,
-                  style=dict(id=st.get("id"), name=st.get("name")), workflow="story film (narrated)", dur_s=l1["dur_f"] / F.FPS,
+                  style=palette, workflow="story film (narrated)", dur_s=l1["dur_f"] / F.FPS,
                   title=sc.get("title"), hook=sc.get("hook_line"), payoff=sc.get("close_line"), log=ctx.log)
     nseg = len(sc["segments"])
     words = clock.words
@@ -1786,7 +1801,11 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
 
     def seg_span(i):
         return (F.Clock.f(clock.segs[i][0]), min(F.Clock.f(clock.segs[i][1]) + 6, l1["dur_f"])) if 0 <= i < nseg else (None, None)
-    l1["story_cues"] = DR.sound_cues(d, word_frame)
+    if ctx.workflow == "wf3":
+        l1["picture_bound_sound"] = True
+    cues = DR.sound_cues(d, word_frame, ids if ctx.workflow == "wf3" else None, use_asked_device=ctx.workflow == "wf3")
+    if ctx.workflow != "wf3" or cues or d.get("by") != "signal":
+        l1["story_cues"] = cues
     l1["sound"], l1["sound_design"] = F.replan_sound(l1, pack)
     asks, notes = DR.palette_asks(d, word_frame, seg_span, ids.get, l1["dur_f"])
     asks = DR.around(asks, around, l1["dur_f"])         # a reel's own hero device keeps its frames: the Director's land beside it
@@ -1858,6 +1877,11 @@ def score(ctx, script):
     knobs = {k: v for k, v in d.items() if k not in ("script", "why", "targets", "retarget", "alien")}
     if render_drop(ctx):                                  # the picture gate's repair: the render's failing pictures go (check)
         knobs["drop"] = list(knobs.get("drop") or []) + [x for x in render_drop(ctx) if x not in (knobs.get("drop") or [])]
+    marker = os.path.join(ctx.supply, "render_repair.json")
+    if os.path.isfile(marker):
+        with open(marker) as receipt:
+            knobs["checked_shots"] = json.load(receipt).get("checked_shots") or []
+    knobs["source_evidence"] = ctx.workflow == "wf3"
     knobs.setdefault("bed", bool(ctx.args.get("song")) or chain.wants_music(ctx))       # the film gets music: the sounds are designed for a film with a bed
     reel = script["style"]["id"] in R.STYLES
     if reel and ctx.args.get("fit", True) is not False:
@@ -1959,7 +1983,7 @@ def drop_offenders(ctx, l1, beats, taste):
     return l1, beats, F.taste_check(l1, beats)
 
 
-JOINT_HOLE_DB = 22.0      # a joint's hole and a short real voice's dip (the judge's drops: 10-24 dB)
+JOINT_HOLE_DB = 13.0      # a joint's hole and a short real voice's dip (the judge's drops: 10-24 dB)
 VOICE_LONG_S, VOICE_LONG_DB = 2.3, 12.0     # a real voice longer than this keeps the bed about 12 dB under it, not out
 # The close keeps the bed at the references' depth. Measured on the judge's stems (lanes/MUSIC2/refs/FLOW.json, all28,
 # turn "last_line", n 12): the music level 0.2-2.2 s into the last line against 3-1 s before it steps -0.49 dB at the
@@ -1981,9 +2005,8 @@ def narrator_gaps(words, min_s=SWELL_GAP_S):
 
 def joints_of(sc, pack, beats=None):
     """[{t, kind, last_word_t, next_first_word_t, db}] at the story's section joints (the writer's beats), at most
-    HOLES_MAX, ranked turn, close, payoff, then low, on the programme's clock from the narration's own words. The hole
-    starts at the first word of the previous section's last caption phrase (writer.annotate's phrase spans), so the bed
-    is out for 0.8-2.3 s and comes back on the next section's first word; the close keeps the bed CLOSE_BED_DB down.
+    HOLES_MAX, ranked turn, close, payoff, then low, on the programme's clock from the narration's own words. The bed
+    dips across the preceding pause (0.5–0.8 s) and returns on the next section's first word; the close keeps the bed CLOSE_BED_DB down.
     {kind: voice, t0, t1, db} for each real voice cut in: a short one (VOICE_LONG_S or less) gets the full cut, a longer
     one keeps the bed VOICE_LONG_DB under it. {kind: swell, t, rise_s, db}: only a type page at a joint and a hole's
     exit earn one, each placed at the end of a narrator gap of SWELL_GAP_S or more near it, rising no longer than the
@@ -1997,12 +2020,8 @@ def joints_of(sc, pack, beats=None):
         prev, cur = clock.seg_words(i - 1), clock.seg_words(i)
         if not prev or not cur:
             continue
-        ph = sc["segments"][i - 1].get("phrases") or []
-        start = prev[-1]["t1"]
-        if ph and isinstance(ph[-1], list) and len(ph[-1]) == 2 and 0 <= int(ph[-1][0]) < len(prev):
-            start = prev[int(ph[-1][0])]["t0"]
         b = cur[0]["t0"]
-        start = min(max(start, b - 2.3), b - 0.8)
+        start = min(max(prev[-1]["t1"], b - 0.8), b - 0.5)
         j = dict(t=round(b, 3), kind=kind, last_word_t=round(start, 3), next_first_word_t=round(b, 3), seg=i, db=JOINT_HOLE_DB)
         if kind == "close":
             j["bed_db"] = CLOSE_BED_DB
@@ -2143,6 +2162,10 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
         shots = planned_shots(beats, pack, clock)
         res, u = FIT.audit(shots, sc, work=os.path.join(ctx.tmp, "audit"), cache_path=os.path.join(ctx.supply, "audit.json"), log=ctx.log,
                            supply=pack.get("fit"))
+        if knobs.get("source_evidence"):
+            passed = {(tuple(r["f"]), r["path"]) for r in res if r.get("f") and r.get("path") and r.get("judged") and r["fit"]}
+            knobs["checked_shots"] = [p for p in beats.get("pictures") or [] if (tuple(p["f"]), p["path"]) in passed
+                                      and p.get("tier") != "voice"]
         return res, u
 
     def row(rnd, res, bad, **kw):
@@ -2601,7 +2624,15 @@ def check(ctx, rd, sc):
         rounds.append(dict(fail_s=fc["picture_fit"]["fail_s"], dropped=bad))
         _check_record(ctx, "picture_rounds", dict(rounds=rounds))
         json.dump(dict(drop=sorted(set(render_drop(ctx)) | set(bad))), open(os.path.join(ctx.supply, RENDER_DROP), "w"), indent=1)
-        json.dump(dict(fail_s=rounds[0]["fail_s"], dropped=rounds[0]["dropped"], rounds=len(rounds)), open(marker, "w"), indent=1)
+        previous = _check_record(ctx, "repair_score") or sc
+        good = {tuple(row["f"]) for row in fc["picture_fit"]["shots"]
+                if row.get("judged") and row["fit"] and row.get("readable") is True}
+        checked = [p for p in (previous.get("beats") or {}).get("pictures") or [] if tuple(p["f"]) in good
+                   and p.get("kind") in ("clip", "photo") and p.get("tier") != "voice"]
+        with open(marker + ".part", "w") as f:
+            json.dump(dict(fail_s=rounds[0]["fail_s"], dropped=rounds[0]["dropped"], rounds=len(rounds),
+                           checked_shots=checked), f, indent=1)
+        os.replace(marker + ".part", marker)
         ctx.log(f"picture gate round {len(rounds)}: {fc['picture_fit']['fail_s']} s of pictures fail their words; dropping {len(bad)} and drawing again")
         for name in ("repair_score", "repair_render"):          # each round builds and draws the plan again
             q = os.path.join(ctx.run_dir, name + ".json")
@@ -2779,13 +2810,39 @@ def _gray(path, ffmpeg, fps, w=270, h=480, t0=None, dur=None):
     return np.frombuffer(out[:n * w * h], np.uint8).reshape(n, h, w)
 
 
-def film_motion(film, pictures, ffmpeg, fps=30.0):
+def shot_flow(fr, idx, span, pts):
+    import cv2
+    import numpy as np
+    res, zoom, pan = [], 1.0, np.zeros(2)
+    for k in idx:
+        x, y = fr[k], fr[k + 1]
+        if float(np.abs(x.astype(np.float32) - y.astype(np.float32)).mean()) > 40:
+            continue
+        flow = cv2.calcOpticalFlowFarneback(x, y, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+        d = flow[pts[:, 1].astype(int), pts[:, 0].astype(int)]
+        M, _ = cv2.estimateAffinePartial2D(pts, pts + d, method=cv2.RANSAC, ransacReprojThreshold=1.0)
+        if M is None:
+            res.append(float(np.percentile(np.linalg.norm(d, axis=1), 90)))
+            continue
+        pred = pts @ M[:, :2].T + M[:, 2] - pts
+        res.append(float(np.percentile(np.linalg.norm(d - pred, axis=1), 90)))
+        step = span / len(idx)
+        zoom *= float(np.sqrt(abs(np.linalg.det(M[:, :2])))) ** step
+        pan += M[:, 2] * step
+    return dict(residual=float(np.median(res)) if res else None, zoom=zoom,
+                pan_fraction=float(np.max(np.abs(pan) / [fr.shape[2], fr.shape[1]])))
+
+
+def film_motion(film, pictures, ffmpeg, fps=30.0, cache_path=None):
     """The rendered programme's motion per planned shot, the way the rater measures it: Farneback flow at 270x480 on
     three and more frame pairs inside the shot (pairs across a cut or a flash, mean luma change over 40, left out), the
     global similarity fit by RANSAC (its zoom or pan over the shot, 2% and more, is a camera move) and the 90th percentile
     of what is left (1.0 px and more is content motion). {content_moving_share, camera_moving_share, static_shots, static_s}."""
     import cv2
     import numpy as np
+    import hashlib
+    cache = FIT._load(cache_path)
+    reused = 0
     fr = _gray(film, ffmpeg, fps)
     if len(fr) < 2:
         return dict(content_moving_share=None, camera_moving_share=None, static_shots=None, static_s=None, shots=0)
@@ -2800,34 +2857,28 @@ def film_motion(film, pictures, ffmpeg, fps=30.0):
         if b - a < 1:
             continue
         idx = sorted({int(round(q)) for q in np.linspace(a, b - 1, num=min(6, b - a))})
-        res, zoom, pan = [], 1.0, np.zeros(2)
+        digest = hashlib.sha256(f"flow-1:{cv2.__version__}:{fr.shape[1:]}:{b-a}".encode())
         for k in idx:
-            x, y = fr[k], fr[k + 1]
-            if float(np.abs(x.astype(np.float32) - y.astype(np.float32)).mean()) > 40:
-                continue
-            flow = cv2.calcOpticalFlowFarneback(x, y, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-            d = flow[pts[:, 1].astype(int), pts[:, 0].astype(int)]
-            M, _ = cv2.estimateAffinePartial2D(pts, pts + d, method=cv2.RANSAC, ransacReprojThreshold=1.0)
-            if M is None:
-                res.append(float(np.percentile(np.linalg.norm(d, axis=1), 90)))
-                continue
-            pred = pts @ M[:, :2].T + M[:, 2] - pts
-            res.append(float(np.percentile(np.linalg.norm(d - pred, axis=1), 90)))
-            step = len(idx) and (b - a) / max(len(idx), 1)
-            zoom *= float(np.sqrt(abs(np.linalg.det(M[:, :2])))) ** step
-            pan += M[:, 2] * step
-        if not res:
+            digest.update(fr[k:k+2])
+        key = digest.hexdigest()
+        if key not in cache:
+            cache[key] = shot_flow(fr, idx, b-a, pts)
+        else:
+            reused += 1
+        measure = cache[key]
+        if measure["residual"] is None:
             continue
         n = f1 - f0
-        content = float(np.median(res)) >= R.MOTION_FLOOR
-        camera = abs(zoom - 1.0) >= R.RIGID_MOVE or float(np.max(np.abs(pan) / np.array([fr.shape[2], fr.shape[1]]))) >= R.RIGID_MOVE
+        content = measure["residual"] >= R.MOTION_FLOOR
+        camera = abs(measure["zoom"] - 1) >= R.RIGID_MOVE or measure["pan_fraction"] >= R.RIGID_MOVE
         tot += n
         con += n if content else 0
         cam += n if camera else 0
         if not content and not camera:
-            static.append(dict(f=[f0, f1], kind=p["kind"], mode=p.get("mode"), residual=round(float(np.median(res)), 2), zoom=round(zoom - 1, 4)))
+            static.append(dict(f=[f0, f1], kind=p["kind"], mode=p.get("mode"), residual=round(measure["residual"], 2), zoom=round(measure["zoom"] - 1, 4)))
+    FIT._save(cache_path, cache)
     return dict(content_moving_share=round(con / max(tot, 1), 3), camera_moving_share=round(cam / max(tot, 1), 3), static_shots=len(static),
-                static_s=round(sum(x["f"][1] - x["f"][0] for x in static) / F.FPS, 2), static_list=static[:20], shots=len(base))
+                static_s=round(sum(x["f"][1] - x["f"][0] for x in static) / F.FPS, 2), static_list=static[:20], shots=len(base), reused=reused)
 
 
 FLIPS_10S = (0.3, 3.6)           # polarity flips a 10 s (the teardown: frame luma correlation -0.3 or lower with the frame before)
@@ -2916,7 +2967,7 @@ def type_measures(l1, beats, sc):
         for x in s_.get("show") or []:
             if isinstance(x, dict) and x.get("role") == "figure":
                 want = str(x.get("big") or x.get("text") or "").upper()
-                its = [w for w in big if str(w.get("t") or "").upper() == want or (want and want in str(w.get("t") or "").upper())]
+                its = [w for w in big if str(w.get("display_text") or w.get("t") or "").upper() == want or (want and want in str(w.get("t") or "").upper())]
                 if its:
                     w = max(its, key=lambda q: q["f"][1] - q["f"][0])
                     s = w.get("s", 1)
@@ -2958,7 +3009,7 @@ def bed_frames(a, b, hop):
 
 def sound_measures(music, clean, ffmpeg, l1, joints=(), sr=16000):
     """The bed (the film with music less the film without, at each 100 ms frame's least-squares gain: bed_frames) over the
-    music's span (the first word to MUSIC_RING_S past the last; the end card carries no music by design):
+    music's span (the first word to MUSIC_RING_S past the last):
     music_runtime_share (the bed within 10 dB of its median while the voice speaks), the drops (bed 10 dB and more under
     that median for 0.3-3 s: count, length, depth, and whether one comes back within 0.1 s of a section's first word),
     the swells (rises of 6 dB and more within 3 s), the bed against the voice, and for each placed sound its 50 ms peak
@@ -3059,7 +3110,7 @@ def film_checks(ctx, film, sc, pack, music=None, clean=None):
         reads.append(dict(key=f"s{k}", frame=mid, identity=idn, meta=m.get("meta")))
     res, usd = FIT.audit(shots, sc_, work=work, cache_path=os.path.join(ctx.supply, "audit.json"), log=ctx.log,
                          supply=pack.get("fit")) if sc_["segments"] else ([], 0.0)
-    rd_, u2 = FIT.readable(reads, work=work, log=ctx.log) if reads else ({}, 0.0)
+    rd_, u2 = FIT.readable(reads, work=work, log=ctx.log, cache_path=os.path.join(ctx.supply, "render_readable.json")) if reads else ({}, 0.0)
     usd += u2
     for r in res:
         rr = rd_.get(r["key"])
@@ -3092,7 +3143,7 @@ def film_checks(ctx, film, sc, pack, music=None, clean=None):
                   print_window_share=round(sum(1 for x in cols if x.get("mode") in ("print", "window")) / max(len(cols), 1), 3),
                   bleed_share=bleed_share(beats)[0])
     try:
-        motion = film_motion(film, beats.get("pictures") or [], pack["ffmpeg"])
+        motion = film_motion(film, beats.get("pictures") or [], pack["ffmpeg"], cache_path=os.path.join(ctx.supply, "render_flow.json"))
     except Exception as e:  # noqa: BLE001 - an unmeasured film does not pass
         motion = dict(error=repr(e)[:200], static_shots=None, content_moving_share=None)
     try:
@@ -3161,7 +3212,7 @@ def film_checks(ctx, film, sc, pack, music=None, clean=None):
             sound_ok = False
     gates_ok = not defects
     return dict(picture_fit=dict(fail_s=fail_s, fail_share=round(fail_s / max(total_s, 1e-6), 3), usd=round(usd, 4), unjudged_s=unjudged_s,
-                                 shots=[dict(key=r["key"], drop=drop_of.get(r["key"]), f=r["f"], line=r["line"],
+                                 shots=[dict(key=r["key"], drop=drop_of.get(r["key"]), f=r["f"], line=r["line"], src=r.get("src"), take=r.get("take_i"),
                                              fit=r["fit"] or bool(r.get("unjudged")), judged=not r.get("unjudged"), readable=r.get("readable"),
                                              why=r.get("why"), shows=r.get("shows")) for r in res]),
                 colour=colour, motion=motion, punctuation=punct, type=dict(typ, ok=type_ok), sound=dict(sound or {}, ok=sound_ok, measured=bool(sound)),

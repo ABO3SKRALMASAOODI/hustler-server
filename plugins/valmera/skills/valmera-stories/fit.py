@@ -355,7 +355,9 @@ def _load(path):
 def _save(path, obj):
     if path:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        json.dump(obj, open(path, "w"), ensure_ascii=False)
+        with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(path), delete=False) as f:
+            json.dump(obj, f, ensure_ascii=False)
+        os.replace(f.name, path)
 
 
 def _clean_id(v):
@@ -531,10 +533,24 @@ def candidates(pack):
     return out
 
 
-def readable(items, ask=None, work=None, log=print, batch=12, waits=None, sleep=None):
+def readable(items, ask=None, work=None, log=print, batch=12, waits=None, sleep=None, cache_path=None):
     """{key: {"readable", "why"}} and usd: one frame of the rendered film per shot ({"key", "frame": jpg, "identity"}),
     asked only whether its subject still reads in the film's crop or print (READ_SYSTEM). An unanswered batch is asked
     again (ask_batches); a frame still unread has no entry (readable unknown, never a failure)."""
+    cache = _load(cache_path)
+    known, pending, fingerprints = {}, [], {}
+    for item in items:
+        if cache_path:
+            with open(item["frame"], "rb") as f:
+                pixels = hashlib.sha256(f.read()).hexdigest()
+            ck = hashlib.sha256(json.dumps([MODEL, READ_SYSTEM, pixels, item.get("identity"), item.get("meta")],
+                                          sort_keys=True).encode()).hexdigest()
+            fingerprints[item["key"]] = ck
+            if ck in cache:
+                known[item["key"]] = cache[ck]
+                continue
+        pending.append(item)
+    items = pending
     ask = ask or _ask_default
     out, batches, parts = {}, [], []
     for b0 in range(0, len(items), batch):
@@ -551,7 +567,10 @@ def readable(items, ask=None, work=None, log=print, batch=12, waits=None, sleep=
         for v in got.get("frames") or []:
             if isinstance(v, dict) and isinstance(v.get("n"), int) and 0 <= v["n"] < len(part) and isinstance(v.get("readable"), bool):
                 out[part[v["n"]]["key"]] = dict(readable=v["readable"], why=str(v.get("why") or "")[:160])
-    return out, round(usd, 4)
+    if cache_path and out:
+        cache.update({fingerprints[k]: v for k, v in out.items()})
+        _save(cache_path, cache)
+    return {**known, **out}, round(usd, 4)
 
 
 # ----------------------------------------------------------------- the audit of a cut
@@ -576,37 +595,40 @@ def audit(shots, sc, ask=None, work=None, cache_path=None, log=print, detail="hi
         except ValueError:
             cache = {}
     res, items, ln_tab, usd = {}, [], {}, 0.0
-    for sh in shots:
+    for index, sh in enumerate(shots):
         ln = int(sh["line"])
-        ck = hashlib.sha1(json.dumps([sh["path"], sh.get("src"), sh.get("crop"), sh.get("frames"), sh.get("words"), lines[ln]["say"], sh.get("identity")],
+        try:
+            stat = os.stat(sh["path"])
+            source = (stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            source = None
+        ck = hashlib.sha1(json.dumps([sh["path"], source, detail, sh.get("src"), sh.get("crop"), sh.get("frames"), sh.get("words"), lines[ln], sh.get("identity"), sh.get("meta"), MODEL, SYSTEM],
                                      default=str).encode()).hexdigest()[:16]
         if ck in cache:
-            res[sh["key"]] = cache[ck]
+            res[index] = cache[ck]
             continue
         # each shot is its own "line" so the model reads the exact words under it
         vid = 10000 + len(items)
         ln_tab[vid] = dict(lines[ln], i=vid, words_under=sh.get("words") or "")
-        items.append(dict(sh, lines=[vid], _ck=ck))
+        items.append(dict(sh, lines=[vid], _ck=ck, index=index))
     if items:
         got, usd = judge(items, ln_tab, ask=ask, work=work, log=log, detail=detail, waits=waits, sleep=sleep)
         for k, _, v in got:
             row = dict(fit=usable(v), why=v.get("why"), shows=v.get("shows"), grade=v.get("grade"),
                        live_action=v.get("live_action"), speaking_on_camera=v.get("speaking_on_camera"),
                        **{k: v[k] for k in ("exact_thing", "time_ok", "contradicts", "story_time", "picture_time") if k in v})
-            res[items[k]["key"]] = row
+            res[items[k]["index"]] = row
             cache[items[k]["_ck"]] = row
-    if cache_path:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        json.dump(cache, open(cache_path, "w"), ensure_ascii=False)
+    _save(cache_path, cache)
     out, unjudged = [], 0
-    for sh in shots:
-        r = res.get(sh["key"])
+    for index, sh in enumerate(shots):
+        r = res.get(index)
         if r is None:
             says = supply_says(supply, sh["path"], sh["line"], sh.get("take_i"))
             r = dict(fit=says is not False, supply_fit=says, unjudged=True,
                      why="not judged: no model answered after the retries; the supply's verdict for this take and line stands")
             unjudged += 1
-        out.append(dict(key=sh["key"], line=sh["line"], f=sh.get("f"), path=sh["path"], judged=not r.get("unjudged"), **r))
+        out.append(dict(key=sh["key"], line=sh["line"], f=sh.get("f"), src=sh.get("src"), take_i=sh.get("take_i"), path=sh["path"], judged=not r.get("unjudged"), **r))
     if unjudged:
         log(f"audit: {unjudged} of {len(shots)} shots unanswered after the retries; kept on the supply's verdicts, never dropped")
     return out, round(usd, 4)

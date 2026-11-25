@@ -731,7 +731,14 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
     cs = contact_sheet(list(pictures), os.path.join(supply, "director_sheet.jpg")) if pictures else None
     # the cache is keyed on what the model reads (the numbered words, the pictures and their contact sheet, the take):
     # a short whose lines were scored again never reads an answer that addresses words it no longer has
-    key = hashlib.sha1(json.dumps([CONTRACT, words_sheet(sents, hot),
+    brief = style if "placed_evidence" in (style or {}) else None
+    system = SYSTEM
+    if brief is not None:
+        system += (' For each sound give "sound_partner" as an object containing only the applicable fields: '
+                   '"after" (the picture ID), "before" (optional), "device" (the exact device on that beat), '
+                   'or "text" (exact printed words). A tick accompanies type landing.')
+    contract = [CONTRACT, system, brief] if brief is not None else CONTRACT
+    key = hashlib.sha1(json.dumps([contract, words_sheet(sents, hot),
                                    [{k: p.get(k) for k in ("id", "path", "label", "kind", "rounds", "faces", "seg")} for p in pictures],
                                    take, editorial, hashlib.sha1(open(cs, "rb").read()).hexdigest() if cs else None],
                                   sort_keys=True, default=str).encode()).hexdigest()[:16]
@@ -775,7 +782,7 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
         msg = content
         for attempt in range(2):
             try:
-                text, use = ask(SYSTEM, msg, effort=effort, max_tokens=24000)
+                text, use = ask(system, msg, effort=effort, max_tokens=24000)
                 spend.append(dict(stage="score", what="director: devices by moment", **(use or {})))
             except Exception as e:      # noqa: BLE001 - a provider failure: the signal director lays the devices
                 repairs.append(f"provider failed: {type(e).__name__}: {str(e)[:200]}")
@@ -965,7 +972,7 @@ def words_to_frames(row, fields, frame_of, end_of):
     return got
 
 
-def sound_cues(d, word_frame, picture_keys=None):
+def sound_cues(d, word_frame, picture_keys=None, *, use_asked_device=False):
     cues = []
     for i, beat in enumerate(d.get("beats") or []):
         if not beat.get("sound") or word_frame(beat["w"]) is None:
@@ -973,6 +980,13 @@ def sound_cues(d, word_frame, picture_keys=None):
         cue = dict(f=int(word_frame(beat["w"])), role=beat["role"], sound=beat["sound"], why=beat["sound_reason"])
         if picture_keys is not None:
             partner = dict(beat.get("sound_partner") or {})
+            if use_asked_device and not partner:
+                # Older scores name the visible change in their own device ask.
+                # Bind that exact beat and word to the composed device.
+                own = [a for a in d.get("asks") or [] if a.get("beat") == i and
+                       any((a.get(k) or {}).get("w") == beat["w"] for k in ("at", "until"))]
+                if own:
+                    partner["device"] = own[0]["dev"]
             for side in ("before", "after"):
                 if side in partner:
                     partner[side] = picture_keys.get(partner[side], partner[side])

@@ -44,6 +44,7 @@ import os
 import subprocess
 
 import film as F
+import evidence_cut
 
 FPS, W, H, LEAD_F = F.FPS, F.W, F.H, F.LEAD_F
 Clock, r4, smooth = F.Clock, F.r4, F.smooth
@@ -1576,9 +1577,11 @@ def take_groups(clips, ffmpeg=None, corr=0.85):
 def picture_key(p):
     """What a viewer sees as one picture: a designed card by its text (two plates with the same words are the same
     picture: on 19 Nov ten STEVE JOBS cards, each keyed by its own path, measured as ten new pictures), anything else by
-    its path and played window."""
+    its source take group and take, or its path and played window when take metadata is absent."""
     if p.get("kind") == "designed":
         return ("designed", str(p.get("shows") or p.get("text") or "").strip().upper())
+    if p.get("kind") == "clip" and p.get("take") is not None:
+        return (p.get("take_group") or p["path"], p["take"])
     return (p["path"], tuple(p.get("src") or []))
 
 
@@ -1760,7 +1763,7 @@ def _same_name(a, b):
     return bool(a and b) and (a == b or f" {a} " in f" {b} " or f" {b} " in f" {a} ")
 
 
-def name_supers(P, clock, sc, timeline, st, pal, f_end, shown, dropped, cards=()):
+def name_supers(P, clock, sc, timeline, st, pal, f_end, shown, dropped, cards=(), bound=False):
     """Each person's name, large and left-aligned, landing on the first word of their name at their first mention
     (writer.annotate's name items, word_i), held 1.5 s; set above or below the middle where the picture under it has no
     face and no designed card's type, never at once with a display word. `cards`: the designed cards on screen
@@ -1780,6 +1783,13 @@ def name_supers(P, clock, sc, timeline, st, pal, f_end, shown, dropped, cards=()
                 continue
             a = max(Clock.f(ws[wi]["t0"]) - 1, 1)
             b = min(a + int(1.5 * FPS), f_end - 2)
+            if bound:
+                partner = next((r for r in timeline if r[0] <= a < r[1] and
+                                str(r[4].get("depicted_name") or "").casefold() == x["text"].casefold()), None)
+                if partner:
+                    b = min(b, partner[1])
+                else:
+                    continue
             if b - a < 14 or any(a < d1 and d0 < b for d0, d1, _ in shown + out):
                 dropped.append(dict(seg=i, text=x["text"], role="name", why="no room"))
                 continue
@@ -1798,7 +1808,7 @@ def name_supers(P, clock, sc, timeline, st, pal, f_end, shown, dropped, cards=()
             def card_overlap(y_):
                 return sum(max(0.0, min(y_ + 0.25 * hgt, c[3][3]) - max(y_ - hgt, c[3][1])) for c in up if c[3])
             order = (0.76, 0.27) if faces_hi else (0.27, 0.76)
-            y = min(order, key=lambda y_: (card_overlap(y_) > 0, order.index(y_)))
+            y = .12 if bound else min(order, key=lambda y_: (card_overlap(y_) > 0, order.index(y_)))
             n = b - a
             k = min(int(bake.BOUNCE["n"]), n)
             ys = [r4(y + float(q)) for q in bake.bounce(k, rest=0.0)] + [r4(y)] * (n - k)
@@ -1958,6 +1968,10 @@ def build(script, sup, style_id, direction=None):
         timeline = cut_story(script, clock, sp, f_end, stress, aim_s=float(d["aim_s"]))
         cutter = dict(name="cut_story", why="no per-line verdicts in the pack (a marketing film or an older pack)")
         intrinsic = None
+    sourced = bool(fit_on and script.get("facts") and d.get("source_evidence"))
+    if sourced:
+        timeline = evidence_cut.retain_checked(timeline, d.get("checked_shots"), sp)
+        timeline = evidence_cut.place(script, clock, timeline, sp, sup.get("identity") or {})
     timeline = F.pin_voices(timeline, sup.get("voices") or [])
     by_seg = {}
     for k, r in enumerate(timeline):
@@ -1982,10 +1996,10 @@ def build(script, sup, style_id, direction=None):
                                finish=fin[seg_at(f0)], use=rec.get("use"),
                                source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"), time_range=rec.get("time_range"),
                                src=rec.get("src"), tier=rec.get("tier") or ("voice" if rec.get("voice") else None), take=rec.get("take_i"),
-                               take_bounds=rec.get("take"), line=rec.get("pick_line", seg_at(f0)), spoken_line=seg_at(f0),
+                               take_bounds=rec.get("take"), take_group=rec.get("take_group"), line=rec.get("pick_line", seg_at(f0)), spoken_line=seg_at(f0),
                                motion=round(float(played), 3) if played is not None else None,
                                chroma=take_chroma(rec, rec.get("take_i")) if kind == "clip" else rec.get("chroma"), burst=rec.get("burst"),
-                               **{k_: rec[k_] for k_ in ("glimpse", "cont", "cutin", "glimpse_flash") if rec.get(k_)}))
+                               **{k_: rec[k_] for k_ in ("glimpse", "cont", "cutin", "glimpse_flash", "depicted_name") if rec.get(k_)}))
         if rec.get("still") or kind == "photo":
             look_pics.append(rec.get("still") or rec["path"])
         still_ = rec.get("still") or ((rec.get("stills3") or [None, None])[len(rec.get("stills3") or [None, None]) // 2]) or \
@@ -2053,6 +2067,21 @@ def build(script, sup, style_id, direction=None):
         note(f0, f1, kind, name, rec, "window")
 
     n_win = [0, 0]
+
+    def native_window(f0, f1, kind, name, rec, key):
+        # With a checked source but no subject bounding box, fit the full image.
+        # The window follows the source aspect, including upright portraits.
+        aspect = rec["w"] * H / (rec["h"] * W)
+        portrait = bool(rec.get("depicted_name"))
+        center_y = .55 if portrait else .46
+        w = min(.94, (.56 if portrait else .72) * aspect)
+        h = w / aspect
+        P.page([f0, f1], "#272521", "#141310", grain=.025)
+        kw = dict(src=list(rec["src"])) if kind == "clip" else {}
+        P.card([f0, f1], key, [.5-w/2, center_y-h/2, .5+w/2, center_y+h/2], z=1, crop=[0,0,1,1], **kw)
+        layer_spans.append((f0, f1, 2))
+        note(f0, f1, kind, name, rec, "window")
+        P.pictures[-1]["crop"] = [0,0,1,1]
 
     def bleed(f0, f1, kind, name, rec, key):
         n_win[1] += 1
@@ -2343,16 +2372,25 @@ def build(script, sup, style_id, direction=None):
     full_frame = set(d.get("full_frame_paths") or [])
     whole_frame = set(d.get("whole_frame_paths") or [])
     board = set(d.get("board_paths") or []) - full_frame
-    sealed = full_frame | board                 # never a print of a collage run (a product clip has its own layout)
+    def needs_native(row):
+        a, _, kind, name, rec = row
+        if not sourced or kind not in ("photo", "clip") or rec.get("voice"):
+            return False
+        briefs = script["segments"][seg_at(a)].get("see") or []
+        aspect = (rec.get("w") or W) / (rec.get("h") or H) / (W / H)
+        return rec.get("depicted_name") or rec.get("tier") == "detail" or (abs(aspect - 1) > .05 and any(
+            x.get("thing") == name and x.get("keep_full_frame") for x in briefs))
+
+    sealed = full_frame | board
     board_on, revealed = bool(d.get("board_paths")), set()     # marketing's board: a whole-frame file reveals once
     runs, k = [], 0
     while k < len(timeline):
         i = seg_at(timeline[k][0])
-        if i in collage and not timeline[k][4].get("voice") and timeline[k][2] != "designed" and timeline[k][4]["path"] not in sealed:
+        if i in collage and not timeline[k][4].get("voice") and timeline[k][2] != "designed" and timeline[k][4]["path"] not in sealed and not needs_native(timeline[k]):
             # a run of prints: consecutive pictures of the collage line, five at most (a pinned voice breaks it)
             run, j = [k], k + 1
             while j < len(timeline) and len(run) < len(PRINT_AT) and seg_at(timeline[j][0]) == i and not timeline[j][4].get("voice") \
-                    and timeline[j][2] != "designed" and timeline[j][4]["path"] not in sealed:
+                    and timeline[j][2] != "designed" and timeline[j][4]["path"] not in sealed and not needs_native(timeline[j]):
                 run.append(j)
                 j += 1
             if len(run) >= 3:
@@ -2386,8 +2424,13 @@ def build(script, sup, style_id, direction=None):
                 note(f0, f1, kind, name, rec, "product")
             elif kind == "clip" and rec["path"] in board and not rec.get("voice"):
                 proof_print(f0, f1, kind, name, rec, keys[rec["path"]])
+            elif rec.get("tier") == "exhibit":
+                evidence_cut.source_page(P, f0, f1, rec, clock)
+                grounds.append((f0, f1, .90))
             elif kind == "designed":
                 designed(f0, f1, rec)
+            elif needs_native(timeline[run[0]]):
+                native_window(f0, f1, kind, name, rec, keys[rec["path"]])
             elif fit_on and kind == "clip" and rec["path"] in talk_fit and not rec.get("voice") and \
                     (seg_at(f0) not in collage or d.get("collage_any_line")):
                 # with collage_any_line a collage line's speaking clip that no print run took keeps the talking rule
@@ -2505,12 +2548,21 @@ def build(script, sup, style_id, direction=None):
     dropped, supers = [], []
     shown = F.display_words(P, clock, sc, "dsp", cap_y + 0.012, f_voice_end, skip_text=tuple(cards_shown), ink=pal["ink"], accent=pal["accent"],
                             gap_s=1.8, hold_s=1.05, px_max=float(st["dsp"]["px"]) * 1.25, dropped=dropped,
+                            exhibits=[(a, b) for a, b, _, _, rec in timeline if rec.get("tier") == "exhibit"],
                             roles_skip=("name",) if fit_on else (), anchored_only=fit_on, cap_floor_px=CAP_FLOOR_PX if fit_on else None) \
         if d.get("display", True) else []
     if fit_on and d.get("display", True):
-        supers = name_supers(P, clock, sc, timeline, st, pal, f_voice_end, shown, dropped, cards=card_type)
-    lines = F.caption_build(P, clock, "cap", cap_y, f_end=f_voice_end + 8, hold=[(a - 1, b) for a, b, _ in shown], z=5,
+        supers = name_supers(P, clock, sc, timeline, st, pal, f_voice_end, shown, dropped, cards=card_type, bound=sourced)
+    lines = F.caption_build(P, clock, "cap", cap_y, f_end=f_voice_end + 8, hold=[(a - 1, b) for a, b, _ in (shown + supers if sourced else shown)] +
+                            [(a, b) for a, b, _, _, r in timeline if r.get("depicted_name")], z=5,
                             script=sc if fit_on else None, ink_lag_s=CAPTION_LAG_S if fit_on else None)
+    # The transcription has its own light paper throughout. Ink a caption on
+    # that paper directly when its entire span lies on the document.
+    paper = [(a, b) for a, b, _, _, rec in timeline if rec.get("tier") == "exhibit"]
+    for it in P.items if paper else ():
+        if it.get("role") == "cap" and any(a <= it["f"][0] and it["f"][1] <= b for a, b in paper):
+            it["ink"] = "#211C17"
+            it.pop("stroke", None)
     # Bright archive drawings and white transition flashes need the caption
     # seat protected after the flashes, just before the screen-plane type.
     def tone_at(f):
@@ -2525,6 +2577,21 @@ def build(script, sup, style_id, direction=None):
     turn_by = "payoff" if turn_f is not None else None
     film = dict(grain=float(st["grain"]), vignette=float(st["vignette"]), over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))
     l1 = P.done(sup.get("sid", "wf3"), f_end, int(d.get("seed", 1114)), film)
+    if sourced:
+        # The builder's fallback if direction is unavailable: the writer's payoff
+        # figure actually appearing on screen. A later Director score owns its cues.
+        l1["picture_bound_sound"] = True
+        l1["story_cues"] = []
+        for a, b, text in shown:
+            seg = sc["segments"][seg_at(a)]
+            if seg.get("beat") != "payoff" or not any(isinstance(x, dict) and x.get("role") == "figure"
+                                                      and x.get("text") == text for x in seg.get("show") or []):
+                continue
+            landed = next((it for it in l1["items"] if it["k"] == "word" and it["f"][0] == a and
+                           it.get("display_text", it["t"]) == text), None)
+            if landed:
+                l1["story_cues"].append(dict(f=a, beat=seg_at(a), role="figure", sound="tick",
+                                             partner=dict(text=landed["t"]), why="The spoken figure appears."))
     secs = f_voice_end / FPS
     np10 = len({picture_key(p) for p in P.pictures}) / max(secs, 1) * 10     # prints and windows count; a card by its text
     takes = take_stats(P.pictures, footage)            # a measure on every cut, cut_story's too (WF2)

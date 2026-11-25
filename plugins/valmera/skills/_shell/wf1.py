@@ -13,7 +13,9 @@ import os
 import subprocess
 
 import chain
-import llm
+from director import shell_llm
+
+llm = shell_llm()
 
 TASTE = ("A device exists only where an event earns it, and less, placed right, beats more. But a plain take with "
          "captions is not a film: frame 0 is a designed picture, the people, places, companies and documents he names "
