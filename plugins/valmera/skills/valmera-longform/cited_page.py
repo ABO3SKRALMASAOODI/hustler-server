@@ -5,7 +5,34 @@ from urllib.parse import urlsplit, parse_qs
 import tempfile
 from contextlib import closing
 
-from PIL import Image
+from PIL import Image, ImageDraw
+
+
+def marked_crop(page, text, quote, mark):
+    """Locate the mark inside this quotation, even when it crosses a line break."""
+    with closing(text.search(quote)) as search:
+        match = search.get_next()
+    if not match:
+        raise ValueError("quotation has no position on the page")
+    with closing(text.search(mark, index=match[0])) as search:
+        focus = search.get_next()
+    if not focus or focus[0] + focus[1] > sum(match):
+        raise ValueError("mark has no position inside the quotation")
+    boxes = [text.get_rect(i) for i in range(text.count_rects(*match))]
+    marks = [text.get_rect(i) for i in range(text.count_rects(*focus))]
+    width, height = page.get_size()
+    left = max(0, min(b[0] for b in boxes) - 14)
+    bottom = max(0, min(b[1] for b in boxes) - 25)
+    right = min(width, max(b[2] for b in boxes) + 14)
+    top = min(height, max(b[3] for b in boxes) + 25)
+    scale = 4
+    with closing(page.render(scale=scale, crop=(left, bottom, width-right, height-top))) as bmp:
+        image = bmp.to_pil().convert("RGB")
+    pen = ImageDraw.Draw(image)
+    for x0, y0, x1, _ in marks:
+        y = (top-y0+1)*scale
+        pen.line(((x0-left)*scale, y, (x1-left)*scale, y), fill="#aa432a", width=4)
+    return image
 
 
 def capture(fact, path, *, original_pdf=None):
@@ -35,6 +62,9 @@ def capture(fact, path, *, original_pdf=None):
                         if excerpt in " ".join(
                             text.get_text_range().casefold().split()
                         ):
+                            if fact.get("mark"):
+                                marked_crop(page, text, quote, fact["mark"]).save(out)
+                                break
                             with closing(text.search(quote)) as search:
                                 match = search.get_next()
                             crop = (0, 0, 0, 0)

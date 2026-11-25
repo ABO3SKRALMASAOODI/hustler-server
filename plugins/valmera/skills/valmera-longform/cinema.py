@@ -59,29 +59,94 @@ def worker():
     return p
 
 
+def attach_documents(rows, segments, credits, documents, mixed):
+    for i,clip in documents.items():
+        row = rows.setdefault(i,dict(i=i,say=segments[i]['say'],clips=[]))
+        row['clips'].append(clip)
+        row['document_supplied'] = True
+        if i in mixed:
+            row['motion_request'] = mixed[i]
+        credits.append(dict(line=i, **clip['source']))
+
+
+def chapter_footage(ctx, script, chapter, dest, avoided, known):
+    from chapter_exhibits import place
+    sc = script['script']
+    segments = {i:s for i,s in enumerate(sc['segments']) if s['chapter']==chapter['id']}
+    saved = dest/'footage.json'
+    prior = read(saved) if saved.exists() else {}
+    staging = {r['i']:r.get('show') for r in prior.get('lines', [])}
+    documents, mixed = place(ctx, script, segments, dest, staging)
+    lines = [dict(i=i, say=s['say'], pictures=s.get('pictures',[]), dur=len(s['say'].split())/2.5+1,
+                  **({'visual':mixed[i]} if i in mixed else {}))
+             for i,s in segments.items() if i not in documents or i in mixed]
+    def fetch_lines(request, folder):
+        return footage_box.fetch(dict(lines=request, named=script['dossier']['named'], avoid=avoided,
+            known_sources=known, about=sc['title']+': '+chapter['title']+
+            '. Find actual moving witnesses and observable actions for the supplied lines.'), folder, ctx.log)
+    # The raw box report remains the numerical record of its own search. It can
+    # cover all lines on an older run or only the motion subset on a newer one.
+    results = []
+    if footage_box.completed_research(prior):
+        results.append((prior, dest))
+        searched = {r['i'] for r in prior['lines']}
+        missing = [ln for ln in lines if ln['i'] not in searched]
+        if missing:
+            folder = dest/('motion-'+hashlib.sha256(json.dumps(missing,sort_keys=True).encode()).hexdigest()[:16])
+            results.append((fetch_lines(missing, folder), folder))
+    elif lines:
+        results.append((fetch_lines(lines, dest), dest))
+    rows = {i:dict(i=i,say=s['say'],clips=[]) for i,s in segments.items()}
+    voices, credits, spend = [], [], {}
+    for report, folder in results:
+        for ln in report['lines']:
+            row = dict(ln, clips=[])
+            for clip in ln['clips']:
+                rel = Path(folder.relative_to(dest))/clip['file']
+                row['clips'].append(dict(clip,file=str(rel),path=str(dest/rel),w=W,h=H))
+            rows[ln['i']] = row
+        for v in report.get('voices', []):
+            voices.append(dict(v, **{k:str(folder.relative_to(dest)/v[k]) for k in ('file','wav') if v.get(k)}))
+        credits.extend(report.get('credits', []))
+        for k,v in report.get('spend', {}).items():
+            spend[k] = spend.get(k,0)+v
+    attach_documents(rows, segments, credits, documents, mixed)
+    if documents:
+        save(dest/'document-supply.json', dict(lines=[rows[i] for i in documents],
+             motion_lines=[ln['i'] for ln in lines], box_reports=[str(f.relative_to(dest)) for _,f in results]))
+    return dict(lines=list(rows.values()), voices=voices, credits=credits, spend=spend)
+
+
 def footage(ctx, script):
     """Each chapter is a bounded search; every previous source range stays reserved."""
     sc = script['script']
     root = Path(ctx.supply)/'footage'
-    if (root/'footage.json').exists():return read(root/'footage.json')
-    rows, voices, credits, avoided, spends = [], [], [], [], []
     probe = script.get('idea_full', {}).get('supply', {})
+    if (root/'footage.json').exists():
+        result = read(root/'footage.json')
+        if (not probe.get('exhibits') or result.get('chapter_documents')
+                or (Path(ctx.supply)/'archive-script/applied.json').exists()):
+            return result
+        # A completed aggregate can have validated additions and witness audio
+        # outside the chapter reports. Attach newly supplied exhibits in place.
+        from chapter_exhibits import place
+        by = {r['i']:r for r in result['lines']}
+        for ci, ch in enumerate(sc['chapters']):
+            dest = root/f'chapter-{ci+1}'
+            segments = {i:s for i,s in enumerate(sc['segments']) if s['chapter']==ch['id']}
+            docs, mixed = place(ctx,script,segments,dest,{i:by[i].get('show') for i in segments if i in by})
+            attach_documents(by, segments, result['credits'], docs, mixed)
+        result.update(lines=list(by.values()),chapter_documents=True)
+        save(root/'footage.json',result)
+        return result
+    rows, voices, credits, avoided, spends = [], [], [], [], []
     motion = [h for subject in probe.get('subjects', []) for h in subject['sources']]
     for ci, ch in enumerate(sc['chapters']):
-        lines = [dict(i=i, say=s['say'], pictures=s.get('pictures',[]), dur=len(s['say'].split())/2.5+1)
-                 for i,s in enumerate(sc['segments']) if s['chapter']==ch['id']]
         dest = root/f'chapter-{ci+1}'
-        payload = dict(lines=lines, named=script['dossier']['named'],
-                       about=sc['title']+': '+ch['title']+'. Landscape documentary; archive moving footage on every line.', avoid=avoided, known_sources=motion)
-        # The Mac's repeated YouTube wall is established in this week's context.
-        # Use the product's same engine on its supported box network.
-        ctx.log(f"footage chapter {ci+1}/{len(sc['chapters'])}: {len(lines)} lines")
-        r = footage_box.fetch(payload, dest, ctx.log)
+        ctx.log(f"footage chapter {ci+1}/{len(sc['chapters'])}: {ch['title']}")
+        r = chapter_footage(ctx, script, ch, dest, avoided, motion)
         for ln in r['lines']:
-            for c in ln['clips']:
-                c['path'] = str(dest/c['file'])
-                c['w'],c['h'] = W,H
-                avoided.append(dict(url=c['source']['url'],time_range=c['time_range']))
+            avoided.extend(dict(url=c['source']['url'],time_range=c['time_range']) for c in ln['clips'] if c.get('kind')!='image')
             rows.append(ln)
         for v in r.get('voices',[]):
             if not v.get('file') or not v.get('wav'):continue
@@ -95,6 +160,7 @@ def footage(ctx, script):
     if probe.get('exhibits'):
         from idea_exhibits import clips
         result['editorial'] = dict(pins=[], rejected=[], bank=list(clips(ctx, probe['exhibits'])))
+        result['chapter_documents'] = True
     prefill_footage(ctx,script,result)
     save(root/'footage.json',result)
     return result
@@ -111,13 +177,19 @@ def prefill_footage(ctx,script,ft,pass_id=None):
         lines=[]
         for i,s in enumerate(sc['segments']):
             if s['chapter']!=ch['id']:continue
-            available=sum(min(7.8,c['seconds']) for c in by.get(i,{}).get('clips',[]))
+            row=by.get(i,{})
+            if row.get('document_supplied') and not row.get('motion_request'):continue
+            available=sum(min(7.8,c['seconds']) for c in row.get('clips',[])
+                          if not row.get('motion_request') or c.get('kind')!='image')
             missing=len(s['say'].split())/2.8+.4-available
-            if missing>=1.5:lines.append(dict(i=i,say=s['say'],pictures=s.get('pictures',[]),dur=missing+2))
+            if missing>=1.5:lines.append(dict(i=i,say=s['say'],pictures=s.get('pictures',[]),dur=missing+2,
+                                              **({'visual':row['motion_request']} if row.get('motion_request') else {})))
         if not lines:continue
         dest=Path(ctx.supply)/'footage'/('prefill-'+ch['id']+('-'+pass_id if pass_id else ''))
         ctx.log(f"archive coverage research {ch['id']}: {len(lines)} lines")
-        known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips']}.values())
+        retained=[h for subject in script.get('idea_full',{}).get('supply',{}).get('subjects',[]) for h in subject['sources']]
+        ranked=retained+[c['source'] for ln in ft['lines'] for c in ln['clips'] if c.get('kind')!='image']
+        known=list({source['url']:source for source in ranked}.values())
         extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title']+'. Find additional literal archive evidence; previous source seconds are reserved.',avoid=avoid,known_sources=known,want_voices=not bool(ft.get('voices'))),dest,ctx.log)
         add_footage(ft,extra,dest)
         avoid.extend(dict(url=c['source']['url'],time_range=c['time_range']) for ln in extra['lines'] for c in ln['clips'])
@@ -532,7 +604,8 @@ def finish_supply(ctx,script,ft,nar,nd):
     world=None
     if any((s.get('design') or {}).get('kind')=='map' for s in sc['segments']):
         world=PX.commons_file(legacy.WORLD,str(Path(ctx.supply)/'world'),want_w=4000)
-    designs=legacy._designs(ctx,sc,script['dossier'],world,str(Path(ctx.supply)/'design'))
+    designs=legacy._designs(ctx,sc,script['dossier'],world,str(Path(ctx.supply)/'design'),
+                            supplied=[c for row in ft['lines'] for c in row['clips'] if c.get('mark')])
     pack=dict(designs=designs,sid=ctx.sid,narration=nar['wav'],words=nar['words'],ffmpeg=PX.FF,footage=ft,record=record)
     save(Path(ctx.supply)/'pack.json',dict(pack=pack,record=record))
     return record
@@ -814,6 +887,22 @@ def still_fill(c):
         return None
 
 
+def document_shot(plan, span, key, clip):
+    plan.page(span,'#14161A',grain=.005)
+    frames = span[1]-span[0]
+    growth = .12 if frames>240 else .025
+    ratio = clip['w']/clip['h']
+    height = min(.66,.70/(1+growth),.84*W/H/ratio)
+    width = height*ratio/(W/H)
+    progress = [q/max(frames-1,1) for q in range(frames)]
+    move = dict(s=[1+growth*t for t in progress])
+    if clip.get('mark'):
+        move['y'] = [.47-.04*t for t in progress]
+    plan.card(span,key,[.5-width/2,.45-height/2,.5+width/2,.45+height/2],**move)
+    label = clip.get('source_label') or archive_label(clip,lambda t:plan.R.width('source',t))
+    plan.word(span,label,'source',.055,.84,note=False,z=3)
+
+
 def build(sc,pack):
     worker()
     from film_long import Plan
@@ -828,13 +917,7 @@ def build(sc,pack):
         if c.get('kind')=='image':
             key=P.image(f'evidence-photo-{j}',c)
             if c.get('document'):
-                P.page(row['f'],'#14161A',grain=.005)
-                n=row['f'][1]-row['f'][0]
-                growth=.12 if n>240 else .025
-                ratio=c['w']/c['h'];height=min(.66,.70/(1+growth),.84*W/H/ratio);width=height*ratio/(W/H)
-                P.card(row['f'],key,[.5-width/2,.45-height/2,.5+width/2,.45+height/2],
-                       s=[1+growth*q/max(n-1,1) for q in range(n)])
-                P.word(row['f'],archive_label(c,lambda t:P.R.width('source',t)),'source',.055,.84,note=False,z=3)
+                document_shot(P, row['f'], key, c)
             else:
                 n=row['f'][1]-row['f'][0]
                 ratio=c['w']/c['h']
@@ -881,6 +964,9 @@ def build(sc,pack):
         if rec['kind']=='number':
             # A number is an annotation on the evidence, never a held replacement card.
             P.word([a,min(a+72,b)],str(d.get('print','')),'chapter',0.055,0.72)
+            continue
+        if rec.get('supplied_passage') and any(row['seg']==si and row['clip']['path']==rec['path']
+                                               and row['f'][0]<=a<row['f'][1] for row in shots):
             continue
         key=P.image('evidence-'+sid,rec)
         n=b-a

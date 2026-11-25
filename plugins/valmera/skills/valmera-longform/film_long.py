@@ -76,13 +76,18 @@ def _named_list(sc, dos):
     return out
 
 
-def _designs(ctx, sc, dos, world, out_dir):
+def _designs(ctx, sc, dos, world, out_dir, supplied=()):
     facts = {f["id"]: f for f in dos.get("facts") or []}
     places = {p["name"]: p for p in dos.get("places") or [] if p.get("lat") is not None and p.get("lon") is not None}
+    retained = {(c['fact'],c['mark']):c for c in supplied if c.get('fact')}
     made = {}
     for i, s in enumerate(sc["segments"]):
         d = s.get("design") or {}
         k = d.get("kind")
+        clip = retained.get((d.get('fact'), d.get('mark')))
+        if k == 'document' and clip:
+            made[str(i)] = dict(clip, kind='original', supplied_passage=True, seg=i, attribution=clip['source_label'])
+            continue
         p = os.path.join(out_dir, f"d{i:03d}_{k}.png")
         try:
             if k in ("document", "quote") and d.get("fact") in facts:
