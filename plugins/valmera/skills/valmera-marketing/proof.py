@@ -862,7 +862,7 @@ def hook_beat(rec, record_path):
         return None
     if not os.path.isfile(str(ex.get("file") or "")):
         return None
-    body = float(ex["dur"]) - endcard_s()
+    body = export_program_seconds(ex, edl)
     pics = [(float(o["start"]), float(o["duration_s"])) for o in D.MF.pictures_of(edl) + D.MF.titles_of(edl)]
     t = showcase_hook(ex, body, pics)
     land = [a for a, _ in pics if t[0] <= a < t[1]]
@@ -945,7 +945,7 @@ def export_check(ctx, rec, ask_text, must_see):
     for t, b in zip(et, frames(ex["file"], et)):
         if b:
             content += [dict(type="text", text=f"export at {t} s"), img(b)]
-    body_s = max(float(ex["dur"]) - endcard_s(), 1.0)
+    body_s = max(export_program_seconds(ex, edl), 1.0)
     measured = dict(upload=source_look(up["file"], keep=False), export=source_look(ex["file"], 0.0, body_s, keep=False))
     lt = [round(body_s * (k + 0.5) / LOOK_CHECK_FRAMES, 2) for k in range(LOOK_CHECK_FRAMES)]
     content.append(dict(type="text", text="How the export looks, for the looks line: the upload measured " + look_line(measured["upload"])
@@ -1829,6 +1829,71 @@ def endcard_s():
         return 5.6
 
 
+def export_program_seconds(ex, edl):
+    """Use the authored programme, whether this particular export appended a brand card or ended on the edit."""
+    if edl and edl.get("keep"):
+        try:
+            duration = D.program(edl)[1]
+            if duration > 0:
+                return min(float(ex["dur"]), duration)
+        except (ValueError, KeyError, TypeError, ImportError):
+            pass
+    return max(0., float(ex["dur"]) - endcard_s())
+
+
+def recorded_titles(script):
+    """Bind authored display anchors to identical titles in the checked export, using its EDL and viewed seconds."""
+    receipt = script.get("receipts") or {}
+    record = jload(script.get("record") or "", {}) or {}
+    exports = record.get("exports") or []
+    ex = next((e for e in reversed(exports) if e.get("sha256") == (receipt.get("export") or {}).get("sha256")
+               and e.get("file") and os.path.isfile(e["file"])), None)
+    if not ex or not ex.get("sha256"):
+        return {}
+    viewed = [t for row in receipt.get("visible") or [] for t in row.get("seconds") or [] if isinstance(t, (float, int))]
+    titles = {}
+    for title in (export_edl(ex) or {}).get("texts") or []:
+        text = " ".join(str(title.get("text") or "").split()).casefold()
+        a, b = title.get("start"), title.get("end")
+        if text and isinstance(a, (int, float)) and isinstance(b, (int, float)) and any(a <= t < b for t in viewed):
+            titles.setdefault(text, (a, min(b, ex["dur"])))
+    out = {}
+    for i, seg in enumerate(script["script"]["segments"]):
+        if "THE EXPORT" not in (seg.get("pictures") or []):
+            continue
+        for item in seg.get("show") or []:
+            if not isinstance(item, dict) or type(item.get("word_i")) != int:
+                continue
+            text = str(item.get("text") or "")
+            span = titles.get(" ".join(text.split()).casefold())
+            if span and span[1] > span[0]:
+                out.setdefault(i, []).append(dict(export=ex, text=text, word_i=item["word_i"], src=span))
+    return out
+
+
+def lay_recorded_titles(l1, clock, titles, reserved):
+    """On the narrated title cue, play its original frames including the Studio's lettering."""
+    rows = []
+    for line, titles_on_line in titles.items():
+        words = clock.seg_words(line)
+        anchors = sorted((t for t in titles_on_line if 0 <= t["word_i"] < len(words)), key=lambda t: t["word_i"])
+        for j, t in enumerate(anchors):
+            on = clock.f(words[t["word_i"]]["t0"])
+            until = clock.f(words[anchors[j + 1]["word_i"]]["t0"] if j + 1 < len(anchors) else words[-1]["t1"])
+            ex = t["export"]
+            fps = ex.get("fps") or F.FPS
+            start = math.ceil(t["src"][0] * fps - 1e-6) / fps
+            end = min(until, on + math.floor((t["src"][1] - start) * F.FPS + 1e-6))
+            for a, b in _minus(on, end, reserved):
+                src = [round(start + (f - on) / F.FPS, 5) for f in (a, b)]
+                layer = D.Layer(l1, {}, f"studio-title-{a}")
+                key = layer.P.video("studio-title-export", dict(ex, path=ex["file"], fps=fps))
+                layer.P.items.append(dict(id="recording", k="shot", f=[a, b], pic=key, crop=[0, 0, 1, 1], src=src))
+                layer.lay([a, b])
+                rows.append(dict(device="Studio title", frames=[a, b], src=src, title=t["text"], line=line, path=ex["file"]))
+    return rows
+
+
 def product_crop(record_path, rec, t):
     """The export's crop of the upload at upload second t, [x0, y0, x1, y1] in upload fractions, read from the final
     export's own edit list (frame mode crop: the ratio's largest window, centred on the focus, the focus track
@@ -1865,7 +1930,7 @@ def product_clips(script, out):
     ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
     up = rec["upload"]
     os.makedirs(out, exist_ok=True)
-    body = ex["dur"] - endcard_s()                       # the export without its end card
+    body = export_program_seconds(ex, export_edl(ex))
     a, b = [float(x) for x in (chk.get("after") or [0, min(4.0, body)])]
     a = min(max(a, 0.0), max(body - 2.0, 0.0))
     b = min(max(b, a + 2.0), a + 4.0, body)
@@ -2163,8 +2228,8 @@ def footage_subjects(ctx, sc, lines):
     spend)."""
     path = os.path.join(ctx.supply, "footage_subjects.json")
     old = jload(path, {}) or {}
-    if old.get("lines") == list(lines):
-        return {int(k): v for k, v in (old.get("subjects") or {}).items()}, []
+    if set(lines).issubset(old.get("lines") or []):
+        return {int(k): v for k, v in (old.get("subjects") or {}).items() if int(k) in lines}, []
     have = {n.get("name"): n for n in sc.get("named") or [] if n.get("name")}
     content = json.dumps(dict(lines=[dict(line=i, say=sc["segments"][i].get("say")) for i in lines],
                               named=[dict(name=n.get("name"), is_a=n.get("is"), must_show=n.get("must_show")) for n in have.values()]),
@@ -2232,6 +2297,55 @@ def proof_fill_clip(body, after_t, sha, shots, ranked, owed=()):
     return fill
 
 
+def external_footage(ctx, script, pack, durs, anchors, reel_kw, spend):
+    """Search uncovered external subjects and retain every proven clip and source observation across passes."""
+    sc, sup_dir = script["script"], ctx.supply
+    own = ("THE UPLOAD", "THE EXPORT")
+    fscript = json.loads(json.dumps(script))         # the footage engine searches the web; the recording's own names are ours
+    for seg in fscript["script"]["segments"]:
+        seg["pictures"] = [n for n in seg.get("pictures") or [] if n not in own]
+        seg["see"] = [v for v in seg.get("see") or [] if v.get("thing") not in own]
+    # a line whose only picture is the recording gets footage of what its words name too (the recording is a few shots,
+    # never a whole line); the typed line and the call to action carry the film's devices
+    pr = sc["proof"]
+    title_lines = recorded_titles(script)
+    bare = [i for i, seg in enumerate(fscript["script"]["segments"]) if not seg.get("pictures")
+            and i not in title_lines and i not in (int(pr["after_after"]), len(sc["segments"]) - 1)]
+    if bare:
+        subjects, uses = footage_subjects(ctx, fscript["script"], bare)
+        spend += uses
+        lend_subjects(fscript["script"], subjects)
+        ctx.log(f"footage subjects for recording lines: {json.dumps({i: [n['name'] for n in v] for i, v in subjects.items()}, ensure_ascii=False)[:300]}")
+    search_lines = [i for i, seg in enumerate(fscript["script"]["segments"]) if seg.get("pictures")]
+    foot = chain.footage(ctx, fscript, durs, anchors=anchors, lines=search_lines, **W3.footage_kw(reel_kw)) if search_lines else None
+    passes = [("footage", foot)] if foot else []
+    covered = {ln["i"] for ln in (foot or {}).get("lines") or [] if ln.get("clips")}
+    missing = [i for i in search_lines if i not in covered]
+    if foot and len(missing) > len(search_lines) / 2:
+        # too little passed: once more with each subject as a plain thing to see (the writer's must_show can be too narrow)
+        ctx.log(f"footage: {foot['counts']['lines_with_footage']} of {len(search_lines)} external-footage lines; searching again with plain subjects")
+        for n in fscript["script"].get("named") or []:
+            n["must_show"] = f"{n['name']}, plainly visible."
+            n["is"] = "person" if n.get("is") == "person" and len(str(n["name"]).split()) <= 3 else "thing"
+        foot2 = chain.footage(ctx, fscript, durs, anchors=anchors, lines=missing, out_name="footage_plain",
+                              avoid=[os.path.join(sup_dir, "footage", "footage.json")], **W3.footage_kw(reel_kw))
+        if foot2:
+            passes.append(("footage_plain", foot2))
+    clips = {}
+    for folder, result in passes:
+        for ln in result.get("lines") or []:
+            clips.setdefault(ln["i"], []).extend(W3.clip_facts(dict(c, path=os.path.join(sup_dir, folder, c["file"])))
+                                                 for c in ln["clips"])
+        pack["credits"] += [dict(name=c["title"], title=c["title"], licence="footage, not licensed (owner's decision)", credit=c["channel"],
+                                 page=c["url"], time_range=c["time_range"], line=c["line"]) for c in result["credits"]]
+        spend.append(dict(stage="supply", provider="openai", model="gpt-6-sol low + gpt-4o-transcribe", what=folder, usd=result["spend"]["usd"]))
+    pack["footage"] = [dict(i=i, clips=rows) for i, rows in sorted(clips.items())]
+    report = dict(clips=sum(map(len, clips.values())), lines=sum(bool(v) for v in clips.values()),
+                  credits=[c for _, result in passes for c in result["credits"]])
+    ctx.log(f"footage: {report['clips']} clips on {report['lines']} of {len(search_lines)} external lines")
+    return fscript, report if passes else None
+
+
 def supply(ctx, script):
     sc = script["script"]
     sup_dir = ctx.supply
@@ -2279,51 +2393,13 @@ def supply(ctx, script):
     durs = chain.seg_durs(words_all, len(sc["segments"]))
     durs = [round(float(x) * FOOTAGE_MORE, 2) for x in durs] if durs else durs
     anchors = {k: [r["path"] for r in v if r.get("path")] for k, v in (pack.get("pictures") or {}).items()}
-    own = ("THE UPLOAD", "THE EXPORT")
-    fscript = json.loads(json.dumps(script))         # the footage engine searches the web; the recording's own names are ours
-    for seg in fscript["script"]["segments"]:
-        seg["pictures"] = [n for n in seg.get("pictures") or [] if n not in own]
-        seg["see"] = [v for v in seg.get("see") or [] if v.get("thing") not in own]
-    # a line whose only picture is the recording gets footage of what its words name too (the recording is a few shots,
-    # never a whole line); the typed line and the call to action carry the film's devices
-    pr = sc["proof"]
-    bare = [i for i, seg in enumerate(fscript["script"]["segments"]) if not seg.get("pictures")
-            and i not in (int(pr["after_after"]), len(sc["segments"]) - 1)]
-    if bare:
-        subjects, uses = footage_subjects(ctx, fscript["script"], bare)
-        spend += uses
-        lend_subjects(fscript["script"], subjects)
-        ctx.log(f"footage subjects for recording lines: {json.dumps({i: [n['name'] for n in v] for i, v in subjects.items()}, ensure_ascii=False)[:300]}")
-    search_lines = [i for i, seg in enumerate(fscript["script"]["segments"]) if seg.get("pictures")]
     # Illustrative footage is silent. The two real-voice passages come only
     # from our verified Studio recording, so source transcripts are unused.
     reel_kw = dict(preserve_source=True, shot_s=0.55, line_max=12, per=4, hear_s=0.0)
-    foot = chain.footage(ctx, fscript, durs, anchors=anchors, lines=search_lines, **W3.footage_kw(reel_kw)) if search_lines else None
-    if foot and foot["counts"]["lines_with_footage"] < len(search_lines) / 2:
-        # too little passed: once more with each subject as a plain thing to see (the writer's must_show can be too narrow)
-        ctx.log(f"footage: {foot['counts']['lines_with_footage']} of {len(search_lines)} external-footage lines; searching again with plain subjects")
-        keep_dir = os.path.join(sup_dir, "footage_first")
-        shutil.rmtree(keep_dir, ignore_errors=True)
-        os.rename(os.path.join(sup_dir, "footage"), keep_dir)
-        for n in fscript["script"].get("named") or []:
-            n["must_show"] = f"{n['name']}, plainly visible."
-            n["is"] = "person" if n.get("is") == "person" and len(str(n["name"]).split()) <= 3 else "thing"
-        foot2 = chain.footage(ctx, fscript, durs, anchors=anchors, lines=search_lines, **W3.footage_kw(reel_kw))
-        if foot2 and foot2["counts"]["clips"] > foot["counts"]["clips"]:
-            foot = foot2
-            shutil.rmtree(keep_dir, ignore_errors=True)
-        else:
-            shutil.rmtree(os.path.join(sup_dir, "footage"), ignore_errors=True)
-            os.rename(keep_dir, os.path.join(sup_dir, "footage"))
+    fscript, footage_report = external_footage(ctx, script, pack, durs, anchors, reel_kw, spend)
     fdir = os.path.join(sup_dir, "footage")
     os.makedirs(fdir, exist_ok=True)
-    pack["footage"] = [dict(i=ln["i"], clips=[W3.clip_facts(dict(c, path=os.path.join(fdir, c["file"]))) for c in ln["clips"]])
-                       for ln in (foot or {}).get("lines") or []]
-    if foot:
-        pack["credits"] += [dict(name=c["title"], title=c["title"], licence="footage, not licensed (owner's decision)", credit=c["channel"],
-                                 page=c["url"], time_range=c["time_range"], line=c["line"]) for c in foot["credits"]]
-        spend.append(dict(stage="supply", provider="openai", model="gpt-6-sol low + gpt-4o-transcribe", what="footage", usd=foot["spend"]["usd"]))
-        ctx.log(f"footage: {foot['counts']['clips']} clips on {foot['counts']['lines_with_footage']} of {foot['counts']['lines']} lines")
+    pr = sc["proof"]
     # the recording: the before and the after cut in with their own sound; a frame of the after may open the film
     pc = product_clips(script, os.path.join(fdir, "product"))
     voices = [dict(after=int(pr["before_after"]), person="before", wav="product/before.wav", file="product/before.mp4", said=None,
@@ -2388,8 +2464,6 @@ def supply(ctx, script):
         short = [r["i"] for r in rows if r["short"] and fscript["script"]["segments"][r["i"]].get("pictures")]
         if not short:
             break
-        for segment in fscript["script"]["segments"]:
-            segment["see"] = [v for v in segment.get("see") or [] if v.get("thing") not in own]
         deficit = sum(r["deficit"] for r in rows)
         added = W3.topup_once(ctx, fscript, pack, durs, short, spend, f"footage-proof-{attempt}",
                               anchors, reel_kw, line_max=max(r["deficit"] for r in rows if r["i"] in short))
@@ -2415,7 +2489,7 @@ def supply(ctx, script):
     wj = json.load(open(nar["words"]))
     rec = dict(narration_s=wj["duration"], voice=nar.get("voice"), gate=nar["gate"], pictures=sum(len(v) for v in pack["pictures"].values()),
                subjects=len(pack["pictures"]), missing=pack.get("missing"), spend=spend, product=pc,
-               footage=(dict(clips=foot["counts"]["clips"], lines=foot["counts"]["lines_with_footage"], credits=foot["credits"]) if foot else None))
+               footage=footage_report)
     jsave(pk, dict(pack=pack, record=rec))
     return rec
 
@@ -3490,8 +3564,21 @@ def score(ctx, script):
         receipt_panel = (instruction_panel(l1, clock, sc, typed_line(script["receipts"])) if not devices.get("typed_line")
                          else dict(typed=typed_line(script["receipts"]), device=devices["typed_line"]))
         spans_dev = [d["frames"] for d in devices.get("laid") or []]
-        seen = dict(beats, pictures=[p for p in beats.get("pictures") or []          # a picture a device covers is not seen
-                                     if not any(a <= p["f"][0] and p["f"][1] <= z for a, z in spans_dev)])
+        reserved = spans_dev + ([receipt_panel["frames"]] if receipt_panel.get("frames") else [])
+        title_shots = lay_recorded_titles(l1, clock, recorded_titles(script), reserved)
+        devices["laid"].extend(title_shots)
+        title_spans = [t["frames"] for t in title_shots]
+        visible = []
+        for pic in beats.get("pictures") or []:
+            if any(a <= pic["f"][0] and pic["f"][1] <= b for a, b in spans_dev):
+                continue
+            for a, b in _minus(*pic["f"], title_spans):
+                visible.append(pic if [a, b] == list(pic["f"]) else D.slice_item(pic, a, b))
+        for t in title_shots:
+            product.add(t["path"])
+            visible.append(dict(f=t["frames"], src=t["src"], line=t["line"], path=t["path"], name="THE EXPORT", kind="clip"))
+        spans_dev += title_spans
+        seen = dict(beats, pictures=sorted(visible, key=lambda p: p["f"][0]))
         bad, sp, fault = checked(ctx, seen, clock, product, cache, script.get("receipts"), roles=roles_of(sc))
         spend += sp
         if fault:

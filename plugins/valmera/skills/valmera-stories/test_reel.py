@@ -914,6 +914,22 @@ def test_a_line_left_without_pictures_plays_the_real_export_not_a_type_page(tmp_
         assert a[1] == b[0]
 
 
+def test_marketing_unit_caption_keeps_its_spoken_beat_clear_of_the_rail():
+    # Factory C1, 11252023-e640ed. Spliced voice passages use the clock's fallback chunks.
+    words = [("Cuban", 12.366, 12.668), ("goes", 12.668, 12.885), ("from", 12.885, 13.144),
+             ("people", 13.144, 13.425), ("to", 13.425, 13.597), ("dollars.", 13.597, 13.921)]
+    clock = F.Clock(dict(words=[dict(w=w, start=a, end=b) for w, a, b in words], duration=14),
+                    dict(segments=[{}]))
+    plan = F.Plan(dict(cap=dict(font="InterDisplay-Bold.ttf", px=72, track=0)), {})
+    F.caption_build(plan, clock, "cap", .615, ink_lag_s=R.CAPTION_LAG_S)
+    assert [it["t"] for it in plan.items] == [w for w, _, _ in words]
+    people = plan.items[3]
+    assert people["f"] == [401, 409] and people["y"] == .615
+    assert plan.voices[people["v"]]["px"] == 72
+    assert plan.items[0]["x"] >= F.SAFE[0] + .012
+    assert people["x"] + plan.R.width(people["v"], "people") / F.W <= F.RAIL_X - .011
+
+
 def test_marketing_captions_at_72_px_stay_in_the_safe_area(tmp_path):
     """Marketing films set the narration's captions at 72 px (56 px read small at phone size); every phrase still fits
     left of the platform's rail and inside the safe area, so the taste check passes with no type dropped."""

@@ -1195,28 +1195,51 @@ def section_frames(sec, frame_of, seg_span=None, dur_f=None):
 
 
 def around(asks, spans, dur_f=None):
-    """Asks moved clear of frames another device owns (a marketing reel's hero device): an ask that starts inside a span
-    starts on the frame after it, its length kept. Nothing is dropped."""
-    spans = sorted([int(a), int(b)] for a, b in spans or [] if b > a)
+    """Place each ask in a free interval around the reel's own devices, including its rendered hold."""
     if not spans:
         return asks
+    free = []
+    at = 0
+    limit = dur_f if dur_f is not None else 10 ** 9
+    for lo, hi in sorted((int(a), int(b)) for a, b in spans if b > a):
+        if lo > at:
+            free.append((at, min(lo, limit)))
+        at = max(at, hi + 1)
+    if at < limit:
+        free.append((at, limit))
+    free = [(lo, hi) for lo, hi in free if hi - lo >= 2]
+    if not free:
+        return asks
     out = []
-    for a in asks:
-        f = a.get("f")
-        a0 = f[0] if isinstance(f, list) else f
-        if not isinstance(a0, int):
-            out.append(a)
+    for ask in asks:
+        f = ask.get("f")
+        origin = f[0] if isinstance(f, list) else f
+        if not isinstance(origin, int):
+            out.append(ask)
             continue
-        for s0, s1 in spans:
-            if s0 <= a0 < s1:
-                shift = s1 + 1 - a0
-                a = dict(a, f=[a0 + shift, f[1] + shift] if isinstance(f, list) else a0 + shift, moved=shift)
-                if dur_f and isinstance(a["f"], list):
-                    a["f"] = [min(a["f"][0], dur_f - 3), min(a["f"][1], dur_f)]
-                elif dur_f:
-                    a["f"] = min(a["f"], dur_f - 3)
-                break
-        out.append(a)
+        # Keep its word when possible. An ask inside the final hero uses the
+        # preceding free interval, instead of landing inside the end card.
+        length = max(2, f[1] - origin) if isinstance(f, list) else 2
+        slot = next(((max(origin, lo), hi) for lo, hi in free if hi - max(origin, lo) >= 2), None)
+        if slot is None:
+            lo, hi = free[-1]
+            slot = max(lo, hi - length), hi
+        start, bound = slot
+        end = min(start + length, bound)
+        row = dict(ask, f=[start, end] if isinstance(f, list) else start, bound=bound)
+        if isinstance(ask.get("bound"), (int, float)):
+            row["bound"] = min(bound, ask["bound"] + start - origin)
+        if start != origin or (isinstance(f, list) and end != f[1]):
+            if start != origin:
+                row["moved"] = start - origin
+            def move(frame):
+                return min(end - 1, max(start, start + frame - origin))
+            if isinstance(ask.get("at"), list):
+                row["at"] = [start, min(bound, max(start + 2, ask["at"][1] + start - origin))]
+            pal = _palette()
+            fields = WORD_FIELDS + tuple(k for k in (pal.word_fields(ask.get("dev")) if pal else ()) if k not in WORD_FIELDS)
+            words_to_frames(row, fields, move, move)
+        out.append(row)
     return out
 
 

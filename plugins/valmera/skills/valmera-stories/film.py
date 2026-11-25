@@ -854,12 +854,19 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
     if not hasattr(P, "cap_lags"):
         P.cap_lags = []
     ph = clock.phrases_of(script) if script is not None else None
+    seat_left = SAFE[0] + .012
+    seat_right = (RAIL_X if y > .55 else SAFE[2]) - .012
+    # Authored lines keep their existing measure. Clock chunks (e.g. after a voice
+    # splice) can use the full safe seat before needing a word break.
+    measure = .70 * W if ph else (seat_right - seat_left) * W
+    if not ph:
+        ph = clock.phrases(max_chars=max_chars, max_words=max_words)
     if ph:
         # a phrase wider than the seat (the platform's rail on the right) is split at its middle word, never set narrower
         fit, todo = [], list(ph)
         while todo:
             t0, t1, text, ws = todo.pop(0)
-            if len(ws) > 1 and P.R.width(v, text) > 0.70 * W:
+            if len(ws) > 1 and P.R.width(v, text) > measure:
                 h = len(ws) // 2
                 a_, b_ = ws[:h], ws[h:]
                 todo[:0] = [(t0, b_[0]["t0"], " ".join(w["w"] for w in a_), a_), (b_[0]["t0"], t1, " ".join(w["w"] for w in b_), b_)]
@@ -975,7 +982,14 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
         if b - first < 5:
             continue
         text = " ".join(t for _, t in pairs)
-        x_left = 0.5 - P.R.width(v, text) / W / 2
+        width = P.R.width(v, text) / W
+        if width > seat_right - seat_left:  # a single long token, or a director-authored run
+            size = P.R.fit_px(v, text, (seat_right - seat_left) * W, P.voices[v]["px"])
+            fitted = f"{v}-fit-{int(size)}"
+            P.voices[fitted] = dict(P.voices[v], px=size)
+            v = fitted
+            width = P.R.width(v, text) / W
+        x_left = max(seat_left, min(.5 - width / 2, seat_right - width))
         toks = [t for _, t in pairs]
         for j, (w, token) in enumerate(pairs):
             on = ons[j]

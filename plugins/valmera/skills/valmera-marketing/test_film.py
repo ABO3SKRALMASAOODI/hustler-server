@@ -52,10 +52,11 @@ def test_pieces_of_two_cuts_say_what_a_sentence_removed():
 
 def test_pictures_are_read_from_both_places_the_product_keeps_them():
     edl = dict(overlays=[dict(id="ov1", kind="image", start=2.2, duration_s=2.6)], fx=[dict(id="br1", type="broll", start=1.49, end=3.69)],
-               motion=[dict(id="mg1", start=0.0, end=3.0)])
+               motion=[dict(id="mg1", start=0.0, end=3.0)], texts=[dict(id="tx1", start=46.72, end=48.28)])
     assert [o["id"] for o in F.pictures_of(edl)] == ["br1", "ov1"]
     assert abs(F.pictures_of(edl)[0]["duration_s"] - 2.2) < 1e-6
-    assert F.titles_of(edl) == [dict(id="mg1", start=0.0, duration_s=3.0)]
+    assert [(t["id"], t["start"], round(t["duration_s"], 2)) for t in F.titles_of(edl)] == [
+        ("mg1", 0.0, 3.0), ("tx1", 46.72, 1.56)]
 
 
 def test_a_pull_back_keeps_one_point_still_and_ends_on_the_seat():

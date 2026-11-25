@@ -60,6 +60,8 @@ def test_the_director_lays_devices_on_a_built_story(tmp_path):
 
 def test_a_marketing_reel_gets_the_directors_devices_round_its_hero(tmp_path, monkeypatch):
     l1, beats, pack, sc = built(tmp_path)
+    click = dict(id="timeline.send", device="timeline", event_f=21, s="click")
+    l1["sound"].append(click)
     (tmp_path / "l1.json").write_text(json.dumps(l1))
     monkeypatch.setattr(wf3, "load_pack", lambda ctx: pack)
     ctx = SimpleNamespace(supply=str(tmp_path), log=lambda _: None, args={}, workflow="wf2")
@@ -68,6 +70,7 @@ def test_a_marketing_reel_gets_the_directors_devices_round_its_hero(tmp_path, mo
                                                                              devices=dict(laid=[dict(frames=hero)])))
     got = json.load(open(path))
     assert path.endswith("l1_director.json") and got["devices"]
+    assert click in got["sound"]
     starts = [a["f"][0] if isinstance(a["f"], list) else a["f"] for a in got["devices"]]
     assert all(not (hero[0] <= f < hero[1]) for f in starts)            # the hero device keeps its frames
     other = SimpleNamespace(supply=str(tmp_path), log=lambda _: None, args={}, workflow="wf3")

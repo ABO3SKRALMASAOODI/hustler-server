@@ -108,6 +108,16 @@ def test_around_moves_asks_clear_of_a_hero_device():
     assert [a["f"] for a in out] == [161, [161, 211], 20]
 
 
+def test_around_keeps_entire_device_out_of_verified_studio_titles():
+    spans = [[0, 84], [500, 659], [701, 747], [767, 812], [846, 983]]
+    asks = [dict(dev="typewriter", f=[528, 700]), dict(dev="split", f=[566, 700]),
+            dict(dev="match_pos", f=[396, 505], cuts=[396, 410]), dict(dev="chapter", f=718)]
+    placed = DR.around(asks, spans, 983)
+    assert [a["f"] for a in placed] == [[660, 701], [660, 701], [396, 500], 748]
+    assert placed[-1]["bound"] == 767
+    assert placed[2]["cuts"] == [396, 410]
+
+
 def test_the_ledger_keeps_each_films_sequence(tmp_path, monkeypatch):
     monkeypatch.setenv("VALMERA_DEVICES_LEDGER", str(tmp_path / "devices.jsonl"))
     sup = tmp_path / "supply"

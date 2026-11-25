@@ -1852,7 +1852,12 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
     cues = DR.sound_cues(d, word_frame, ids if ctx.workflow == "wf3" else None, use_asked_device=ctx.workflow == "wf3")
     if ctx.workflow != "wf3" or cues or d.get("by") != "signal":
         l1["story_cues"] = cues
-    l1["sound"], l1["sound_design"] = F.replan_sound(l1, pack)
+    # The recorded devices own their sound as well as their frames. hear_devices
+    # carries those marked events through the subsequent palette composition.
+    device_sounds = [s for s in l1.get("sound") or [] if around and s.get("device")]
+    sounds, l1["sound_design"] = F.replan_sound(l1, pack)
+    l1["sound"] = sorted(device_sounds + [s for s in sounds if not any(
+        abs(s["event_f"] - own["event_f"]) <= 2 for own in device_sounds)], key=lambda s: s["event_f"])
     asks, notes = DR.palette_asks(d, word_frame, seg_span, ids.get, l1["dur_f"])
     asks = DR.around(asks, around, l1["dur_f"])         # a reel's own hero device keeps its frames: the Director's land beside it
     if asks:

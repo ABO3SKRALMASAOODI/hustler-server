@@ -698,9 +698,10 @@ def pictures_of(edl):
 
 
 def titles_of(edl):
-    """The designed titles of an EDL (motion graphics), on programme time: [{id, start, duration_s}]."""
+    """The EDL’s motion and text titles on programme time: [{id, start, duration_s}]."""
     return sorted((dict(id=str(o.get("id")), start=float(o["start"]), duration_s=float(o["end"]) - float(o["start"]))
-                   for o in (edl.get("motion") or []) if o.get("start") is not None and o.get("end") is not None), key=lambda o: o["start"])
+                   for track in ("motion", "texts") for o in edl.get(track) or []
+                   if o.get("start") is not None and o.get("end") is not None), key=lambda o: o["start"])
 
 
 def edits_itself(script, sup, direction=None):

@@ -653,3 +653,57 @@ def test_a_slow_or_broken_source_frame_is_a_look_not_measured_never_a_stopped_ru
     monkeypatch.setattr(P, "grey_frame", lambda *a: (_ for _ in ()).throw(MemoryError("frame too large")))
     assert P.source_look(str(src), keep=False) is None
     assert P.look_line(P.source_look(str(src), keep=False)) == "not measured"
+
+
+def test_verified_export_titles_fill_their_own_anchors_and_only_missing_lines_retry(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    video = tmp_path / "exports" / "final.mp4"
+    video.parent.mkdir()
+    video.touch()
+    ex = dict(file=str(video), dur=49.8, fps=30, w=1080, h=1920, sha256="accepted", edl_version=5)
+    record = tmp_path / "record.json"
+    record.write_text(json.dumps(dict(exports=[ex])))
+    edl = dict(keep=[[0., 40.62], [41.72, 50.9]], texts=[
+        dict(start=46.72, end=48.28, text="Millions of people"),
+        dict(start=48.28, end=49.8, text="Hundreds of millions\nof dollars")])
+    (tmp_path / "edl").mkdir()
+    (tmp_path / "edl/v005.json").write_text(json.dumps(edl))
+    segments = [dict(pictures=[s], say=s) for s in ("interview set", "typing", "headphones", "THE UPLOAD",
+                                                      "THE UPLOAD", "THE EXPORT", "THE EXPORT")]
+    segments[5]["show"] = [dict(word_i=0, text="MILLIONS OF PEOPLE"), dict(word_i=6, text="HUNDREDS OF MILLIONS OF DOLLARS")]
+    script = dict(record=str(record), script=dict(segments=segments, proof=dict(after_after=4)),
+                  receipts=dict(export=dict(sha256="accepted"), visible=[dict(seconds=[46.8, 48.05]), dict(seconds=[49.3])]))
+    assert abs(P.export_program_seconds(ex, edl) - 49.8) < 1e-6
+    assert abs(P.export_program_seconds(dict(ex, dur=54.8), edl) - 49.8) < 1e-6
+    titles = P.recorded_titles(script)
+    assert list(titles) == [5]
+    words = [dict(t0=t, t1=t+.2) for t in (23.355, 23.87, 23.98, 24.18, 24.5, 25.15, 25.58, 27.92)]
+    scene = dict(items=[], assets={}, voices={})
+    shots = P.lay_recorded_titles(scene, SimpleNamespace(seg_words=lambda i: words, f=P.F.Clock.f), titles, [[701, 705]])
+    assert [s["frames"] for s in shots] == [[705, 747], [767, 812]]
+    assert all(s["path"] == str(video) for s in shots)
+    assert shots[0]["src"][0] > 46.73 and shots[1]["src"] == [48.3, 49.8]
+
+    cached = dict(lines=[3, 5], subjects={"3": [dict(name="crowd")], "5": [dict(name="Millions of people caption")]})
+    (tmp_path / "footage_subjects.json").write_text(json.dumps(cached))
+    calls = []
+
+    def acquire(ctx, request, durs, anchors, lines, **options):
+        calls.append((list(lines), options))
+        i = lines[0]
+        return dict(lines=[dict(i=i, clips=[dict(file="kept.mp4")])], counts=dict(lines_with_footage=1),
+                    credits=[], spend=dict(usd=0))
+
+    monkeypatch.setattr(P.chain, "footage", acquire)
+    monkeypatch.setattr(P.W3, "clip_facts", lambda clip: clip)
+    pack = dict(credits=[])
+    request, report = P.external_footage(SimpleNamespace(supply=str(tmp_path), log=lambda msg: None),
+                                         script, pack, [], {}, {}, [])
+    assert [lines for lines, _ in calls] == [[0, 1, 2, 3], [1, 2, 3]]
+    assert calls[1][1]["avoid"] == [str(tmp_path / "footage/footage.json")]
+    assert request["script"]["segments"][5]["pictures"] == []
+    assert report["clips"] == report["lines"] == 2
+    assert [r["clips"][0]["path"] for r in pack["footage"]] == [
+        str(tmp_path / "footage/kept.mp4"), str(tmp_path / "footage_plain/kept.mp4")]
