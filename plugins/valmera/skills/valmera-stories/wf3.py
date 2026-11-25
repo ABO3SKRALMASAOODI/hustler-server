@@ -1803,6 +1803,7 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
         return (F.Clock.f(clock.segs[i][0]), min(F.Clock.f(clock.segs[i][1]) + 6, l1["dur_f"])) if 0 <= i < nseg else (None, None)
     if ctx.workflow == "wf3":
         l1["picture_bound_sound"] = True
+        l1["figure_cues"] = list(l1.get("story_cues") or [])
     cues = DR.sound_cues(d, word_frame, ids if ctx.workflow == "wf3" else None, use_asked_device=ctx.workflow == "wf3")
     if ctx.workflow != "wf3" or cues or d.get("by") != "signal":
         l1["story_cues"] = cues

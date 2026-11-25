@@ -1256,8 +1256,20 @@ def replan_sound(l1, sup):
     a = (l1.get("sound_design") or {}).get("replan")
     if not a:
         return [], {"fault": "no first plan to follow"}
-    return design_sound(l1, sup, dict(bed=a.get("bed"), delivery_tail_s=a.get("delivery_tail_s", 0.0), tick_10s=a.get("tick_10s")),
-                        turn_f=a.get("turn_f"), spoken=[tuple(x) for x in a["spoken"]] if a.get("spoken") else None, np10=a.get("np10"))
+    settings = dict(bed=a.get("bed"), delivery_tail_s=a.get("delivery_tail_s", 0.0), tick_10s=a.get("tick_10s"))
+    params = dict(turn_f=a.get("turn_f"), spoken=[tuple(x) for x in a["spoken"]] if a.get("spoken") else None, np10=a.get("np10"))
+    sounds, report = design_sound(l1, sup, settings, **params)
+    if ("composed_events" in l1 and l1.get("story_cues") and l1.get("figure_cues") and
+            not sounds and not report.get("fault")):
+        # A requested device can compose to a quiet move. The already scored
+        # payoff accent can still land if its text survives composition.
+        alternate = dict(l1, story_cues=l1["figure_cues"])
+        sounds, placed = design_sound(alternate, sup, settings, **params)
+        if sounds:
+            placed["directed_bindings"] = report.get("picture_bindings")
+            placed["cue_source"] = "composed payoff figure"
+            report = placed
+    return sounds, report
 
 
 def audio_scene(l1, sup):

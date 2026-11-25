@@ -107,3 +107,19 @@ def test_directed_sound_resolves_the_actual_device_on_its_word():
                asks=[dict(beat=0, at=dict(w=47), dev="snap"), dict(beat=0, at=dict(w=53), dev="shrink")])
     cue, = director.sound_cues(cut, lambda w: w * 10, {}, use_asked_device=True)
     assert cue["partner"] == {"device": "shrink"} and cue["f"] == 530
+
+
+def test_a_quiet_directed_move_keeps_the_composed_payoff_accent(monkeypatch):
+    import film
+    directed = [dict(sound="air", partner=dict(device="shrink"))]
+    figure = [dict(sound="tick", partner=dict(text="220 MILLION"))]
+    scene = dict(story_cues=directed, figure_cues=figure, composed_events=[dict(dev="shrink", strength=.4)],
+                 sound_design=dict(replan=dict(np10=6.5)))
+    def plan(scene, *args, **kw):
+        if scene["story_cues"] == figure:
+            return [dict(event_f=1823)], dict(picture_bindings=[dict(f=1823)])
+        return [], dict(picture_bindings=[None])
+    monkeypatch.setattr(film, "design_sound", plan)
+    sounds, report = film.replan_sound(scene, {})
+    assert sounds == [dict(event_f=1823)] and report["directed_bindings"] == [None]
+    assert film.replan_sound(dict(scene, story_cues=[]), {})[0] == []
