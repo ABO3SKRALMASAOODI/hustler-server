@@ -752,7 +752,7 @@ def music_version(ctx, rd, sc):
     rep = jload(report) or {}
     if not (rep.get("ok") and previous.get("movie") and inputs == previous.get("inputs") and
             previous.get("movie") == file_sha(out) and previous.get("receipt") == file_sha(report)):
-        prior = (rep.get("choice") or {}).get("cid") if rep.get("ok") and ctx.workflow == "wf3" and not song else None
+        prior = (rep.get("choice") or {}).get("cid") if rep.get("ok") and ctx.workflow in ("wf2", "wf3") and not song else None
         pending_report = report + ".pending.json"
         wk = brand.worker_dir()
         brief = ""
@@ -862,7 +862,7 @@ def music_version(ctx, rd, sc):
                     track = next((r for r in json.load(f)["tracks"] if r["cid"] == choice["cid"]),None)
                 if track:
                     bed = dict(bed,path=os.path.join(library,track["file"]))
-        if bed and ctx.workflow == "wf3":
+        if bed and ctx.workflow in ("wf2", "wf3"):
             bed = dict(bed, speech_room_db=9.)
         finished, _ = cached_finish(ctx, out, final, receipt=previous["receipt"], card_bed=bed,
                                     last_word_s=last_word(ctx, sc), **end_accent(ctx, sc))
@@ -875,6 +875,8 @@ def music_version(ctx, rd, sc):
                 tempo=plan.get("tempo"), cuts=plan.get("cuts"), payoff_flow_s=levels.get("payoff_flow_s"),
                 holes=levels.get("holes"), hits=levels.get("hits"), under_voice_db=levels.get("under_voice_db"), lifts=len(levels.get("lifts") or []),
                 accents=len(levels.get("accents") or []), lufs=(mix.get("master") or {}).get("lufs"))
+    if ctx.workflow == "wf2" and "audibility" in mix:
+        does["stem_balance"] = mix["audibility"]
     if "opening_bed_dbfs" in mix:
         does["opening_bed_dbfs"] = mix["opening_bed_dbfs"]
     if rep.get("chapters"):                      # a long film: a track a chapter, each opening on an entrance and closing on a hit

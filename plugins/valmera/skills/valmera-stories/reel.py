@@ -1865,6 +1865,36 @@ def push_crop(rec, n, k=PUSH_K, tight=1.0):
     return out
 
 
+def place_proof_print(P, f0, f1, rec, key, cap_y, paper, side):
+    """Fit the entire recording on its moving print, with a clear board below for captions."""
+    n = max(f1 - f0, 1)
+    pw_, ph_ = float(rec.get("w") or W), float(rec.get("h") or H)
+    top, bottom = PROOF_TOP, max(cap_y - PROOF_CLEAR, PROOF_TOP + 0.25)
+    h_ = bottom - top
+    w_ = h_ * (pw_ / ph_) * H / W
+    if w_ > PROOF_W_MAX:
+        w_ = PROOF_W_MAX
+        h_ = w_ * (ph_ / pw_) * W / H
+    cx, cy = 0.5, bottom - h_ / 2
+    # The recording is the print. A second enlargement of it behind the
+    # print crops the speaker in two, particularly after a rhythm pass.
+    ground = ("#2E2822", "#191512") if paper else ("#181B20", "#0C0E12")
+    P.page([f0, f1], *ground, grain=0.07, proof_board=True)
+    land = max(min(PROOF_LAND_F, n - 1), 1)
+
+    def ease(j):
+        u = min(j / land, 1.0)
+        return 1.0 - (1.0 - u) ** 3
+    s_ = [r4(1.0 + PROOF_MOVE * (1.0 - ease(j)) + PROOF_DRIFT * max(j - land, 0) / max(n - land, 1)) for j in range(n)]
+    xs = [r4(cx + side * PROOF_SLIDE * (1.0 - ease(j))) for j in range(n)]
+    kw = dict(z=1, crop=[0.0, 0.0, 1.0, 1.0], src=list(rec["src"]), s=s_, x=xs, radius=0.008,
+              shadow=dict(a=0.62, blur=0.03, dx=0.004, dy=0.014), op=[min(1.0, 0.45 + 0.3 * j) for j in range(n)], proof_board=True)
+    if paper:
+        kw["rot"] = [round(side * (2.2 - 1.2 * ease(j)), 3) for j in range(n)]
+    P.card([f0, f1], key, [cx - w_ / 2, cy - h_ / 2, cx + w_ / 2, cy + h_ / 2], **kw)
+    return _hex_tone(ground[0])
+
+
 def build(script, sup, style_id, direction=None):
     """(l1, beats) for one story. script: the writer's (segments with say, pictures, beat, era, collage, show, emphasis);
     sup: the pack (wf3.supply: words, narration, pictures, footage, voices, talking); direction: the style's knobs."""
@@ -2334,44 +2364,12 @@ def build(script, sup, style_id, direction=None):
     board_k = [0]
 
     def proof_print(f0, f1, kind, name, rec, key):
-        """A product recording on a narrated line (board_paths): the export whole, at its own shape, as a print on the
-        style's board (the dark board of a paper style, else its own picture blurred and dimmed under it), landing
-        PROOF_MOVE large from one side (the sides alternate print to print) and drifting on, never held. It ends
-        PROOF_CLEAR above the caption seat, so the narration's captions and their pool sit on the board, never on the
-        export's pixels; nothing crops, grades or draws over the print (20 Nov: every recording clip was a sealed static
-        full-frame plate, its captions deleted, the export's burned words under the narrator's)."""
-        n = max(f1 - f0, 1)
-        pw_, ph_ = float(rec.get("w") or W), float(rec.get("h") or H)
-        top, bottom = PROOF_TOP, max(cap_y - PROOF_CLEAR, PROOF_TOP + 0.25)
-        h_ = bottom - top
-        w_ = h_ * (pw_ / ph_) * H / W
-        if w_ > PROOF_W_MAX:
-            w_ = PROOF_W_MAX
-            h_ = w_ * (ph_ / pw_) * W / H
-        cx, cy = 0.5, bottom - h_ / 2
         side = 1 if board_k[0] % 2 == 0 else -1
         board_k[0] += 1
-        if st.get("paper"):
-            P.page([f0, f1], "#2E2822", "#191512", grain=0.07, proof_board=True)
-        else:
-            P.shot([f0, f1], key, F.cover_crop(pw_, ph_, W / H, (0.5, 0.45), (0.5, 0.40)), src=list(rec["src"]), blur=GROUND_BLUR * 1.5,
-                   grade=dict(BED), proof_board=True)
-        land = max(min(PROOF_LAND_F, n - 1), 1)
-
-        def ease(j):
-            u = min(j / land, 1.0)
-            return 1.0 - (1.0 - u) ** 3
-        s_ = [r4(1.0 + PROOF_MOVE * (1.0 - ease(j)) + PROOF_DRIFT * max(j - land, 0) / max(n - land, 1)) for j in range(n)]
-        xs = [r4(cx + side * PROOF_SLIDE * (1.0 - ease(j))) for j in range(n)]
-        kw = dict(z=1, crop=[0.0, 0.0, 1.0, 1.0], src=list(rec["src"]), s=s_, x=xs, radius=0.008,
-                  shadow=dict(a=0.62, blur=0.03, dx=0.004, dy=0.014), op=[min(1.0, 0.45 + 0.3 * j) for j in range(n)], proof_board=True)
-        if st.get("paper"):
-            kw["rot"] = [round(side * (2.2 - 1.2 * ease(j)), 3) for j in range(n)]
-        P.card([f0, f1], key, [cx - w_ / 2, cy - h_ / 2, cx + w_ / 2, cy + h_ / 2], **kw)
+        tone = place_proof_print(P, f0, f1, rec, key, cap_y, st.get("paper"), side)
         layer_spans.append((f0, f1, 2))
         note(f0, f1, kind, name, rec, "proof_print")
-        if st.get("paper"):
-            grounds[-1] = (f0, f1, _hex_tone("#2E2822"))       # the caption seat is on the board, not on the print
+        grounds[-1] = (f0, f1, tone)
 
     flashes = []
     full_frame = set(d.get("full_frame_paths") or [])

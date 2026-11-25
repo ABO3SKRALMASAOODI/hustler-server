@@ -1608,6 +1608,7 @@ def ui_shots(rec):
     if board:
         with Image.open(os.path.join(d, board)) as im:
             out["board"] = dict(path=os.path.join(d, board), w=im.size[0], h=im.size[1])
+    out["field"] = jload(os.path.join(d, "type_00_field.json"), {})
     if "site.png" in files:
         with Image.open(os.path.join(d, "site.png")) as im:
             out["site"] = dict(path=os.path.join(d, "site.png"), w=im.size[0], h=im.size[1])
@@ -3319,7 +3320,7 @@ def lay_devices(ctx, l1, sc, pack, clock, script, knobs):
         else:
             rec_d, f_end = D.timeline(l1, f0=f0, f_send=f_send, f_after=f_after, upload=upload, export=body, edl_a=edl_a, edl_b=edl_b,
                                       typed=typed, word_f=wf, export_at=export_at, lib=lib, ff=pack["ffmpeg"], work=work, focus=focus,
-                                      caption_spans=caption_spans(rec, edl_b), versions=(1, ex.get("edl_version")))
+                                      caption_spans=caption_spans(rec, edl_b), versions=(1, ex.get("edl_version")), ui=ui_shots(rec))
         out["typed_line"] = rec_d["device"]
         out["laid"].append(rec_d)
         ctx.log(f"device {rec_d['device']}: frames {rec_d['frames']}, typed at {rec_d.get('typed_px')} px, {len(rec_d['sounds'])} sounds")
@@ -3462,9 +3463,24 @@ def lay_cta(ctx, l1, sc, pack, clock, script):
         lib = dict(pack.get("sounds") or {})
         lib.update(PX.sound_facts(("click_1", "whoosh_soft_1", D.CTA_RISER)))
         src0 = max(m["dur"] - (l1["dur_f"] - f0) / F.FPS - 0.2, 0.0)
-        ui = ui_shots(json.load(open(script["record"]))) if script.get("record") else None
+        record = jload(script.get("record") or "", {})
+        ui = ui_shots(record) if record else None
         if ui and ui.get("site"):
-            return D.site(l1, f0=f0, f1=int(l1["dur_f"]), page=ui["site"], export=m, lib=lib, src0=src0)
+            # End on the accepted result when the final visible check supplies
+            # its clock; otherwise show the recording's freshly uploaded player.
+            action = dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
+            receipt = script.get("receipts") or {}
+            final = next((ex for ex in reversed(record.get("exports") or []) if ex.get("file")
+                          and ex.get("sha256") == (receipt.get("export") or {}).get("sha256")), None)
+            if final:
+                result = dict(final, path=final["file"], fps=final.get("fps") or F.FPS)
+                checked = [t for row in receipt.get("visible") or [] for t in row.get("seconds") or []
+                           if isinstance(t, (int, float)) and 0 <= t < result["dur"]]
+                if checked:
+                    hold = (l1["dur_f"] - f0 + 1) // 2 / F.FPS
+                    action = dict(result, at=max(0., min(max(checked) - hold/2, result["dur"] - hold)))
+            return D.site(l1, f0=f0, f1=int(l1["dur_f"]), page=ui["site"], export=m, lib=lib,
+                          src0=src0, action_media=action)
         return D.cta(l1, f0=f0, f1=int(l1["dur_f"]), export=m, lib=lib, src0=src0)
     except Exception as e:  # noqa: BLE001 - the film keeps its spoken call to action
         ctx.log(f"call to action not laid: {repr(e)[:300]}")
@@ -3495,6 +3511,19 @@ def product_layout(paths, footage=()):
     reveal = set(upload_reveals(paths, footage))
     whole = [p for p in paths if os.path.basename(p) in ("before.mp4", "after.mp4", "hook.mp4") or p in reveal]
     return whole, [p for p in paths if p not in whole]
+
+
+def keep_checked_layout(l1, seen, shown):
+    """Keep the scored picture clock and resolve caption contrast against the final composited shot."""
+    keys = {asset.get("path"): key for key, asset in l1["assets"].items()}
+    checked_cuts = [dict(f=p["f"], path=p["path"], pic=keys[p["path"]], source_slice=p.get("src"))
+                    for p, verdict in zip(seen.get("pictures") or [], shown) if verdict.get("fit") == "yes" and p["path"] in keys]
+    if checked_cuts:
+        l1["documentary_cuts"] = checked_cuts
+    for it in l1["items"]:
+        if it.get("role") == "cap":
+            it["contrast_shadow"] = True
+            it.setdefault("stroke", dict(w=1.6, c="#0B0A09"))
 
 
 def score(ctx, script):
@@ -3605,6 +3634,7 @@ def score(ctx, script):
             verdict = cache.get(picture_key(picture, words)) or dict(fits=False, why="missing picture verdict")
             shown.append(dict(file=os.path.basename(picture["path"]), frames=picture["f"], source=picture.get("src"),
                               words=words, **verdict))
+        keep_checked_layout(l1, seen, shown)
         rounds.append(dict(round=rnd, pictures=len(shown), shown=shown, repair=repair,
                            misfits=[dict(file=b, words=w, why=y) for b, w, y in bad]))
         ctx.log(f"picture check: {len(bad)} of {len(seen.get('pictures') or [])} judged loose against their words (recorded)")

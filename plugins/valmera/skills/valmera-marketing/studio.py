@@ -128,12 +128,27 @@ def drive(run, sid, browser="chrome"):
             tag = f"type_{self.sends - 1:02d}"
             self.shot(f"{tag}_00")
             words = text.split()
+            fields = []
             for k, w in enumerate(words):
                 ta.press_sequentially(w + (" " if k < len(words) - 1 else ""), delay=18)
                 self.shot(f"{tag}_{k + 1:02d}")
+                try:
+                    fields.append(ta.evaluate("""e => {
+                    const r = e.getBoundingClientRect();
+                    return {box:[r.left/innerWidth,r.top/innerHeight,r.right/innerWidth,r.bottom/innerHeight],
+                            scroll:e.scrollTop, font:parseFloat(getComputedStyle(e).fontSize)/innerWidth};
+                    }"""))
+                except Exception:  # The screenshot and submitted sentence still carry the proof.
+                    fields.append(None)
             if ta.input_value() != text:          # the composer is the person's: whatever it made of the keys, it sends the sentence
                 ta.fill(text)
                 self.shot(f"{tag}_{len(words):02d}")
+            elif fields and all(fields):
+                try:
+                    with open(os.path.join(self.out, "shots", f"{tag}_field.json"), "w") as stream:
+                        json.dump(dict(text=text, words=fields), stream)
+                except OSError:
+                    pass  # The recording also supports a shaped word reveal without field metadata.
             p.wait_for_timeout(250)
             if self.view == "phone":
                 p.get_by_role("button", name="Send").click(timeout=10000)
@@ -499,7 +514,7 @@ def collect_one(run, sid):
     ui = []                                  # the Studio's own screen: the typing, word by word, and the result (send, watch)
     shots = os.path.join(sdir, "shots")
     for n in sorted(os.listdir(shots)) if os.path.isdir(shots) else []:
-        if n.endswith(".png") and (n.startswith("type_") or n.startswith("result_") or n.startswith("01_uploaded") or n == "site.png"
+        if n == "type_00_field.json" or n.endswith(".png") and (n.startswith("type_") or n.startswith("result_") or n.startswith("01_uploaded") or n == "site.png"
                                   or n.startswith("board_")):
             os.makedirs(os.path.join(tmp, "ui"), exist_ok=True)
             shutil.copy2(os.path.join(shots, n), os.path.join(tmp, "ui", n))

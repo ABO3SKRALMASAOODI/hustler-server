@@ -243,11 +243,18 @@ def word_frames(clock_words, typed, norm):
             out.append((f(w["t0"]), max(f(w["t1"]), f(w["t0"]) + 2)))
         else:
             out.append(None)
-    for i, v in enumerate(out):                         # fill the gaps between found words
-        if v is None:
-            prev = next((out[k] for k in range(i - 1, -1, -1) if out[k]), (a, a))
-            nxt = next((out[k] for k in range(i + 1, len(out)) if out[k]), (b, b))
-            out[i] = (prev[1], max(nxt[0], prev[1] + 2))
+    i = 0
+    while i < len(out):
+        if out[i] is not None:
+            i += 1
+            continue
+        j = next((k for k in range(i+1, len(out)) if out[k] is not None), len(out))
+        left = out[i-1][1] if i else a
+        right = out[j][0] if j < len(out) else b
+        left = min(left, right)
+        edges = [round(left+(right-left)*k/(j-i)) for k in range(j-i+1)]
+        out[i:j] = [(lo, max(lo+1, hi)) for lo, hi in zip(edges, edges[1:])]
+        i = j
     return out
 
 
@@ -358,32 +365,23 @@ class _Wrap:
 
 
 def typed_text(L, iid, f_end, lines, v, x, y0, pitch, word_f, fade_from=None):
-    """The sentence typed into a field, each word's characters landing over the frames that word is said; a caret
-    blinks at the end. word_f: [(f0, f1)] per word of the sentence. Returns the caret's last place."""
-    words = " ".join(lines).split()
-    slots, k = [], 0
-    for li, line in enumerate(lines):
-        for wi, wd in enumerate(line.split()):
-            pre = " ".join(line.split()[:wi]) + (" " if wi else "")
-            slots.append((li, wd, x + L.R.width(v, pre) / W))
-            k += 1
-    assert len(slots) == len(words)
+    """Reveal shaped whole words on their spoken frames in their final line positions."""
     caret = []
-    fade = 6
-    for wi, (li, wd, wx) in enumerate(slots):
-        a, b = word_f[min(wi, len(word_f) - 1)]
-        n = max(len(wd), 1)
-        for ci, ch in enumerate(wd):
-            fc = int(a + round(ci * max(b - a, n) / n))
-            cx = wx + (L.R.width(v, wd[:ci + 1]) - L.R.width(v, ch)) / W
-            nn = f_end - fc
-            if nn <= 0:
+    wi = 0
+    for li, line in enumerate(lines):
+        prefix = ""
+        for word in line.split():
+            start, _ = word_f[min(wi, len(word_f) - 1)]
+            wi += 1
+            if start >= f_end:
                 continue
-            ops = [1.0] * nn
-            if fade_from is not None and fade_from < f_end:
-                ops = [1.0 if fc + q < fade_from else max(0.0, 1.0 - (fc + q - fade_from + 1) / fade) for q in range(nn)]
-            L.P.word(f"{iid}.{li}.{wi:02d}.{ci:02d}", [fc, f_end], ch, v, cx, y0 + li * pitch, INK, ops, note=False)["role"] = "device"
-            caret.append((fc, wx + L.R.width(v, wd[:ci + 1]) / W, y0 + li * pitch))
+            wx = x + L.R.width(v, prefix) / W
+            y = y0 + li * pitch
+            opacity = 1. if fade_from is None else [
+                min(1., max(0., (fade_from + 5 - f) / 6)) for f in range(start, f_end)]
+            L.P.word(f"{iid}.{wi-1:02d}", [start, f_end], word, v, wx, y, INK, opacity, note=False)["role"] = "device"
+            caret.append((start, x + L.R.width(v, prefix + word) / W, y))
+            prefix += word + " "
     L.P.shown.append(" ".join(lines))
     vo = L.l1["voices"][v]
     L.texts.append(dict(t=" ".join(lines), v=v, f=[int(word_f[0][0]), int(f_end)], px=float(vo["px"]), cap_px=round(L.R.cap(v), 1), x=r4(x), y=r4(y0),
@@ -413,8 +411,41 @@ def caret_card(L, iid, f0, f1, caret, v, x, y):
 
 # ----------------------------------------------------------------- timeline: the frame pulls back onto its own timeline
 
+def recorded_field(ui, typed, work, seat_width):
+    """Crop the photographed input using its browser bounds, pinning its first baseline as it grows."""
+    from PIL import Image
+    data = ui.get("field") or {}
+    rows = data.get("words") or []
+    files = ui.get("typing") or []
+    if not rows or data.get("text") != typed or len(rows) != len(typed.split()) or len(files) != len(rows)+1:
+        return None
+    pictures = []
+    for row, name in zip(rows, files[1:]):
+        if (not isinstance(row, dict) or row.get("scroll") or len(row.get("box", [])) != 4
+                or not all(0 <= v <= 1 for v in row["box"]) or not os.path.isfile(os.path.join(ui["dir"], name))):
+            return None
+        with Image.open(os.path.join(ui["dir"], name)) as image:
+            l, t, r, b = row["box"]
+            box = (round(l*image.width), round(t*image.height), round(r*image.width), round(b*image.height))
+            if box[2] <= box[0] or box[3] <= box[1]:
+                return None
+            pictures.append(image.crop(box).convert("RGB"))
+    width, height = max(p.width for p in pictures), max(p.height for p in pictures)
+    scale = seat_width * W / width
+    paths = []
+    os.makedirs(work, exist_ok=True)
+    for j, pic in enumerate(pictures):
+        padded = Image.new("RGB", (width, height), pic.getpixel((0, 0)))
+        padded.paste(pic)
+        path = os.path.join(work, f"recorded-field-{j:02d}.png")
+        padded.save(path)
+        paths.append(path)
+    return dict(width=width, height=height, h=height*scale/H, px=round(rows[-1]["font"]*ui["w"]*scale, 1),
+                pictures=paths)
+
+
 def timeline(l1, *, f0, f_send, f_after, upload, export, edl_a, edl_b, typed, word_f, export_at, lib, ff, work, focus=(0.5, 0.42),
-             caption_spans=(), versions=(1, None)):
+             caption_spans=(), versions=(1, None), ui=None):
     """The typed line as Valmera's own project. upload/export: media facts of the upload and of the export's body (no
     end card); edl_a: the upload as it came in (one block); edl_b: the export's final edit list; export_at: the export
     second the reel's after starts on, at frame f_after. Returns (record, the frame the reel's after takes over)."""
@@ -457,7 +488,10 @@ def timeline(l1, *, f0, f_send, f_after, upload, export, edl_a, edl_b, typed, wo
     R.voices[L.k("dv_r")]["px"] = 54
     r_cap = R.cap(L.k("dv_r")) / H
     row_h = max(r_cap * 1.75, 0.034)
-    body_h = max(s_cap + (len(lines) - 1) * pitch, r_cap + (len(rows) - 1) * row_h)   # the typed lines, then the receipt in their place
+    field = recorded_field(ui, typed, work, (RAIL_X - .09)) if ui else None
+    if field and field["px"] < px:
+        field = None
+    body_h = max(field["h"] if field else 0., s_cap + (len(lines) - 1) * pitch, r_cap + (len(rows) - 1) * row_h)   # the typed lines, then the receipt in their place
     prompt_bot = label_base - lab_cap - 0.022
     prompt_h = 0.024 + lab_cap + 0.022 + body_h + 0.026
     prompt_top = prompt_bot - prompt_h
@@ -615,8 +649,19 @@ def timeline(l1, *, f0, f_send, f_after, upload, export, edl_a, edl_b, typed, wo
     y_s = lab_y + 0.022 + s_cap
     wf = list(word_f) or [(f_pull1 + 2 + 3 * i, f_pull1 + 5 + 3 * i) for i in range(len(typed.split()))]
     wf = [(max(a, f_pull1 + 1), max(b, max(a, f_pull1 + 1) + 1)) for a, b in wf]
-    caret = typed_text(L, "say", f_push1, lines, L.k("dv_s"), 0.09, y_s, pitch, wf, fade_from=f_send + 4)
-    caret_card(L, "caret", wf[0][0], f_send + 2, caret, L.k("dv_s"), 0.09, y_s)
+    if field:
+        for j, photo in enumerate(field["pictures"]):
+            start, end = wf[j][0], wf[j+1][0] if j+1 < len(wf) else f_send + 4
+            if end <= start:
+                continue
+            pk = P.image(f"dv_field{j}", photo, field["width"], field["height"])
+            top = y_s - s_cap
+            P.card(f"field{j}", [start, end], pk, [.09, top, RAIL_X, top + field["h"]], z=6)
+        L.texts.append(dict(t=typed, f=[wf[0][0], f_send+4], px=field["px"], cap_px=field["px"]*.73,
+                            x=.09, y=y_s, w=RAIL_X-.09, v="recorded composer"))
+    else:
+        caret = typed_text(L, "say", f_send + 10, lines, L.k("dv_s"), 0.09, y_s, pitch, wf, fade_from=f_send + 4)
+        caret_card(L, "caret", wf[0][0], f_send + 2, caret, L.k("dv_s"), 0.09, y_s)
     P.items.append(dict(id="sent", k="flash", f=[f_send, f_send + 8], mode="fill", c=ACCENT, a=[r4(0.9 * (1 - q / 8.0)) for q in range(8)],
                         rect=[0.05, r4(prompt_bot - 0.005), 0.95, r4(prompt_bot)], z=7))
     first = y_s - s_cap + r_cap
@@ -627,14 +672,19 @@ def timeline(l1, *, f0, f_send, f_after, upload, export, edl_a, edl_b, typed, wo
             row["f"] = fa
 
     # ---- sound: a few, each on what lands
-    L.hit("typing_2", wf[0][0] + 1, "typing")
+    # A run of keys starts at the first word. Its loudest key can be more
+    # than a second into the sample and does not time the first keystroke.
+    if "typing_2" in lib:
+        L.hit("typing_2", wf[0][0], "typing")
+        keys = L.P.sounds[-1]
+        keys.update(start_s=wf[0][0] / FPS, trim_s=0., dur_s=max(1, f_send-wf[0][0]) / FPS)
     L.hit("click_1", f_send, "click")
     if removed > 0.2 or landed or rows:
         L.hit("whoosh_soft_1", f_slide + 2, "whoosh")
     rec = L.lay([f0, f_push1])
     rec.update(device="timeline", frames=[f0, f_push1], pull=[f0, f_pull1], typed=[wf[0][0], f_send], send_f=f_send, after_f=f_after,
                push=[f_push0, f_push1], viewer=vbox, export_in_viewer=ebox, prompt=[0.05, r4(prompt_top), 0.95, r4(prompt_bot)],
-               tracks={k: [r4(v[0]), r4(v[0] + v[1])] for k, v in seats.items()}, typed_px=px, typed_lines=lines, receipt=rows,
+               tracks={k: [r4(v[0]), r4(v[0] + v[1])] for k, v in seats.items()}, typed_px=field["px"] if field else px, recorded_composer=bool(field), typed_lines=lines, receipt=rows,
                removed_s=round(removed, 3), pictures_landed=landed, durations=[round(dur_a, 3), round(dur_b, 3)], versions=list(versions),
                export_at=round(export_at, 3), upload_at_after=round(s_after, 3))
     return rec, f_push1
@@ -1028,7 +1078,7 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
     return rec
 
 
-def site(l1, *, f0, f1, page, export, lib, src0=0.0, url="valmera.io"):
+def site(l1, *, f0, f1, page, export, lib, src0=0.0, url="valmera.io", action_media=None):
     """The call to action is the website itself: the real valmera.io front page as a phone shows it (`page`: {path, w,
     h}, the recording's own photograph), under the website's name as the film's largest line. The brand's end card
     follows (the shell's, unchanged). True by construction: everything on it is the site's own words."""
@@ -1047,16 +1097,41 @@ def site(l1, *, f0, f1, page, export, lib, src0=0.0, url="valmera.io"):
     box = [r4(0.5 - pw / 2), r4(top), r4(0.5 + pw / 2), r4(top + ph)]
     pk = P.image("dv_site", page["path"], int(page["w"]), int(page["h"]))
     n = f1 - f0
-    P.card("page", [f0, f1], pk, box, z=3, radius=0.02, crop=[0.0, 0.0, 1.0, r4(rows)], shadow=dict(a=0.5, blur=0.04, dx=0, dy=0.016),
-           s=[r4(v) for v in MF.settle(10, 0.9)] + [1.0] * max(n - 10, 0), op=[r4(min(1.0, (q + 1) / 4.0)) for q in range(n)])
+    # Travel down the photographed site to its upload control, then show the
+    # recorded Studio with the upload in its player. Both use the same seat.
+    action = f0 + n // 2 if action_media and n >= 12 else f1
+    travel = MF.ease_io(max(2, action - f0))[:action - f0]
+    crops = ([[0., r4((1 - rows) * u), 1., r4(rows + (1 - rows) * u)] for u in travel]
+             if action_media else [0., 0., 1., r4(rows)])
+    scale = ([r4(.96 + .04*u) for u in travel] if action_media else
+             (MF.settle(10, .9) + [1.] * n)[:n])
+    P.card("page", [f0, action], pk, box, z=3, radius=0.02, crop=crops,
+           s=scale, shadow=dict(a=.5, blur=.04, dx=0, dy=.016), op=[r4(min(1., (j+1)/4)) for j in range(action-f0)])
+    if action < f1:
+        if action_media.get("fps"):
+            key = P.video("dv_action", action_media)
+            # The completed portrait edit fits as a whole inside the page seat.
+            w = min(pw, ph * H / W * action_media["w"] / action_media["h"])
+            h = w * W / H * action_media["h"] / action_media["w"]
+            center = top + ph / 2
+            P.card("action", [action, f1], key, [.5-w/2, center-h/2, .5+w/2, center+h/2],
+                   t0=action_media["at"], z=3, radius=.02)
+        else:
+            photo = P.image("dv_action", action_media["path"], action_media["w"], action_media["h"])
+            visible = min(1., ph * H / (pw * W) * action_media["w"] / action_media["h"])
+            P.card("action", [action, f1], photo, box, z=3, radius=0.02,
+                   crop=[0., 0., 1., visible], s=[r4(1. + .04*u) for u in MF.ease_io(f1-action)])
     w_url = R.width(L.k("dv_w"), url) / W
     L.text("url", [f0 + 4, f1], url, L.k("dv_w"), 0.5 - w_url / 2, base, "#FFFFFF", 1.0, rise=True)
-    L.hit(CTA_RISER, f0 + 1, "riser")             # the film climbs into the website, then it lands
-    L.hit("whoosh_soft_1", f0 + 1, "whoosh")
-    L.hit("click_1", f0 + 5, "click")
+    if action_media is None:
+        L.hit(CTA_RISER, f0 + 1, "riser")
+        L.hit("whoosh_soft_1", f0 + 1, "whoosh")
+        L.hit("click_1", f0 + 5, "click")
+    elif action < f1:
+        L.hit("click_1", action, "click")
     rec = L.lay([f0, f1])
     rec.update(device="cta", frames=[f0, f1], seconds=round((f1 - f0) / FPS, 2), lines=[url], page_box=box, page_rows=r4(rows),
-               url_px=float(R.voices[L.k("dv_w")]["px"]), url_cap_px=round(u_cap * H, 1), lands=[f0, f0 + 4])
+               url_px=float(R.voices[L.k("dv_w")]["px"]), url_cap_px=round(u_cap * H, 1), lands=[f0, f0 + 4] + ([action] if action < f1 else []))
     return rec
 
 

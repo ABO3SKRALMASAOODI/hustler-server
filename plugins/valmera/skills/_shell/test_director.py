@@ -351,3 +351,18 @@ def test_m09_sound_partner_tracks_pictures_from_sheet_to_scene():
                                      sound_partner=dict(before="P7",after="P4",device="slice"))]),sentences,words)
     cue, = DR.sound_cues(result,lambda w:347, picture_keys={"P7":"explorer","P4":"chassis"})
     assert cue["beat"] == 0 and cue["partner"] == dict(before="explorer",after="chassis",device="slice")
+
+
+def test_marketing_uses_the_existing_performance_at_its_addressed_word():
+    import director as dr
+    typed = "Make a vertical short with separate titles for the people and dollars."
+    asks = [dict(id="dr3",dev="brackets",t="units",f=355),
+            dict(id="dr5",dev="typewriter",t=typed,f=[528,622]),
+            dict(id="dr6",dev="split",f=[559,622]),
+            dict(id="dr10",dev="loop",f=961),
+            dict(id="next",dev="name",f=300)]
+    left, represented = dr.recorded_type(asks, [dict(f=[351,380],text="BOTH UNITS")],
+                            [dict(f=[529,659],text=typed)],
+                            [dict(frames=[500,659],device="timeline"),dict(frames=[846,983],device="cta")])
+    assert [a["id"] for a in left] == ["next"]
+    assert [r["text"] for r in represented] == ["BOTH UNITS",typed,"timeline","cta"]

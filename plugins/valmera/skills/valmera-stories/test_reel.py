@@ -1163,10 +1163,7 @@ def test_the_export_on_a_narrated_line_is_a_moving_print_on_the_board_under_the_
             assert it['s'][0] - it['s'][land] >= 0.02 and it['s'][-1] >= it['s'][land]          # lands, then drifts on
             assert abs(it['x'][0] - it['x'][-1]) > 0.02                                         # slides in from a side
         grounds = [it for it in l1['items'] if it.get('proof_board') and it['k'] == 'shot']
-        if R.STYLES[style].get('paper'):
-            assert grounds and all(it['pic'] == 'plate' for it in grounds)                  # the dark board
-        else:
-            assert grounds and all(it['pic'] in keys and it.get('blur') for it in grounds)  # its own picture, blurred
+        assert grounds and all(it['pic'] == 'plate' for it in grounds)
         assert all(p['mode'] == 'proof_print' for p in beats['pictures'] if p['path'] in paths)
         caps = [it for it in l1['items'] if it['k'] == 'word' and it.get('role') == 'cap']
         assert any(any(c['f'][0] < it['f'][1] and c['f'][1] > it['f'][0] for c in caps) for it in prints)

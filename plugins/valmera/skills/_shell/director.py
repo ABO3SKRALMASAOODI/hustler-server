@@ -731,7 +731,7 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
     cs = contact_sheet(list(pictures), os.path.join(supply, "director_sheet.jpg")) if pictures else None
     # the cache is keyed on what the model reads (the numbered words, the pictures and their contact sheet, the take):
     # a short whose lines were scored again never reads an answer that addresses words it no longer has
-    brief = style if "placed_evidence" in (style or {}) else None
+    brief = style if "placed_evidence" in (style or {}) or "recorded_beats" in (style or {}) else None
     system = SYSTEM
     if brief is not None:
         system += (' For each sound give "sound_partner" as an object containing only the applicable fields: '
@@ -1192,6 +1192,37 @@ def section_frames(sec, frame_of, seg_span=None, dur_f=None):
     if seg_span and sec.get("segs"):
         return seg_span(min(sec["segs"]))[0], seg_span(max(sec["segs"]))[1]
     return None, None
+
+
+def recorded_type(asks, headlines, recording, devices=()):
+    """Resolve an addressed type performance to the authored ink already showing its words."""
+    pal = _palette()
+    pending, performed = [], []
+    for ask in asks:
+        f = ask.get("f")
+        start, end = (f if isinstance(f, list) else [f, f + 2]) if f is not None else [0, 0]
+        words = ask.get("t") or ask.get("text")
+        match = next((row for row in (*recording, *headlines)
+                      if pal and ask["dev"] in pal.SETS_WORDS and words and row.get("text")
+                      and row["f"][0] < end and start < row["f"][1]
+                      and pal.same_text(words, row["text"])), None)
+        if not match:
+            # The timeline already compares the two states. A closing camera move belongs to the
+            # moving site/result shot. Other asks still go through the normal palette placement.
+            for row in devices:
+                lo, hi = row["frames"]
+                if not (lo <= start and end <= hi):
+                    continue
+                timeline = row.get("device") == "timeline" and ask["dev"] == "split"
+                closing = row.get("device") == "cta" and ask["dev"] == "loop"
+                if timeline or closing:
+                    match = dict(text=row["device"], f=row["frames"])
+                    break
+        if match:
+            performed.append(dict(id=ask["id"], dev=ask["dev"], text=match["text"], frames=match["f"]))
+        else:
+            pending.append(ask)
+    return pending, performed
 
 
 def around(asks, spans, dur_f=None):

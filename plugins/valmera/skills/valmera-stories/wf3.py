@@ -1828,6 +1828,18 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
     pics, ids = DR.film_pictures(l1, beats.get("pictures"), os.path.join(ctx.supply, "director_stills"), pack.get("ffmpeg") or "ffmpeg", F.FPS)
     st = script.get("style") or {}
     palette = dict(id=st.get("id"), name=st.get("name"))
+    if ctx.workflow == "wf2" and around:
+        for beat in beats.get("recorded_devices") or []:
+            if beat.get("device") == "cta" and beat.get("lines"):
+                # The visible address already performs the spoken closing line on this clock.
+                lo, hi = beat["frames"]
+                spoken = " ".join(w["w"] for w in rows if lo <= round(w["t0"] * F.FPS) < hi)
+                beats.setdefault("recorded_ink", []).append(dict(f=[lo, hi], text=spoken, printed=beat["lines"]))
+        palette.update(placed_type=beats.get("display") or [], recorded_ink=beats.get("recorded_ink") or [],
+                       recorded_beats=[dict(device=r.get("device"), frames=r["frames"])
+                                       for r in beats.get("recorded_devices") or [] if r.get("frames")],
+                       direction="Compose around the recorded edit on its own clock. Its prompt, version change, "
+                                 "result titles and closing action already perform these beats. Bind accents to their visible events.")
     if ctx.workflow == "wf3":
         palette["placed_evidence"] = [dict(frames=p["f"], picture=p.get("shows"), source=p.get("source"))
                                       for p in beats.get("pictures") or [] if p.get("tier") in ("identity", "detail", "exhibit")]
@@ -1846,10 +1858,10 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
 
     def seg_span(i):
         return (F.Clock.f(clock.segs[i][0]), min(F.Clock.f(clock.segs[i][1]) + 6, l1["dur_f"])) if 0 <= i < nseg else (None, None)
-    if ctx.workflow == "wf3":
+    if ctx.workflow in ("wf2", "wf3"):
         l1["picture_bound_sound"] = True
         l1["figure_cues"] = list(l1.get("story_cues") or [])
-    cues = DR.sound_cues(d, word_frame, ids if ctx.workflow == "wf3" else None, use_asked_device=ctx.workflow == "wf3")
+    cues = DR.sound_cues(d, word_frame, ids, use_asked_device=True)
     if ctx.workflow != "wf3" or cues or d.get("by") != "signal":
         l1["story_cues"] = cues
     # The recorded devices own their sound as well as their frames. hear_devices
@@ -1859,13 +1871,16 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
     l1["sound"] = sorted(device_sounds + [s for s in sounds if not any(
         abs(s["event_f"] - own["event_f"]) <= 2 for own in device_sounds)], key=lambda s: s["event_f"])
     asks, notes = DR.palette_asks(d, word_frame, seg_span, ids.get, l1["dur_f"])
+    performed = []
+    if ctx.workflow == "wf2":
+        asks, performed = DR.recorded_type(asks, beats.get("display") or [], beats.get("recorded_ink") or [], beats.get("recorded_devices") or [])
     asks = DR.around(asks, around, l1["dur_f"])         # a reel's own hero device keeps its frames: the Director's land beside it
     if asks:
         l1["devices"] = list(l1.get("devices") or []) + asks
         ev = DR.device_events(asks)                      # landings the music and sound workflow may answer (no device sounds)
         beats["device_events"] = ev
         beats["events"] = sorted(set(beats.get("events") or []) | {e["f"] for e in ev})
-    return dict(by=d.get("by"), asked=[a["dev"] for a in asks], notes=notes, sections=d.get("sections"), why=d.get("why"))
+    return dict(by=d.get("by"), performed=performed, asked=[a["dev"] for a in asks], notes=notes, sections=d.get("sections"), why=d.get("why"))
 
 
 def with_director(ctx, script, sc):
@@ -1879,11 +1894,16 @@ def with_director(ctx, script, sc):
         l1 = json.load(open(sc["l1"]))
         if l1.get("devices"):
             return sc["l1"]
-        if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(sc["l1"]):
+        if os.path.exists(out) and os.path.getmtime(out) >= max(os.path.getmtime(sc["l1"]), os.path.getmtime(__file__),
+                                                                 os.path.getmtime(_director().__file__)):
             return out
         beats = sc.get("beats") or json.load(open(os.path.join(ctx.supply, "beats.json")))
         pack = load_pack(ctx)
         hero = [list(x["frames"]) for x in ((sc.get("devices") or {}).get("laid") or []) if x.get("frames")]
+        beats = dict(beats, recorded_devices=(sc.get("devices") or {}).get("laid"), recorded_ink=[
+            dict(f=item["frames"], text=text)
+            for item in (sc.get("devices") or {}).get("laid") or [] if item.get("frames")
+            for text in ([item.get("title")] + [row.get("t") for row in item.get("texts", [])]) if text])
         rec = director_devices(ctx, script, script["script"], pack, l1, beats, around=hero)
         rec["heard"] = chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))     # the sound hears them
         json.dump(l1, open(out, "w"), ensure_ascii=False)
@@ -2692,6 +2712,21 @@ def topup_from_score(ctx, script_rec, pack, lines, windows=None, remaining=None)
     return dict(lines=lines, clips=added, reused_frames=reused_frames)
 
 
+def rendered_sounds(scene, fps):
+    """Report exactly the layers sent to the two mixers, grouped at their picture frame."""
+    report = dict(scene.get("sound_design") or {})
+    planned = {round(p["t"] * fps): p for p in report.get("placed", [])}
+    placed = {}
+    for sound in scene.get("sound") or []:
+        f = sound["event_f"]
+        row = placed.setdefault(f, dict(planned.get(f, {}), t=round(f / fps, 3), layers=[], rendered=[]))
+        row.setdefault("kind", sound.get("device") or sound.get("for") or "picture")
+        row["layers"].append([sound.get("s"), sound.get("db", 0), 1])
+        row["rendered"].append({key: sound[key] for key in ("id", "file", "start_s", "trim_s", "dur_s", "peak_s", "device")
+                                if key in sound})
+    return dict(report, placed=[placed[f] for f in sorted(placed)], sounds=len(scene.get("sound") or []))
+
+
 def render(ctx, script, sc):
     out = os.path.join(ctx.supply, "film_engine.mp4")
     cache = os.path.join(ctx.tmp, "scene-cache")
@@ -2700,10 +2735,26 @@ def render(ctx, script, sc):
     l1 = json.load(open(composed or drawn))
     pack = load_pack(ctx)
     sound = os.path.join(ctx.supply, "sound.m4a")
-    mix = F.audio_master(pack["ffmpeg"], l1, pack["narration"], sound, ctx.tmp) if not os.path.exists(sound) else {}
+    marketing = getattr(ctx, "workflow", None) == "wf2" and (sc.get("devices") or {}).get("format") != "showcase"
+    scene = drawn
+    if marketing or not os.path.exists(out):
+        scene = composed or chain.lay_devices(ctx, drawn)
+    dirty = not os.path.exists(out)
+    if marketing:
+        with open(scene) as stream:
+            l1 = json.load(stream)
+        mix_scene = os.path.join(ctx.supply, "l1_render_audio.json")
+        from shell import jload, jsave
+        audio = F.audio_scene(l1, pack)
+        audio["sound_design"] = rendered_sounds(audio, l1["fps"])
+        jsave(mix_scene, audio)
+        revision = dict(scene=chain.file_sha(mix_scene), voice=chain.file_sha(pack["narration"]))
+        marker = out + ".revision.json"
+        dirty = dirty or jload(marker) != revision
+    mix = F.audio_master(pack["ffmpeg"], l1, pack["narration"], sound, ctx.tmp) if (
+        not os.path.exists(sound) or marketing and dirty) else {}
     settle = os.environ.get("SHELL_RENDER_CMD")       # a renderer in place of the Mac engine: the box image's, where a film is settled
-    if not os.path.exists(out):
-        scene = composed or chain.lay_devices(ctx, drawn)  # the scene to draw: every device it asks for laid out first
+    if dirty:
         if settle:
             log = chain.sh(ctx, ["zsh", settle, scene, ctx.supply, sound, out + ".part.mp4"], label=f"wf3-render-{ctx.run_id}", heavy=os.environ.get("SHELL_RENDER_REMOTE") != "1", timeout=7200)
             j = {}
@@ -2730,8 +2781,10 @@ def render(ctx, script, sc):
         os.replace(out + ".part.mp4", out)
         chain.measure_devices(ctx, out, scene)          # what the film did, by signal, beside the bar (a record only)
         json.dump(dict(j, mix=mix), open(out + ".log.json", "w"))
+        if marketing:
+            jsave(marker, revision)
     j = json.load(open(out + ".log.json")) if os.path.exists(out + ".log.json") else {}
-    return dict(engine="scene", film=out, engine_check=dict(frames=j.get("frames"), seconds=j.get("seconds"), audio=j.get("mix"),
+    return dict(engine="scene", film=out, **(dict(composed_l1=scene, l1_audio=mix_scene) if marketing else {}), engine_check=dict(frames=j.get("frames"), seconds=j.get("seconds"), audio=j.get("mix"),
                                                               degraded=j.get("degraded"), warnings=j.get("warnings"), settled_on=j.get("settled_on")))
 
 
@@ -2902,6 +2955,8 @@ def check(ctx, rd, sc):
 
 
 def check_once(ctx, rd, sc):
+    if ctx.workflow == "wf2" and rd.get("l1_audio"):
+        sc = dict(sc, l1=rd["l1_audio"], l1_audio=rd["l1_audio"])
     r = chain.finish_and_check(ctx, rd, sc)
     c = r["checks"]
     rows = mark_samples(rd["film"], r["final"])

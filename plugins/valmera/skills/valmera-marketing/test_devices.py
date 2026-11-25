@@ -106,7 +106,7 @@ def test_timeline_pulls_back_types_as_said_lands_the_edit_and_pushes_into_the_ex
     assert push["f"][1] == f_end and abs(push["s"][-1] * (rec["export_in_viewer"][2] - rec["export_in_viewer"][0]) - 1.0) < 0.01
     assert items["tl.view.ex"]["f"][0] == 96 and abs(items["tl.view.ex"]["src"][0] - 6.8) < 1e-3   # the export with its own voice
     chars = [it for it in l1["items"] if it["id"].startswith("tl.say.")]
-    assert "".join(it["t"] for it in sorted(chars, key=lambda it: (it["f"][0], it["id"]))) == TYPED.replace(" ", "")
+    assert [it["t"] for it in sorted(chars, key=lambda it: (it["f"][0], it["id"]))] == TYPED.split()
     assert min(it["f"][0] for it in chars) >= round(words_of_line()[2]["t0"] * FPS)
     assert [r["text"] for r in rec["receipt"]] == ["−0.3 s cut", "+3 pictures", "+ captions"] and all("f" in r for r in rec["receipt"])
     assert len(rec["pictures_landed"]) == 3 and rec["removed_s"] > 0.2
@@ -127,7 +127,7 @@ def test_timeline_pulls_back_types_as_said_lands_the_edit_and_pushes_into_the_ex
     assert {s["s"] for s in snd} == {"typing_2", "click_1", "whoosh_soft_1", "tick_1"}
     lands = {p["f"] + 1 for p in rec["pictures_landed"]}
     for s in snd:
-        assert s["event_f"] in {rec["typed"][0] + 1, rec["send_f"], rec["send_f"] + 8} | lands
+        assert s["event_f"] in {rec["typed"][0], rec["send_f"], rec["send_f"] + 8} | lands
 
 
 def test_timeline_keeps_the_prompt_and_the_tracks_apart(monkeypatch):
@@ -383,3 +383,47 @@ def test_the_scale_film_opens_on_every_short_counted_then_the_studio_board_then_
         assert sum(1 for it in l1["items"] if it["k"] == "shot" and it["f"][0] <= f < it["f"][1]) == 1, f
     texts = [t for d in beats["devices"] for t in d["texts"]]
     assert min(t["px"] for t in texts) >= 44 and max(t["px"] for t in texts if t["t"] == "valmera.io") >= 140
+
+
+def test_recorded_tutorial_completes_the_upload_on_the_site_beat():
+    l1 = reel(f_end=983)
+    uploaded = dict(path="/record/type_00_00.png", w=780, h=1688)
+    rec = D.site(l1, f0=846, f1=983, page=UI["site"], export=EXPORT, lib=LIB, action_media=uploaded)
+    page, action = [next(it for it in l1["items"] if it["id"] == k) for k in ("ct.page", "ct.action")]
+    assert page["f"][1] == action["f"][0] == rec["lands"][-1]
+    assert page["crop"][15] != page["crop"][-15]
+    assert action["s"][15] != action["s"][-15] and action["f"][1] == 983
+    assert [(s["s"],s["f"]) for s in rec["sounds"]] == [("click_1", action["f"][0])]
+
+
+def test_recorded_composer_pins_growing_field_at_its_first_baseline(tmp_path):
+    from PIL import Image
+    field = dict(text="separate titles", words=[])
+    ui = dict(field=field, typing=["empty"], dir=str(tmp_path), w=300)
+    for i, top in enumerate((.84, .76)):
+        name = f"type_{i}.png"
+        im = Image.new("RGB", (300, 500), "#111111")
+        im.putpixel((40, round(top*500)+4), (255,255,255))
+        im.save(tmp_path/name)
+        ui["typing"].append(name)
+        field["words"].append(dict(box=[.1,top,.9,.94], scroll=0, font=.04))
+    captured = D.recorded_field(ui, "separate titles", str(tmp_path), .76)
+    assert captured["height"] == 90
+    for path in captured["pictures"]:
+        with Image.open(path) as pic:
+            assert pic.size == (240,90) and pic.getpixel((10,4)) == (255,255,255)
+
+
+def test_checked_keyboard_and_rendered_sound_follow_the_final_picture_clock():
+    keyboard = "/checked/195963594.jpg"
+    l1 = dict(assets={"photo": {"path": keyboard}},
+              items=[{"id": "you", "k": "word", "f": [241, 248], "role": "cap"}],
+              sound_design={"placed": [dict(t=t, kind="card") for t in (3.30, 5.37, 23.93, 31.63)]},
+              sound=[dict(id="ct.snd0", s="click_2", file="click_2.flac", device="ct",
+                          event_f=914, start_s=30.318, db=-18)])
+    P.keep_checked_layout(l1, {"pictures": [dict(f=[241, 258], path=keyboard)]}, [{"fit": "yes"}])
+    assert l1["documentary_cuts"][0]["f"] == [241, 258]
+    assert l1["items"][0]["contrast_shadow"] and l1["items"][0]["stroke"]["w"] > 0
+    report = P.W3.rendered_sounds(l1, 30)
+    assert [(row["t"], row["kind"]) for row in report["placed"]] == [(30.467, "ct")]
+    assert report["placed"][0]["rendered"][0]["file"] == "click_2.flac"
