@@ -6628,9 +6628,28 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # and keep the original dialogue playing underneath.
             rect = picture_pixels(W or 1280, H or 720,
                 (edl.get("frame") or {}).get("picture") if picture_cover else None)
-            chain.append(f"scale={rect[2]}:{rect[3]}:"
-                         f"force_original_aspect_ratio=increase,"
-                         f"crop={rect[2]}:{rect[3]}")
+            box = item.get("still_box") if item["kind"] == "image" else None
+            if box:
+                # Preserve the source aspect and the authored screen-space focal point even
+                # when the context needed around it runs beyond the edges of the original.
+                l, t, r, b = box
+                x0, x1 = (2 * round(v * rect[2] / 2) for v in (l, r))
+                y0, y1 = (2 * round(v * rect[3] / 2) for v in (t, b))
+                if (x0, y0, x1, y1) == (0, 0, rect[2], rect[3]):
+                    chain.append(f"scale={rect[2]}:{rect[3]},setsar=1")
+                else:
+                    # An out-of-photo margin continues the photograph softly behind the
+                    # complete subject, without stretching the hardware or source lettering.
+                    chain.append(f"split=2[stillfg{j}][stillbg{j}];[stillbg{j}]"
+                                 f"scale={rect[2]}:{rect[3]}:force_original_aspect_ratio=increase,"
+                                 f"crop={rect[2]}:{rect[3]},setsar=1,gblur=sigma={rect[2]*.05:.2f},"
+                                 f"eq=brightness=-.16:saturation=.65[stillmat{j}];"
+                                 f"[stillfg{j}]scale={max(2,x1-x0)}:{max(2,y1-y0)},setsar=1[stillphoto{j}];"
+                                 f"[stillmat{j}][stillphoto{j}]overlay={x0}:{y0}")
+            else:
+                chain.append(f"scale={rect[2]}:{rect[3]}:"
+                             f"force_original_aspect_ratio=increase,"
+                             f"crop={rect[2]}:{rect[3]}")
         else:
             if scale_animated:
                 scale_expr = _anim_expr(scale_value, "t")
@@ -7489,6 +7508,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     overlay_inputs = []
     for item in edl.get("overlays") or []:
         local = _fetch(item["asset_key"], "overlay", next_idx)
+        if item["kind"] == "image" and item.get("fit") == "cover":
+            insert_locals[item["asset_key"]] = local
         input_args, graph_item = _overlay_input(item, local, fps,
                                                 copy_timestamps=False)
         extra_inputs += input_args
@@ -8593,6 +8614,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             overlay_items = overlay_items[count:]
     for item in overlay_items:
         local = _fetch(item["asset_key"], "overlay", next_idx)
+        if item["kind"] == "image" and item.get("fit") == "cover":
+            insert_locals[item["asset_key"]] = local
         input_args, graph_item = _overlay_input(
             item, local, fps, copy_timestamps=seek_main_source)
         extra_inputs += input_args

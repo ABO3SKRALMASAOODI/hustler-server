@@ -130,7 +130,7 @@ def _out_words(edl, index, tl, carry=None):
     ends its shot."""
     if carry is None:
         carry = caplib.caption_plan(edl, index, tl)
-    return caplib._mark_shot_ends(carry.caption_words(), tl)
+    return caplib._mark_shot_ends(carry.caption_words(), tl, edl)
 
 
 def _runs_by_room(words, chars, canvas, edl, index):

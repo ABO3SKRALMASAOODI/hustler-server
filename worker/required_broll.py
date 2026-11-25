@@ -183,12 +183,25 @@ def supply(ctx, ledger):
     if not ledger.get('required_pictures'):
         return ''
     notes = []
-    frame_edl = dict(ctx.latest_edl()['json'])
+    row = ctx.latest_edl()
+    current = row['json']
+    frame_edl = dict(current)
     if ledger.get('picture_frame_ratio'):
         frame_edl.pop('canvas', None)
         frame_edl['frame'] = dict(frame_edl.get('frame') or {}, ratio=ledger['picture_frame_ratio'])
     frame_size = asks.output_size(frame_edl, getattr(ctx, 'index', None) or {})
+    import picture_hold
+    try:
+        reused = picture_hold.reuse(ctx, row, ledger['required_pictures'], frame_size)
+    except Exception as exc:
+        print(f"[pictures] existing shot unavailable: {type(exc).__name__}", flush=True)
+        reused = {}
     for p in ledger.get('required_pictures') or []:
+        if p['id'] in reused:
+            p['existing_shots'] = reused[p['id']]
+            notes.append(f"{p['id']}: retained {p['subject']} on {p['existing_shots']}. Inspect that window in the preview.")
+            if set(picture_hold.cue_windows(current, ctx.index, p)) <= {w for _, w in reused[p['id']]}:
+                continue
         subject = {'name': p['subject'], 'must_show': p['must_show'],
                    'searches': [p['query']]}
         try:
@@ -244,6 +257,9 @@ def supply(ctx, ledger):
         ending = ledger['picture_story_end']
         notes.append(f"STORY END: end after source word {ending['word']} (word id {ending['word_id']}). "
                      f"{ending['reason']} Keep that complete word, with a natural release; do not continue into the next topic.")
+    if all(p.get("existing_shots") and not p.get("candidates") and p.get("supply") in (None, "not searched")
+           for p in ledger['required_pictures']):
+        return "\n" + "\n".join(notes)
     return ('\nREQUIRED PICTURES (each remains an individual ask):\n' + '\n'.join(notes) +
             '\nDownload a checked candidate with add_stock_media, inspect its actual frames, then '
             "place it with add_overlay(fit='cover') at the named words on the CURRENT program clock. "

@@ -318,7 +318,7 @@ def detail_grid(canvas, cols, rows):
 
 def canvas_grid(img, src_size, W, H, *, mode=None, focus=None, crop=None,
                 picture=None, rotation=0, zoom=(1.0, 0.5, 0.5), cols=COLS,
-                card=None, detail=False):
+                card=None, detail=False, cover=False, still_box=None):
     """The program picture's luma grid (row-major ints 0-255, cols x rows)
     for one decoded source frame placed on the W x H canvas the way the
     render places it. ``card`` (a source-fed picture card's spec with its
@@ -352,6 +352,9 @@ def canvas_grid(img, src_size, W, H, *, mode=None, focus=None, crop=None,
     def out(canvas):
         means = list(canvas.resize((cols, rows), Image.BOX).tobytes())
         return (means, detail_grid(canvas, cols, rows)) if detail else means
+    if cover:
+        from picture_hold import still_plate
+        return out(still_plate(img, (CW, CH), still_box))
     if card:
         return out(_card_canvas(img, card, CW, CH))
     px, py, pw, ph = renderer.picture_pixels(CW, CH, picture)
@@ -532,10 +535,20 @@ class Probe:
         """(path, media_t, is_still, geometry dict) of program second t, or
         None when it cannot be measured."""
         import renderer
+        src_t = self.tl.out_to_src(t) if self.tl is not None else None
+        for overlay in reversed(self.edl.get("overlays") or []):
+            if not overlay["start"] <= t < overlay["start"] + overlay["duration_s"]:
+                continue
+            path = self.insert_locals.get(overlay["asset_key"])
+            if (path and overlay.get("fit") == "cover" and overlay.get("kind") == "image"
+                    and overlay.get("opacity") in (None, 1) and not any(overlay.get(k) for k in
+                    ("screen", "entrance", "exit", "rotation")) and not _card_at(self.edl, t, src_t)):
+                return path, 0., True, dict(cover=True, crop=overlay.get("source_crop"),
+                                            still_box=overlay.get("still_box")), None, None
+            break
         zoom = renderer.zoom_state_at(self.zooms, t, self.out_duration,
                                       size=(self.W, self.H))
         zoom = tuple(round(float(v), 4) for v in zoom)
-        src_t = self.tl.out_to_src(t) if self.tl is not None else None
         if src_t is not None and self.src:
             focus, mode = self._focus_at(src_t)
             geom = {"mode": mode, "focus": list(focus) if focus else None,
@@ -625,7 +638,8 @@ class Probe:
                                        picture=geom.get("picture"),
                                        rotation=geom.get("rotation") or 0,
                                        zoom=geom.get("zoom") or (1.0, 0.5, 0.5),
-                                       cols=self.cols, card=geom.get("card"), detail=True)
+                                       cols=self.cols, card=geom.get("card"), detail=True,
+                                       cover=geom.get("cover"), still_box=geom.get("still_box"))
                 except Exception:  # noqa: BLE001
                     continue
                 out[i] = g

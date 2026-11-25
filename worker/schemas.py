@@ -2088,6 +2088,9 @@ class OverlayItem(BaseModel):
     # Preserve a region of uploaded footage above a cutaway (for example
     # burned-in subtitles or a logo), without transcribing/recreating pixels.
     source_crop: Optional[List[float]] = None
+    # The cropped still occupies this normalized output box, with a matte outside it.
+    still_box: Optional[List[float]] = None
+    caption_anchor_y: Optional[float] = Field(default=None, ge=.05, le=.95)
     z_index: Optional[int] = Field(default=None, ge=-1000, le=1000)
     entrance: Optional[Literal["fade", "slide_left", "slide_right",
                                "slide_up"]] = None
@@ -2105,7 +2108,7 @@ class OverlayItem(BaseModel):
     screen: Optional[ScreenLock] = None
     motion_motif: Optional[MotionMotif] = None
 
-    @field_validator("source_crop")
+    @field_validator("source_crop", "still_box")
     @classmethod
     def _crop_source(cls, value):
         return _source_rectangle(value)

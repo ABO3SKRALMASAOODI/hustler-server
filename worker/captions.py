@@ -990,7 +990,7 @@ def program_cuts(tl):
                   if 1e-3 < c < float(tl.out_duration) - 1e-3)
 
 
-def _mark_shot_ends(out_words, tl):
+def _mark_shot_ends(out_words, tl, edl=None):
     """Stamp each word with ``cut``: the first program cut at or after it
     ends. The line belongs to the shot it was spoken in: grouping breaks a
     card at the cut (_cut_between), and a caption whose words are all spoken
@@ -998,6 +998,10 @@ def _mark_shot_ends(out_words, tl):
     or fade surviving a jump cut ghosts over the new framing. Words are
     copied only when a cut exists."""
     cuts = program_cuts(tl)
+    for shot in (edl or {}).get("overlays") or []:
+        if shot.get("caption_anchor_y") is not None and shot.get("kind") == "image" and shot.get("fit") == "cover":
+            cuts.extend([shot["start"], shot["start"] + shot["duration_s"]])
+    cuts.sort()
     if not cuts or not out_words:
         return out_words
     import bisect
@@ -1073,8 +1077,19 @@ def caption_plan(edl, index, tl, mutes=None, canvas=None):
     import caption_carry
     if mutes is None:
         mutes = effective_caption_mutes(edl)
-    return caption_carry.plan(edl, index, tl, transcript_words(edl, index, tl, mutes),
-                              canvas=canvas)
+    plan = caption_carry.plan(edl, index, tl, transcript_words(edl, index, tl, mutes), canvas=canvas)
+    shots = [s for s in edl.get("overlays") or [] if s.get("caption_anchor_y") is not None
+             and s.get("kind") == "image" and s.get("fit") == "cover"]
+    for shot in shots:
+        start = float(shot["start"])
+        end = start + float(shot["duration_s"])
+        y = shot["caption_anchor_y"]
+        position = "top" if y < .5 else "bottom"
+        place = dict(y=y, position=position, b=position[0], h=1, z=[y-.055, y+.055])
+        for i, word in enumerate(plan.words):
+            if start <= (word["t0"] + word["t1"])/2 < end and i not in plan.hidden:
+                plan.placed.setdefault(i, place)
+    return plan
 
 
 def caption_words(edl, index, tl):
@@ -3372,7 +3387,7 @@ def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
         if captions.get("design_version") == CAPTION_DESIGN_VERSION:
             # v2 lines clear on the cut after their last word (historical
             # tracks keep their holds, and their bytes).
-            out_words = _mark_shot_ends(out_words, tl)
+            out_words = _mark_shot_ends(out_words, tl, edl)
         global_style = captions.get("style")
         if captions.get("placement_track") or carry.placed:
             events = _positioned_events(
