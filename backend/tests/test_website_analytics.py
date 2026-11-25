@@ -18,6 +18,18 @@ def test_sensitive_urls_and_values_are_not_stored():
     assert len(cleaned['events'])==1 and cleaned['events'][0][-1]==502
     assert 'private' not in str(cleaned) and 'secret@example' not in str(cleaned)
 
+def test_enterprise_contact_signals_store_only_event_fields():
+    kinds = ['enterprise_email_open', 'enterprise_draft_copy']
+    payload = data(events=[{'id': str(uuid.uuid4()), 'kind': kind, 'active_seconds': 5,
+                            'body': 'private draft', 'recipient': 'private@example.com'} for kind in kinds])
+    payload['page'] = '/subscribe?inquiry=private-input'
+    cleaned = wa.clean_payload(payload)
+    assert cleaned['page'] == '/subscribe'
+    assert [event[2] for event in cleaned['events']] == kinds
+    assert all(event[3:] == (5, None) for event in cleaned['events'])
+    assert 'private' not in str(cleaned)
+
+
 @pytest.mark.parametrize('value',[None,[],{'visit_id':'not-a-uuid'}, {'device_id':'token@secret.com','session_id':'session123'}])
 def test_malformed_identity_is_rejected(value):
     with pytest.raises(ValueError): wa.clean_payload(value)
