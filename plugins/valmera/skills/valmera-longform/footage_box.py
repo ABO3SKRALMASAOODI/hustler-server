@@ -152,7 +152,8 @@ def search_with_known(queries,*args,**kwargs):
         urls={h['url'] for h in found.get(k,[])}
         for h in j.get('known_sources',[]):
             if h['url'] not in urls:
-                found.setdefault(k,[]).append(dict(h,id=hashlib.sha256(h['url'].encode()).hexdigest(),where=h.get('where') or 'youtube',duration=None))
+                urls.add(h['url'])
+                found.setdefault(k,[]).append(dict(h,id=h.get('id') or hashlib.sha256(h['url'].encode()).hexdigest(),where=h.get('where') or 'youtube',duration=h.get('duration')))
     return found
 search.run=search_with_known
 if j.get('_voices'):
@@ -199,7 +200,7 @@ if j.get('_voices'):
         urls={h['url'] for h in hits.get(si,[])}
         for h in j.get('known_sources',[]):
             if h['url'] not in urls:
-                hits.setdefault(si,[]).append(dict(h,id=hashlib.sha256(h['url'].encode()).hexdigest(),where=h.get('where') or 'youtube',duration=None))
+                hits.setdefault(si,[]).append(dict(h,id=h.get('id') or hashlib.sha256(h['url'].encode()).hexdigest(),where=h.get('where') or 'youtube',duration=h.get('duration')))
     print('witness sources found:',sum(len(v) for v in hits.values()),flush=True)
     ranked,usd=plan.rank(subjects,hits,per=3);sources=[];by={}
     for si,h,why in ranked:

@@ -16,7 +16,7 @@ def enrich(ctx, clips):
     groups={}
     for c in clips:
         url=c['source']['url'].split('#')[0]
-        if c.get('document') and url.endswith('.pdf'):
+        if c.get('document') and not c.get('primary_passage') and url.endswith('.pdf'):
             groups.setdefault(url,[]).append(c)
     root=Path(ctx.supply)/'document-context';root.mkdir(exist_ok=True)
     for url,rows in groups.items():

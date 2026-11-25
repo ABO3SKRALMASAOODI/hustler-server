@@ -46,6 +46,31 @@ def probe(idea):
     return footage_box.probe(idea)
 
 
+def story_score(idea):
+    return float(idea.get("strength") or 0) + min((idea.get("supply") or {}).get("clips", 0), 40) / 80
+
+
+def supported_idea(ctx, candidates, checkpoint):
+    from idea_exhibits import hydrate
+    from openai_budget import OverBudget
+    research_error = None
+    for idea in sorted(candidates, key=story_score, reverse=True):
+        try:
+            changed = hydrate(ctx, idea)
+        except OverBudget:
+            raise
+        except (OSError, ValueError, RuntimeError) as exc:
+            ctx.log(f"originals for {idea.get('title')}: {exc}")
+            research_error = exc
+        else:
+            if changed:
+                checkpoint()
+        if idea["supply"]["ok"]:
+            return idea
+    if research_error:
+        raise research_error
+
+
 def ideas(ctx):
     from shell import jload, jsave
 
@@ -72,7 +97,8 @@ def ideas(ctx):
         ctx.log(f"probe {i.get('title')}: {i['supply']['covered']}/{len(i['supply']['subjects'])} subjects, {i['supply']['clips']} ranked footage sources")
     # Among the ideas with enough real footage, the story decides; footage only breaks a near tie (16 Nov: up to 4 points
     # of footage on a 10-point story scale let an archive-rich procedure beat a stronger story).
-    got.sort(key=lambda i: (not (i.get("supply") or {}).get("ok"), -(float(i.get("strength") or 0) + min((i.get("supply") or {}).get("clips", 0), 40) / 80)))
+    supported_idea(ctx, got[:3], lambda: jsave(checkpoint, research))
+    got.sort(key=lambda i: (not (i.get("supply") or {}).get("ok"), -story_score(i)))
     srcs = sorted({u for i in got for u in i.get("sources") or []})
     return dict(source=dict(kind="web research by the writer model", origin="web_search", sources=srcs[:60], searches=use.get("web_searches")),
                 ideas=got, chosen=None, spend=[dict(stage="ideas", **use)]+[dict(stage='ideas',provider='openai',what='footage discovery',usd=i['supply'].get('usd',0)) for i in got if i.get('supply')])
@@ -80,7 +106,12 @@ def ideas(ctx):
 
 def script(ctx, ideas_out):
     able = {s["id"]: s for s in able_cards(ctx)}
-    pick = next((i for i in ideas_out["ideas"] if i.get("style") in able and (i.get("supply") or {}).get("ok")), None)
+    import idea_exhibits
+    from shell import jsave
+    # Older runs resume directly from ideas.json, after the shell's no-repeat selection.
+    # Try the strongest retained story first, reusing its ranked motion search.
+    candidates = [i for i in ideas_out["ideas"] if i.get("style") in able and i.get("supply")]
+    pick = supported_idea(ctx, candidates, lambda: jsave(os.path.join(ctx.run_dir, "ideas.json"), ideas_out))
     if not pick:
         raise RuntimeError("no idea with enough real footage evidence: " + json.dumps([(i.get("title"), (i.get("supply") or {}).get("covered")) for i in ideas_out["ideas"]])[:600])
     card = able[pick["style"]]
@@ -93,7 +124,9 @@ def script(ctx, ideas_out):
         raw, use = story.dossier(pick)
         spend.append(dict(stage="script", what="dossier", **{k: v for k, v in use.items() if k != "what"}))
         dos, drep = story.check_dossier(raw)
-        json.dump(dict(dossier=dos, verify=drep, raw_facts=len(raw.get("facts") or [])), open(dp, "w"), ensure_ascii=False, indent=1)
+        dj = dict(dossier=dos, verify=drep, raw_facts=len(raw.get("facts") or []))
+    if idea_exhibits.add_facts(dos, drep, pick["supply"].get("exhibits", [])) or not os.path.exists(dp):
+        jsave(dp, dj)
     ctx.log(f"dossier: {drep['verified']}/{drep['total']} facts verified on their pages")
     if drep["verified"] < 25:
         raise RuntimeError(f"only {drep['verified']} facts verified; a long film needs at least 25")

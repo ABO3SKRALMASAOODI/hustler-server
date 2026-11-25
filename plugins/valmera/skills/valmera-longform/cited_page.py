@@ -8,20 +8,22 @@ from contextlib import closing
 from PIL import Image
 
 
-def capture(fact, path):
+def capture(fact, path, *, original_pdf=None):
     import net_fetch
 
     url, quote = fact["url"], fact["quote"].strip()
-    net_fetch.check_url(url)
+    if not original_pdf:
+        net_fetch.check_url(url)
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     parts = urlsplit(url)
-    if parts.path.lower().endswith(".pdf") or parts.path.startswith("/pdf/"):
+    if original_pdf or parts.path.lower().endswith(".pdf") or parts.path.startswith("/pdf/"):
         import pypdfium2 as pdfium
 
         with tempfile.TemporaryDirectory(dir=out.parent) as tmp:
-            pdf = str(Path(tmp) / "original.pdf")
-            net_fetch.download(url, pdf, max_bytes=50_000_000, timeout_s=45)
+            pdf = original_pdf or str(Path(tmp) / "original.pdf")
+            if not original_pdf:
+                net_fetch.download(url, pdf, max_bytes=50_000_000, timeout_s=45)
             with pdfium.PdfDocument(pdf) as doc:
                 page_no = parse_qs(parts.fragment).get("page")
                 pages = [int(page_no[0]) - 1] if page_no else range(len(doc))

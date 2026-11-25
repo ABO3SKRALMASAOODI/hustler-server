@@ -119,7 +119,7 @@ def dossier(idea, effort="high"):
               "true story from: facts with their exact sources, what the camera can show, where things happened. You read "
               "every page you cite with your web tools. Nothing is invented, rounded or dramatised beyond the sources.")
     content = (f"# The story\n{json.dumps(idea, ensure_ascii=False)}\n\n"
-               "Research it now. Every quote is checked later by fetching its URL with a plain script and finding the quote "
+               "Build on any verified exhibits and ranked video sources supplied with the idea. Research the remaining facts. Every new quote is checked later by fetching its URL with a plain script and finding the quote "
                "on the page word for word, so cite pages a script can read (Wikipedia, NASA, the Library of Congress, "
                "archive.org, Smithsonian, government and university pages) and copy each quote exactly as it stands there, "
                "one or two sentences. Pages behind a paywall or a bot wall (Britannica, most newspapers) cannot be checked.\n\n"
@@ -172,7 +172,7 @@ def write(idea, dos, card, voices=None, notes=None, effort="high", line=None):
     system = ("You are the writer and voice director of Valmera's long-form workflow. By default you write a 10-20 minute narration "
               "spoken by a synthetic narrator over real archive pictures and designed maps, documents and diagrams. Every "
               "statement of fact comes from the dossier's verified facts; you never add a fact, a figure or a date that is not "
-              "in them, and you never round or dramatise beyond them. When citing an X post, paper or direct quotation choose design kind document or quote and its exact fact id. Choose the canonical status URL or actual paper PDF. You direct the actor too: pace, energy, melody, emphasis "
+              "in them, and you never round or dramatise beyond them. For document beats use the retained dated exhibit facts. Reserve archive faces and demos for what the recordings show. When citing an X post, paper or direct quotation choose design kind document or quote and its exact fact id. Choose the canonical status URL or actual paper PDF. You direct the actor too: pace, energy, melody, emphasis "
               "and pauses per segment. Write for the ear: concrete nouns, numbers a listener can hold, the "
               "voice of a storyteller who knows where the story goes and makes the viewer want the next minute.")
     lo, hi = FORM["words"]

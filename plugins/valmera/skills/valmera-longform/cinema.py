@@ -65,12 +65,14 @@ def footage(ctx, script):
     root = Path(ctx.supply)/'footage'
     if (root/'footage.json').exists():return read(root/'footage.json')
     rows, voices, credits, avoided, spends = [], [], [], [], []
+    probe = script.get('idea_full', {}).get('supply', {})
+    motion = [h for subject in probe.get('subjects', []) for h in subject['sources']]
     for ci, ch in enumerate(sc['chapters']):
         lines = [dict(i=i, say=s['say'], pictures=s.get('pictures',[]), dur=len(s['say'].split())/2.5+1)
                  for i,s in enumerate(sc['segments']) if s['chapter']==ch['id']]
         dest = root/f'chapter-{ci+1}'
         payload = dict(lines=lines, named=script['dossier']['named'],
-                       about=sc['title']+': '+ch['title']+'. Landscape documentary; archive moving footage on every line.', avoid=avoided)
+                       about=sc['title']+': '+ch['title']+'. Landscape documentary; archive moving footage on every line.', avoid=avoided, known_sources=motion)
         # The Mac's repeated YouTube wall is established in this week's context.
         # Use the product's same engine on its supported box network.
         ctx.log(f"footage chapter {ci+1}/{len(sc['chapters'])}: {len(lines)} lines")
@@ -90,6 +92,9 @@ def footage(ctx, script):
             avoided.append(dict(url=v['source']['url'],time_range=v['time_range']))
         credits.extend(r.get('credits',[])); spends.append(r.get('spend',{}))
     result = dict(lines=rows, voices=voices, credits=credits, spend=spends)
+    if probe.get('exhibits'):
+        from idea_exhibits import clips
+        result['editorial'] = dict(pins=[], rejected=[], bank=list(clips(ctx, probe['exhibits'])))
     prefill_footage(ctx,script,result)
     save(root/'footage.json',result)
     return result
@@ -586,7 +591,9 @@ def unify_image_copies(ft):
     extra=[dict(clips=editorial.get('bank',[])),dict(clips=[p['clip'] for p in editorial.get('pins',[])])]
     for line in ft['lines']+extra:
         for c in line['clips']:
-            if c.get('kind')!='image':continue
+            # Distinct passages on the same paper layout can have near-identical perceptual hashes.
+            # Their existing pixel digests still identify exact copies.
+            if c.get('kind')!='image' or c.get('primary_passage'):continue
             path=c['path']
             if path not in known:
                 with Image.open(path) as im:
