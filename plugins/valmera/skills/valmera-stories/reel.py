@@ -801,13 +801,14 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
         free.difference_update(same)
         return "clip", q["c"].get("subject"), q["c"], tier, (q["ti"], q["take"])
 
+    def fresh(u):
+        return sp.fresh_room(units[u]["c"], units[u]["take"]) is not None
+
     def pick(line, last, photos_on_line, shots_on_line, burst=False, lead=False):
         """The next picture for this line: (kind, name, rec, tier, take) or None. lead: the line's first shot on the hook,
         the payoff or the close, its best-graded fitting take (moving first among equals)."""
         last_still = bool(out) and out[-1][2] == "clip" and not moving(out[-1][4])
 
-        def fresh(u):              # a take of a recording another file already showed whole is not a new picture
-            return sp.fresh_room(units[u]["c"], units[u]["take"]) is not None
         mine = [u for u in reserved[line] if units[u]["c"]["path"] != last and fresh(u)]
         spare = sorted((u for u in free if line in units[u]["lines"] and units[u]["c"]["path"] != last and fresh(u)), key=lambda u: rank(u, line))
         if lead and (mine or spare):
@@ -1040,11 +1041,15 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
             last = out[-1][4]["path"] if out else None
             lead = shots_on == 0 and s.get("beat") in ("hook", "payoff", "close") and not in_burst
             rf_move = None
-            if not in_burst and not lead and not still_only and not (prefer_new and photos_for(line)) and n_static[0] + 1 > STATIC_SHARE * (n_shots[0] + 1) + 1 and \
+            if not in_burst and not lead and not still_only and n_static[0] + 1 > STATIC_SHARE * (n_shots[0] + 1) + 1 and \
                     not any(units[u]["moving"] for u in reserved[line] + [v for v in free if line in units[v]["lines"]] if units[u]["c"]["path"] != last):
                 # past the film's static budget with no moving take left: a moving take of this line again on a reframe,
                 # before any photograph or still take
-                rf_move = reframe(line, min(n, int(REFRAME_MAX_S * FPS)), moving_only=True)
+                fresh_evidence = prefer_new and (photos_for(line) or any(
+                    units[u]["c"]["path"] != last and units[u]["grades"].get(line, 0) >= 4 and fresh(u)
+                    for u in (*reserved[line], *free)))
+                if not fresh_evidence:
+                    rf_move = reframe(line, min(n, int(REFRAME_MAX_S * FPS)), moving_only=True)
             got = None if rf_move is not None else pick(line, last, photos_on, shots_on, burst=in_burst, lead=lead)
             if got is None and in_burst:
                 burst_left = 0
@@ -1954,7 +1959,7 @@ def build(script, sup, style_id, direction=None):
         talk_fit = {p for p in talk if any(v.get("live_action") is True and v.get("speaking_on_camera") is True for v in _verdict_rows(ver.get(p)))}
         sp = Supply(pics, footage, talk=(), allow=collage, fit=sup.get("fit") or {}, deny=deny, cards=cards, only_ok=d.get("only_ok"),
                     grades=fit_grades(sup.get("fit_verdicts")))
-        timeline = cut_fit(script, clock, sp, f_end, stress, seed=int(d.get("seed", 1114)), device_lines=[i for i, f_ in enumerate(fin) if f_], prefer_new=bool(d.get("prefer_new_pictures")),
+        timeline = cut_fit(script, clock, sp, f_end, stress, seed=int(d.get("seed", 1114)), device_lines=[i for i, f_ in enumerate(fin) if f_], prefer_new=bool(d.get("prefer_new_pictures", d.get("source_evidence"))),
                            proof_fill=d.get("proof_fill") or ())
         cutter = dict(name="cut_fit", why="every picture carries a verdict for its line and take")
         # grey footage counts against the black-and-white budget: the devices get what the pictures leave
@@ -2378,7 +2383,7 @@ def build(script, sup, style_id, direction=None):
             return False
         briefs = script["segments"][seg_at(a)].get("see") or []
         aspect = (rec.get("w") or W) / (rec.get("h") or H) / (W / H)
-        return rec.get("depicted_name") or rec.get("tier") == "detail" or (abs(aspect - 1) > .05 and any(
+        return rec.get("keep_full_frame") or rec.get("depicted_name") or rec.get("tier") == "detail" or (abs(aspect - 1) > .05 and any(
             x.get("thing") == name and x.get("keep_full_frame") for x in briefs))
 
     sealed = full_frame | board

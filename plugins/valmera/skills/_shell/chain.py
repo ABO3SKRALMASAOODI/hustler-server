@@ -9,6 +9,7 @@ in the checkout; then `python -m scene.run --local` (BUILD W1). SHELL_ENGINE=sli
 """
 import json
 import os
+import shlex
 import shutil
 import subprocess
 
@@ -683,6 +684,50 @@ def wants_music(ctx):
     return (ctx.args or {}).get("music", True) is not False and ctx.workflow != "selftest"
 
 
+def file_sha(path):
+    if not path or not os.path.isfile(path):
+        return None
+    from delivered import sha256_file
+    return sha256_file(path).split(":", 1)[1]
+
+
+def cached_finish(ctx, programme, final, *, receipt=None, **options):
+    """Commit the movie first. A crash between renames leaves a detectable content mismatch."""
+    from shell import jload, jsave
+    key = dict(programme=file_sha(programme), receipt=receipt, options=options)
+    bed = options.get("card_bed")
+    if bed:
+        key["recording"] = file_sha(bed.get("path"))
+    sidecar = final + ".json"
+    saved = jload(sidecar) or {}
+    if key == saved.get("inputs") and saved.get("sha256") and saved["sha256"] == file_sha(final):
+        return saved, True
+    info = brand.finish(programme, final + ".part.mp4", ctx.tmp, **options)
+    saved = dict(inputs=key, sha256=file_sha(final + ".part.mp4"), finish=info)
+    os.replace(final + ".part.mp4", final)
+    jsave(sidecar, saved)
+    return saved, False
+
+
+def music_inputs(ctx, rd, sc, song=None):
+    from shell import jload
+    audio_scene = sc.get("l1_audio") or sc["l1"]
+    main = ((jload(audio_scene) or {}).get("assets") or {}).get("main") or {}
+    source = main.get("abs") or main.get("path") or "source.mp4"
+    inputs = dict(programme=file_sha(rd["film"]), scene=file_sha(audio_scene),
+                  source=file_sha(os.path.join(ctx.supply, source)),
+                  index=file_sha(os.path.join(ctx.supply, "index.json")), workflow=ctx.workflow,
+                  script=file_sha(os.path.join(ctx.run_dir, "script.json")),
+                  song=file_sha(song), vocals=file_sha((ctx.args or {}).get("song_vocals")),
+                  payoff=(ctx.args or {}).get("turn_s", sc.get("turn_s")),
+                  turn=sc.get("story_turn_s"), turn_drop=bool(sc.get("turn_drop")))
+    if ctx.workflow == "wf3":
+        repair = file_sha(os.path.join(ctx.supply, "render_repair.json"))
+        if repair:
+            inputs["picture_repair"] = repair
+    return inputs
+
+
 def music_version(ctx, rd, sc):
     """The same film with music under it, on a copy of the engine's picture (worker/music_film.py: the story's turn
     and payoff read from the film's own lines, the part of the song chosen by the engine, its level ridden under
@@ -700,7 +745,15 @@ def music_version(ctx, rd, sc):
     tag = "song" if song else "music"
     out = os.path.join(ctx.supply, f"film_engine_{tag}.mp4")
     report = os.path.join(ctx.supply, f"{tag}.json")
-    if not (os.path.exists(out) and os.path.exists(report)):
+    from shell import jload, jsave
+    inputs = music_inputs(ctx, rd, sc, song)
+    manifest = report + ".revision.json"
+    previous = jload(manifest) or {}
+    rep = jload(report) or {}
+    if not (rep.get("ok") and previous.get("movie") and inputs == previous.get("inputs") and
+            previous.get("movie") == file_sha(out) and previous.get("receipt") == file_sha(report)):
+        prior = (rep.get("choice") or {}).get("cid") if rep.get("ok") and ctx.workflow == "wf3" and not song else None
+        pending_report = report + ".pending.json"
         wk = brand.worker_dir()
         brief = ""
         try:
@@ -720,7 +773,9 @@ def music_version(ctx, rd, sc):
         cmd = (f"cd '{wk}' && export VALMERA_MUSIC_SET=\"${{VALMERA_MUSIC_SET:-{MUSIC_SET}}}\" && export OPENAI_API_KEY=\"${{OPENAI_API_KEY:-$(grep -E '^OPENAI_API_KEY=' '{ENV_FILE}' | tail -1 | cut -d= -f2- | tr -d '\"')}}\" && "
                f"PYTHONPATH=. FFMPEG_BIN='{brand.FF}' SCENE_CEIL_DBTP=-2.0 SKIP_DB_INIT=1 '{PY}' -m music_film score --l1 '{sc.get('l1_audio') or sc['l1']}' "
                f"--work '{ctx.supply}' --film '{rd['film']}' --out '{out}.part.mp4' --kind {SONG_KIND.get(ctx.workflow, 'stories')} "
-               f"--cache '{os.path.join(ctx.state_root, 'music_cache')}' --report '{report}' --brief \"$(cat '{bf}')\"")    # the publishers' own files, sha256-checked, kept between runs
+               f"--cache '{os.path.join(ctx.state_root, 'music_cache')}' --report '{pending_report}' --brief \"$(cat '{bf}')\"")    # the publishers' own files, sha256-checked, kept between runs
+        if prior:
+            cmd += f" --preferred-cid {shlex.quote(str(prior))}"
         if song:
             cmd += f" --song '{song}'"
             if (ctx.args or {}).get("song_vocals"):
@@ -745,6 +800,10 @@ def music_version(ctx, rd, sc):
         # --args '{"music_ledger": "<file>"}'. The choice is made under the file's lock, one film at a time.
         ledger, lock, used = (ctx.args or {}).get("music_ledger") if not song else None, None, []
         try:
+            # A killed attempt may leave either staging file. Never pair it with this attempt.
+            for staging in (pending_report, out + ".part.mp4"):
+                if os.path.exists(staging):
+                    os.remove(staging)
             if ledger:
                 import fcntl
                 lock = open(ledger + ".lock", "a")
@@ -756,7 +815,7 @@ def music_version(ctx, rd, sc):
             if used:                                     # the same call as the command line, with the tracks to leave out
                 aj, hp = os.path.join(ctx.supply, f"{tag}_args.json"), os.path.join(ctx.supply, f"{tag}_used.py")
                 json.dump(dict(l1=sc.get("l1_audio") or sc["l1"], work=ctx.supply, film=rd["film"], out=out + ".part.mp4", kind=SONG_KIND.get(ctx.workflow, "stories"),
-                               cache=os.path.join(ctx.state_root, "music_cache"), report=report, brief=brief,
+                               cache=os.path.join(ctx.state_root, "music_cache"), report=pending_report, brief=brief, preferred_cid=prior,
                                payoff=float(turn) if turn is not None else None, turn=float(story_turn) if story_turn is not None else None, turn_drop=turn_drop,
                                used=used), open(aj, "w"), ensure_ascii=False)
                 open(hp, "w").write(MUSIC_USED)
@@ -765,55 +824,51 @@ def music_version(ctx, rd, sc):
             if adapter:
                 aj = os.path.join(ctx.supply, f"{tag}_args.json")
                 json.dump(dict(l1=sc.get("l1_audio") or sc["l1"], work=ctx.supply, film=rd["film"], out=out + ".part.mp4",
-                               kind=SONG_KIND.get(ctx.workflow, "stories"), cache=os.path.join(ctx.state_root, "music_cache"), report=report,
+                               kind=SONG_KIND.get(ctx.workflow, "stories"), cache=os.path.join(ctx.state_root, "music_cache"), report=pending_report, preferred_cid=prior,
                                brief=brief, payoff=float(turn) if turn is not None else None, turn=float(story_turn) if story_turn is not None else None, turn_drop=turn_drop, used=used,
                                song=song, vocals=(ctx.args or {}).get("song_vocals")), open(aj, "w"), ensure_ascii=False)
                 sh(ctx, ["zsh", adapter, aj], label=f"wf-{tag}-{ctx.run_id}",
                    heavy=os.environ.get("SHELL_MUSIC_REMOTE") != "1", timeout=1800)
             else:
                 sh(ctx, ["zsh", "-c", cmd], label=f"wf-{tag}-{ctx.run_id}", heavy=True, timeout=1800)
-            rep = json.load(open(report)) if os.path.exists(report) else {}
+            rep = jload(pending_report) or {}
             if not rep.get("ok") or not os.path.exists(out + ".part.mp4"):
                 raise RuntimeError(json.dumps({k: rep.get(k) for k in ("why", "tried")}, ensure_ascii=False)[:600])
             if ledger:
-                from shell import jsave
                 cid = (rep.get("choice") or {}).get("cid")
                 if cid and str(cid) not in used:
                     jsave(ledger, used + [str(cid)])
+            previous = dict(inputs=inputs, movie=file_sha(out + ".part.mp4"), receipt=file_sha(pending_report))
             os.replace(out + ".part.mp4", out)
+            os.replace(pending_report, report)
+            jsave(manifest, previous)
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             ctx.log(f"{tag} version skipped: {str(e)[:300]}")
             return None
         finally:
             if lock:
                 lock.close()
-    try:
-        rep = json.load(open(report))
-    except (OSError, ValueError):
-        rep = {}
     final = os.path.join(ctx.run_dir, f"final_{tag}.mp4")
-    if not os.path.exists(final):
-        try:
-            bed = (rep.get("mix") or {}).get("card_bed")
-            if bed and not os.path.isfile(bed["path"]):
-                # A remote mix can name its own music cache. Resolve the same licensed recording locally.
-                library = use_music_set() or MUSIC_SET
-                choice = rep.get("choice") or {}
-                if song:
-                    bed = dict(bed,path=song)
-                elif choice.get("cid") and os.path.isfile(os.path.join(library,"index.json")):
-                    with open(os.path.join(library,"index.json")) as f:
-                        track = next((r for r in json.load(f)["tracks"] if r["cid"] == choice["cid"]),None)
-                    if track:
-                        bed = dict(bed,path=os.path.join(library,track["file"]))
-            if bed and ctx.workflow == "wf3":
-                bed = dict(bed, speech_room_db=9.)
-            brand.finish(out, final + ".part.mp4", ctx.tmp, card_bed=bed,
-                         last_word_s=last_word(ctx, sc), **end_accent(ctx, sc))
-            os.replace(final + ".part.mp4", final)
-        except (RuntimeError, OSError, subprocess.SubprocessError) as e:     # the clean film is delivered either way
-            ctx.log(f"{tag} version not finished: {str(e)[:300]}")
-            return None
+    try:
+        bed = (rep.get("mix") or {}).get("card_bed")
+        if bed and not os.path.isfile(bed["path"]):
+            # A remote mix can name its own music cache. Resolve the same licensed recording locally.
+            library = use_music_set() or MUSIC_SET
+            choice = rep.get("choice") or {}
+            if song:
+                bed = dict(bed,path=song)
+            elif choice.get("cid") and os.path.isfile(os.path.join(library,"index.json")):
+                with open(os.path.join(library,"index.json")) as f:
+                    track = next((r for r in json.load(f)["tracks"] if r["cid"] == choice["cid"]),None)
+                if track:
+                    bed = dict(bed,path=os.path.join(library,track["file"]))
+        if bed and ctx.workflow == "wf3":
+            bed = dict(bed, speech_room_db=9.)
+        finished, _ = cached_finish(ctx, out, final, receipt=previous["receipt"], card_bed=bed,
+                                    last_word_s=last_word(ctx, sc), **end_accent(ctx, sc))
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:     # the clean film is delivered either way
+        ctx.log(f"{tag} version not finished: {str(e)[:300]}")
+        return None
     mix = rep.get("mix") or {}
     plan, levels = mix.get("plan") or {}, mix.get("music") or {}
     does = dict(marks=rep.get("marks"), drop_at=plan.get("drop_at"), build_at=plan.get("build_at"), end_hit_s=plan.get("end_hit_s"), jumps=plan.get("jumps"),
@@ -847,6 +902,9 @@ def music_version(ctx, rd, sc):
                  tracks=ch.get("tracks"), pool=ch.get("pool"), entry=ch.get("entry"),
                  checks={k: chk.get(k) for k in ("length_ok", "endcard_ok", "mark_ok", "lufs", "lra", "true_peak_dbtp", "loud_ok")}, removable=True,
                  note="CC-BY: the credit line goes wherever the film is published; film_clean.mp4 is the same film without music")
+    music["revision"] = dict(inputs=inputs, mix=previous["movie"],
+                             receipt=previous["receipt"], final=finished["sha256"],
+                             clean=file_sha(os.path.join(ctx.run_dir, "final.mp4")))
     return dict(final_music=final, music=music, spend=spend)
 
 
@@ -860,7 +918,8 @@ import music_film as M
 a = json.load(open(sys.argv[1]))
 try:
     rep = M.score(json.load(open(a["l1"])), a["work"], film=a["film"], out=a["out"], kind=a["kind"], payoff_s=a.get("payoff"), turn_s=a.get("turn"), cache=a["cache"],
-                  brief=a["brief"], call=M.openai_call(), used=a["used"], turn_drop=bool(a.get("turn_drop")))
+                  brief=a["brief"], call=M.openai_call(), used=a["used"], turn_drop=bool(a.get("turn_drop")),
+                  **({"preferred_cid": a["preferred_cid"]} if a.get("preferred_cid") else {}))
 except Exception as ex:  # noqa: BLE001 - the clean film is delivered either way; the reason is on file
     rep = {"ok": False, "why": f"{type(ex).__name__}: {str(ex)[:300]}"}
 json.dump(rep, open(a["report"], "w", encoding="utf-8"), default=float, ensure_ascii=False, indent=1)
@@ -935,13 +994,10 @@ def last_word(ctx, sc):
 def finish_and_check(ctx, rd, sc):
     """Brand finish, then the measured checks. A failed check is reported, never a stop."""
     final = os.path.join(ctx.run_dir, "final.mp4")
-    if not os.path.exists(final):
-        info = brand.finish(rd["film"], final + ".part.mp4", ctx.tmp, last_word_s=last_word(ctx, sc), **end_accent(ctx, sc))
-        os.replace(final + ".part.mp4", final)
-    else:
-        info = {}
+    finished, reused = cached_finish(ctx, rd["film"], final, last_word_s=last_word(ctx, sc), **end_accent(ctx, sc))
+    info = finished["finish"]
     c = brand.check(rd["film"], final, ctx.tmp)
-    if not info:
+    if reused:
         # A resumed run still needs the measured programme boundary. Returning
         # an empty finish record makes downstream audits treat the card as
         # speech time (or fail), despite the cached film being valid.
@@ -959,7 +1015,7 @@ def finish_and_check(ctx, rd, sc):
     elif ctx.workflow == "wf3" and (ctx.args or {}).get("one_command") and wants_music(ctx):
         report = os.path.join(ctx.supply, "music.json")
         try:
-            reason = json.load(open(report))
+            reason = json.load(open(report + ".pending.json" if os.path.isfile(report + ".pending.json") else report))
         except (OSError, ValueError):
             reason = {"why": "music generation produced no report"}
         raise RuntimeError("required story music was not delivered: " +

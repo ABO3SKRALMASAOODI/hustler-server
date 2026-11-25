@@ -941,3 +941,22 @@ def test_the_scene_worker_is_the_worker_that_laid_the_devices(monkeypatch):
     assert film.scene_worker() == "/tmp/w-palette"
     monkeypatch.setenv("VALMERA_SCENE_WORKER", "/tmp/w-scene")
     assert film.scene_worker() == "/tmp/w-scene"
+
+
+def test_interrupted_new_round_does_not_check_the_previous_picture(tmp_path, monkeypatch):
+    import wf3 as W3
+    ctx = _ctx(tmp_path)
+    run, supply = tmp_path / "run", tmp_path / "sup"
+    (run / "script.json").write_text("{}")
+    film = supply / "film_engine.mp4"
+    film.write_bytes(b"old master")
+    (run / "repair_score.json").write_text(json.dumps(dict(version="first", _picture_revision=1)))
+    (run / "repair_render.json").write_text(json.dumps(dict(film=str(film), _picture_revision=1)))
+    (supply / "render_repair.json").write_text(json.dumps(dict(revision=2, rounds=2)))
+    monkeypatch.setattr(W3, "score", lambda *args: dict(version="second"))
+    def draw(ctx, script, score):
+        film.write_bytes(score["version"].encode())
+        return dict(film=str(film))
+    monkeypatch.setattr(W3, "render", draw)
+    monkeypatch.setattr(W3, "check_once", lambda ctx, rd, sc: (film.read_bytes(), sc["version"]))
+    assert W3._check_repair(ctx) == (b"second", "second")

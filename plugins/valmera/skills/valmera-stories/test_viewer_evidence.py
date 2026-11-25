@@ -205,3 +205,23 @@ def test_a_fitting_unused_take_is_placed_in_the_gap_before_a_new_read(tmp_path):
     a,b = knobs["checked_shots"]
     assert a == held and b["path"] == replacement["path"] and b["f"] == [30,53]
     assert abs((b["src"][1] - b["src"][0]) - .70) < .001
+
+
+def test_repaired_bridge_group_keeps_its_verified_native_frame(tmp_path):
+    import evidence_cut
+    import reel
+    import wf3
+    clip = dict(path=str(tmp_path / "bridge.mp4"), w=1920, h=1080, seconds=1.1, subject="Walkman listeners")
+    (tmp_path / "bridge.mp4").touch()
+    gap = dict(kind="clip", path="cropped", line=7, f=[1033,1065])
+    fits = dict(grade=4, fits_line=True, exact_thing=True, time_ok=True, version_ok=True, contradicts=False)
+    pack = dict(footage=[dict(i=7, clips=[clip])], fit_verdicts={clip["path"]: {0: {7: fits}}})
+    knobs = {}
+    rows = [[1033,1065,"clip","Walkman listeners",dict(path="cropped", pick_line=7)]]
+    supply = reel.Supply({}, {7: [clip]})
+    def build():
+        placed, = evidence_cut.retain_checked(rows, knobs["checked_shots"], supply)
+        assert placed[4]["keep_full_frame"] and placed[4]["src"] == knobs["checked_shots"][0]["src"]
+        return {}, dict(pictures=knobs["checked_shots"])
+    plan = wf3.repair_layout(dict(pictures=[gap]), [gap], knobs, build)
+    assert plan(pack, None) == []

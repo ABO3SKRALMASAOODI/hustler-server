@@ -212,6 +212,18 @@ def deliver(ctx, state, out_root, results):
                 DL.append(delivered_row(ctx, script, results, final_dir), refuse=False)
             return dict(folder=final_dir, bytes=du(final_dir), already=True)
         raise RuntimeError(f"{final_dir} exists: a folder is delivered once, never added to")
+    if ctx.workflow == "wf3" and chk.get("final_music") and results.get("score", {}).get("l1"):
+        # A resume can enter here directly from a saved check, including an older unbound check.
+        rd, sc = results["render"], results["score"]
+        active_rd = jload(os.path.join(ctx.run_dir, "repair_render.json")) or rd
+        active_sc = jload(os.path.join(ctx.run_dir, "repair_score.json")) or sc
+        revision = (chk.get("music") or {}).get("revision") or {}
+        files = dict(mix=os.path.join(ctx.supply, "film_engine_music.mp4"), receipt=os.path.join(ctx.supply, "music.json"),
+                     final=chk["final_music"], clean=chk["final"])
+        current = revision.get("inputs") == chain.music_inputs(ctx, active_rd, active_sc)
+        if not current or any(not revision.get(k) or revision[k] != chain.file_sha(path) for k, path in files.items()):
+            chk = results["check"] = load_workflow(ctx.workflow).check(ctx, rd, sc)
+            jsave(os.path.join(ctx.run_dir, "check.json"), chk)
     # the shared delivered ledger (delivered.py): a source delivered before is refused before anything is copied
     # Only a folder inside the owner's delivery folders is a delivery; anywhere else the run is a test, never recorded.
     mode = ledger_mode(ctx, final_dir)

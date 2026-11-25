@@ -2594,7 +2594,7 @@ def repair_layout(beats, windows, knobs, build, read=None):
                     if FIT.usable(v) and group not in used and os.path.isfile(path):
                         native = round((take[1] - take[0]) * F.FPS) >= b - a
                         choices.append((v.get("grade") or 0, native, R.take_motion(c, take), path, ti, c, take, group))
-            for _, _, _, path, ti, clip, take, group in sorted(choices, key=lambda q: q[:5], reverse=True):
+            for grade, _, _, path, ti, clip, take, group in sorted(choices, key=lambda q: q[:5], reverse=True):
                 if group in used or a >= b:
                     continue
                 frames = (take[1] - take[0]) * F.FPS
@@ -2607,7 +2607,8 @@ def repair_layout(beats, windows, knobs, build, read=None):
                     continue
                 proposed.append(dict(kind="clip", line=line, f=[a,end], path=path, take=ti,
                                      take_bounds=list(take), take_group=group[0], name=clip.get("subject"),
-                                     src=list(R.Takes.best(clip, take, (end-a)/F.FPS)), tier="line", use=1))
+                                     src=list(R.Takes.best(clip, take, (end-a)/F.FPS)), tier="line", use=1,
+                                     keep_full_frame=grade >= 4 and 0 < (clip.get("h") or 0) < (clip.get("w") or 0)))
                 used.add(group)
                 a = end
         if not proposed:
@@ -2801,8 +2802,7 @@ def clear_render(ctx):
     """The render's cached outputs, removed so render() and the finish draw the plan again."""
     sup = ctx.supply
     for p in (os.path.join(sup, "film_engine.mp4"), os.path.join(sup, "film_engine.mp4.log.json"), os.path.join(sup, "sound.m4a"),
-              os.path.join(sup, "l1.alien.json"), os.path.join(sup, "film_engine_music.mp4"), os.path.join(sup, "music.json"),
-              os.path.join(sup, "film_engine_song.mp4"), os.path.join(sup, "song.json"), os.path.join(ctx.run_dir, "final.mp4")):
+              os.path.join(sup, "l1.alien.json")):
         if os.path.exists(p):
             os.remove(p)
 
@@ -2810,14 +2810,19 @@ def clear_render(ctx):
 def _check_record(ctx, name, value=None):
     """Check-stage checkpoints survive a refusal without replacing the shell's original plan."""
     path = os.path.join(ctx.run_dir, name + ".json")
+    from shell import jload
+    revision = None
+    if name in ("repair_score", "repair_render"):
+        marker = jload(os.path.join(ctx.supply, "render_repair.json")) or {}
+        revision = marker.get("revision")
     if value is None:
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except (OSError, ValueError):
-            return None
+        saved = jload(path)
+        if saved is not None and saved.pop("_picture_revision", None) == revision:
+            return saved
+        return None
+    saved = dict(value, _picture_revision=revision) if revision is not None else value
     with open(path + ".part", "w") as f:
-        json.dump(value, f, ensure_ascii=False, indent=1)
+        json.dump(saved, f, ensure_ascii=False, indent=1)
     os.replace(path + ".part", path)
     return value
 
@@ -2873,13 +2878,9 @@ def check(ctx, rd, sc):
                    and p.get("kind") in ("clip", "photo") and p.get("tier") != "voice"]
         with open(marker + ".part", "w") as f:
             json.dump(dict(fail_s=rounds[0]["fail_s"], dropped=rounds[0]["dropped"], rounds=len(rounds),
-                           checked_shots=checked), f, indent=1)
+                           checked_shots=checked, revision=len(rounds)), f, indent=1)
         os.replace(marker + ".part", marker)
         ctx.log(f"picture gate round {len(rounds)}: {fc['picture_fit']['fail_s']} s of pictures fail their words; dropping {len(bad)} and drawing again")
-        for name in ("repair_score", "repair_render"):          # each round builds and draws the plan again
-            q = os.path.join(ctx.run_dir, name + ".json")
-            if os.path.exists(q):
-                os.remove(q)
         r, fc = _check_repair(ctx)
         rounds[-1]["after_s"] = fc["picture_fit"]["fail_s"]
         _check_record(ctx, "picture_rounds", dict(rounds=rounds))

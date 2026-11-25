@@ -1184,3 +1184,20 @@ def test_collage_any_line_lets_the_styles_budget_take_unmarked_lines(tmp_path):
                              for p in talking})
     _, beats = R.build(sc, sup, 'pinboard', dict(require_fit=True, collage_any_line=True))
     assert all(p['mode'] in ('print', 'window') for p in beats['pictures'] if p['path'] in talking)
+
+
+def test_sourced_reel_uses_the_fitting_unplayed_take_before_a_moving_repeat():
+    script = _fit_script(n=2, words=24)
+    clock = F.Clock(_words(script), script)
+    def clip(name, motion):
+        return dict(path=name, seconds=1.6, subject="Alpha", w=1920, h=1080,
+                    motion=dict(p90=motion, curve=[motion] * 24))
+    footage = {0: [clip(f"static-{i}", .1) for i in range(6)],
+               1: [clip("Pressman record control", 6), clip("Walkman controls", 5),
+                   clip("Twin headphone jacks", .1)]}
+    fit = {c["path"]: {line} for line, clips in footage.items() for c in clips}
+    grades = {c["path"]: {0: {line: 4}} for line, clips in footage.items() for c in clips}
+    sp = R.Supply({}, footage, fit=fit, grades=grades)
+    rows = R.cut_fit(script, clock, sp, F.Clock.f(clock.dur) + 15, stress=[], prefer_new=True)
+    on_line = [row[4] for row in rows if row[4].get("pick_line") == 1]
+    assert {r["path"] for r in on_line[:3]} == {c["path"] for c in footage[1]}

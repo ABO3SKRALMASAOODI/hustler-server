@@ -203,6 +203,8 @@ def retain_checked(timeline, receipts, supply):
             continue
         rec = dict(original, src=p.get("src"), take=p.get("take_bounds"), take_i=p.get("take"),
                    pick_line=p["line"], tier=p.get("tier"), use=p.get("use"))
+        if p.get("keep_full_frame") or (p.get("mode") == "window" and p.get("crop") == [0, 0, 1, 1]):
+            rec["keep_full_frame"] = True
         rec.update({k: p[k] for k in ("cont", "glimpse", "cutin", "burst", "depicted_name") if p.get(k)})
         timeline = overlay(timeline, [a, b, p["kind"], p.get("name"), rec])
     return timeline
