@@ -297,6 +297,9 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         sources_seen[:] = sources
         spend["hear"] = round(sum(s.get("hear_usd") or 0.0 for s in sources), 5)
         live = [s for s in sources if not s.get("error") and s.get("shots")]
+        if motion_first and scout_motion:
+            for source in live:
+                source["known_moving"] = motion.moving_intervals(source.get("proxy"), source["shots"])
         # 5. moments and the picture check, per subject
         def per_subject(si):
             sub = subjects[si]
@@ -316,8 +319,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             for k, s in enumerate(mine):
                 said = [m["t"] for m in ms if m["src"] == k]
                 if motion_first and scout_motion:
-                    times, mo = motion_at_candidates(s,said,log)
-                    s.setdefault('scout_motion',{}).update(mo)
+                    times = scout_times(s, said, avoid)
                 elif motion_first:
                     mo = motion.of_shots(s.get("proxy"), s["shots"], log=log)
                     times = look.pick_times(s["shots"], said, moving={sh for sh, v in mo.items() if v["p90"] >= motion.FLOOR}, min_s=0.3)
@@ -371,9 +373,14 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             if k and av.get("time_range"):
                 taken.setdefault(k, []).append((float(av["time_range"][0]), float(av["time_range"][1])))
         motion_of = {}
+        motion_stats = {"measured": 0, "reused": 0}
         if motion_first:
             for s in live:
-                motion_of[s["key"]] = s.get('scout_motion',{}) if scout_motion else motion.of_shots(s.get("proxy"), s["shots"], log=log)
+                intervals = s["shots"]
+                if scout_motion:
+                    intervals = {tuple(shots.shot_at(intervals, c["t"])) for c in good
+                                 if c["source"] == s["key"] and (not strict_lines or c["lines"])}
+                motion_of[s["key"]] = motion.of_shots(s.get("proxy"), sorted(intervals), log=log, stats=motion_stats)
         plan_rows = assign(lines, good, src_of, shows, taken, shot_s=shot_s, line_max=line_max, strict=strict_lines,
                            motion_of=motion_of if motion_first else None, alloc=alloc)
         # 7. cut: resolve each used source's stream once, cut, measure, grade to one look, finish
@@ -574,6 +581,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                    counts=dict(lines=len(out_lines), lines_with_footage=sum(1 for r in out_lines if r["clips"]),
                                clips=sum(len(r["clips"]) for r in out_lines), frames_checked=len(pool_frames)-reused,
                                frames_reused=reused, frames_passed=len(good),
+                               **({"motion_intervals": motion_stats} if motion_first and scout_motion else {}),
                                sources_opened=len(live), sources_tried=len(sources)),
                    credits=[dict(line=r["i"], url=c["source"]["url"], channel=c["source"]["channel"], title=c["source"]["title"],
                                  time_range=c["time_range"]) for r in out_lines for c in r["clips"]]
@@ -591,11 +599,16 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             shutil.rmtree(work, ignore_errors=True)
 
 
-def motion_at_candidates(source,said,log=print):
-    """Bound preliminary flow to the actual scout frames; selected cuts are measured separately."""
-    times = look.pick_times(source['shots'],said,min_s=.3)
-    selected = sorted({tuple(shots.shot_at(source['shots'],t)) for t in times})
-    return times,motion.of_shots(source.get('proxy'),selected,log=log)
+def scout_times(source, said, prior):
+    """Scout relevant moments and the even spread, retaining previously proved moving frames."""
+    times = look.pick_times(source["shots"], said, min_s=0.3)
+    if source.get("known_moving"):
+        moving = look.pick_times(source["shots"], said, min_s=0.3, moving=source["known_moving"])
+        times += [t for t in moving if tuple(shots.shot_at(source["shots"], t)) in source["known_moving"]]
+    known = [row["frame_at"] for row in prior or [] if row.get("url") == source["url"]
+             and (row.get("motion_p90") or 0) >= motion.FLOOR and row.get("frame_at") is not None
+             and source["shots"][0][0] <= row["frame_at"] < source["shots"][-1][1]]
+    return sorted(set(times + known))
 
 
 def source_rounds(ranked):
@@ -812,7 +825,8 @@ def main():
         lines = [ln for ln in lines if int(ln["i"]) in keep]
     from . import seam
     anchors = json.load(open(a.anchors)) if a.anchors else None
-    avoid = [dict(url=c["source"]["url"], time_range=c["time_range"]) for p in a.avoid for ln in json.load(open(p)).get("lines") or []
+    avoid = [dict(url=c["source"]["url"], time_range=c["time_range"], frame_at=c.get("frame_at"),
+                  motion_p90=c.get("motion_p90")) for p in a.avoid for ln in json.load(open(p)).get("lines") or []
              for c in ln.get("clips") or []]
     res = seam.for_lines(lines, named, title, a.out, a.w, a.h, scope="workflow", log=lambda m: print("[footage] " + m, flush=True),
                          anchors=anchors, avoid=avoid, preserve_source=a.preserve_source, **hearing,

@@ -942,7 +942,7 @@ def _caption(c):
     return _clip(text, 360) or "(no caption)"
 
 
-def check_named(subject, cands, workdir=None, budget_s=None, frame_size=None):
+def check_named(subject, cands, workdir=None, budget_s=None, frame_size=None, local_photos=None):
     """(kept, report, usd): the candidates a vision model passes as showing
     the subject, best first, each with what it shows. No answer passes
     nothing: an unchecked picture of a real person is never offered."""
@@ -960,9 +960,10 @@ def check_named(subject, cands, workdir=None, budget_s=None, frame_size=None):
         def thumb(i):
             p = os.path.join(tmp, f"{i}.jpg")
             try:
-                net_fetch.download(cands[i]["_thumb"], p,
-                                   max_bytes=4 * 1024 * 1024, timeout_s=10)
-                with Image.open(p) as im:
+                source = (local_photos or {}).get(cands[i]["id"])
+                if not source:
+                    net_fetch.download(cands[i]["_thumb"], p, max_bytes=4 * 1024 * 1024, timeout_s=10)
+                with Image.open(source or p) as im:
                     im = im.convert("RGB")
                     if frame_size:
                         w, h = map(float, frame_size)

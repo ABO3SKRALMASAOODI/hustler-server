@@ -20,6 +20,8 @@ def youtube(q, n=8, timeout_s=40):
         return []
     out = []
     for e in d.get("entries") or []:
+        if not isinstance(e, dict):
+            continue
         dur = e.get("duration")
         if not e.get("id") or (dur and dur > MAX_SOURCE_S) or e.get("live_status") in ("is_live", "is_upcoming"):
             continue

@@ -1,11 +1,12 @@
 """A source's shots (ffmpeg's scene score on the scanning copy) and its frames at given times."""
 import concurrent.futures as cf
+import fcntl
 import json
 import os
 import re
 import subprocess
 
-from . import fetch
+from . import fetch, measurements
 
 SCENE = 0.30          # the threshold the reference study read the references' cuts with
 MIN_GAP_S = 0.08
@@ -31,6 +32,32 @@ def probe(path):
 
 def cuts(path, upto):
     """Shots [(t0, t1)] of the first upto seconds."""
+    path_cache = measurements.record(path, "shots", ("scene-v1", SCENE, MIN_GAP_S, upto), fetch.ffmpeg())
+    if path_cache:
+        try:
+            path_cache.parent.mkdir(parents=True, exist_ok=True)
+            with path_cache.with_suffix(".lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                try:
+                    rows = json.loads(path_cache.read_text())
+                    if (isinstance(rows, list) and rows and rows[0][0] == 0 and rows[-1][1] == round(upto, 3)
+                            and all(0 <= a < b <= round(upto, 3) for a, b in rows)
+                            and all(left[1] == right[0] for left, right in zip(rows, rows[1:]))):
+                        return [tuple(row) for row in rows]
+                except (OSError, ValueError, IndexError, TypeError, KeyError):
+                    pass
+                rows, ok = _scene_scan(path, upto)
+                if ok:
+                    part = path_cache.with_suffix(".part")
+                    part.write_text(json.dumps(rows))
+                    part.replace(path_cache)
+                return rows
+        except OSError:
+            pass
+    return _scene_scan(path, upto)[0]
+
+
+def _scene_scan(path, upto):
     r = subprocess.run([fetch.ffmpeg(), "-hide_banner", "-nostats", "-t", f"{upto:.2f}", "-i", path, "-an", "-vf",
                         f"scale=320:-2,select='gt(scene,{SCENE})',showinfo", "-f", "null", "-"], capture_output=True, text=True)
     ts = []
@@ -38,7 +65,7 @@ def cuts(path, upto):
         if not ts or t - ts[-1] > MIN_GAP_S:
             ts.append(t)
     b = [0.0] + [t for t in ts if 0.05 < t < upto - 0.05] + [upto]
-    return [(round(b[i], 3), round(b[i + 1], 3)) for i in range(len(b) - 1) if b[i + 1] - b[i] > 0.04]
+    return [(round(b[i], 3), round(b[i + 1], 3)) for i in range(len(b) - 1) if b[i + 1] - b[i] > 0.04], r.returncode == 0
 
 
 def shot_at(shots, t):
