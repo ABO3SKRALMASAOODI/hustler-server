@@ -66,3 +66,12 @@ def test_with_joints_the_drop_and_end_holes_merge_into_the_joint_holes():
     assert {m["before"] for m in notes["holes_merged"]} == {"drop", "last hit"} and all(m["into"] is not None for m in notes["holes_merged"])
     _, _, plain = music.flow(3000, .01, dict(marks, joints=None), plan, music.PROFILE, 0, 0)
     assert {h["before"] for h in plain["holes"]} == {"drop", "last hit"} and "holes_merged" not in plain
+
+
+def test_short_payoff_breath_leaves_the_last_spoken_number_intact():
+    ts = np.arange(5650, 5710) / 100
+    notes = {"holes": []}
+    curve = music._story_joints(ts, [dict(kind="payoff", last_word_t=56.706,
+                                next_first_word_t=57.026, db=13.)], 68., music.PROFILE, notes)
+    assert np.all(curve[ts <= 56.706] == 0)
+    assert -10 < curve.min() < 0

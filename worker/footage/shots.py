@@ -5,6 +5,8 @@ import json
 import os
 import re
 import subprocess
+import tempfile
+from pathlib import Path
 
 from . import fetch, measurements
 
@@ -79,11 +81,34 @@ def frames(path, times, out_dir, w=384, workers=8):
     """{t: jpg path} for each time (fast seek on the scanning copy)."""
     os.makedirs(out_dir, exist_ok=True)
 
+    ff = fetch.ffmpeg()
+    # Share decoded source pixels across subjects and passes. A different
+    # rendition, seek time, decoder or output width gets its own frame.
+    cache = measurements.record(path, "frames", ("scout-jpeg-v1", w), ff)
+    folder = cache.with_suffix("") if cache else Path(out_dir) / str(w)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        folder = Path(out_dir) / str(w)
+        folder.mkdir(parents=True, exist_ok=True)
+
     def one(t):
-        p = os.path.join(out_dir, f"f{t:09.3f}.jpg")
-        if not os.path.exists(p):
-            subprocess.run([fetch.ffmpeg(), "-hide_banner", "-loglevel", "error", "-ss", f"{t:.3f}", "-i", path, "-frames:v", "1",
-                            "-vf", f"scale={w}:-2", "-q:v", "3", "-y", p], capture_output=True)
-        return t, (p if os.path.exists(p) else None)
+        dest = folder / f"f{t:09.3f}.jpg"
+        with dest.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if not dest.is_file() or not dest.stat().st_size:
+                with tempfile.NamedTemporaryFile(suffix=".jpg", dir=folder, delete=False) as tmp:
+                    pending = Path(tmp.name)
+                try:
+                    proc = subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-ss", f"{t:.3f}", "-i", path,
+                                           "-frames:v", "1", "-vf", f"scale={w}:-2", "-q:v", "3", "-y", str(pending)],
+                                          capture_output=True)
+                    if proc.returncode or not pending.stat().st_size:
+                        return t, None
+                    pending.replace(dest)
+                finally:
+                    pending.unlink(missing_ok=True)
+        return t, str(dest)
+
     with cf.ThreadPoolExecutor(max_workers=workers) as pool:
         return {t: p for t, p in pool.map(one, times) if p}

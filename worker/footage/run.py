@@ -219,6 +219,9 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         if read_s:
             hits = {si: ([h for h in hs if h.get("duration") and float(h["duration"]) <= WHOLE_UNDER_S] or hs) for si, hs in hits.items()}
         kept, spend["rank"] = plan.rank(subjects, hits, per=per)
+        repairing = any(ln.get("repair_windows") for ln in lines)
+        if repairing:
+            max_sources = min(max_sources, max(2, 2 * len(lines)))
         if alloc == 'round':
             kept = source_rounds(kept)
         sources, by_id = [], {}
@@ -291,6 +294,8 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 more.append(src)
         if failed or dead:
             log(f"archive round: {len(failed)} sources would not open, {len(dead)} subjects had none; {len(more)} archive sources to open")
+        if repairing:
+            more = more[:sum(bool(s.get("error")) for s in sources) + max(0, max_sources - len(sources))]
         if more:
             with openai_budget.ThreadPoolExecutor(max_workers=4) as pool:
                 sources += list(pool.map(opener, more))
@@ -318,14 +323,19 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             cands = []
             for k, s in enumerate(mine):
                 said = [m["t"] for m in ms if m["src"] == k]
-                if motion_first and scout_motion:
+                if repairing:
+                    aliases = {sub["name"]} | {n["thing"] for n in named or [] if n.get("name") == sub["name"] and n.get("thing")}
+                    times = repair_times(s, said, avoid, aliases, need)
+                elif motion_first and scout_motion:
                     times = scout_times(s, said, avoid)
                 elif motion_first:
                     mo = motion.of_shots(s.get("proxy"), s["shots"], log=log)
                     times = look.pick_times(s["shots"], said, moving={sh for sh, v in mo.items() if v["p90"] >= motion.FLOOR}, min_s=0.3)
                 else:
                     times = look.pick_times(s["shots"], said)
-                fr = shots.frames(s["proxy"], times, os.path.join(work, "frames", s["key"]))
+                frame_dir = os.path.join(work, "frames", s["key"])
+                size = {"w": min(s.get("w") or look.BRIEF_CELL_W, look.BRIEF_CELL_W)} if repairing else {}
+                fr = shots.frames(s["proxy"], times, frame_dir, **size)
                 for t, jpg in sorted(fr.items()):
                     cands.append(dict(src=k, t=t, jpg=jpg, said=look.said_at(s.get("transcript"), t), source=s["key"]))
             try:
@@ -611,6 +621,49 @@ def scout_times(source, said, prior):
     return sorted(set(times + known))
 
 
+def repair_times(source, said, prior, aliases, lines):
+    """Read the best unused leads at the brief sheet's resolution. Prior
+    observations nominate times; the current detail still gets its own verdict."""
+    rows = [r for r in prior or [] if r.get("url") == source["url"]]
+    used = [r["time_range"] for r in rows if r.get("time_range")]
+    def available(t):
+        return source["shots"][0][0] <= t < source["shots"][-1][1] and not any(a-.3 <= t <= b+.3 for a,b in used)
+    budget = min(look.PER_SOURCE, look.BRIEF_PER_SHEET * max(1, len(lines)))
+    leads = sorted((r for r in rows if r.get("subject") in aliases and r.get("grade") and r.get("frame_at") is not None),
+                   key=lambda r: -r["grade"])
+    proven = list(dict.fromkeys(r["frame_at"] for r in leads if available(r["frame_at"])))
+    near = [t for t in look.pick_times(source["shots"], said, moving=source.get("known_moving"), min_s=.3)
+            if available(t) and t not in proven]
+    # Leave room for previously unseen material. Transcript leads come first.
+    first = proven[:budget//2]
+    near.sort(key=lambda t: min((abs(t-m) for m in said), default=0))
+    spoken = [t for t in near if any(abs(t-m) <= 2 for m in said)][:budget//2]
+    pool = [t for t in near if t not in spoken]
+    return sorted((first + spoken + look._spread(pool, budget-len(first)-len(spoken)) + proven[len(first):])[:budget])
+
+
+def prior_reads(records):
+    out = []
+    for path in records:
+        with open(path) as f:
+            rec = json.load(f)
+        out.extend(dict(url=c["source"]["url"], time_range=c["time_range"], frame_at=c.get("frame_at"),
+                        motion_p90=c.get("motion_p90")) for ln in rec.get("lines") or [] for c in ln.get("clips") or [])
+        looked = os.path.join(os.path.dirname(path), "looked.json")
+        if not os.path.isfile(looked):
+            continue
+        sources = {s["key"]: s["url"] for s in rec.get("sources") or []}
+        try:
+            with open(looked) as f:
+                observations = json.load(f)
+        except (OSError, ValueError):
+            continue
+        for row in observations:
+            if row.get("ok") and row.get("clean") and (row.get("grade") or 0) >= 3 and row.get("source") in sources:
+                out.append(dict(url=sources[row["source"]], frame_at=row["t"], grade=row["grade"], subject=row["subject"]))
+    return out
+
+
 def source_rounds(ranked):
     """Spend the source cap across subjects before buying a fifth view of the first."""
     from collections import defaultdict, deque
@@ -781,7 +834,7 @@ def lines_of(script):
     out = []
     for k, s in enumerate(sc.get("segments") or []):
         ln = dict(i=int(s.get("i", k)), say=s.get("say"), pictures=s.get("pictures") or [], dur=s.get("dur"), pause_after=s.get("pause_after"))
-        for key in ("see", "era", "beat", "visual", "claim", "single_action"):  # the writer's picture brief, when the script carries one
+        for key in ("see", "era", "beat", "visual", "claim", "single_action", "repair_windows"):  # the writer's picture brief, when the script carries one
             if s.get(key) is not None:
                 ln[key] = s[key]
         out.append(ln)
@@ -825,7 +878,7 @@ def main():
         lines = [ln for ln in lines if int(ln["i"]) in keep]
     from . import seam
     anchors = json.load(open(a.anchors)) if a.anchors else None
-    avoid = [dict(url=c["source"]["url"], time_range=c["time_range"], frame_at=c.get("frame_at"),
+    avoid = prior_reads(a.avoid) if any(ln.get("repair_windows") for ln in lines) else [dict(url=c["source"]["url"], time_range=c["time_range"], frame_at=c.get("frame_at"),
                   motion_p90=c.get("motion_p90")) for p in a.avoid for ln in json.load(open(p)).get("lines") or []
              for c in ln.get("clips") or []]
     res = seam.for_lines(lines, named, title, a.out, a.w, a.h, scope="workflow", log=lambda m: print("[footage] " + m, flush=True),

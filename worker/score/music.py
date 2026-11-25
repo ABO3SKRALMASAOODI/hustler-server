@@ -948,8 +948,8 @@ NOTCH = (3.0, 0.8, 9.5, 0.15)      # a story's accent: -3 dB over 0.8 s, then 9.
 
 def _story_joints(t, joints, e, P, notes):
     """dB per frame (negative) for a narrated story's joints (marks["joints"], only a story's scene carries them): at
-    each the bed leaves from the last word before it and comes back on the next section's first word (0.5-2.3 s,
-    12-20 dB); from the close's first word it stays down; under each real voice it dips. Without joints: nothing.
+    each the bed eases down in the preceding breath and returns on the next section's first word. A breath
+    shorter than half a second gets a proportionate dip; from the close's first word it stays down; under each real voice it dips. Without joints: nothing.
     Optional per joint (absent, every caller gets exactly the defaults): "db" (the hole's or the dip's depth),
     "bed_db" (a close's dry bed), and the kind "swell" {t, rise_s, db}: the bed rises db (8-12) over rise_s (2-3 s)
     into t and settles back in 0.3 s."""
@@ -972,12 +972,12 @@ def _story_joints(t, joints, e, P, notes):
             continue
         b = float(j["next_first_word_t"])
         a = float(j.get("last_word_t") if j.get("last_word_t") is not None else b - JOINT_HOLE_S[0])
-        a = min(max(a, b - JOINT_HOLE_S[1]), b - JOINT_HOLE_S[0])
+        a = min(max(a, b - JOINT_HOLE_S[1]), b)
         if b >= e - 0.2 or a < 0.3:
             continue
-        db = float(j.get("db") or JOINT_DB.get(kind, 16.0))
+        db = float(j.get("db") or JOINT_DB.get(kind, 16.0)) * min(1., (b - a) / JOINT_HOLE_S[0])
         out -= db * np.clip(np.minimum((t - a) / P["hole_in_s"], (b - t) / 0.03), 0.0, 1.0)
-        notes["holes"].append({"t": round(a, 3), "len_s": round(b - a, 3), "db": db, "before": kind})
+        notes["holes"].append({"t": round(a, 3), "len_s": round(b - a, 3), "db": round(db, 3), "before": kind})
         if kind == "close":
             bed = float(j.get("bed_db") or CLOSE_BED_DB)
             out -= bed * np.clip(np.minimum((t - b) / 0.05, (e - 0.3 - t) / 0.3), 0.0, 1.0)
