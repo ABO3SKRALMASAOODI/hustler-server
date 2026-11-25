@@ -268,7 +268,8 @@ def test_podcast_score_resamples_the_spine_and_muxes_the_arrangement(songs, tmp_
         assert np.max(np.abs(stems["bed"])) > .01
 
 
-def test_story_mix_carries_the_arranged_recording_through_the_brand(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["stories", "marketing"])
+def test_story_mix_carries_the_arranged_recording_through_the_brand(tmp_path, monkeypatch, kind):
     import numpy as np
     from score import music
     from scene import audio
@@ -280,7 +281,7 @@ def test_story_mix_carries_the_arranged_recording_through_the_brand(tmp_path, mo
     monkeypatch.setattr(music, "track", lambda *a, **kw: (samples, {}))
     monkeypatch.setattr(audio, "master", lambda *a: {})
     song = str(tmp_path / "licensed.mp3")
-    report = music.mix_film("copied.mp4", song, dict(words=[(0, .5)]), kind="stories")
+    report = music.mix_film("copied.mp4", song, dict(words=[(0, .5)]), kind=kind)
     assert report["card_bed"] == dict(path=song, bar_s=2., tempo=.9, at_s=12.45)
 
 
@@ -296,3 +297,27 @@ def test_repair_auditions_the_same_licensed_track_on_new_marks(monkeypatch):
     marks = _marks(payoff=28.5)
     choice, _, _ = MF.choose({}, marks, "", preferred_cid="mk-595")
     assert choice["cid"] == "mk-595" and auditions == [(marks, pool[1:])]
+
+
+@needs_ffmpeg
+def test_marketing_mix_keeps_the_picture_frame_and_ducks_the_word_on_its_own_stem(songs, tmp_path, monkeypatch):
+    from scene import audio
+    from score import music
+    l1, index = _film(7.)
+    rate = music.SR
+    t = np.arange(rate * 7) / rate
+    voice = (.06 * np.sin(2 * np.pi * 300 * t)).astype("float32")
+    from scipy.io.wavfile import write
+    source = str(tmp_path / "voice.wav")
+    write(source, rate, voice)
+    l1.update(assets={"main": {"abs": source}}, picture_bound_sound=True,
+              sound=[dict(id="cta", s="click_2", file="click_2.flac", device="ct",
+                          event_f=90, start_s=2.85, peak_s=.15, trim_s=0, db=-18)])
+    bed = np.column_stack((voice * 5, voice * 5))
+    monkeypatch.setattr(music, "arrange", lambda *a, **kw: dict(ok=True, drop_at=3.2, payoff_s=3.,
+                       segments=[dict(tempo=1.)], end_hit_bar=0, end_hit_s=6.))
+    monkeypatch.setattr(music, "track", lambda *a, **kw: (bed, {}))
+    monkeypatch.setattr(audio, "master", lambda *args: {})
+    report = music.mix(l1, str(tmp_path), songs["full"], kind="marketing", index=index)
+    assert report["final_sounds"][0]["event_f"] == 90
+    assert report["audibility"]["bed_under_voice_db"] > 0

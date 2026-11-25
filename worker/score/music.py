@@ -118,7 +118,7 @@ ARC_DEFAULT = {"setup": "mid", "build": "mid", "payoff": "high", "close": "mid"}
 def profile_for(kind):
     """The PROFILE for a kind of film (stories | marketing | podcast | longform)."""
     out = dict(PROFILE, under_voice_db=UNDER_VOICE.get(kind, PROFILE["under_voice_db"]))
-    if kind == "stories":
+    if kind in ("stories", "marketing"):
         out.update(rest_cost_per_s=48., phrase_lift_db=6.)
     if kind == 'podcast':
         out.update(HOLD)
@@ -1795,7 +1795,7 @@ def voice_spans_of(l1, work):
         return []
 
 
-def duck_spoken_words(music, voice, words):
+def duck_spoken_words(music, voice, words, under_voice_db=UNDER_VOICE["podcast"]):
     """Catch broadband masking on quiet words after the song's phrase and spectral rides."""
     length = min(len(music), len(voice))
     hop = SR // 100
@@ -1837,7 +1837,7 @@ def duck_spoken_words(music, voice, words):
                 # Leave a soft syllable extra room up to the ordinary dialogue
                 # target. A level word keeps its existing word-wide margin.
                 below_word = max(0., 10 * math.log10(whole / power))
-                margin = min(UNDER_VOICE["podcast"], HOLD["hold_floor_db"] + below_word)
+                margin = min(under_voice_db, HOLD["hold_floor_db"] + below_word)
                 change = 10 * math.log10(power / bed) - margin
                 frames = slice(lo // hop, math.ceil(hi / hop) + 1)
                 # Short replies share the slow word ride across speakers. In a
@@ -1985,7 +1985,10 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
     if not plan.get("ok"):
         return rep
     from . import sound as SD
-    l1 = dict(l1, sound=sounds_on_the_drop(l1.get("sound") or [], plan, float(l1["fps"])))
+    sounds = l1.get("sound") or []
+    if kind != "marketing" or not l1.get("picture_bound_sound"):
+        sounds = sounds_on_the_drop(sounds, plan, float(l1["fps"]))
+    l1 = dict(l1, sound=sounds)
     rep["drop_landing"] = marks.get("drop_landing")   # the sound's turn hit the drop was asked to join (screen placement)
     total = len(voice) / float(AU.SR)
     with tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(out)) if out else None) as tmp:
@@ -1993,7 +1996,11 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
         music, mrep = track(song_path, song, plan, marks, voice=lv[:int(marks["dur_s"] * SR)], profile=prof)
         if kind == "podcast":
             podcast_bed(music, lv, marks, song, plan, song_path, rep)
-        elif kind == "stories":
+        elif kind in ("stories", "marketing"):
+            if kind == "marketing":
+                # A splice or the end of a syllable can extend beyond the narrator's word stamps.
+                speech = sorted(set(marks["words"]) | set(voice_spans(lv)))
+                duck_spoken_words(music, lv, speech, prof["under_voice_db"])
             rep["card_bed"] = card_continuation(marks, song, plan, song_path)
         # with the bed known, each placed sound is made to be there over the voice and the song together
         if kind == 'podcast':
@@ -2037,6 +2044,9 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
                                 sfx=audibility.mono(fx).astype(np.float32),bed=audibility.mono(bed).astype(np.float32))
             fx = np.asarray(fx)+bed
         else:
+            if kind == "marketing":
+                from . import audibility
+                rep["audibility"] = audibility.measure(lv[:len(music)], fx[:len(music)], music)
             fx[:len(music)] += music[:len(fx)]
         m4a = os.path.join(tmp, "song.m4a")
         rep["master"] = AU.master(voice, fx, m4a, tmp, total)
@@ -2114,7 +2124,7 @@ def mix_film(film, song_path, marks, out=None, kind="stories", vocals=None, sung
             music, mrep = track(song_path, song, plan, marks, voice=prog[:n_prog], profile=prof)
             if kind == "podcast":
                 podcast_bed(music,prog,marks,song,plan,song_path,rep)
-            elif kind == "stories":
+            elif kind in ("stories", "marketing"):
                 rep["card_bed"] = card_continuation(marks, song, plan, song_path)
         if not marks["words"]:                              # nobody speaks: the music is set against the film's own level, not a voice's
             i, _tp, _ = AU.loudness_of(prog, tmp) if float(np.abs(prog).max()) > 1e-5 else (None, None, None)
