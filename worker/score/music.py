@@ -118,6 +118,8 @@ ARC_DEFAULT = {"setup": "mid", "build": "mid", "payoff": "high", "close": "mid"}
 def profile_for(kind):
     """The PROFILE for a kind of film (stories | marketing | podcast | longform)."""
     out = dict(PROFILE, under_voice_db=UNDER_VOICE.get(kind, PROFILE["under_voice_db"]))
+    if kind == "stories":
+        out.update(rest_cost_per_s=48., phrase_lift_db=6.)
     if kind == 'podcast':
         out.update(HOLD)
         # Dialogue carries the cut. Keep the beat arrangement and ride phrases
@@ -210,6 +212,13 @@ def analyse(path, rmap=None, vocals=None, sung=None):
     pres = (cen >= 2000) & (cen <= 8000)             # consonants: where a lead voice fights a narrator
     low = cen < 150
     rms = np.asarray(feat["rms_db"], np.float64)
+    # A bar with one loud pluck and a long rest can have the same mean as a sustained bar.
+    # Measure quarter-second energy on the recording clock, including rests across bar boundaries.
+    window = max(1, round(.25 * fps))
+    energy = 10 ** (rms / 10)
+    smoothed = np.convolve(np.pad(energy, (window//2, window-1-window//2), mode="edge"),
+                           np.ones(window) / window, mode="valid")
+    resting = smoothed < np.percentile(smoothed, 65) * 10 ** (-12 / 10)
     lv_voc = None
     if vocals and os.path.exists(vocals):
         try:
@@ -235,6 +244,7 @@ def analyse(path, rmap=None, vocals=None, sung=None):
         pre = lm[max(0, f0 - int(0.25 * fps)):max(1, f0 - 2)]
         hit = 10 * math.log10((head[:, low].mean() + 1e-9) / (pre[:, low].mean() + 1e-9)) if len(pre) else 0.0
         bars.append({"i": len(bars), "t0": round(a, 4), "t1": round(b, 4),
+                     "rest_s": round(float(resting[f0:f1].sum()) / fps, 3),
                      "k": round(float(10 * np.log10(np.mean(10 ** (lv / 10)) + 1e-12)), 1),
                      "low": round(float(10 * np.log10(seg[:, low].mean() + 1e-9)), 1), "hit": round(float(hit), 1)})
     if not bars:
@@ -434,11 +444,13 @@ def _arc_run(song, F, slots, kd, n_build, J, P, has_free):
     full2 = 0.5 * en + 0.5 * np.append(en[1:], en[-1])
     has_entry = bool(entry.any())
 
+    rest_cost = [P.get("rest_cost_per_s", 0.) * b.get("rest_s", 0.) for b in bars]
+
     def lay_cost(idx, seq_part):
         """voice under voice and near-silent bars under the setup, for slots idx played as seq_part"""
         c = 0.0
         for i, b in zip(idx, seq_part):
-            c += vcost[b] * sp[i]
+            c += vcost[b] * sp[i] + rest_cost[b]
             if k[b] < k_top - 26.0:
                 c += 1.0                                    # a hole of the song itself under the words, not a quiet part
         return c
@@ -1486,6 +1498,12 @@ def track(path, song, plan, marks, voice=None, profile=None, song_pcm=None):
     slow, fast, notes = flow(nf, hop_s, marks, plan, P, base, open_gain)
     slow = slow + np.clip((song_lv - P["quiet_max_db"]) - loc, 0.0, 8.0) * live
     slow = _smooth(slow, hop_s, P["duck_attack_s"], P["duck_release_s"])
+    if P.get("phrase_lift_db"):
+        # A softer phrase inside a sounding bar can disappear beneath speech. Ride its
+        # sustained level before the intentional section ducks, retaining the note attacks.
+        phrase = _pmean_db(mk, min(nf, round(.25 / hop_s)))
+        lift = np.clip(song_lv - P["quiet_max_db"] - phrase, 0., P["phrase_lift_db"])
+        slow += _smooth(lift * live, hop_s, .09, .12)
     hit_f = min(nf - 1, int(hit_at / hop))
     slow[hit_f:] = np.maximum(slow[hit_f:], open_gain + P["end_hit_db"])
     # the judge's ruler (FLOW.json): the voice's level while it speaks against the music's 0.4 s level under its words.

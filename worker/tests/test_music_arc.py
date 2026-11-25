@@ -88,3 +88,32 @@ def test_a_song_too_short_for_a_run_is_arranged_the_general_way():
     plan = MU.arrange(song, dict(_marks(), arc=True), profile=MU.profile_for("podcast"))
     assert plan["ok"] and not plan["arc"]["on"]
     assert MF.carries(plan, True, arc=True) > MF.carries(plan, True)       # its loop now counts against it in the audition
+
+
+def test_story_arranges_a_continuous_phrase_when_equal_level_bars_have_rests():
+    # A plucked attack can give an otherwise empty bar the same average as a sustained one.
+    song = _song([-17.] * 60 + [-9.] * 10, (60,))
+    marks = dict(_marks(), arc=True)
+    original = MU.arrange(song, marks, profile=MU.profile_for("stories"))
+    sparse = {b["bar"] for b in original["bars_played"][:4]}
+    for i in sparse:
+        song["bars"][i]["rest_s"] = .9
+    arranged = MU.arrange(song, marks, profile=MU.profile_for("stories"))
+    assert not sparse.intersection(b["bar"] for b in arranged["bars_played"])
+
+
+def test_story_rides_a_soft_phrase_inside_a_playing_bar(monkeypatch):
+    # The bar mean includes its loud attack. A half-second phrase between attacks fell out of the bed.
+    sr = MU.SR
+    m = dict(_marks(), dur_s=12., turn_s=None, payoff_s=None, words=[], turn_drop=False)
+    song = _song(LEVELS, DROPS)
+    plan = MU.arrange(song, m, profile=MU.profile_for("stories"), arc=True)
+    t = np.arange(12 * sr) / sr
+    mono = .1 * np.sin(2 * np.pi * 400 * t)
+    mono[(t > 2.4) & (t < 2.95)] *= 10 ** (-13/20)
+    signal = np.stack((mono, mono), axis=1).astype(np.float32)
+    monkeypatch.setattr(MU, "_lay", lambda *args: (signal, round(plan["end_hit_s"] * sr)))
+    wet, _ = MU.track("", song, plan, m, profile=MU.profile_for("stories"), song_pcm=signal)
+    def power(a, b):
+        return np.mean(wet[round(a*sr):round(b*sr)] ** 2)
+    assert 0 < 10*np.log10(power(2.1, 2.3) / power(2.55, 2.77)) < 10

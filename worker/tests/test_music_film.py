@@ -282,3 +282,17 @@ def test_story_mix_carries_the_arranged_recording_through_the_brand(tmp_path, mo
     song = str(tmp_path / "licensed.mp3")
     report = music.mix_film("copied.mp4", song, dict(words=[(0, .5)]), kind="stories")
     assert report["card_bed"] == dict(path=song, bar_s=2., tempo=.9, at_s=12.45)
+
+
+def test_repair_auditions_the_same_licensed_track_on_new_marks(monkeypatch):
+    import music_choose
+    pool = [{"cid": "other"}, {"cid": "mk-595"}]
+    monkeypatch.setattr(music_choose, "workflow_pools", lambda film: [("set", pool)])
+    auditions = []
+    def audition(film, marks, cache, tracks, pool_name, **kwargs):
+        auditions.append((marks, tracks))
+        return dict(tracks[0], carries=1), "song.mp3", [tracks[0]]
+    monkeypatch.setattr(MF, "_choose_from", audition)
+    marks = _marks(payoff=28.5)
+    choice, _, _ = MF.choose({}, marks, "", preferred_cid="mk-595")
+    assert choice["cid"] == "mk-595" and auditions == [(marks, pool[1:])]

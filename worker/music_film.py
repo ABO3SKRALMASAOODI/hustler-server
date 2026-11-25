@@ -411,7 +411,7 @@ def track_file(track, cache):
     return local_track(track, cache)
 
 
-def choose(film, marks, cache, used=(), call=None, n=AUDITION, fetch=None, profile=None):
+def choose(film, marks, cache, used=(), call=None, n=AUDITION, fetch=None, profile=None, preferred_cid=None):
     """A track for this film: (choice, path, tried). The workflow films choose from the reference music set first and
     fall back only to library tracks that passed the signal gate (music_choose.workflow_pools; a failed track is never
     offered). In each pool: the signal shortlist, a model's ranking of it, then the engine itself: each of the first
@@ -422,6 +422,15 @@ def choose(film, marks, cache, used=(), call=None, n=AUDITION, fetch=None, profi
     import music_choose
     tried, keep = [], None
     pools = music_choose.workflow_pools(film)
+    if preferred_cid:
+        for pool_name, pool in pools:
+            prior = [t for t in pool if t["cid"] == preferred_cid]
+            if prior:
+                ch, path, got = _choose_from(film, marks, cache, prior, pool_name, call=call,
+                                             n=1, fetch=fetch, profile=profile, refit=True)
+                tried.extend(got)
+                if ch and ch["carries"] < NO_ARRANGEMENT:
+                    return ch, path, tried
     reserved = set(used or ())
     for reuse in ([False, True] if reserved else [False]):
         for pool_name, pool in pools:
@@ -468,25 +477,28 @@ def entry_s(choice):
     return float(p["t"]) if p and p.get("t") is not None else None
 
 
-def _choose_from(film, marks, cache, pool, pool_name, used=(), call=None, n=AUDITION, fetch=None, profile=None):
+def _choose_from(film, marks, cache, pool, pool_name, used=(), call=None, n=AUDITION, fetch=None, profile=None, refit=False):
     import music_choose
     from score import music as MU
     opts, pen, arc = [], 1.0, False
-    if call is not None and described(pool):
+    if (refit or call is not None) and described(pool):
         # the story first: a model ranks the whole palette by the film's lines, arc and person; the engine then plays
         # each pick by its own measured arc (score.music.arrange(arc=True)), not by a reference-matched section
-        story, why = story_rank(film, pool, call, used=used)
+        if refit:
+            story, why = pool, "This story's licensed choice, refitted to the revised cut."
+        else:
+            story, why = story_rank(film, pool, call, used=used)
         if story:
             opts = [{"cid": t["cid"], "track": t, "section": {}} for t in story]
     if opts:
-        order, by, pen, arc = list(range(len(opts))), "model (story)", STORY_RANK_PEN, True
+        order, by, pen, arc = list(range(len(opts))), "retained" if refit else "model (story)", STORY_RANK_PEN, True
     else:
         available = [t for t in pool if t["cid"] not in used]
         opts, prof = music_choose.shortlist(film, n=8, pool=available)
         if not opts:
             return None, None, []
         order, why, by = list(range(len(opts))), "the closest match to the references by signal", "signal"
-        if call is not None:
+        if call is not None and not refit:
             try:
                 prompt = music_choose._prompt(film, prof, opts)
                 if film.get("tone"):
@@ -619,7 +631,7 @@ def score_chapters(film, marks, kind, cache, call=None, used=(), fetch=None, voi
 # ----------------------------------------------------------------- the workflow shell's music stage
 
 def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None, turn_s=None, payoff_s=None, cache=None, brief="",
-          call=None, used=(), index=None, turn_drop=False):
+          call=None, used=(), index=None, turn_drop=False, preferred_cid=None):
     """One compiled film with music: the song the run was handed (`song`), else a track chosen for it from the
     library. The story's marks come from the caller, else from a model's reading of the film's own lines (the
     reading also gives the film's mood, which the track choice is told, so it is made whenever a model is at hand).
@@ -698,7 +710,8 @@ def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None,
         import music_choose
         text = " ".join(s for _t, s in lines)
         f = facts(kind, marks, brief=(str(brief or "") + " " + text[:400]).strip(), mood=mood, lines=lines)
-        choice, song, tried = choose(f, marks, cache or os.path.join(work, "music_cache"), used=used, call=call, profile=MU.profile_for(music_choose.ENGINE_KIND.get(f["kind"], kind)))
+        choice, song, tried = choose(f, marks, cache or os.path.join(work, "music_cache"), used=used, call=call, profile=MU.profile_for(music_choose.ENGINE_KIND.get(f["kind"], kind)),
+                                     **({"preferred_cid": preferred_cid} if preferred_cid else {}))
         rep["film"], rep["tried"] = f, tried
         if not choice:
             rep["why"] = "no library track could be had for this film"
@@ -804,6 +817,7 @@ def main(argv=None):
     ap.add_argument("--film")
     ap.add_argument("--out")
     ap.add_argument("--kind", default="stories")
+    ap.add_argument("--preferred-cid", help="Re-audition this run's licensed track against the revised cut first")
     ap.add_argument("--song")
     ap.add_argument("--vocals")
     ap.add_argument("--turn", type=float)
@@ -817,7 +831,7 @@ def main(argv=None):
     work = a.work or os.path.dirname(os.path.abspath(a.l1))
     try:
         rep = score(l1, work, film=a.film, out=a.out, kind=a.kind, song=a.song, vocals=a.vocals, turn_s=a.turn, payoff_s=a.payoff, cache=a.cache,
-                    brief=a.brief, call=openai_call(), turn_drop=a.turn_drop)
+                    brief=a.brief, call=openai_call(), turn_drop=a.turn_drop, preferred_cid=a.preferred_cid)
     except Exception as ex:  # noqa: BLE001 - the clean film is delivered either way; the reason is on file
         rep = {"ok": False, "why": f"{type(ex).__name__}: {str(ex)[:300]}"}
     if a.report:
