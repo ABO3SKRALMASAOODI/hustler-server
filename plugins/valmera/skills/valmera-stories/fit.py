@@ -518,7 +518,7 @@ def candidates(pack):
         for r in recs:
             out.append(dict(path=r["path"], kind="photo", subject=name, line=None, takes=[(0.0, 0.0)],
                             meta=dict(title=r.get("title"), description=r.get("description"), caption=r.get("shows"), page=r.get("page"),
-                                      date=r.get("date"))))
+                                      date=r.get("image_date") or r.get("date"))))
     for ln in pack.get("footage") or []:
         for c in ln.get("clips") or []:
             s = c.get("source") or {}

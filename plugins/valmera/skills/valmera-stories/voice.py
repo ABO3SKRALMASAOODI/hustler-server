@@ -226,6 +226,7 @@ class Read:
         self.generated_takes = 0
         self.group_offset = 0
         self.picks = []
+        self.edge_context = None
         self.reset_context()
 
     def reset_context(self):
@@ -291,7 +292,11 @@ class Read:
             bonus += t["cadence_bonus"]
             t["bonus"] = round(bonus, 1)
             t["net"] = round(t["score"] - t["drift"] + bonus, 1)
-        best = min(takes, key=lambda t: (t["errs"], -t["net"]))
+        if self.edge_context:
+            from voice_joins import native_edge_cost
+            best = min(takes, key=lambda t: (t["errs"], native_edge_cost(t, self.edge_context), -t["net"]))
+        else:
+            best = min(takes, key=lambda t: (t["errs"], -t["net"]))
         self.keep_contour(self.ends(best), best.get("cadence"))
         self.picks.append(dict(file=best.get("file"), net=best["net"], bonus=best.get("bonus"), restart_st=best.get("restart_st"),
                                range_st=(best.get("feat") or {}).get("range_st"), cadence=best.get("cadence"),
@@ -320,7 +325,7 @@ class Read:
         return np.concatenate(parts).astype(np.float32), bounds, chunks
 
 
-def render(a):
+def render(a, edge_context=None, group_offset=0):
     import narrate as N
     N.malloc_returns_memory()            # a workflow calling render from its own entry point (long-form) gets it too
     import lines as LN
@@ -332,6 +337,7 @@ def render(a):
     groups = groups_of(script["segments"])
     gs = group_script(script, groups)
     rd = Read(N, LN, PF, prosody)
+    rd.edge_context = edge_context
     LN.generate_phonon = rd.generate_phonon
     LN.join_lines = rd.join_lines
     PF.choose = rd.choose
@@ -357,14 +363,15 @@ def render(a):
         finish(folder, local, local_groups, rd.picks, max_tempo=LN.MAX_TEMPO)
 
     previous = os.environ.get("STORIES_PREVIOUS_READ")
-    if previous and N.pick_engine(args, gs) == "phonon":
+    if previous and edge_context is None and N.pick_engine(args, gs) == "phonon":
         import timing_audio
         (out / "_generations.json").write_text(json.dumps(gs, ensure_ascii=False, indent=1))
         voice = "phonon:" + LN.phonon_voice(args, gs)
         if timing_audio.repair(Path(previous), out, script, gs, groups, a.band, voice, rd, read_block):
             return
         rd.reset_context()
-    read_block(out, script, groups, gs)
+    read_block(out, script, groups, gs, group_offset)
+    return rd.generated_takes
 
 
 # ----------------------------------------------------------------- the finish on the mastered read
@@ -749,6 +756,10 @@ def main():
     f = sub.add_parser("finish", help="the finish alone, on a read already rendered from this script")
     f.add_argument("script")
     f.add_argument("--out", required=True)
+    j = sub.add_parser("match-joins")
+    j.add_argument("folder", type=Path)
+    j.add_argument("out", type=Path)
+    j.add_argument("donors", type=Path, nargs="*")
     lv = sub.add_parser("level-voices")
     lv.add_argument("dir")
     a = ap.parse_args()
@@ -761,6 +772,13 @@ def main():
     if a.cmd == "render":
         import narrate as N
         N.malloc_returns_memory()        # before the chdir: the arguments may be relative paths
+    if a.cmd == "match-joins":
+        import voice_joins
+        if voice_joins.repair(a.folder, a.donors, a.out):
+            import narrate as N
+            band = json.loads((a.out / "render.json").read_text())["band"]
+            N.check(argparse.Namespace(dir=str(a.out), band=band))
+        return
     os.chdir(NARR)
     if a.cmd == "render":
         return render(a)

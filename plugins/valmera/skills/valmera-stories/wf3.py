@@ -20,6 +20,7 @@ import json
 import math
 import os
 import sys
+import subprocess
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -530,9 +531,13 @@ def narrate_script(ctx, sc, out, previous=None):
     return PX.narrate(ns, out, band=band, label=f"wf3-narrate-{ctx.run_id}", env=env, reader=os.path.join(HERE, "voice.py"))
 
 
-def _words_of(sc):
-    """The words a read speaks: each segment's line, in order."""
-    return [str(s_.get("say") or "") for s_ in sc.get("segments") or []]
+def _spoken_request(sc):
+    read = writer.narration_script(sc, writer.FORMS[FORM]["band"])
+    read.pop("title", None)
+    for segment in read["segments"]:
+        # The Stories reader sets the gap from the actual beat at the next generation.
+        segment.pop("pause_after", None)
+    return read
 
 
 def timed(ctx, sc, rep, spend, narrate=None, rewrite=None, final=None):
@@ -579,7 +584,7 @@ def timed(ctx, sc, rep, spend, narrate=None, rewrite=None, final=None):
         asks += 1
         new, uses, changed = rewrite(cur, m, notes)    # the last read's measure stands until the words change
         spend += [dict(stage="timing", **u) for u in uses if u]
-        if not changed or _words_of(new) == _words_of(cur):
+        if not changed or _spoken_request(new) == _spoken_request(cur):
             notes = "your last answer changed none of the words of the beats asked for"
             tries.append(dict(ask=asks, read=False, why="no word changed"))
             continue
@@ -590,7 +595,7 @@ def timed(ctx, sc, rep, spend, narrate=None, rewrite=None, final=None):
             ctx.log(f"timing: {notes}"[:300])
             tries.append(dict(ask=asks, read=False, why=notes[:300]))
             continue
-        if _words_of(new) == _words_of(cur):           # the fact check restored the words that were read
+        if _spoken_request(new) == _spoken_request(cur):           # the fact check restored the words that were read
             notes = "the fact check put back the words you rewrote; land the beat inside its quotes"
             tries.append(dict(ask=asks, read=False, why="the fact check restored the read words"))
             continue
@@ -601,11 +606,34 @@ def timed(ctx, sc, rep, spend, narrate=None, rewrite=None, final=None):
     _, k, sc2, rep2, out, rec = best
     final_dir = os.path.join(ctx.supply, "narration")
     if os.path.isdir(out):
-        shutil.rmtree(final_dir, ignore_errors=True)
-        os.replace(out, final_dir)
+        with tempfile.TemporaryDirectory(prefix="join-match-", dir=ctx.supply) as scratch:
+            check_path = os.path.join(out, "check.json")
+            prepared = os.path.join(scratch, "master")
+            if os.path.isfile(check_path) and (json.load(open(check_path)).get("joins") or {}).get("with_artefact"):
+                donors = [os.path.join(ctx.supply, f"narration_t{j}") for j in range(len(rounds)) if j != k]
+                os.mkdir(prepared)
+                import fcntl
+                env = dict(os.environ, TMPDIR=ctx.tmp, VALMERA_RUN=ctx.run_id, VALMERA_SKILL="wf3")
+                with open(PX.NARRATE_LOCK, "a") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    command = [PX.NARRATE_PY, os.path.join(HERE, "voice.py"), "match-joins", out, prepared, *donors]
+                    for attempt in range(2):
+                        child = subprocess.run(command, cwd=os.path.dirname(PX.NARRATE), env=env)
+                        if child.returncode == 0:
+                            break
+                        ctx.log(f"narration join assembly exited {child.returncode} on attempt {attempt+1}")
+                        shutil.rmtree(prepared)
+                        os.mkdir(prepared)
+            chosen = out
+            if os.path.isfile(os.path.join(prepared, "check.json")):
+                grouped = os.path.join(out, "_generations.json")
+                if os.path.isfile(grouped):
+                    shutil.copy2(grouped, prepared)
+                chosen = prepared
+            shutil.rmtree(final_dir, ignore_errors=True)
+            os.replace(chosen, final_dir)
     for j in range(len(rounds)):
-        if os.path.join(ctx.supply, f"narration_t{j}") != out:
-            shutil.rmtree(os.path.join(ctx.supply, f"narration_t{j}"), ignore_errors=True)
+        shutil.rmtree(os.path.join(ctx.supply, f"narration_t{j}"), ignore_errors=True)
     sc2 = dict(sc2, timing=dict(kept=k, rounds=rounds, asks=tries, budgets=dict(hook_land_s=timing.HOOK_LAND_S, close_s=timing.CLOSE_S)))
     json.dump(dict(script=sc2, report=dict(kept=k, rounds=rounds, asks=tries)), open(os.path.join(ctx.run_dir, "script_timing.json"), "w"),
               ensure_ascii=False, indent=1)
@@ -937,6 +965,10 @@ def supply(ctx, script):
             have = {r["path"] for r in got.get(k) or []}
             got.setdefault(k, []).extend(r for r in v if r["path"] not in have)
         reports, usd = reports + reports2, round(usd + usd2, 4)
+        import publisher_pictures
+        extra_reports, uses = publisher_pictures.supply(sc, subj, got, os.path.join(sup_dir, "pics"), per)
+        reports.extend(extra_reports)
+        spend.extend(uses)
         keep_photos(pack, got, reports, usd, spend)
         searched = {x.get("key") or x["name"] for x in subj}
         pack["missing"] = [n["name"] for n in named if n["name"] in searched and not got.get(n["name"])]
@@ -1558,7 +1590,7 @@ def tag_things(foot, script):
     return foot
 
 
-FOOTAGE_FLAGS = dict(strict_lines=True, motion_first=True, alloc="round", reassign_lost=True, verify=False, whole_first=True, keep_sources=True)
+FOOTAGE_FLAGS = dict(strict_lines=True, motion_first=True, scout_motion=True, alloc="round", reassign_lost=True, verify=False, whole_first=True, keep_sources=True)
 
 
 def footage_kw(reel_kw, **more):

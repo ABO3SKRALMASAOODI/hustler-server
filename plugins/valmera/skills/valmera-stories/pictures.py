@@ -158,13 +158,13 @@ def pictures(named, out, per=4, min_px=700):
     return res, reports, round(usd, 4)
 
 
-def commons_file(title, out, want_w=4000):
+def commons_file(title, out, want_w=4000, download_original=None):
     """One exact Wikimedia Commons file, its licence and credit from the file's own metadata. Raises when the licence
     is not free (public domain, CC0, CC BY, CC BY-SA)."""
     B = _worker()
     title = title if title.startswith("File:") else "File:" + title
     q = urllib.parse.urlencode(dict(action="query", titles=title, prop="imageinfo", iiprop="url|size|extmetadata|mime",
-                                    iiurlwidth=want_w, format="json"))
+                                    format="json", **({"iiurlwidth": want_w} if want_w else {})))
     req = urllib.request.Request("https://commons.wikimedia.org/w/api.php?" + q, headers={"User-Agent": UA})
     d = json.load(urllib.request.urlopen(req, timeout=30))
     page = next(iter(d["query"]["pages"].values()))
@@ -176,13 +176,16 @@ def commons_file(title, out, want_w=4000):
     lic = B.canon_licence(raw, (md.get("LicenseUrl") or {}).get("value"))
     if not lic:
         raise RuntimeError(f"{title}: licence {raw!r} is not free")
-    url = ii.get("thumburl") if ii.get("width", 0) > want_w and ii.get("thumburl") else ii["url"]
+    url = ii.get("thumburl") if want_w and ii.get("width", 0) > want_w and ii.get("thumburl") else ii["url"]
     os.makedirs(out, exist_ok=True)
     ext = os.path.splitext(urllib.parse.urlparse(url).path)[1].lower() or ".jpg"
     path = os.path.join(out, "photo" + (ext if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff") else ".jpg"))
     req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=120) as r, open(path, "wb") as f:
-        f.write(r.read())
+    if download_original:
+        download_original(url, path)
+    else:
+        with urllib.request.urlopen(req, timeout=120) as r, open(path, "wb") as f:
+            f.write(r.read())
     if not path.endswith((".jpg", ".jpeg", ".png")):
         jp = os.path.join(out, "photo.jpg")
         subprocess.run([FF, "-v", "error", "-y", "-i", path, "-q:v", "2", jp], check=True)
@@ -195,6 +198,7 @@ def commons_file(title, out, want_w=4000):
     strip = lambda s: html.unescape(re.sub(r"<[^>]+>", "", s or "")).strip()   # noqa: E731 - markup off a metadata field
     return dict(name=title, path=path, w=w, h=h, provider="wikimedia", title=title, licence=lic[0], licence_url=lic[1],
                 credit=strip((md.get("Artist") or {}).get("value"))[:160], page=ii.get("descriptionurl"), url=ii["url"],
+                image_date=strip((md.get("DateTimeOriginal") or {}).get("value")),
                 description=strip((md.get("ImageDescription") or {}).get("value"))[:1500])
 
 
