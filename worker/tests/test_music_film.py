@@ -266,3 +266,19 @@ def test_podcast_score_resamples_the_spine_and_muxes_the_arrangement(songs, tmp_
     assert os.path.getsize(output) > 0
     with np.load(tmp_path / "mix_stems.npz") as stems:
         assert np.max(np.abs(stems["bed"])) > .01
+
+
+def test_story_mix_carries_the_arranged_recording_through_the_brand(tmp_path, monkeypatch):
+    import numpy as np
+    from score import music
+    from scene import audio
+    samples = np.zeros((music.SR, 2), np.float32)
+    monkeypatch.setattr(music, "_decode", lambda *a: samples)
+    monkeypatch.setattr(music, "analyse", lambda *a, **kw: dict(bar_s=2., bars=[dict(t0=12.)]))
+    monkeypatch.setattr(music, "arrange", lambda *a, **kw: dict(ok=True, segments=[dict(tempo=.9)],
+                       end_hit_bar=0, end_hit_s=.5))
+    monkeypatch.setattr(music, "track", lambda *a, **kw: (samples, {}))
+    monkeypatch.setattr(audio, "master", lambda *a: {})
+    song = str(tmp_path / "licensed.mp3")
+    report = music.mix_film("copied.mp4", song, dict(words=[(0, .5)]), kind="stories")
+    assert report["card_bed"] == dict(path=song, bar_s=2., tempo=.9, at_s=12.45)

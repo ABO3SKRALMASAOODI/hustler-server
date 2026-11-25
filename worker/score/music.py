@@ -1921,10 +1921,14 @@ def podcast_bed(music, voice, marks, song, plan, song_path, report):
             report["opening_bed_dbfs"] = round(float(10*np.log10(max(1e-12,np.mean(music[:first]**2)))), 2)
     duck_spoken_words(music, voice, marks.get("words", []))
     report["podcast_bed_version"] = 2
+    report["card_bed"] = card_continuation(marks, song, plan, song_path)
+
+
+def card_continuation(marks, song, plan, song_path):
+    """Position on the same licensed recording at the programme/card boundary."""
     tempo = plan["segments"][-1].get("tempo") or plan["tempo"]
-    report["card_bed"] = dict(path=os.path.abspath(song_path), tempo=tempo, bar_s=song.get("bar_s"),
-                              at_s=song["bars"][plan["end_hit_bar"]]["t0"] +
-                                   (marks["dur_s"]-plan["end_hit_s"])*tempo)
+    source_end = song["bars"][plan["end_hit_bar"]]["t0"] + (marks["dur_s"] - plan["end_hit_s"]) * tempo
+    return dict(path=os.path.abspath(song_path), tempo=tempo, bar_s=song.get("bar_s"), at_s=source_end)
 
 
 def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind="stories", index=None, prog_end_f=None, payoff_s=None, supplied=True,
@@ -1971,6 +1975,8 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
         music, mrep = track(song_path, song, plan, marks, voice=lv[:int(marks["dur_s"] * SR)], profile=prof)
         if kind == "podcast":
             podcast_bed(music, lv, marks, song, plan, song_path, rep)
+        elif kind == "stories":
+            rep["card_bed"] = card_continuation(marks, song, plan, song_path)
         # with the bed known, each placed sound is made to be there over the voice and the song together
         if kind == 'podcast':
             from . import audibility
@@ -2090,6 +2096,8 @@ def mix_film(film, song_path, marks, out=None, kind="stories", vocals=None, sung
             music, mrep = track(song_path, song, plan, marks, voice=prog[:n_prog], profile=prof)
             if kind == "podcast":
                 podcast_bed(music,prog,marks,song,plan,song_path,rep)
+            elif kind == "stories":
+                rep["card_bed"] = card_continuation(marks, song, plan, song_path)
         if not marks["words"]:                              # nobody speaks: the music is set against the film's own level, not a voice's
             i, _tp, _ = AU.loudness_of(prog, tmp) if float(np.abs(prog).max()) > 1e-5 else (None, None, None)
             if i is not None and i > -70:
