@@ -138,11 +138,8 @@ def sources_md(folder):
     wf3.screen_credits; what was supplied and never shown is checks.stories.credits_supplied, kept out), the music."""
     rec = jload(os.path.join(folder, "film.json"), {}) or {}
     sc = (rec.get("script") or {}).get("script") or {}
-    from wf4_sources import story_arc
-    arc = story_arc(rec.get("script") or {}, cited=True)
-    if arc:
-        with open(os.path.join(folder, "STORY.md"), "w", encoding="utf-8") as companion:
-            companion.write("\n".join(arc) + "\n")
+    from wf4_sources import story_sidecar
+    story_sidecar(folder, rec.get("script") or {})
     st = (rec.get("checks") or {}).get("stories") or {}
     out = [f"# {sc.get('title') or rec.get('idea')}", "", f"Style: {(rec.get('style') or {}).get('name')}. Delivered {rec.get('delivered')}.", "",
            "## Facts (each quote fetched and found on its page)", ""]

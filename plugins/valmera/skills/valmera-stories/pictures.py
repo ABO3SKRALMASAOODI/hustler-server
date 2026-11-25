@@ -66,7 +66,45 @@ def _worker():
 
 # ----------------------------------------------------------------- the voice
 
-def narrate(nscript, out, band="03", label="narrate", env=None, timeout=5400, reader=None):
+def paced_master(out, band, reader, check, env):
+    """Reuse the finished voice. Cache a retimed bundle only once all of its receipts exist."""
+    import hashlib
+    import tempfile
+    from pathlib import Path
+    src = Path(out)
+    pace = (check.get("in_band") or {}).get("wpm") or {}
+    bounds, measured = pace.get("band"), pace.get("value")
+    if not bounds or not measured or measured <= bounds[1]:
+        return out
+    # Aim inside the measured band, retaining the take's natural rhythm.
+    factor = round(max(1 / 1.12, (bounds[1] * .96) / measured), 4)
+    key = hashlib.sha256(f"{band}:{factor}".encode())
+    for filename in ("narration.wav", "words.json", "render.json", "narration_script.json"):
+        with (src / filename).open("rb") as file:
+            for block in iter(lambda: file.read(1024 * 1024), b""):
+                key.update(block)
+    dst = src / ("paced-" + key.hexdigest()[:16])
+    if (dst / "check.json").exists():
+        return str(dst)
+    with tempfile.TemporaryDirectory(dir=src) as td:
+        bundle = Path(td) / "master"
+        subprocess.run([NARRATE_PY, reader, "pace-master", str(src.resolve()), str(bundle.resolve()), str(factor)],
+                       check=True, capture_output=True, text=True, env=env, timeout=120)
+        subprocess.run([NARRATE_PY, NARRATE, "check", str(bundle.resolve()), "--band", band],
+                       cwd=os.path.dirname(NARRATE), check=True, capture_output=True, text=True, env=env, timeout=1800)
+        receipt = bundle / "check.json"
+        checked = json.loads(receipt.read_text())
+        checked["dir"] = str(dst.resolve())
+        receipt.write_text(json.dumps(checked, indent=1))
+        try:
+            bundle.rename(dst)
+        except OSError:
+            if not (dst / "check.json").is_file():
+                raise
+    return str(dst)
+
+
+def narrate(nscript, out, band="03", label="narrate", env=None, timeout=5400, reader=None, repair_fast_read=False):
     """narration.wav and words.json in `out`. A stopped render resumes at its next chunk (the tool keeps _state).
     reader: a script that reads with the narrate tool's parts its own way (workflow 3: voice.py), same arguments."""
     os.makedirs(out, exist_ok=True)
@@ -87,6 +125,10 @@ def narrate(nscript, out, band="03", label="narrate", env=None, timeout=5400, re
         subprocess.run([NARRATE_PY, NARRATE, "check", out, "--band", band], cwd=os.path.dirname(NARRATE),
                        capture_output=True, text=True, timeout=1800, env=env)
     chk = json.load(open(os.path.join(out, "check.json"))) if os.path.exists(os.path.join(out, "check.json")) else {}
+    if repair_fast_read:
+        out = paced_master(out, band, reader, chk, env)
+        if os.path.exists(os.path.join(out, "check.json")):
+            chk = json.load(open(os.path.join(out, "check.json")))
     w = json.load(open(os.path.join(out, "words.json")))
     g, ib = chk.get("gate") or {}, chk.get("in_band") or {}
     return dict(wav=os.path.join(out, "narration.wav"), words=os.path.join(out, "words.json"), duration=w["duration"],

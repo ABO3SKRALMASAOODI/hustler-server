@@ -375,6 +375,9 @@ def run(a):
         state["out_root"] = os.path.abspath(a.out)
     jsave(os.path.join(run_dir, "run.json"), state)
     ctx = Ctx(run_dir, state, state_root)
+    if ctx.workflow == "wf2" and os.environ.get("CODEX_PROXY_LOCAL") == "1":
+        # The local proxy reads its proof tag first, including in child processes.
+        os.environ.update(CODEX_PROXY_PROOF=ctx.run_id, VALMERA_RUN=ctx.run_id)
     sounds = chain.use_sound_set()           # the workflow films' own sound-effect set, placed by what the picture does
     if sounds:
         ctx.log(f"sound set: {sounds}")

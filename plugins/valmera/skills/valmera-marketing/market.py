@@ -144,6 +144,10 @@ def sources_md(folder):
     """SOURCES.md beside the film: every fact's page, every clip and photograph with its source and licence, the music."""
     rec = jload(os.path.join(folder, "film.json"), {}) or {}
     sc = (rec.get("script") or {}).get("script") or {}
+    from wf4_sources import story_sidecar
+    script = rec.get("script") or {}
+    story_sidecar(folder, script, script.get("receipts") or
+                  ((rec.get("checks") or {}).get("marketing") or {}).get("receipts"))
     st = (rec.get("checks") or {}).get("stories") or {}
     out = [f"# {sc.get('title') or rec.get('idea')}", "", f"Style: {(rec.get('style') or {}).get('name')}. Delivered {rec.get('delivered')}.", "",
            "## Facts (each quote fetched and found on its page)", ""]

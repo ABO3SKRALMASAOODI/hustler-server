@@ -80,3 +80,12 @@ def test_timing_rewrite_reads_only_the_changed_native_group(tmp_path, monkeypatc
     assert len(checked) == 2 and checked[0][:4] == checked[1][:4]
     rep = json.loads((Path(ctx.supply)/"narration"/"render.json").read_text())
     assert rep["stories_read"]["timing_repair"]["reused_groups"] == [0, None]
+
+
+def test_successful_cli_render_keeps_take_count_out_of_exit_status(tmp_path, monkeypatch):
+    import sys
+    monkeypatch.setattr(sys, "argv", ["voice.py", "render", "script", "--out", str(tmp_path)])
+    monkeypatch.setattr(voice, "render", lambda args: 48)
+    monkeypatch.setattr(narrate, "malloc_returns_memory", lambda: None)
+    monkeypatch.setattr(voice.os, "chdir", lambda path: None)
+    assert (voice.main() or 0) == 0

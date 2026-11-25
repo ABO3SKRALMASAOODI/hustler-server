@@ -216,7 +216,13 @@ def drive(run, sid, browser="chrome"):
             clip_dir = os.path.join(CORPUS, self.a.sid, "media", "1")
             clip = os.path.join(clip_dir, sorted(os.listdir(clip_dir))[0])
             asks = [dict(text=s["prompt"], phase=s.get("typed_phase")) for s in self.log.doc.get("steps") or [] if s.get("prompt")]
-            doc = dict(i=i, sid=self.a.sid, text=text, asks=asks, state="done", failures=list(self.log.doc.get("failures") or []),
+            if not hasattr(self, "indexed_words"):
+                indexed = self.stack.q("SELECT json->'words' AS words FROM indexes WHERE video_sha256=%s",
+                                       (sha256(clip),), one=True) or {}
+                self.indexed_words = [{k: w[k] for k in ("w", "t0", "t1")} for w in indexed.get("words") or []]
+                with open(os.path.join(self.out, "words.json"), "w") as f:
+                    json.dump(self.indexed_words, f)
+            doc = dict(words=self.indexed_words, i=i, sid=self.a.sid, text=text, asks=asks, state="done", failures=list(self.log.doc.get("failures") or []),
                        source=dict(file=st.get("source"), t0=st.get("t0"), t1=st.get("t1")),
                        upload=dict(file=clip, sha256=sha256(clip), **probe(clip)), exports=exports, at=time.time())
             with open(os.path.join(d, f"turn_{i}.json.part"), "w") as f:
@@ -529,6 +535,7 @@ def collect_one(run, sid):
                              edl_before=s.get("edl_before"), edl_after=s.get("edl_after"), changed=s.get("edit_changed"),
                              follow_up=bool(s.get("follow_up")), written_from=s.get("written_from")))
     rec = dict(sid=sid, run=run, be_sha=j.get("be_sha"), fe_sha=j.get("fe_sha"), account=dict(plan=j.get("plan"), cls=j.get("account_class")),
+               words=json.load(open(os.path.join(sdir, "words.json"))) if os.path.isfile(os.path.join(sdir, "words.json")) else [],
                models=j.get("settings"), recorded_at=j.get("started_at"), state=j.get("state"), failures=j.get("failures"),
                source=dict(file=sess["studio"]["source"], t0=sess["studio"]["t0"], t1=sess["studio"]["t1"]),
                upload=dict(file=os.path.join(out, "upload.mp4"), sha256=sha256(os.path.join(tmp, "upload.mp4")), **probe(os.path.join(tmp, "upload.mp4"))),

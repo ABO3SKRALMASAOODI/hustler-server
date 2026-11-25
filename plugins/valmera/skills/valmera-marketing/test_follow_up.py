@@ -308,3 +308,50 @@ def test_a_session_with_follow_ups_writes_live_steps_and_its_record_keeps_every_
     assert [e["tag"] for e in rec["exports"]] == ["ask1", "ask2", "final"] and all(len(e["sha256"]) == 64 for e in rec["exports"])
     assert rec["turns"][0]["answer"] == dict(text=F1)
     assert P.asks_of(rec) == [S1, F1]
+
+
+def test_recorded_insert_and_word_edges_are_visible():
+    ex = dict(dur=13.433, fps=30)
+    edl = dict(overlays=[dict(id="ov2", kind="image", start=7.96, duration_s=.70)])
+    times = P.review_times(ex, edl, [dict(w="mining", t0=8.30, t1=8.66)])
+    assert {239, 249, 259, 260} <= {round(t * 30) for t in times}
+
+
+def test_studio_keeps_factory_attribution(monkeypatch):
+    monkeypatch.setenv("CODEX_PROXY_PROOF", "factory-c1-marketing")
+    settings = P.record_settings("11252023-e640ed")
+    for key in ("env", "backend_env"):
+        assert settings[key]["VALMERA_RUN"] == "11252023-e640ed"
+        assert settings[key]["CODEX_PROXY_PROOF"] == "11252023-e640ed"
+    assert "VALMERA_RUN" not in P.STACK["env"]
+
+
+def test_marketing_story_sidecar(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(os.path.join(os.path.dirname(HERE), "_shell"))
+    from importlib.util import spec_from_file_location, module_from_spec
+    spec = spec_from_file_location("marketing_cli", os.path.join(HERE, "market.py"))
+    market = module_from_spec(spec)
+    spec.loader.exec_module(market)
+    story = dict(segments=[dict(beat=k, say=s) for k, s in
+                           [("hook", "The old cut."), ("turn", "One request."), ("payoff", "The result.")]])
+    (tmp_path / "film.json").write_text(json.dumps(dict(script=dict(script=story))))
+    market.sources_md(tmp_path)
+    lines = (tmp_path / "STORY.md").read_text().splitlines()
+    assert len(lines) == 3
+    assert all(s["say"] in line for s, line in zip(story["segments"], lines))
+
+
+def test_missing_display_phrases_use_authored_copy_without_rewriting_the_script():
+    from copy import deepcopy
+    segments = [
+        dict(say="The next says hundreds of millions of dollars.",
+             show=[dict(text="HUNDREDS OF MILLIONS OF DOLLARS")]),
+        dict(say="Cuban says both in one breath.", emphasis=["one breath"], show=[]),
+        dict(say="Try Valmera.", fallback_text="VALMERA.IO"),
+    ]
+    original = deepcopy(segments)
+    P.fill_display_phrases(dict(segments=segments))
+    assert [s["fallback_text"] for s in segments] == [
+        "HUNDREDS OF MILLIONS OF DOLLARS", "one breath", "VALMERA.IO"]
+    for before, after in zip(original, segments):
+        assert all(after[k] == v for k, v in before.items())

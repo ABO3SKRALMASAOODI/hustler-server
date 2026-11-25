@@ -39,6 +39,23 @@ def story_arc(script, *, cited=False):
     return lines
 
 
+def story_sidecar(folder, script, recording=None):
+    lines = story_arc(script, cited=True)
+    if len(lines) < 3 and recording:
+        # A showcase has no narration. Describe the published demonstration from its recording.
+        idea = script.get("idea_full") or {}
+        result = script.get("export_check") or {}
+        elements = [e.get("how") for e in result.get("elements") or [] if e.get("visible") and e.get("how")]
+        parts = (idea.get("pain") or idea.get("hook"), recording.get("typed"),
+                 " ".join(elements) or result.get("looks"))
+        if all(parts):
+            lines = [f"- **{role}** — " + " ".join(value.split()) for role, value in
+                     zip(("Setup", "Turn", "Payoff"), parts)]
+    if lines:
+        (Path(folder) / "STORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return lines
+
+
 def citations(script):
     dossier = script.get("dossier") or {}
     facts = {f["id"]: f for f in script.get("facts_cited") or []}

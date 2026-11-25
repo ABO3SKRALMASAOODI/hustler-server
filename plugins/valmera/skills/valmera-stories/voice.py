@@ -529,16 +529,18 @@ def artic(words):
     return len(words) / max(t, 1e-3) * 60
 
 
-def pace(x, sr, words, ffmpeg):
+def pace(x, sr, words, ffmpeg, factor=None):
     """The read played faster, pitch kept (ffmpeg atempo, WSOLA), when it speaks slower than ARTIC_AIM; at most 1.12x.
     Word times scale with it. Returns (x, factor)."""
     import subprocess
     import tempfile
     import soundfile as sf
-    a = artic(words)
-    if not a or a >= ARTIC_AIM - 6:
-        return x, 1.0
-    f = round(min(ARTIC_AIM / a, 1.12), 4)
+    if factor is None:
+        a = artic(words)
+        if not a or a >= ARTIC_AIM - 6:
+            return x, 1.0
+        factor = min(ARTIC_AIM / a, 1.12)
+    f = round(factor, 4)
     with tempfile.TemporaryDirectory() as td:
         src, dst = os.path.join(td, "a.wav"), os.path.join(td, "b.wav")
         sf.write(src, x, sr, subtype="FLOAT")
@@ -714,6 +716,54 @@ def finish(out, script, groups, picks=None, tone_fn=None, max_tempo=1.0):
     print(json.dumps(dict(narration=str(out / "narration.wav"), lra=rep["lra"], focus=len(hits), lufs=rep["lufs"])))
 
 
+def pace_master(src, dst, factor):
+    """Retime the mastered take and its program-time receipts together, preserving pitch and wording."""
+    import soundfile as sf
+    import narrate
+    wj = json.loads((src / "words.json").read_text())
+    report = json.loads((src / "render.json").read_text())
+    x, sr = sf.read(src / "narration.wav", dtype="float32")
+    y, f = pace(x, sr, wj["words"], narrate.FFMPEG, factor)
+    if f == 1.0:
+        raise RuntimeError("ffmpeg could not retime the narration master")
+    # WSOLA overlaps can pulse in room tone. Carry the native quiet between
+    # words through the same clock map, crossfading its edges into the WSOLA read.
+    import measure
+    for boundary in report.get("boundaries", []):
+        gap = measure.gap_at(x, sr, boundary["t"])
+        if not gap:
+            continue
+        left, right = [max(0, round(t * sr / f)) for t in gap]
+        right = min(right, len(y))
+        if right - left < .05 * sr:
+            continue
+        positions = np.arange(left, right) * f
+        start, stop = max(0, int(positions[0])), min(len(x), math.ceil(positions[-1]) + 1)
+        native = np.interp(positions, np.arange(start, stop), x[start:stop])
+        blend = np.ones(right - left)
+        fade = min(round(.015 * sr), len(blend) // 2)
+        blend[:fade] = np.linspace(0, 1, fade)
+        blend[-fade:] = blend[:fade][::-1]
+        y[left:right] += blend * (native - y[left:right])
+
+    def scale(value):
+        return round(value / f, 3)
+    for span in [*wj.get("phrases", []), *report["chunks"]]:
+        span["start"], span["end"] = scale(span["start"]), scale(span["end"])
+    wj["cut_points"] = [scale(t) for t in wj.get("cut_points", [])]
+    for boundary in report.get("boundaries", []):
+        boundary["t"] = scale(boundary["t"])
+        if boundary.get("gap"):
+            boundary["gap"] = [scale(t) for t in boundary["gap"]]
+    wj["duration"] = report["duration_s"] = round(len(y) / sr, 2)
+    report["stories_read"]["master_tempo"] = f
+    dst.mkdir(parents=True, exist_ok=True)
+    sf.write(dst / "narration.wav", y, sr, subtype="PCM_24")
+    (dst / "words.json").write_text(json.dumps(wj, indent=1))
+    (dst / "render.json").write_text(json.dumps(report, indent=1))
+    (dst / "narration_script.json").write_bytes((src / "narration_script.json").read_bytes())
+
+
 def level_voices(a):
     """Each real voice cut into the narration (narrate.py splice) brought to the narrator's own loudness around it,
     K-weighted (BS.1770), within 1 LU: an archive clip's narrow band under-reads by RMS (VO2: -3.6 LU)."""
@@ -753,6 +803,10 @@ def main():
     r.add_argument("script")
     r.add_argument("--out", required=True)
     r.add_argument("--band", default="03")
+    m = sub.add_parser("pace-master")
+    m.add_argument("src", type=Path)
+    m.add_argument("dst", type=Path)
+    m.add_argument("factor", type=float)
     f = sub.add_parser("finish", help="the finish alone, on a read already rendered from this script")
     f.add_argument("script")
     f.add_argument("--out", required=True)
@@ -779,9 +833,13 @@ def main():
             band = json.loads((a.out / "render.json").read_text())["band"]
             N.check(argparse.Namespace(dir=str(a.out), band=band))
         return
+    if a.cmd == "pace-master":
+        pace_master(a.src, a.dst, a.factor)
+        return
     os.chdir(NARR)
     if a.cmd == "render":
-        return render(a)
+        render(a)  # callers of render() use its take count; a successful CLI run exits zero
+        return
     if a.cmd == "finish":
         script = json.load(open(a.script))
         return finish(a.out, script, groups_of(script["segments"]))

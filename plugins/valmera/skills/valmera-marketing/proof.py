@@ -570,6 +570,12 @@ def snap_window(words, t0, t1):
     return round(max(a - 0.25, 0.0), 2), round(b + 0.15, 2)
 
 
+def record_settings(run_id):
+    # The gauntlet builds isolated environments for its web and worker processes.
+    tags = dict(VALMERA_RUN=run_id, CODEX_PROXY_PROOF=run_id)
+    return dict(STACK, env={**STACK["env"], **tags}, backend_env={**STACK.get("backend_env", {}), **tags})
+
+
 def record(ctx, idea, k, ask_text, follow_ups=None):
     """One session on a local stack of the product: upload the clip, type the sentence before the first result, export.
     While the session stays open each result is exported and checked against everything typed so far (answer_turn);
@@ -600,7 +606,7 @@ def record(ctx, idea, k, ask_text, follow_ups=None):
     row = dict(sid=sid, source=idea["file"], t0=t0, t1=t1, plan=PLAN, view=VIEW, asks=asks, note=idea.get("title"))
     if n_follow:
         row["follow_ups"] = dict(dir=live, wait_s=FOLLOW_UP_WAIT_S)
-    spec = dict(settings=STACK, sessions=[row])
+    spec = dict(settings=record_settings(ctx.run_id), sessions=[row])
     sp = os.path.join(ctx.run_dir, f"studio_spec_{k}.json")
     jsave(sp, spec)
     run = f"wf2-{ctx.run_id}-{k}"
@@ -721,10 +727,10 @@ def follow_up(ctx, idea, asks, chk):
               "and looked at the result it returned. A careful look at that result found what is listed below. Write the next "
               "message you would type into the same chat so the product fixes it: plain words a customer types, one or two short "
               f"sentences, at most {FOLLOW_UP_WORDS} words, saying what to change and how it should look instead; cover every "
-              "defect and every asked thing that is not visible, most important first; never repeat what already works, never "
+              "defect and every asked thing that is not visible, most important first. If the right shot appears briefly, ask to hold that same shot through the named words and leave good cuts in place. Never "
               "name a tool, a setting or a timecode, never thank or greet. A narrator will read it aloud word for word in a film, "
               "so write numbers as words and use no digits or symbols.")
-    facts = dict(typed_so_far=asks, technique=idea.get("technique"), not_visible=[e.get("asked") for e in chk.get("elements") or []
+    facts = dict(typed_so_far=asks, technique=idea.get("technique"), not_visible=[dict(asked=e.get("asked"), observed=e.get("how"), seconds=e.get("seconds")) for e in chk.get("elements") or []
                                                                              if isinstance(e, dict) and not e.get("visible")],
                  defects=chk.get("defects") or [], looks=chk.get("looks"))
     note, spend = "", []
@@ -781,7 +787,7 @@ def img(b64):
     return dict(type="image", source=dict(type="base64", media_type="image/jpeg", data=b64))
 
 
-CHECK_V = 7           # the export check reads the spoken words too (EDL keep ranges on the source's captions); the end card is the brand's;
+CHECK_V = 8           # the export check reads the spoken words too (EDL keep ranges on the source's captions); the end card is the brand's;
                       # 6 (20 Nov): its "looks" is read on 720 px frames beside the measured picture (it called a soft 4x VHS upscale
                       # "a clean vertical cut" from 288 px frames). A record, never a reason to refuse the recording
                       # 7 (20 Nov): the after is the stretch that holds the landings the sentence names (the after held the trash
@@ -867,8 +873,39 @@ def hook_beat(rec, record_path):
     return dict(t=t, landing=round(min(land), 3) if land else None, says=says, upload_at=round(D.src_at(D.program(edl)[0], t[0]), 3))
 
 
+def review_times(ex, edl, words):
+    """Review the entering and outgoing frame of actual picture cuts and their spoken cues."""
+    import math
+    duration, fps = ex["dur"], ex.get("fps") or 30
+    last = max(0, math.ceil(duration * fps - .05) - 1)
+    def frame(t):
+        return max(0, min(last, math.ceil(t * fps - 1e-6)))
+    def spread(values, limit):
+        values = sorted(set(values))
+        if len(values) <= limit:
+            return values
+        return [values[round(i * (len(values)-1) / (limit-1))] for i in range(limit)]
+    cuts, cues = set(), set()
+    for shot in D.MF.pictures_of(edl or {}) + D.MF.titles_of(edl or {}):
+        a = shot["start"]
+        b = a + shot["duration_s"]
+        for t in (a, b):
+            edge = frame(t)
+            cuts.update([max(0, edge - 1), edge])
+        for w in words:
+            if w["t0"] <= b + .6 and w["t1"] >= a:
+                cues.update([frame(w["t0"]), frame(w["t1"])])
+    # Cover the rest of the film too. A frame already present spends no extra image.
+    n = min(40, max(1, int(duration)))
+    overview = [frame(min(duration / 2, .5) + i * max(0, duration-1) / max(n-1, 1)) for i in range(n)]
+    indices = set(spread(cuts, 24))
+    indices.update(spread(cues - indices, 16))
+    indices.update(spread(set(overview) - indices, min(len(overview), max(4, 44-len(indices)))))
+    return [math.floor(i * 1000 / fps) / 1000 for i in sorted(indices)]
+
+
 def export_check(ctx, rec, ask_text, must_see):
-    """The export against the sentence, element by element, on its own frames (one a second) and the upload's."""
+    """The export against the sentence, element by element, on its actual shot and word boundaries and the upload's frames."""
     ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1] if rec.get("exports") else None)
     if not ex:
         return dict(ok=False, v=CHECK_V, why="no export")
@@ -877,8 +914,9 @@ def export_check(ctx, rec, ask_text, must_see):
     up = rec["upload"]
     if ex["w"] >= ex["h"]:
         return dict(ok=False, v=CHECK_V, why=f"the export is {ex['w']}x{ex['h']}, not vertical", export=ex)
-    n = min(int(ex["dur"]), 40)
-    et = [round(0.5 + i * (ex["dur"] - 1) / max(n - 1, 1), 2) for i in range(n)]
+    edl = export_edl(ex) or {}
+    words = D.program(edl)[0].kept_words(rec["words"]) if rec.get("words") and edl else []
+    et = review_times(ex, edl, words)
     ut = [round(0.5 + i * (up["dur"] - 1) / 9, 2) for i in range(10)]
     if isinstance(ask_text, (list, tuple)):     # follow-ups typed in the same session after seeing the result before
         typed = ("The sentences typed into the product, in order, in one session: the first before its first result, each later "
@@ -895,12 +933,15 @@ def export_check(ctx, rec, ask_text, must_see):
         if b:
             content += [dict(type="text", text=f"upload at {t} s"), img(b)]
     up_words, ex_words = spoken(rec, ex)
+    if words:
+        content.append(dict(type="text", text="Studio indexed speech on the export clock: " +
+                            " ".join(f"{w['t0']:.2f}-{w['t1']:.2f} {w['w']}" for w in words)))
     if up_words:
         content.append(dict(type="text", text=f"What the upload says (its captions): {up_words}"))
     if ex_words:
         content.append(dict(type="text", text="What the export says, kept range by kept range (its EDL on the same captions; the export's "
                                               "speed changes, if any, are not counted):\n" + "\n".join(ex_words)))
-    content.append(dict(type="text", text=f"Then the export the product returned ({ex['w']}x{ex['h']}, {ex['dur']} s), a frame a second:"))
+    content.append(dict(type="text", text=f"Then the export the product returned ({ex['w']}x{ex['h']}, {ex['dur']} s), including the frames at its picture cuts and spoken cues:"))
     for t, b in zip(et, frames(ex["file"], et)):
         if b:
             content += [dict(type="text", text=f"export at {t} s"), img(b)]
@@ -984,7 +1025,7 @@ SHOW_ROLES = ("figure", "key", "name")       # the display roles of a marketing 
 
 
 def show_text(x):
-    return str(x.get("text") if isinstance(x, dict) else x)
+    return str((x.get("text") if isinstance(x, dict) else x) or "")
 
 
 FOLD_WORDS = 6     # two items of a line fewer words apart than this would land under 1.8 s apart, the reel's display gap
@@ -995,6 +1036,19 @@ def _at(toks, words, taken):
     """The first position in toks, not yet taken, where `words` (normalised) start; None if they are not there."""
     n = len(words)
     return next((k for k in range(len(toks) - n + 1) if n and toks[k:k + n] == words and k not in taken), None)
+
+
+def fill_display_phrases(sc):
+    """Borrow the line's authored display copy or emphasis when its fallback field is missing."""
+    for segment in sc.get("segments") or []:
+        if 1 <= len(str(segment.get("fallback_text") or "").split()) <= 5:
+            continue
+        candidates = [show_text(item) for item in segment.get("show") or []]
+        candidates += [segment.get("say") or "", *(segment.get("emphasis") or [])]
+        for candidate in candidates:
+            if isinstance(candidate, str) and 1 <= len(candidate.split()) <= 5:
+                segment["fallback_text"] = candidate.strip()
+                break
 
 
 def anchor_show(sc):
@@ -1243,7 +1297,7 @@ def write(ctx, idea, card, rc, notes=None, inventory=None, hook=None):
                + (f"# Fix these from the last attempt\n{notes}\n\n" if notes else "")
                + "Return JSON only: {\"title\": a plain title, \"pace\": steady|brisk|fast, \"energy\": low|mid|high, \"hook_line\": the first "
                "segment's words, \"close_line\": the last segment's words, \"names\": [proper nouns said, as spelled], \"segments\": [{\"say\": "
-               "the words spoken, numbers written as words, no digits, \"show\": the line's display type, printed large and landing on its "
+               "the words spoken, numbers written as words, no digits, \"fallback_text\": a one-to-five-word display phrase, \"show\": the line's display type, printed large and landing on its "
                "spoken word, at most two items, each {\"text\": as printed, \"word_i\": the index (from 0) in say's space-separated "
                "words of the word it lands on (a figure: the first word of the spoken figure), \"role\": figure (a number from "
                "the receipts, digits allowed only for one) | key (a word or short phrase the line stresses) | name (a proper "
@@ -1387,6 +1441,7 @@ def script(ctx, ideas_out):
         sc, use = write(ctx, idea, card, rc, notes, inventory, hook=hook)
         spend.append(use)
         fixed = anchor_show(sc)
+        fill_display_phrases(sc)
         if fixed:
             ctx.log("display items repaired: " + "; ".join(fixed)[:600])
         probs = script_problems(sc, ask_text, rc) + VI.script_problems(sc, inventory)
@@ -2191,7 +2246,8 @@ def supply(ctx, script):
     env = dict(os.environ, TMPDIR=ctx.tmp)
     narr_dir = os.path.join(sup_dir, "narration")
     nar = PX.narrate(writer.narration_script(sc, "03"), narr_dir, band="03", label=f"wf2-narrate-{ctx.run_id}", env=env,
-                     reader=os.path.join(STORIES, "voice.py"))
+                     reader=os.path.join(STORIES, "voice.py"), repair_fast_read=True)
+    narr_dir = os.path.dirname(nar["wav"])
     ctx.log(f"narration {nar['duration']} s, gate {nar['gate']}")
     pack = dict(sid=ctx.sid, words=nar["words"], narration=nar["wav"], ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[],
                 work=os.path.join(sup_dir, "finish"))
