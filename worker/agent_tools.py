@@ -29717,7 +29717,7 @@ def _music_program_beats(ctx, edl, bpm=None, every_s=None, key=None):
                                 f"({str(e)[:160]}).")
         ctx._asset_perception[item["storage_key"]] = p
     conf = float(p.get("bpm_conf") or 0.0)
-    track_beats = p.get("beats") or []
+    track_beats = p.get("beats") or _tempo_grid(p)
     if not track_beats:
         return None, None, (
             f"REJECTED: the music's own pulse is not clear enough to cut to "
@@ -29827,6 +29827,31 @@ def _beat_align_to_music(ctx, edl, beats, label, tol):
     return res
 
 
+def _tempo_grid(p):
+    """A beat grid from a MEASURED tempo whose confidence was too low for the
+    analysis to lay its own grid (perception keeps beats only at >= 0.3):
+    the tempo's period, phased to the first loud moment of the audio. p6238
+    (24 Nov): beat_align_cuts refused a 0.28-confidence song and the turn
+    ended partial. The caller reports the confidence. [] with no tempo."""
+    try:
+        bpm = float(p.get("bpm") or 0.0)
+        if not 30.0 <= bpm <= 300.0:
+            return []
+        period = 60.0 / bpm
+        bin_s = float(p.get("energy_bin_s") or 0.5)
+        energy = p.get("energy") or []
+        dur = float(p.get("duration_s") or len(energy) * bin_s or 0.0)
+        if dur <= period:
+            return []
+        phase = next((i * bin_s for i, v in enumerate(energy)
+                      if v is not None and float(v) > -12.0), 0.0) % period
+        n = int((dur - phase) / period) + 1
+        return [round(phase + k * period, 3) for k in range(n)
+                if phase + k * period <= dur]
+    except (TypeError, ValueError):
+        return []
+
+
 def beat_align_cuts(ctx, tolerance_s=0.35, source=None, bpm=None,
                     every_s=None):
     """Move each INTERNAL keep boundary to the nearest beat within tolerance
@@ -29855,7 +29880,7 @@ def beat_align_cuts(ctx, tolerance_s=0.35, source=None, bpm=None,
     except Exception as e:
         return f"Audio analysis unavailable ({str(e)[:160]})."
     bpm, conf = p.get("bpm"), float(p.get("bpm_conf") or 0.0)
-    beats = p.get("beats") or []
+    beats = p.get("beats") or _tempo_grid(p)
     if not bpm or not beats:
         return ("REJECTED: the footage's own audio has no pulse clear enough "
                 f"to cut to (bpm {bpm or 'none'}, confidence {conf:.2f}; "

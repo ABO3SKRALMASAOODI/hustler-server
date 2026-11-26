@@ -420,7 +420,7 @@ LEDGER_SCHEMA = {
     "properties": {
         "lang": {"type": "string", "description": "ISO code of the language the customer typed in."},
         "start": {"type": "string", "enum": ["current", "upload"],
-                  "description": "upload when the current film is an automatic first cut the product made by itself and the customer's words are about their uploaded video, not that cut (they ask to keep the upload's length, format or narration, or to work on a part of it the first cut left out); current otherwise, and always when the customer has built on the current film."},
+                  "description": "upload when the current film is an automatic first cut the product made by itself and the customer's words are about their uploaded video, not that cut (they ask to keep the upload's length, format or narration, or to work on a part of it the first cut left out); current otherwise, and always when the customer has built on the current film. A request that changes how the film on screen looks or sounds (a grade, a look, grain, music, captions, effects, text) and needs nothing of the upload the cut left out is current: it applies to the film they see (p6303: a grade-only ask reset a finished first cut to the bare upload and lost its titles, overlays and music)."},
         "asks": {"type": "array", "maxItems": 24, "items": {
             "type": "object", "additionalProperties": False,
             "required": ["id", "said", "want", "kind", "span", "cut", "length", "items", "how", "where", "pass", "otherwise", "devices"],
@@ -463,7 +463,7 @@ span: whole when the ask runs through the entire film or a long stretch of it (o
 
 cut, for a film ask: new when they want a new cut made from the upload (a short, a reel, highlights, a shorter or reordered film); keep when the upload's length and order stay and the work goes over it (keep my full narration and add pictures, keep the song and the photo order and add movement). none for the other kinds.
 
-start: the current film may be an automatic first cut the product made by itself (its origin says made_by automatic_first_cut): a short piece of the upload, often reframed. When the customer has not built on it (customer_requests_since 0) and their words are about their video rather than that cut (a part of the upload the cut left out, the transcript or story as a whole, their full narration or length, the upload's own format), start is upload. start is current when they talk about the cut they saw, or have edited it since.
+start: the current film may be an automatic first cut the product made by itself (its origin says made_by automatic_first_cut): a short piece of the upload, often reframed. When the customer has not built on it (customer_requests_since 0) and their words are about their video rather than that cut (a part of the upload the cut left out, the transcript or story as a whole, their full narration or length, the upload's own format), start is upload. start is current when they talk about the cut they saw, or have edited it since, and when they only change how that film looks or sounds (a grade, a look, music, captions, effects, text) without needing footage, length or format the cut does not have.
 
 how: look when the frames of the rendered film show it (text, pictures, framing, colour, motion). measure when the edit's numbers show it (length, captions on, music present, number of sound effects, loudness, aspect ratio). reply when only the reply can show it. There is no listening: a sound ask is measured.
 

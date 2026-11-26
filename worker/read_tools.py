@@ -103,6 +103,30 @@ def asset_by_key(conn, project_id, storage_key):
         return cur.fetchone()
 
 
+def _spoken_upload_key(ctx):
+    """The storage_key of the project's newest audio upload (a narration
+    uploaded as music or voiceover) when the project has no main recording
+    to read; None otherwise. A narration-only project's get_transcript
+    answered "end must be greater than start" (19 Nov, found proving #1103)."""
+    if float(getattr(ctx, "duration", 0) or 0) > 0:
+        return None
+
+    def _q(conn):
+        with conn.cursor() as cur:
+            cur.execute("""SELECT storage_key FROM assets
+                           WHERE project_id = %s
+                             AND kind IN ('music', 'voiceover', 'audio')
+                           ORDER BY id DESC LIMIT 1""", (ctx.project_id,))
+            return cur.fetchone()
+    try:
+        row = ctx.db.run(_q)
+    except Exception:  # noqa: BLE001 - the plain answer below stands
+        return None
+    if not row:
+        return None
+    return row.get("storage_key") if isinstance(row, dict) else row[0]
+
+
 def listener_policy(meta):
     """Whether a render is deterministic-only MCP evidence, judged by the FACT.
 
@@ -459,6 +483,10 @@ def get_transcript(ctx, start=0, end=None, asset_key=None):
         return _cap(f"Transcript of {asset_key} (CLIP seconds):\n"
                     + "\n".join(out),
                     budget=TRANSCRIPT_CHAR_BUDGET)
+    if not asset_key:
+        spoken = _spoken_upload_key(ctx)
+        if spoken:
+            return get_transcript(ctx, start, end, asset_key=spoken)
     start = ctx.clamp(start or 0)
     end = ctx.clamp(end if end is not None else ctx.duration)
     if end <= start:
@@ -644,6 +672,9 @@ def get_words(ctx, start=0, end=None, asset_key=None):
         end = min(duration, max(0.0, float(end if end is not None else duration)))
         prefix = f"Words of {asset_key} (CLIP seconds, not output seconds):\n"
     else:
+        spoken = _spoken_upload_key(ctx)
+        if spoken:
+            return get_words(ctx, start, end, asset_key=spoken)
         start = ctx.clamp(start or 0)
         end = ctx.clamp(end if end is not None else ctx.duration)
     if end <= start:
