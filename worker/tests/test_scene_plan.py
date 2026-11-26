@@ -562,3 +562,18 @@ def test_tiny_type_is_truer_from_coverage_than_from_the_distance_field():
         errs["field"].append(float(np.abs(from_field - truth).mean()))
     assert max(errs["coverage"]) < 1e-3, errs
     assert min(errs["field"]) > 4 * max(errs["coverage"]), errs
+
+
+@needs_hb
+def test_atlas_revision_only_invalidates_segments_with_type(monkeypatch):
+    shots, dur = plates([60, 60])
+    doc = film(shots + [word(1, 60, 90, "governor")], dur)
+    doc["documentary_cuts"] = [{"f": [60, 120]}]
+    plan = scene.compile_scene(doc, "/")
+    before = [s["sha"] for s in plan.segments]
+    monkeypatch.setattr(S, "ATLAS_LAYOUT", S.ATLAS_LAYOUT + 1)
+    revised = S.stamp(plan.doc)
+    assert any(s["f"][1] <= 60 for s in revised)
+    for old, segment in zip(before, revised):
+        a, b = segment["f"]
+        assert (old != segment["sha"]) == (a < 90 and b > 60)

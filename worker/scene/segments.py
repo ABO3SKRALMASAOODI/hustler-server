@@ -22,6 +22,8 @@ MIN_S, MAX_S = 1.5, 4.0
 NOT_DRAWN = ("f", "on", "chunk", "role")
 CAP_BYTES = 20 * 1024 ** 3
 MAX_AGE_S = 7 * 86400
+# Encoded text segments predating the dedicated-page shelf fix can contain another glyph.
+ATLAS_LAYOUT = 2
 FF = os.environ.get("FFMPEG_BIN", "ffmpeg")
 FP = os.environ.get("FFPROBE_BIN", "ffprobe")
 
@@ -110,7 +112,8 @@ def stamp(d):
         assets = {k: {x: v.get(x) for x in ("sha", "rate", "w", "h", "kind")} for k, v in d["assets"].items() if k in pics}
         blob = canon({"engine": d["engine"], "shaders": d["shaders"], "sws": d.get("sws"), "fps": d["fps"], "frame": d["frame"], "seed": d["seed"],
                       "film": d["film"], "n": b - a, "key": s["key"], "items": its, "assets": assets,
-                      "voices": {k: d["voices"].get(k) for k in sorted(v for v in voices if v)}, "masks": sorted(masks)})
+                      "voices": {k: d["voices"].get(k) for k in sorted(v for v in voices if v)}, "masks": sorted(masks),
+                      **({"atlas_layout": ATLAS_LAYOUT} if voices else {})})
         s["sha"] = hashlib.sha256(blob.encode()).hexdigest()[:32]
         s["matte"] = under
         s["hook"] = s["i"] == 0
