@@ -152,6 +152,9 @@ def edit_film(wf, root, batch, index, idea, until_script):
     else:
         state = shell.jload(state_path)
         if "script" not in state["done"] and not shell.alive(state.get("pid")):
+            if wf == "wf2" and (state.get("stopped") or {}).get("stage") == "script" and captured_session(directory, idea):
+                state["args"]["recover_recording_cut"] = state["stopped"]["error"]
+                shell.jsave(str(state_path), state)
             original = shell.jload(directory / "ideas.json")
             original["ideas"][0]["style"] = idea["style"]
             shell.jsave(str(directory / "ideas.json"), original)
@@ -199,7 +202,13 @@ def delivery_styles(wf, root, batch, items, target):
     return order
 
 
-def build_wave(wf, root, batch, target, slots, tried):
+def captured_session(directory, idea):
+    evidence = (shell.jload(directory / "script_state.json") or {}).get("i0") or {}
+    return bool(evidence.get("ok") and Path(evidence.get("record") or "").is_file()
+                and idea.get("device") != "triptych")
+
+
+def build_wave(wf, root, batch, target, slots, tried, recorded_only=False):
     plan = shell.jload(batch / "plan.json")
     items = list(enumerate(candidates(plan, wf)))
     order = delivery_styles(wf, root, batch, items, target)
@@ -226,6 +235,8 @@ def build_wave(wf, root, batch, target, slots, tried):
             continue
         directory = batch / "work" / rid
         state = shell.jload(directory / "run.json") or {}
+        if recorded_only and "script" not in state.get("done", []) and not captured_session(directory, idea):
+            continue
         if state.get("stopped"):
             errors[str(i)] = state["stopped"]["error"]
         fixed = None
@@ -395,14 +406,18 @@ def produce(wf, root, batch, topic, out, sidecar):
     _, _, _, count = CONFIG[wf]
     os.environ.update(CODEX_PROXY_PROOF=batch.name, VALMERA_RUN=batch.name)
     discover(wf, root, batch, topic, count)
-    if wf == "wf2":
+    films = []
+    if wf == "wf2" and (batch / "masters").exists():
+        # A captured session can finish from its own files while another lane uses the recording stack.
+        films = build_wave(wf, root, batch, count, 2, set(), recorded_only=True)
+    if wf == "wf2" and len(films) < count:
         command = [sys.executable, __file__, "studio", wf, str(root), str(batch)]
         if os.environ.get("GAUNTLET_LOCK_HELD") != "1":
             command = ["zsh", shell.V + "/ops-loop/tools/gauntlet_lock.sh", *command]
         subprocess.run(command, check=True)
         results = shell.jload(batch / "results.json")["films"]
         films = [Path(results[i]) for i in sorted(results, key=int)]
-    else:
+    elif wf != "wf2":
         films = build(wf, root, batch, count, 2)
     report = handoff(wf, batch, films, out, sidecar, topic)
     for folder in films:

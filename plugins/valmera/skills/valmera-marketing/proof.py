@@ -1429,6 +1429,12 @@ def script(ctx, ideas_out):
         rc["siblings"] = [dict(typed=s["typed"], export=s["export_sha256"]) for s in sibs]
         if len(sibs) < 2:
             ctx.log(f"triptych: {len(sibs)} other export of this upload; the film opens on its own export and keeps the timeline")
+    recovery = ctx.args.get("recover_recording_cut")
+    if recovery and showcase_ui(rec):
+        result = showcase_script(idea, card, rec, rc, chk, stt, tag, spend)
+        result["recut"] = dict(from_format="tutorial", recording=rec["sid"], turns=len(rc["asks"]),
+                               previous_script_error=recovery)
+        return result
     if format_of(dict(idea_full=idea), ctx.args) == "showcase":
         return showcase_script(idea, card, rec, rc, chk, stt, tag, spend)
     # the opening beat: the export's own landing beside the raw clip, on the speaker's voice (a triptych of three exports
