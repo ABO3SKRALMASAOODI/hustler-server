@@ -211,3 +211,25 @@ def test_narration_only_project_transcript_reads_the_narration(monkeypatch):
     monkeypatch.setattr(read_tools, "asset_by_key", lambda conn, pid, key: {"storage_key": key, "sha256": "abc"})
     out = read_tools.get_transcript(_Ctx())
     assert "Hello there" in out and "narration.mp3" in out, out
+
+
+def test_a_clip_window_past_its_source_is_moved_back_inside():
+    # p5993 gate (26 Nov): "Clip m20 extends beyond its source video" refused a montage batch.
+    import edit_batch
+    from schemas import validate_edl
+    base = validate_edl({"keep": [[0.0, 10.0], [12.0, 30.0]]}, 40.0).model_dump()
+    base = edit_batch.apply_batch(base, [{
+        "action": "upsert", "layer": "inserts", "id": "m1",
+        "value": {"kind": "video", "asset_key": "v/a.mov", "at_output_s": 10.0,
+                  "duration_s": 1.0}}], 40.0, {"v/a.mov": {"duration_s": 5.0}})
+    keys = {"v/a.mov": {"duration_s": 5.0}, "v/b.mov": {"duration_s": 0.6}}
+    out = edit_batch.apply_batch(base, [
+        {"action": "upsert", "layer": "inserts", "id": "m1",
+         "value": {"source_start_s": 4.5, "duration_s": 1.0}},
+        {"action": "upsert", "layer": "inserts", "id": "m2",
+         "value": {"kind": "video", "asset_key": "v/b.mov", "at_output_s": 10.0,
+                   "duration_s": 1.2}}], 40.0, keys)
+    m1 = next(i for i in out["inserts"] if i["id"] == "m1")
+    m2 = next(i for i in out["inserts"] if i["id"] == "m2")
+    assert m1["duration_s"] == 1.0 and m1["source_start_s"] + 1.0 <= 5.0
+    assert not m2["source_start_s"] and m2["duration_s"] <= 0.6

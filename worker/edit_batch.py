@@ -1181,12 +1181,34 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
         normalized = validate_edl(edl, duration).model_dump()
     check_fx_devices(before, normalized)
     if isinstance(allowed_keys, dict):
+        # A clip window past its source's end is moved back inside it (p5993
+        # gate, 26 Nov: "Clip m20 extends beyond its source video" refused a
+        # whole montage batch twice). The clip keeps its length when the
+        # source is long enough, else it plays the whole source.
+        refit = False
         for item in normalized.get("inserts") or []:
             asset_duration = (allowed_keys.get(item["asset_key"]) or {}).get("duration_s")
             if item["kind"] == "video" and asset_duration:
-                end = (item.get("source_start_s") or 0) + item["duration_s"] * (item.get("rate") or 1)
-                if end > float(asset_duration) + .05:
-                    raise ValueError(f"Clip {item['id']} extends beyond its source video.")
+                rate = float(item.get("rate") or 1)
+                src = float(asset_duration)
+                need = float(item["duration_s"]) * rate
+                end = float(item.get("source_start_s") or 0) + need
+                if end > src + .05:
+                    if need <= src:
+                        item["source_start_s"] = round(max(0.0, src - need - .02), 3)
+                        msg = (f"clip {item['id']}: its window ran past the {src:.2f} s source; "
+                               f"it now starts at {item['source_start_s']:.2f} s, same length")
+                    else:
+                        item["source_start_s"] = 0.0
+                        item["duration_s"] = round(max(.1, (src - .02) / rate), 3)
+                        refit = True
+                        msg = (f"clip {item['id']}: the {src:.2f} s source is shorter than the "
+                               f"window; it plays the whole source ({item['duration_s']:.2f} s)")
+                    near_ops.append(msg)
+                    if notes is not None:
+                        notes.append(msg)
+        if refit:
+            normalized = validate_edl(normalized, duration).model_dump()
     # Pydantic's historical EDL schema tolerates extras. A field it would
     # have dropped silently is said in the result: the near spelling of a real
     # field is kept, anything else is named as left out.
