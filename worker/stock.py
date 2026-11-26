@@ -43,6 +43,8 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
+
 import config
 import net_fetch
 
@@ -518,19 +520,30 @@ def resolve(item, want_w, want_h):
 
 def _too_big(exc):
     text = str(exc)
-    return "MB limit" in text or "exceeded" in text
+    return "MB limit" in text or ("download exceeded " in text and text.endswith(" MB"))
 
 
 def _smaller_renditions(files, picked_w, picked_h):
-    """Usable renditions smaller than the pick, largest first, down to a
-    720-line short side."""
+    """Usable renditions smaller than the pick, largest first."""
     usable = [f for f in files
               if f.get("link") and (f.get("width") or 0) > 0
               and str(f.get("file_type", "video/mp4")).startswith("video")
-              and min(f.get("width") or 0, f.get("height") or 0) >= 720
+              and (f.get("height") or 0) > 0
               and (f.get("width") or 0) * (f.get("height") or 0)
               < (picked_w or 0) * (picked_h or 0)]
     return sorted(usable, key=lambda f: -(f["width"] * f["height"]))
+
+
+def _fetch_rendition(url, path, cap):
+    try:
+        return net_fetch.download(url, path, max_bytes=cap, timeout_s=DOWNLOAD_TIMEOUT_S)
+    except net_fetch.PolicyError:
+        raise
+    except (net_fetch.FetchError, requests.RequestException) as exc:
+        if _too_big(exc):
+            raise
+        # Only this GET is repeated, before assets or edit versions are written.
+        return net_fetch.download(url, path, max_bytes=cap, timeout_s=DOWNLOAD_TIMEOUT_S)
 
 
 def download(item, out_path, want_w, want_h):
@@ -549,9 +562,12 @@ def download(item, out_path, want_w, want_h):
         from export_context import rendition_size
         want_w, want_h = rendition_size() or (want_w, want_h)
     url, cap = resolve(item, want_w, want_h)
+    smaller = _smaller_renditions(item.get("_files") or [],
+                                  item.get("picked_width"), item.get("picked_height"))
+    # Prefer a smaller transfer of this same shot when the CDN has alternatives.
+    first_cap = min(cap, MAX_VIDEO_BYTES) if smaller else cap
     try:
-        net_fetch.download(url, out_path, max_bytes=cap,
-                           timeout_s=DOWNLOAD_TIMEOUT_S)
+        _fetch_rendition(url, out_path, first_cap)
     except net_fetch.FetchError as exc:
         # The smallest rendition that COVERS a 9:16 frame is 4K for a
         # landscape clip, often over the byte cap: the owner's Zuckerberg run
@@ -559,12 +575,9 @@ def download(item, out_path, want_w, want_h):
         # rendition (a slight upscale under a cover crop) beats no shot.
         if item.get("kind") != KIND_VIDEO or not _too_big(exc):
             raise
-        for f in _smaller_renditions(item.get("_files") or [],
-                                     item.get("picked_width"),
-                                     item.get("picked_height")):
+        for f in smaller:
             try:
-                net_fetch.download(f["link"], out_path, max_bytes=cap,
-                                   timeout_s=DOWNLOAD_TIMEOUT_S)
+                _fetch_rendition(f["link"], out_path, first_cap)
             except net_fetch.FetchError as again:
                 if _too_big(again):
                     continue
@@ -573,7 +586,9 @@ def download(item, out_path, want_w, want_h):
             url = f["link"]
             break
         else:
-            raise
+            if first_cap == cap:
+                raise
+            _fetch_rendition(url, out_path, cap)
     if item.get("kind") == KIND_PHOTO:
         # Wave 4 (4C, JRE defect 29): a "photo" link can serve a web page
         # (a login wall, a landing page); judge the bytes, never the name
