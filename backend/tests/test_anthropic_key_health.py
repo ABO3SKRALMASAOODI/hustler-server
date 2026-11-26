@@ -65,12 +65,40 @@ def test_unreadable_expiry_is_recorded_and_logged_once(caplog):
     with caplog.at_level("WARNING", logger="anthropic_key_health"):
         state, alert = check_key("test-key", {}, NOW, metadata, lambda key: True)
         check_key("other-key", {}, NOW, metadata, lambda key: True)
-    assert alert is None and state["ok"] is True
+    assert alert[0] == "Anthropic key expiry is not monitored" and state["ok"] is True
     assert "not both set" in state["expiry_unknown"]
     assert sum("not monitored" in r.getMessage() for r in caplog.records) == 1
     state, _ = check_key("test-key", dict(state, checked_at=(NOW - timedelta(days=2)).isoformat()), NOW,
                          lambda key: None, lambda key: True)
     assert "expiry_unknown" not in state
+
+
+def test_unmonitored_expiry_reaches_the_owner_once_per_reason():
+    """Finding 4 (pr179 review): ANTHROPIC_ADMIN_API_KEY / ANTHROPIC_API_KEY_ID are set nowhere, so the
+    3-day warning never fired and only a backend log line said so."""
+    reason = ["ANTHROPIC_ADMIN_API_KEY and ANTHROPIC_API_KEY_ID are not both set"]
+
+    def metadata(key):
+        raise ExpiryUnknown(reason[0])
+    state, alert = check_key("test-key", {}, NOW, metadata, lambda key: True)
+    assert alert[0] == "Anthropic key expiry is not monitored"
+    assert "ANTHROPIC_ADMIN_API_KEY" in alert[1] and "test-key" not in alert[1]
+    later = NOW + timedelta(days=1, minutes=1)
+    state, alert = check_key("test-key", state, later, metadata, lambda key: True)
+    assert alert is None                                   # the same gap is not mailed every day
+    reason[0] = "ANTHROPIC_API_KEY_ID names a different key than the one editing uses"
+    state, alert = check_key("test-key", state, later + timedelta(days=1), metadata, lambda key: True)
+    assert alert and "different key" in alert[1]           # a new reason is news
+    # a failed probe outranks it on the same tick; the gap is still said on the next one
+    state, alert = check_key("new-key", {}, NOW, metadata, lambda key: False)
+    assert alert[0] == "Anthropic live key probe failed"
+    state, alert = check_key("new-key", state, NOW + timedelta(minutes=1), metadata, lambda key: False)
+    assert alert[0] == "Anthropic key expiry is not monitored"
+    # an expiry read once keeps its warning through a later failed read: no gap to report
+    known, _ = check_key("test-key", {}, NOW, lambda key: "2027-06-01T00:00:00Z", lambda key: True)
+    state, alert = check_key("test-key", dict(known, checked_at=(NOW - timedelta(days=2)).isoformat()), NOW,
+                             metadata, lambda key: True)
+    assert alert is None and state["expires_at"] == "2027-06-01T00:00:00Z"
 
 
 def test_expiry_lookup_names_why_it_cannot_read(monkeypatch):

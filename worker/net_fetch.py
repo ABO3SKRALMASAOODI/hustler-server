@@ -95,7 +95,8 @@ _DEADLINE_SLACK_S = 0.25
 
 
 class FetchError(Exception):
-    pass
+    # The HTTP status the server answered with, when it answered (else None).
+    status = None
 
 
 class PolicyError(FetchError):
@@ -511,7 +512,9 @@ def download(url, out_path, *, allowed_hosts=None, max_bytes, timeout_s,
     if resp.status_code != 200:
         code = resp.status_code
         _close(resp)
-        raise FetchError(f"HTTP {code}")
+        err = FetchError(f"HTTP {code}")
+        err.status = code
+        raise err
 
     # Trust Content-Length only to FAIL EARLY. It is advisory — a server can
     # understate it or omit it — so the read loop below is the real bound.

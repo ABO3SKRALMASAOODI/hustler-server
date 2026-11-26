@@ -164,20 +164,27 @@ def _provider_fallback(messages, tools, max_tokens, tool_choice, timeout):
         options["tools"] = tools
         if tool_choice is not None:
             options["tool_choice"] = tool_choice
-    # One request per provider, bounded like the Claude call it replaces: the
-    # recovery clients carry the SDK's 5 retries, which hid a slow or 429ing
-    # provider for minutes before the next one was asked.
-    options["timeout"] = float(timeout or config.CLAUDE_TRIAL_TIMEOUT_S)
-    last_error = None
+    # The whole chain is bounded like the Claude call it replaces: one deadline
+    # across every wallet and retry, and no SDK retries. A recovery call used
+    # to send up to six 300 s requests per wallet and sleep up to 5 x 60 s on a
+    # 429 before the agent loop's budget-aware wait saw it; now a 429 moves to
+    # the next wallet or reaches the loop after one request.
+    deadline = time.monotonic() + float(timeout or config.CLAUDE_TRIAL_TIMEOUT_S)
+    last_error = limited = None
     for model, client in llm.provider_recovery_clients():
+        if deadline - time.monotonic() <= 1.0:
+            break
         try:
             result = llm.create_with_dialect(llm.without_sdk_retries(client), model,
                                              edit_rung._strip(messages),
-                                             max_tokens=max_tokens, **options)
+                                             max_tokens=max_tokens, deadline=deadline,
+                                             **options)
         except Exception as exc:
             if llm.is_budget_stop(exc):
                 raise
             last_error = exc
+            if llm.is_rate_limit_error(exc):
+                limited = exc
             continue
         if result.usage is not None:
             result.usage.answered_model = model
@@ -185,8 +192,8 @@ def _provider_fallback(messages, tools, max_tokens, tool_choice, timeout):
                 claude_trial.meter(model, edit_rung.allowance_usd(result.usage),
                                    kind="provider_fallback")
         return result
-    if last_error is not None and llm.is_rate_limit_error(last_error):
-        raise last_error        # the loop's budget-aware wait, then this call again
+    if limited is not None:
+        raise limited           # the loop's budget-aware wait, then this call again
     raise ClaudeLaneUnavailable("No configured provider accepted the editing call "
                                 "(credit balance or key)") from last_error
 

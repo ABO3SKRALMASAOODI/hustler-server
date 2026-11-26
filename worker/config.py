@@ -184,6 +184,10 @@ PAID_API_KEY = (
     or (_VISION_ENV_KEY if PAID_BASE_URL == VISION_BASE_URL else "")
     or (IMAGE_API_KEY if PAID_BASE_URL == IMAGE_BASE_URL else "")
     or (_OPENAI_ENV_KEY if PAID_BASE_URL == OPENAI_BASE_URL else ""))
+# Set for this lane in the environment, not inherited from the image or vision
+# wallet that shares its URL: only such a key may answer a refused Claude call
+# (llm.provider_recovery_clients).
+PAID_API_KEY_EXPLICIT = bool(os.getenv("PAID_API_KEY", "").strip())
 
 # EMPTY = this lane is off and every non-Frontier plan runs AGENT_MODEL. The
 # provider above stays configured so switching it on is one variable, not four.
@@ -226,6 +230,9 @@ FRONTIER_API_KEY = (
     or (IMAGE_API_KEY if FRONTIER_BASE_URL == IMAGE_BASE_URL else "")
     or (PAID_API_KEY if FRONTIER_BASE_URL == PAID_BASE_URL else "")
     or (_OPENAI_ENV_KEY if FRONTIER_BASE_URL == OPENAI_BASE_URL else ""))
+# Same rule as PAID_API_KEY_EXPLICIT: on the box FRONTIER_API_KEY is otherwise
+# the Grok Imagine key (IMAGE_API_KEY, same api.x.ai URL).
+FRONTIER_API_KEY_EXPLICIT = bool(os.getenv("FRONTIER_API_KEY", "").strip())
 
 # Plans that route to the frontier provider. A set, so adding a higher tier
 # later is one edit and no new branch.

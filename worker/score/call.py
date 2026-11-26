@@ -220,7 +220,8 @@ def _recover(asked, system, content, *, max_tokens, purpose, deadline, on_text, 
                     return
                 try:
                     res = llm.create_with_dialect(llm.without_sdk_retries(client), model, messages,
-                                                  max_tokens=int(max_tokens), timeout=left, cache_role=purpose)
+                                                  max_tokens=int(max_tokens), deadline=deadline,
+                                                  cache_role=purpose)
                 except Exception as exc:  # noqa: BLE001 - the next wallet answers
                     box["error"] = exc
                     if llm.is_budget_stop(exc):

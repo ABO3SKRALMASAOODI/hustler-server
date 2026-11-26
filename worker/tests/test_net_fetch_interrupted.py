@@ -71,3 +71,14 @@ def test_size_and_time_limits_are_typed():
     assert issubclass(net_fetch.TooLarge, net_fetch.FetchError)
     assert issubclass(net_fetch.TimeLimit, net_fetch.FetchError)
     assert not issubclass(net_fetch.PolicyError, (net_fetch.TooLarge, net_fetch.TimeLimit))
+
+
+def test_an_http_answer_carries_its_status(monkeypatch, tmp_path):
+    """stock repeats a broken transfer once, never a link the server answered as dead."""
+    dead = _Resp(None)
+    dead.status_code = 404
+    _serve(monkeypatch, dead)
+    with pytest.raises(net_fetch.FetchError, match="HTTP 404") as err:
+        net_fetch.download("https://cdn.example/clip.mp4", str(tmp_path / "d.mp4"), max_bytes=1 << 20, timeout_s=90)
+    assert err.value.status == 404
+    assert net_fetch.FetchError("could not reach cdn.example").status is None

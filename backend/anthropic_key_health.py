@@ -101,6 +101,16 @@ def check_key(key, state, now, metadata=_expiry, probe=_probe):
         state["warned_expiry"] = expiry
         return state, ("Anthropic key expiry warning", f"The key expires at {expiry}. "
                        "Rotate it in the console and in provider_api_keys.")
+    # The 3-day warning cannot fire for a key whose expiry was never read: say so to the owner once
+    # per key and reason (a log line alone reached no one, and #1796 was an expiry). A key whose
+    # expiry was read keeps its warning through a later failed read, so that is no gap.
+    unknown = state.get("expiry_unknown")
+    if unknown and "expires_at" not in state and unknown != state.get("unmonitored_alerted"):
+        state["unmonitored_alerted"] = unknown
+        return state, ("Anthropic key expiry is not monitored",
+                       f"The 3-day expiry warning cannot fire: {unknown}. Set ANTHROPIC_ADMIN_API_KEY "
+                       "(an Admin API key) and ANTHROPIC_API_KEY_ID (the id of the key editing uses) "
+                       "on the backend. The daily live probe still runs.")
     return state, None
 
 

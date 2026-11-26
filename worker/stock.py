@@ -41,6 +41,7 @@ more trusted than any other host.
 
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
@@ -57,6 +58,12 @@ OPENVERSE_IMAGE_API = "https://api.openverse.org/v1/images/"
 
 API_TIMEOUT_S = float(os.getenv("STOCK_API_TIMEOUT_S", "12"))
 DOWNLOAD_TIMEOUT_S = float(os.getenv("STOCK_DOWNLOAD_TIMEOUT_S", "90"))
+# One stock download ends inside this budget: the pick, its one repeat after a
+# broken transfer, and the smaller renditions after it. Each rendition gets at
+# most DOWNLOAD_TIMEOUT_S of it, shared with its own repeat (a fresh 90 s per
+# repeat let one download run about 12 minutes inside a 420 s turn).
+DOWNLOAD_BUDGET_S = float(os.getenv("STOCK_DOWNLOAD_BUDGET_S",
+                                    str(3 * DOWNLOAD_TIMEOUT_S)))
 MAX_VIDEO_BYTES = int(os.getenv("STOCK_MAX_VIDEO_BYTES", str(90 * 1024 * 1024)))
 MAX_PHOTO_BYTES = int(os.getenv("STOCK_MAX_PHOTO_BYTES", str(15 * 1024 * 1024)))
 
@@ -546,18 +553,34 @@ def _smaller_renditions(files, picked_w, picked_h, want_w=0, want_h=0):
     return sorted(usable, key=lambda f: -(f["width"] * f["height"]))
 
 
-def _fetch_rendition(url, path, cap):
-    """One rendition at the frame's byte budget. A transfer that broke off (a
-    reset, an unreachable edge, a 5xx) is fetched once more: only this GET is
-    repeated, before assets or edit versions are written."""
+# Less time than this left is no transfer at all.
+_MIN_TRANSFER_S = 1.0
+
+
+def _answered(exc):
+    """The server answered for this link (a dead link: 403, 404, 410): asking
+    the same link again gets the same answer."""
+    status = getattr(exc, "status", None) or 0
+    return 400 <= status < 500 and status not in (408, 425, 429)
+
+
+def _fetch_rendition(url, path, cap, deadline):
+    """One rendition at the frame's byte budget, in its own window: at most
+    DOWNLOAD_TIMEOUT_S, never past the download's deadline. A transfer that
+    broke off (a reset, an unreachable edge, a 5xx) is fetched once more on
+    the window's time left: only this GET is repeated, before assets or edit
+    versions are written."""
+    window = min(deadline, time.monotonic() + DOWNLOAD_TIMEOUT_S)
     try:
-        return net_fetch.download(url, path, max_bytes=cap, timeout_s=DOWNLOAD_TIMEOUT_S)
+        return net_fetch.download(url, path, max_bytes=cap,
+                                  timeout_s=window - time.monotonic())
     except net_fetch.PolicyError:
         raise
     except net_fetch.FetchError as exc:
-        if _gives_way(exc):
+        left = window - time.monotonic()
+        if _gives_way(exc) or _answered(exc) or left < _MIN_TRANSFER_S:
             raise
-        return net_fetch.download(url, path, max_bytes=cap, timeout_s=DOWNLOAD_TIMEOUT_S)
+        return net_fetch.download(url, path, max_bytes=cap, timeout_s=left)
 
 
 def download(item, out_path, want_w, want_h):
@@ -576,32 +599,43 @@ def download(item, out_path, want_w, want_h):
         from export_context import rendition_size
         want_w, want_h = rendition_size() or (want_w, want_h)
     url, cap = resolve(item, want_w, want_h)
+    deadline = time.monotonic() + DOWNLOAD_BUDGET_S
     try:
         # The pick first, at the budget its delivery size earns (4K: 4x).
-        _fetch_rendition(url, out_path, cap)
+        _fetch_rendition(url, out_path, cap, deadline)
+    except net_fetch.PolicyError:
+        raise
     except net_fetch.FetchError as exc:
         # The smallest rendition that COVERS a 9:16 frame is 4K for a
         # landscape clip, often over the byte cap: the owner's Zuckerberg run
         # (14 Oct, project 3639) lost two picks at 234 and 157 MB. A slow
-        # CDN runs a big file out of time the same way. A smaller rendition
-        # (a slight upscale under a cover crop) beats no shot.
-        if item.get("kind") != KIND_VIDEO or not _gives_way(exc):
+        # CDN runs a big file out of time the same way, an edge that resets
+        # long transfers breaks it twice, and one rendition's link can be
+        # dead. A smaller rendition (a slight upscale under a cover crop)
+        # beats no shot, and one that fails moves on to the next.
+        if item.get("kind") != KIND_VIDEO:
             raise
+        got = None
         for f in _smaller_renditions(item.get("_files") or [],
                                      item.get("picked_width"),
                                      item.get("picked_height"),
                                      want_w, want_h):
+            if deadline - time.monotonic() < _MIN_TRANSFER_S:
+                break
             try:
-                _fetch_rendition(f["link"], out_path, cap)
-            except net_fetch.FetchError as again:
-                if _gives_way(again):
-                    continue
+                _fetch_rendition(f["link"], out_path, cap, deadline)
+            except net_fetch.PolicyError:
                 raise
-            item["picked_width"], item["picked_height"] = f.get("width"), f.get("height")
-            url = f["link"]
+            except net_fetch.FetchError as again:
+                print(f"[stock] {f.get('width')}x{f.get('height')} rendition "
+                      f"failed too: {str(again)[:120]}", flush=True)
+                continue
+            got = f
             break
-        else:
-            raise
+        if got is None:
+            raise exc
+        item["picked_width"], item["picked_height"] = got.get("width"), got.get("height")
+        url = got["link"]
     if item.get("kind") == KIND_PHOTO:
         # Wave 4 (4C, JRE defect 29): a "photo" link can serve a web page
         # (a login wall, a landing page); judge the bytes, never the name
