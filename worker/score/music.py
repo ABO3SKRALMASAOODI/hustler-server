@@ -118,6 +118,7 @@ ARC_DEFAULT = {"setup": "mid", "build": "mid", "payoff": "high", "close": "mid"}
 def profile_for(kind):
     """The PROFILE for a kind of film (stories | marketing | podcast | longform)."""
     out = dict(PROFILE, under_voice_db=UNDER_VOICE.get(kind, PROFILE["under_voice_db"]))
+    out["continuous_bed"] = kind in ("stories", "marketing", "podcast", "longform")
     if kind == 'podcast':
         out.update(hole_min_s=1.0, hole_max_s=1.3, broadband_bed_db=5.5, build_floor_db=6.)
         out.update(HOLD)                # the story's arc held under every word (hold_under_words)
@@ -1027,6 +1028,8 @@ def flow(nf, hop_s, marks, plan, P, base, open_gain):
                 notes["lifts"].append({"t": round(p0, 2), "len_s": round(L, 2), "db": round(amt * float(w.max()), 1)})
     slow += lift
     fast = np.zeros(nf)
+    if P.get("continuous_bed"):
+        return slow, fast, notes
     d = plan.get("drop_at")
     e = plan["end_hit_s"]
     # A short's payoff often leaves fewer than two full bars before the close.
@@ -1713,6 +1716,45 @@ def voice_spans_of(l1, work):
         return []
 
 
+def seat_programme_bed(music, voice, marks, plan):
+    """Fit the audible musical phrase after arrangement, before effects and mastering.
+
+    Measure half-second energy on the arranged stereo stem. The reference is the
+    programme's voiced level, independent of the instantaneous level of a syllable.
+    Leave the final ring and intentional silence outside the programme alone.
+    """
+    from scipy.ndimage import uniform_filter1d, gaussian_filter1d
+    hop = SR // 20
+    stop = min(len(music), len(voice), round(plan["end_hit_s"] * SR))
+    count = stop // hop
+    if count < 10:
+        return {}
+    def levels(pcm):
+        blocks = pcm[:count * hop].reshape(count, -1)
+        energy = np.mean(np.square(blocks, dtype=np.float64), axis=1)
+        return 10 * np.log10(np.maximum(uniform_filter1d(energy, 10, mode="nearest"), 1e-12))
+    bed, speech = levels(music), levels(voice)
+    live = bed > -65.
+    if not live.any():
+        return {}
+    voiced = np.zeros(count, bool)
+    for a, b in marks.get("words") or ():
+        voiced[max(0, int(a * SR / hop)):max(0, math.ceil(b * SR / hop))] = True
+    voiced &= speech > -45.
+    target = float(np.median(speech[voiced]) - 7.5) if voiced.any() else -23.
+    # Retain the larger-scale musical arc within a six-decibel window.
+    centre = np.median(bed[live])
+    desired = target + np.clip((bed - centre) * .25, -3., 3.)
+    gain = gaussian_filter1d(np.clip(desired - bed, -15., 14.), 1.6)
+    # No gain from a silent bar leaks into the attack of the following phrase.
+    gain = np.interp(np.arange(count), np.flatnonzero(live), gain[live])
+    amp = 10 ** (np.interp(np.arange(len(music)), (np.arange(count) + .5) * hop, gain) / 20)
+    music *= amp.reshape((-1,) + (1,) * (music.ndim-1))
+    return dict(target_dbfs=round(target, 2), voiced_blocks=int(voiced.sum()),
+                swing_before_db=round(float(np.ptp(np.percentile(bed[live], [10,90]))), 2),
+                swing_after_db=round(float(np.ptp(np.percentile(levels(music)[live], [10,90]))), 2))
+
+
 def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind="stories", index=None, prog_end_f=None, payoff_s=None, supplied=True,
         sung=None, open_s=None, turn_drop=False, arc=False, story_arc=None):
     """A compiled film's sound with a song under it: the voice and the designed sounds as the engine mixes them
@@ -1755,6 +1797,7 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
     with tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(out)) if out else None) as tmp:
         lv, _ = AU.level_voice(voice, tmp) if float(np.abs(voice).max()) > 1e-5 else (voice, {})
         music, mrep = track(song_path, song, plan, marks, voice=lv[:int(marks["dur_s"] * SR)], profile=prof)
+        rep["programme_bed"] = seat_programme_bed(music, lv, marks, plan)
         # with the bed known, each placed sound is made to be there over the voice and the song together
         if kind == 'podcast':
             from . import audibility
@@ -1872,7 +1915,8 @@ def mix_film(film, song_path, marks, out=None, kind="stories", vocals=None, sung
     with tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(out)) if out else None) as tmp:
         if mrep is None or "chapters" not in mrep:
             music, mrep = track(song_path, song, plan, marks, voice=prog[:n_prog], profile=prof)
-        if not marks["words"]:                              # nobody speaks: the music is set against the film's own level, not a voice's
+        rep["programme_bed"] = seat_programme_bed(music, prog, marks, dict(end_hit_s=plan.get("end_hit_s", marks["dur_s"])))
+        if not marks["words"] and not prof.get("continuous_bed"):  # nobody speaks: the music is set against the film's own level, not a voice's
             i, _tp, _ = AU.loudness_of(prog, tmp) if float(np.abs(prog).max()) > 1e-5 else (None, None, None)
             if i is not None and i > -70:
                 music = music * np.float32(10 ** ((i - VOICE_LUFS) / 20))
