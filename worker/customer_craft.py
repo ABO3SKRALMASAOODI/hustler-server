@@ -396,12 +396,20 @@ def plan_first(ctx, ledger, request, record=None):
         return ("\n\nPIECE PLAN: the plan step did not answer (" + str(err) + "). Make the piece yourself: "
                 "plan_piece for the story and cut, direct the beats, dress the words, score it, then render and look.")
     done, missed = [], []
+
+    def step(name, label, args, call):
+        """One craft call; a failure is named for the editor and the other steps go on."""
+        try:
+            res = call()
+        except Exception as exc:  # noqa: BLE001 - the editor repairs this step itself
+            res = f"REJECTED: {type(exc).__name__}: {str(exc)[:200]}"
+        record(name, args, res)
+        (missed if str(res).startswith("REJECTED") else done).append(f"{label}: {str(res)[:240]}")
     duration = float(getattr(ctx, "duration", 0) or 0)
     keep = _keep_list(value.get("keep"), duration) if on_source and value.get("cut") == "new" else []
     if keep:
-        res = plan_piece(ctx, brief="Cut the piece by its story", keep=keep)
-        record("plan_piece", {"keep": keep}, res)
-        (missed if str(res).startswith("REJECTED") else done).append(f"cut: {str(res)[:240]}")
+        step("plan_piece", "cut", {"keep": keep},
+             lambda: plan_piece(ctx, brief="Cut the piece by its story", keep=keep))
     clock = program_clock_of(ctx.latest_edl()["json"])
     moments = []
     for n, beat in enumerate(value.get("beats") or [], 1):
@@ -413,9 +421,7 @@ def plan_first(ctx, ledger, request, record=None):
                         "role": beat.get("role"), "start": round(span[0], 3), "end": round(span[1], 3),
                         "text": beat.get("text") or None, "color": beat.get("color") or None})
     if moments:
-        res = direct(ctx, moments=moments)
-        record("direct", {"moments": moments}, res)
-        (missed if str(res).startswith("REJECTED") else done).append(f"direction: {str(res)[:240]}")
+        step("direct", "direction", {"moments": moments}, lambda: direct(ctx, moments=moments))
     words = []
     for n, row in enumerate(value.get("words") or [], 1):
         span = _to_film(clock, row.get("start"), row.get("end"), on_source)
@@ -424,15 +430,13 @@ def plan_first(ctx, ledger, request, record=None):
                           "end": round(span[1], 3)})
     captions = {"on": True, "off": False}.get(value.get("captions"))
     if words or captions is not None:
-        res = dress(ctx, words=words, captions=captions)
-        record("dress", {"words": words, "captions": captions}, res)
-        (missed if str(res).startswith("REJECTED") else done).append(f"words: {str(res)[:240]}")
+        step("dress", "words", {"words": words, "captions": captions},
+             lambda: dress(ctx, words=words, captions=captions))
     if value.get("music") or value.get("sounds"):
-        res = score(ctx, brief=value.get("sound_brief") or "", music=bool(value.get("music")),
-                    sounds=bool(value.get("sounds")))
-        record("score", {"music": bool(value.get("music")), "sounds": bool(value.get("sounds")),
-                         "brief": value.get("sound_brief")}, res)
-        (missed if str(res).startswith("REJECTED") else done).append(f"score: {str(res)[:240]}")
+        step("score", "score", {"music": bool(value.get("music")), "sounds": bool(value.get("sounds")),
+                                "brief": value.get("sound_brief")},
+             lambda: score(ctx, brief=value.get("sound_brief") or "", music=bool(value.get("music")),
+                           sounds=bool(value.get("sounds"))))
     ctx.piece_plan = {"plan": value, "moments": moments, "words": words, "usage": usage}
     version = ctx.latest_edl()["version"]
     beats = "\n".join(f"  {m['id']} {m['device']} {m['start']:.2f}-{m['end']:.2f} s" for m in moments)

@@ -189,3 +189,43 @@ def test_the_editor_reads_each_craft_tools_whole_contract():
     assert "rgb_split" in listed and "rgb_split" in craft.piece_system()
     assert all(not craft.FOOTAGE_ONLY & set(palette.DEVICES[n].get("needs") or ()) for n in listed)
     assert any(craft.FOOTAGE_ONLY & set(e.get("needs") or ()) for e in palette.DEVICES.values())
+
+
+def test_plan_evidence_reads_real_frames_words_shots_and_sound(tmp_path, monkeypatch):
+    import llm
+    src = str(tmp_path / "source.mp4")
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=size=640x360:rate=30:duration=6", "-f", "lavfi", "-i",
+                    "sine=frequency=440:duration=6", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", src], check=True)
+    ctx, _ = tool_context({"keep": [[0., 6.]]}, duration=6.)
+    ctx.workdir = str(tmp_path)
+    monkeypatch.setattr(type(ctx), "proxy_path", lambda self: src, raising=False)
+    ctx.index.update(video={"duration": 6.0, "width": 640, "height": 360},
+                     words=[{"w": "watch", "t0": 1.0, "t1": 1.3}, {"w": "this", "t0": 1.3, "t1": 1.6},
+                            {"w": "jump", "t0": 3.0, "t1": 3.4}],
+                     shots=[{"start": 0.0, "end": 6.0, "caption": {"text": "a test card"}}])
+    content, on_source = craft.evidence(ctx, ctx.latest_edl()["json"], {"asks": [{"said": "make it fire", "want": "a reel"}]},
+                                        "make it fire")
+    text = content[0]["text"]
+    assert on_source and "[1.00-1.60] watch this" in text and "[3.00-3.40] jump" in text
+    assert "[0.0-6.0] a test card" in text and "CLOCK: source seconds" in text
+    images = [part for part in content if part.get("type") == "image_url"]
+    assert len(images) == 1 and images[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    from PIL import Image
+    import base64, io
+    sheet = Image.open(io.BytesIO(base64.b64decode(images[0]["image_url"]["url"].split(",", 1)[1])))
+    assert max(sheet.size) <= 1280                       # low resolution: one small sheet, not eight frames
+
+
+def test_a_failing_step_is_named_and_the_others_still_apply(monkeypatch):
+    ctx, _ = tool_context({"keep": [[0., 20.]]}, duration=20.)
+    _planned(monkeypatch, PLAN)
+    def boom(ctx, **kw):
+        raise RuntimeError("music library unreachable")
+    monkeypatch.setattr(craft, "score", boom)
+    seen = []
+    note = craft.plan_first(ctx, {"asks": []}, "make a promo", record=lambda n, a, r: seen.append((n, str(r)[:9])))
+    edl = ctx.latest_edl()["json"]
+    assert edl["keep"] == [[2., 6.], [10., 14.]] and edl["direction"]
+    assert seen[-1] == ("score", "REJECTED:") and "Not applied:" in note and "music library unreachable" in note
