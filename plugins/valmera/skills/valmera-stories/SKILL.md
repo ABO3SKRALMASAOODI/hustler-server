@@ -1,6 +1,6 @@
 ---
 name: valmera-stories
-description: Make a finished narrated vertical story film about a founder, a company or a topic (workflow 3, cut like the @metromedia.house reels) with one command and at most a few words (/valmera-stories, or /valmera-stories <name or topic>). The run finds a true story worth telling on the web, checks every fact against its page, writes it for the ear, narrates it with the default narrator (Phonon 31M Easton), cuts real footage and free photographs of every person, place and event it names at the judge's pace (about 16 pictures a 10 s, never one picture twice, collages, flash frames, finishes by section, display words, captions word by word), lays the references' sound design and chosen music, delivers one complete folder once and deletes its work. Use when the user asks for a story, founder story, company story or topic story film, with or without a subject. Does not publish.
+description: Make a folder of six narrated vertical story films about different founders, companies or subjects (workflow 3, cut like the @metromedia.house reels) with one command and at most a few words (/valmera-stories, or /valmera-stories <name or topic>). One shared search finds distinct true stories worth telling on the web, checks every fact against its page, writes it for the ear, narrates it with the default narrator (Phonon 31M Easton), cuts real footage and free photographs of every person, place and event it names at the judge's pace (about 16 pictures a 10 s, never one picture twice, collages, flash frames, finishes by section, display words, captions word by word), lays the references' sound design and chosen music, delivers one complete folder once and deletes its work. Use when the user asks for a story, founder story, company story or topic story film, with or without a subject. Does not publish.
 ---
 
 # Valmera story films (workflow 3)
@@ -16,16 +16,10 @@ python3 /Users/masaoodi/Documents/Valmera/hustler-server/plugins/valmera/skills/
 - No words: the run chooses its own story. A name, a company or a topic ("Claude Shannon", "the Walkman"): the
   run finds the strongest true story inside it. Ask the user for nothing else: no style, no length, no song.
 - Run it in the background (`run_in_background: true`); it takes 30 to 90 minutes. Do not poll; you are woken when it exits.
-- Its last line is one JSON object: `delivered` (the folder), `title`, `style`, `measured` (pictures a 10 s, collages,
-  flashes, finishes), `music`, `spend_usd`, `work_empty`. Tell the user the folder once, with the title.
-- Exit 2 (`stopped`): run the same command with the same words; it continues where it stopped. Exit 1: report the reason.
-- `--out <folder>` delivers somewhere else (default `/Users/masaoodi/Documents/Valmera/Story Films/`).
-- Never rate the film yourself: a separate Opus session rates it on rubric v3.
-
-The folder: `film.mp4` (with the music Valmera chose), `film_clean.mp4` (the same film without music), `film.json`
-(every fact with its quote and URL, every clip and photograph with its source, licence and time range, the music
-credit, the narration's gate, the measures) and `SOURCES.md` (the credits to paste into a post's caption: the footage
-is not licensed, by the owner's decision of 13 Nov). Nothing is published; nothing is ever added to a delivered folder.
+- A normal run delivers six complete story films. A topic guides the search for different companies or subjects within it. Two persistent editing processes overlap the individual fact checks, writing, narration, picture sourcing and renders. Each film retains the original editorial checks.
+- The final JSON gives `delivered`, `films` and `cost`. Run the same command with the same destination to resume the collection.
+- The delivery root defaults to `/Users/masaoodi/Documents/Valmera/Story Films/`. Each collection has numbered MP4s, matching music-free versions in `clean/`, individual film receipts in `records/`, a publisher index in `shorts.json`, and the films’ source and music credits in `SOURCES.md`. When applicable, `platform_music.json` names the catalog song for each clean upload.
+- A separate Opus session rates the films on rubric v3. The skill delivers once and never publishes.
 
 ## How to run it (Claude Code and Codex alike)
 

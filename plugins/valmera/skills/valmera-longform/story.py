@@ -92,7 +92,7 @@ def find_ideas(card, avoid=(), line=None, n=6, effort="high", delivered=""):
                f"Return JSON only: {{\"ideas\": [{n} items, best first]}}. Each: {{\"id\": \"i1\", \"title\": a plain title, "
                "\"hook\": the first sentence as it would be spoken, \"promise\": what the viewer will know by the end, in one "
                "sentence, \"protagonist\": who the story follows and what they want, \"question\": the one dramatic question "
-               "the film answers last, \"stakes\": what is lost, and for whom, if they fail, \"story\": the story in plain sentences, with consequences as well as figures, \"chapters\": [chapters arising from the story, "
+               "the film answers last, \"stakes\": what is lost, and for whom, if they fail, \"story\": the story in plain sentences, with consequences as well as figures, \"chapters\": [aim for five to ten distinct chapters arising from the story, "
                "{\"title\": two to four words, \"question\": the question the chapter opens}], \"turn\": the turn, \"payoff\": the "
                "payoff with its figure, \"arc\": {\"setup\": one sentence opening the central question, \"escalation\": one sentence "
                "on how the stakes rise, \"payoff\": one sentence answering the question}, \"ledger\": [two to four {\"label\": the stake, \"start\": its value at the start, \"end\": "

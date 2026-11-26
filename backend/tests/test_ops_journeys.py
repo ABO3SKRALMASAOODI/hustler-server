@@ -248,7 +248,7 @@ def test_the_journeys_route_is_admin_only_and_signs_each_request(
               headers=_admin(app))
     assert r.status_code == 200
     assert seen == {"endpoint": "/admin/video/ops/journeys",
-                    "params": {"window": "24h", "version": 2}, "fresh": True}
+                    "params": {"window": "24h", "version": 3}, "fresh": True}
     body = r.get_json()
     assert body["stories"][0]["uploaded"] == {"url":
                                               "https://s/proxies/1/a.mp4"}
@@ -354,3 +354,76 @@ def test_warmed_route_serves_complete_snapshot_and_honors_refresh(client, monkey
     app.extensions["journey_snapshots"]["7d"] = (time.monotonic() - 150, snapshot)
     c.get(mod.JOURNEYS_ENDPOINT, headers=_admin(app))
     assert calls == [("7d", True), ("7d", False)]
+
+
+def test_folds_only_empty_sessions_using_all_calls():
+    s = sessions.Session(surface="mcp", settled=True)
+    s.rows = {"jobs": [{"type": "mcp_tool", "tool": "get_transcript"}]}
+    ctx = _ctx()
+    def fold(src=None, got=None):
+        return journeys.fold_kind(s, ctx, got, src, {"kind": "upload_only"})
+    assert fold() == "mcp"
+    s.rows["jobs"].insert(0, {"type": "mcp_tool", "tool": "deliver_aspects"})
+    assert fold() is None
+    s["surface"], s["settled"], s.rows["jobs"] = "studio", False, []
+    assert fold() == "running"
+    ctx["requests"] = [{"text": "edit"}]
+    assert fold() is None
+    ctx["requests"], s["settled"] = [], True
+    assert fold(src={"asset_id": 1}) == "upload"
+    assert fold() is None
+    assert fold(got={"asset_id": 2}) is None
+    ctx["earlier_requests"] = [{"text": "continued"}]
+    assert fold(src={"asset_id": 1}) is None
+
+
+def test_session_chat_endpoint_replays_exact_turns_and_signs_at_open(client, monkeypatch):
+    from types import SimpleNamespace
+    app, c, mod = client
+    base = "/admin/video/ops/session_chat"
+    key = sessions.session_key(10, T0)
+    assert c.get(base).status_code == 401
+    headers = _admin(app)
+    assert c.get(base + "?key=oops", headers=headers).status_code == 400
+    s = sessions.Session(key=key, started_at=T0, ended_at=NOW, surface="studio")
+    s.data = {"projects": {10: {}, 11: {}}}
+    s.rows = {"messages": [], "jobs": [{"type": "mcp_tool", "id": 8, "state": "done"}]}
+    s.next_events = [{"id": 5, "project_id": 10, "kind": "upload_failed"}]
+    long = "The complete original text.\n" * 350
+    def msg(i, role, minute, version=None, **fields):
+        return dict(dict(id=i, role=role, created_at=T0+timedelta(minutes=minute),
+                         project_id=10, content=long, version=version, preview_id=None,
+                         held=None, error=None), **fields)
+    msgs = [msg(1, "user", 0), msg(2, "assistant", 2, 1, preview_id=41),
+            msg(3, "assistant", 4, 2), msg(4, "assistant", 5, 3, error="failed")]
+    def asset(i, pid, version, minute, purged=False):
+        return dict(id=i, project_id=pid, version=version, duration_s=12.3,
+                    variant="preview", purged=purged, storage_key=f"renders/{i}",
+                    created_at=T0 + timedelta(minutes=minute))
+    renders = [asset(41, 10, 1, 1), asset(42, 10, 2, 3, True),
+               asset(43, 11, 2, 3), asset(44, 10, 3, 6)]
+    call = dict(id=8, created_at=T0, tool="get_transcript", args={"start": 0},
+                text=long, error=False, state="done", preview_id=None)
+    failure = dict(created_at=T0+timedelta(minutes=7), kind="upload_failed", text="Offline")
+    def connection():
+        return SimpleNamespace(cursor=lambda: Cur([msgs, [call], renders, [failure]]),
+                               close=lambda: None)
+    monkeypatch.setattr(mod, "_connect", connection)
+    monkeypatch.setattr(sessions, "discover", lambda *a, **kw: ([s], {}))
+    assert c.get(base + "?key=p10-0", headers=headers).status_code == 404
+    url = base + "?key=" + key
+    for suffix in ("first", "second"):
+        monkeypatch.setattr(mod, "_admin_presign", lambda k: k + "/" + suffix)
+        response = c.get(url, headers=headers)
+        assert response.status_code == 200 and response.cache_control.no_store
+        entries = response.json["entries"]
+        assert [e["at"] for e in entries] == sorted(e["at"] for e in entries)
+        replies = [e for e in entries if e["role"] == "assistant"]
+        assert replies[0]["text"] == long
+        assert replies[0]["video"]["url"] == "renders/41/" + suffix
+        assert replies[0]["video"]["duration_s"] == 12.3
+        assert replies[1]["video"]["purged"] and replies[1]["video"]["url"] is None
+        assert replies[2]["error"] and "video" not in replies[2]
+        assert entries[-1]["text"] == "Offline"
+        tool = next(e for e in entries if e["role"] == "tool")
+        assert tool["tool"] == "get_transcript" and tool["text"] == long and tool["args"] == {"start": 0}

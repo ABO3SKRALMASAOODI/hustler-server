@@ -36,6 +36,11 @@ def test_documentary_sources_are_staged_with_the_film(tmp_path, monkeypatch):
     (supply / 'l1.json').write_text(json.dumps(scene))
     results = dict(script=script, ideas=dict(source=dict(sources=[unused['url']])), score=dict(l1=supply / 'l1.json'),
                    render={}, check=dict(final=str(film), checks=dict(longform=dict(credits=[unused]))))
+    # Stub only the chapter rendering in this source-credit fixture.
+    import sys
+    from types import SimpleNamespace
+    monkeypatch.setitem(sys.modules, "chapter_shorts", SimpleNamespace(
+        write=lambda ctx, part, results: dict(folder="Shorts", count=1)))
     rename = shell.os.rename
 
     def commit(staged, final):

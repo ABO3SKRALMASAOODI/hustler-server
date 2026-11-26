@@ -52,6 +52,13 @@ def _driver(tmp_path, monkeypatch):
     monkeypatch.setattr(story, "prepare_state", lambda: None)
     monkeypatch.setattr(story, "stopped_run", lambda topic: None)
     monkeypatch.setattr(story, "sources_md", lambda folder: None)
+    # Exercise the pre-batch single-film handoff and its driver-token compatibility.
+    import batch_films
+    def legacy_fixture(wf, root, topic, out, sidecar):
+        cli = DL.driver_cli(sys.argv[1:], "story.py", story.OUT_ROOT)
+        env = {} if cli["test"] else {DL.DRIVER_ENV: DL.driver_token(wf)}
+        return story.single(cli, env, None)
+    monkeypatch.setattr(batch_films, "run_driver", legacy_fixture)
     calls = []
 
     def run(cmd, **kw):

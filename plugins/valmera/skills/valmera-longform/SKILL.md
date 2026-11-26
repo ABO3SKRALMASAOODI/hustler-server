@@ -18,6 +18,8 @@ Optional: `--topic "a subject"`, `--out <folder>`. Existing `run --resume <id>` 
 
 A topic can carry a running time, for example `--topic "Make a 12–20 minute documentary on the AI breakthroughs of November 2026."` Both screenplay writers receive the saved topic on resume. Each new delivery includes `SOURCES.md` beside the film, with the story plan’s three-line arc, cited claims and quotations, and the sources of individual pictures and footage where the edit records identify them.
 
+Each long film also delivers a `Shorts/` folder. The writer aims for five to ten chapters, and the short selector chooses a self-contained passage from each, up to ten. Completed older screenplays retain their chapter count. Each numbered vertical film opens on its own hook, shows the entire source image, captions the final spoken words, uses the music scored for that chapter, and ends with the spoken “Edited using Valmera” card. `Shorts/shorts.json` identifies the source window, chapter, facts, music and encoded checks for each film.
+
 Working media lives under `.valmera/workflow/longform/work/`, outside the lane's evidence and delivery folder, and is deleted after measurement and delivery. Existing run IDs retain their saved state location on resume. Use the shared corpus directly for any supplied replay inputs; never duplicate them into a lane.
 
 Read [REFERENCES.md](REFERENCES.md) for the long-form pacing and music bar. This is a documentary, not a stretched short. The story determines its structure and treatment. Do not copy a reference's story skeleton or prescribe a fixed ledger, turn position or chapter duration. A hook must work in the first ten seconds; each chapter must change what the viewer expects.

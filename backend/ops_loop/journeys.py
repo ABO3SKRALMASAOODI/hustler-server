@@ -627,7 +627,7 @@ def _review_card(r):
 # or "unknown" (no video and nothing recorded to explain it).
 DELIVERY_TOOLS = frozenset((
     "render_preview", "export_final", "make_shorts", "make_first_cut",
-    "download_url", "record_website", "record_website_demo",
+    "download_url", "deliver_aspects", "render_variants", "record_website", "record_website_demo",
     "showcase_demo"))
 WHY_DETAIL_CHARS = 220
 
@@ -771,6 +771,25 @@ def plan_use(jobs, user, stored_limit, trial_grant_usd=None):
     return None
 
 
+def fold_kind(s, ctx, got, src, why):
+    """Classify the full window before MCP calls are shortened for the card."""
+    if got or ctx["requests"] or ctx.get("earlier_requests"):
+        return None
+    jobs = s.rows["jobs"]
+    if any(j.get("type") == "final" or
+           (s["surface"] == "mcp" and j.get("type") == "preview") or
+           (j.get("type") == "mcp_tool" and j.get("tool") in DELIVERY_TOOLS)
+           for j in jobs):
+        return None
+    if not s["settled"]:
+        return "running"
+    if s["surface"] == "mcp":
+        return "mcp"
+    if src and why and why["kind"] == "upload_only":
+        return "upload"
+    return None
+
+
 def story(s, ctx, review, person, trial, extra):
     rv = _review_card(review)
     src = _pick_source(ctx, rv and rv.get("source_asset_id"))
@@ -794,7 +813,13 @@ def story(s, ctx, review, person, trial, extra):
             mcp_calls.append({"at": t["at"], "tool": t["tool"],
                               "args": _plain(t.get("args") or "", 160),
                               "error": bool(t["error"])})
+    tools = {j["tool"] for j in s.rows["jobs"]
+             if j["type"] == "mcp_tool" and _visible_tool(j.get("tool"))}
+    why = why_no_video(dict(ctx, surface=s["surface"], settled=s["settled"]), got)
     return {
+        "fold_kind": fold_kind(s, ctx, got, src, why),
+        "search_only": bool(tools) and tools <= {
+            "get_transcript", "find_footage", "search_stock", "research_broll", "search"},
         "key": s["key"], "surface": s["surface"],
         "project_id": ctx["project"]["id"],
         "project_title": ctx["project"]["title"],
@@ -817,8 +842,7 @@ def story(s, ctx, review, person, trial, extra):
         "automatic_first_cut": first_cut,
         "mcp_calls": mcp_calls[:8], "mcp_calls_total": len(mcp_calls),
         "got": got, "renders": len(renders),
-        "why": why_no_video(dict(ctx, surface=s["surface"],
-                                 settled=s["settled"]), got),
+        "why": why,
         "process": _process(ctx),
         "review": rv,
         "next": _timeline(ctx, s, extra, renders, src),
