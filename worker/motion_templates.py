@@ -262,10 +262,11 @@ def _coerce(name, key, p, v, strict):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
     if t == "color":
-        v = str(v).strip()
-        if not HEX.match(v):
-            raise ValueError(f"{where} must be #RRGGBB")
-        return v.upper()
+        from schemas import coerce_hex
+        got = coerce_hex(v)
+        if got is None:
+            raise ValueError(f"{where} '{v}' is not a colour; use #RRGGBB")
+        return got
     if t == "enum":
         vals = p.get("values") or []
         if v not in vals:

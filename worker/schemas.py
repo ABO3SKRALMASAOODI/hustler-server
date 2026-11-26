@@ -54,6 +54,78 @@ TEXT_MIN_SPAN_S = 0.3
 GAIN_MIN_DB = -60.0
 GAIN_MAX_DB = 12.0
 HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+# Colour names a model writes in place of a hex (CSS's basic set). A value, not
+# an intent: "red" is a colour wherever it is written.
+CSS_COLORS = {
+    "black": "#000000", "white": "#FFFFFF", "red": "#FF0000", "green": "#008000",
+    "lime": "#00FF00", "blue": "#0000FF", "yellow": "#FFFF00", "cyan": "#00FFFF",
+    "aqua": "#00FFFF", "magenta": "#FF00FF", "fuchsia": "#FF00FF",
+    "silver": "#C0C0C0", "gray": "#808080", "grey": "#808080",
+    "maroon": "#800000", "olive": "#808000", "purple": "#800080",
+    "teal": "#008080", "navy": "#000080", "orange": "#FFA500",
+    "gold": "#FFD700", "pink": "#FFC0CB", "brown": "#A52A2A",
+    "beige": "#F5F5DC", "cream": "#FFFDD0", "ivory": "#FFFFF0",
+    "indigo": "#4B0082", "violet": "#EE82EE", "coral": "#FF7F50",
+    "crimson": "#DC143C", "turquoise": "#40E0D0", "salmon": "#FA8072",
+    "khaki": "#F0E68C", "lavender": "#E6E6FA", "mint": "#98FF98",
+    "amber": "#FFBF00", "charcoal": "#36454F",
+}
+_RGB_FN = re.compile(r"^rgba?\(\s*([\d.]+%?)\s*[, ]\s*([\d.]+%?)\s*[, ]\s*([\d.]+%?)"
+                     r"\s*(?:[,/]\s*([\d.]+%?)\s*)?\)$")
+
+
+def hex_rgba(value):
+    """(#RRGGBB, alpha 0..1) for any colour a model writes, or None when the
+    value names no colour. Accepts #RGB, #RGBA, #RRGGBB, #RRGGBBAA, the same
+    without the hash or as 0x..., rgb()/rgba(), a CSS colour name, and
+    "transparent". The engine draws #RRGGBB; the alpha is returned so a caller
+    can carry it as opacity instead of refusing the colour (p6238, 24 Nov:
+    apply_edit_batch refused '#FFFFFF00' and the turn ended partial)."""
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    if s == "transparent":
+        return "#000000", 0.0
+    if s in CSS_COLORS:
+        return CSS_COLORS[s], 1.0
+    m = _RGB_FN.match(s)
+    if m:
+        def _ch(v, scale=255.0):
+            return float(v[:-1]) / 100.0 * scale if v.endswith("%") else float(v)
+        try:
+            rgb = [max(0, min(255, round(_ch(v)))) for v in m.groups()[:3]]
+            a = m.group(4)
+            alpha = 1.0 if a is None else max(0.0, min(1.0, _ch(a, 1.0)))
+        except ValueError:
+            return None
+        return "#" + "".join(f"{c:02X}" for c in rgb), alpha
+    h = s[2:] if s.startswith("0x") else s.lstrip("#")
+    if not h or any(ch not in "0123456789abcdef" for ch in h):
+        return None
+    if len(h) in (3, 4):
+        h = "".join(ch * 2 for ch in h)
+    if len(h) == 6:
+        return "#" + h.upper(), 1.0
+    if len(h) == 8:
+        return "#" + h[:6].upper(), round(int(h[6:], 16) / 255.0, 4)
+    return None
+
+
+def coerce_hex(value):
+    """The #RRGGBB the engine draws for any colour a model writes, or None."""
+    got = hex_rgba(value)
+    return got[0] if got else None
+
+
+def _hex_or_raise(value, what, exc=ValueError):
+    """#RRGGBB for a colour field; raises only when the value names no colour."""
+    got = coerce_hex(value)
+    if got is None:
+        raise exc(f"{what} '{value}' is not a colour; use #RRGGBB hex, e.g. #FF0000 for red")
+    return got
 # Widened 12 -> 16 (round 35) and enforcement changed from reject to clamp:
 # an out-of-range grouping is a taste choice to trim, not an impossible state.
 MAX_WORDS_PER_CAPTION = 16
@@ -577,33 +649,21 @@ class CaptionStyle(BaseModel):
     @field_validator("color")
     @classmethod
     def _color_hex(cls, v):
-        v = (v or "").strip()
-        if not HEX_COLOR.match(v):
-            raise ValueError(
-                f"color '{v}' must be #RRGGBB hex, e.g. #FF0000 for red")
-        return v.upper()
+        return _hex_or_raise(v, "color")
 
     @field_validator("highlight_color")
     @classmethod
     def _hl_hex(cls, v):
         if v is None:
             return v
-        v = v.strip()
-        if not HEX_COLOR.match(v):
-            raise ValueError(
-                f"highlight_color '{v}' must be #RRGGBB hex, e.g. #FFE14D")
-        return v.upper()
+        return _hex_or_raise(v, "highlight_color")
 
     @field_validator("outline_color", "background_color")
     @classmethod
     def _optional_caption_hex(cls, v, info):
         if v is None:
             return v
-        v = v.strip()
-        if not HEX_COLOR.match(v):
-            raise ValueError(
-                f"{info.field_name} '{v}' must be #RRGGBB hex")
-        return v.upper()
+        return _hex_or_raise(v, info.field_name)
 
     @field_validator("size_scale")
     @classmethod
@@ -1875,18 +1935,14 @@ class PictureCard(BaseModel):
     @field_validator("background", "border_color")
     @classmethod
     def _color(cls, value):
-        if not re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
-            raise ValueError("picture card colors must be #RRGGBB")
-        return value.upper()
+        return _hex_or_raise(value, "picture card color")
 
     @field_validator("background_color2")
     @classmethod
     def _color2(cls, value):
         if value is None:
             return None
-        if not re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
-            raise ValueError("picture card colors must be #RRGGBB")
-        return value.upper()
+        return _hex_or_raise(value, "picture card color")
 
     @model_validator(mode="after")
     def _backdrop(self):
@@ -2259,6 +2315,9 @@ class VectorItem(BaseModel):
     height: float = 0.08
     color: str = "#FFFFFF"
     opacity: float = 1.0
+    # The fill's own opacity under ``opacity`` (None = solid): a colour written
+    # with an alpha ('#FFFFFF00') becomes an outline-only shape.
+    fill_opacity: Optional[float] = None
     stroke_color: Optional[str] = None
     # Fraction of the frame's shorter edge, so borders stay proportional in
     # landscape, square and vertical exports.
@@ -3417,9 +3476,8 @@ def validate_edl(data, duration=None, *, render_fragment=False):
         if not (CANVAS_FPS_MIN <= c.fps <= CANVAS_FPS_MAX):
             raise EDLValidationError(
                 f"canvas fps {c.fps} outside [{CANVAS_FPS_MIN}, {CANVAS_FPS_MAX}].")
-        if not HEX_COLOR.match(c.bg_color or ""):
-            raise EDLValidationError(
-                f"canvas bg_color {c.bg_color!r} must be #RRGGBB.")
+        c.bg_color = _hex_or_raise(c.bg_color, "canvas bg_color",
+                                   EDLValidationError)
         if not edl.inserts:
             raise EDLValidationError(
                 "a canvas program needs at least one insert (a clip or image) "
@@ -3884,11 +3942,8 @@ def validate_edl(data, duration=None, *, render_fragment=False):
         for cname in ("color", "accent_color"):
             cv = getattr(tx, cname)
             if cv is not None:
-                cv = cv.strip()
-                if not HEX_COLOR.match(cv):
-                    raise EDLValidationError(
-                        f"texts[{i}].{cname} '{cv}' must be #RRGGBB hex.")
-                setattr(tx, cname, cv.upper())
+                setattr(tx, cname, _hex_or_raise(
+                    cv, f"texts[{i}].{cname}", EDLValidationError))
         if tx.behind is not None:
             b = tx.behind
             if not b.asset_key:
@@ -3951,11 +4006,25 @@ def validate_edl(data, duration=None, *, render_fragment=False):
             cv = getattr(vec, cname)
             if cv is None:
                 continue
-            cv = cv.strip()
-            if not HEX_COLOR.match(cv):
+            got = hex_rgba(cv)
+            if got is None:
                 raise EDLValidationError(
-                    f"{label}.{cname} '{cv}' must be #RRGGBB hex.")
-            setattr(vec, cname, cv.upper())
+                    f"{label}.{cname} '{cv}' is not a colour; use #RRGGBB hex.")
+            hexv, alpha = got
+            if alpha < 1.0:
+                # A colour written with its alpha (#RRGGBBAA, rgba(), transparent)
+                # is drawn with that alpha: a see-through fill keeps its outline,
+                # a see-through border or track is no border or track.
+                if cname == "color":
+                    vec.fill_opacity = round(alpha * float(
+                        1.0 if vec.fill_opacity is None else vec.fill_opacity), 4)
+                elif alpha <= 0.0:
+                    hexv = None
+            setattr(vec, cname, hexv)
+        if vec.fill_opacity is not None:
+            vec.fill_opacity = round(min(max(float(vec.fill_opacity), 0.0), 1.0), 4)
+            if vec.fill_opacity >= 1.0:
+                vec.fill_opacity = None
         if vec.motion is not None:
             span = vec.end - vec.start
             bounds = {
@@ -4260,11 +4329,8 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 cv = getattr(sf, cname)
                 if cv is None:
                     continue
-                cv = str(cv).strip().upper()
-                if not HEX_COLOR.match(cv):
-                    raise EDLValidationError(
-                        f"effects.screen_frame.{cname} must be #RRGGBB hex.")
-                setattr(sf, cname, cv)
+                setattr(sf, cname, _hex_or_raise(
+                    cv, f"effects.screen_frame.{cname}", EDLValidationError))
         if fx.frame_shifts is not None:
             seen_fs = set()
             for i, fsh in enumerate(fx.frame_shifts):
@@ -4277,11 +4343,9 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 fsh.duration_s = _r(min(max(float(fsh.duration_s),
                                             FRAME_SHIFT_MIN_S),
                                         FRAME_SHIFT_MAX_S))
-                fsh.color = str(fsh.color).strip().upper()
-                if not HEX_COLOR.match(fsh.color):
-                    raise EDLValidationError(
-                        f"effects.frame_shifts[{i}].color must be #RRGGBB "
-                        "hex.")
+                fsh.color = _hex_or_raise(
+                    fsh.color, f"effects.frame_shifts[{i}].color",
+                    EDLValidationError)
             fx.frame_shifts.sort(key=lambda s: (s.at, s.id))
             # Two shifts inside one another's morph would have the bars
             # animating to two places at once; the second would win per frame
