@@ -454,6 +454,18 @@ def test_the_split_opens_on_the_completed_proof_and_pushes_in_until_it_reads(mon
         assert lab["op"][-1] == 0.0
 
 
+def test_a_checklist_drawn_as_one_title_lands_where_the_export_check_saw_it_whole(monkeypatch):
+    """The second recording of the same sentence drew the checklist as ONE title (items inside it): the edit list shows
+    no stack, the export check's receipt does (its real seconds, records of run fix58b-f1d224-f51886)."""
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: round(t, 3))
+    visible = [dict(seconds=[0.5, 5.533, 11.64, 27.15]), dict(seconds=[8.2, 9.366, 11.6, 11.64, 12.7])]
+    one_title = [(8.2, 18.0)]
+    assert P.proof_landing(one_title, 27.0) is None                       # the old reading: no stack, no landing
+    assert P.proof_landing(one_title, 27.0, visible) == 12.7
+    hook = P.showcase_hook(dict(file="/x/e.mp4"), 27.0, one_title, visible=visible)
+    assert hook[0] <= 12.7 and hook[1] - 12.7 >= P.PROOF_HOLD_S - 1e-6
+
+
 def test_the_sent_prompt_stays_under_the_mark_and_clear_of_the_growing_result():
     ui = dict(UI, bubble=[0.406, 0.485])
     l1, beats = D.showcase(upload=UPLOAD, export=EXPORT, edl_b=EDL_B, typed=TYPED, window=[0.0, 18.58], hook=[13.65, 16.45], ui=ui,

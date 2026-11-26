@@ -1609,20 +1609,30 @@ def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach
 PROOF_HOLD_S = 1.2              # the completed proof (every title of a stack on screen) holds the split's last 1.2 s
 
 
-def proof_landing(pics, body):
-    """Export second at which the most of the export's pictures and titles are on screen together (a checklist's last
-    item, a stack's last card), or None when no two of them ever overlap. Read from the edit list: `pics` (start,
-    seconds)."""
+def proof_landing(pics, body, visible=()):
+    """Export second at which the export's proof is complete, or None. Two readings, the later one kept: the edit list
+    (`pics` (start, seconds)), where the most pictures and titles are on screen together (a stack's last card); and the
+    export check's own receipt (`visible`: [{seconds}], what it saw on the export), the last second of its most
+    concentrated row, the asked element seen whole (26 Nov: the Studio drew a checklist as ONE title whose items
+    appear inside it, so the edit list alone showed no stack)."""
     pics = [(float(a), float(d)) for a, d in pics if a < body - 0.2 and d > 0]
     best, at = 1, None
     for a, _ in sorted(pics):
         n = sum(1 for b, e in pics if b <= a + 0.05 < b + e)
         if n > best:
             best, at = n, a
+    rows = []
+    for row in visible or ():
+        secs = sorted(float(t) for t in (row.get("seconds") or []) if isinstance(t, (int, float)) and 0 <= t < body - 0.2)
+        if len(secs) >= 3:
+            rows.append((secs[-1] - secs[0], secs[-1]))
+    if rows:
+        seen = min(rows)[1]
+        at = seen if at is None else max(at, seen)
     return round(at, 3) if at is not None else None
 
 
-def showcase_hook(ex, body, pics, span=None):
+def showcase_hook(ex, body, pics, span=None, visible=()):
     """[start, end] export seconds of the split hook. When the export builds a proof out of several titles or pictures
     (a checklist of three questions, a stack), the split shows it completed: the window ends PROOF_HOLD_S after its
     last item lands (26 Nov, the checklist film: the split entered on the first item and ended before the third, so the
@@ -1630,7 +1640,7 @@ def showcase_hook(ex, body, pics, span=None):
     before it lands, SPLIT_S long; without one, the stretch of the same length at two fifths of the body. Snapped to
     the quietest point near each end (between words)."""
     span = float(span or D.SPLIT_S)
-    landed = proof_landing(pics, body)
+    landed = proof_landing(pics, body, visible)
     if landed is not None and landed + PROOF_HOLD_S <= body - 0.2:
         t0 = quiet_snap(ex["file"], max(landed + PROOF_HOLD_S - span, 0.0), span=0.2)
         t0 = min(max(t0, 0.0), landed, max(body - span - 0.1, 0.0))
@@ -1859,7 +1869,8 @@ def showcase_supply(ctx, script, sup_dir, pk):
     pics = [(float(o["start"]), float(o["duration_s"])) for o in D.MF.pictures_of(edl) + D.MF.titles_of(edl)]
     d = W3.direction_of(ctx) if hasattr(ctx, "run_dir") else {}
     win = [float(x) for x in d.get("export_window") or showcase_window(ex, body, pics)]
-    hook = [float(x) for x in d.get("hook_window") or showcase_hook(ex, body, pics)]
+    visible = (script.get("receipts") or {}).get("visible") or ()
+    hook = [float(x) for x in d.get("hook_window") or showcase_hook(ex, body, pics, visible=visible)]
     ui = showcase_ui(rec)
     typed = typed_line(script["receipts"])
     mk = D.showcase_marks(hook, win, len(typed.split()), lead_f=F.LEAD_F)
@@ -1892,7 +1903,7 @@ def showcase_supply(ctx, script, sup_dir, pk):
                 voices=[], work=os.path.join(sup_dir, "finish"), fit=[],
                 product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
                              upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None,
-                             proof_at=proof_landing(pics, body)))
+                             proof_at=proof_landing(pics, body, visible)))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
                 format="showcase", studio_ui=bool(ui), site=bool(ui and ui.get("site")))
     jsave(pk, dict(pack=pack, record=rec_))
