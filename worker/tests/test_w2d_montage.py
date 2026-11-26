@@ -482,3 +482,21 @@ def test_library_clusters_alike_shots_across_clips():
     ents = [{"desc": d1}, {"desc": d2}, {"desc": d3}]
     library.cluster(ents)
     assert ents[0]["cluster"] == ents[1]["cluster"] != ents[2]["cluster"]
+
+
+def test_ramp_window_off_kept_footage_is_fitted_not_refused():
+    # p6238 (24 Nov): "window is not on kept footage" ended the turn partial.
+    ctx = S.Ctx(S.edl(keep=((0.0, 10.0), (12.0, 20.0))))
+    out = MT.set_speed_ramp(ctx, 15.0, 30.0, low=0.6, hold=0.3,
+                            allow_duplicates=True, allow_speech=True)
+    assert not out.startswith("REJECTED"), out
+    assert "fitted to the kept shot" in out, out
+
+
+def test_ramp_window_across_a_cut_stays_in_the_shot_it_covers_most():
+    from timeline import Timeline
+    tl = Timeline([[0.0, 10.0], [12.0, 20.0]])
+    kind, a, b = MT._ramp_window(tl, 8.0, 15.0)
+    assert kind == "shot" and a == pytest.approx(10.0) and b < 15.0 + 1e-6
+    kind, a, b = MT._ramp_window(tl, 30.0, 33.0)
+    assert kind == "shot" and b <= 18.0 + 1e-6 and a >= 15.0 - 1e-6

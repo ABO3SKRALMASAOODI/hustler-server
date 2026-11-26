@@ -2102,6 +2102,55 @@ def open_visual_page(ctx, pages=None):
            "All persisted storyboard pages have now been opened this turn."))
 
 
+def _seconds_one(v):
+    """One time as seconds: a number, '3.2', '3.2s', '1:05' or '00:01:05.5'."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, dict):
+        for k in ("t", "time", "at", "s", "seconds", "start"):
+            if k in v:
+                return _seconds_one(v[k])
+        return None
+    t = str(v).strip().lower().rstrip("s").strip()
+    if not t:
+        return None
+    try:
+        if ":" in t:
+            total = 0.0
+            for part in t.split(":"):
+                total = total * 60.0 + float(part)
+            return total
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _seconds_list(value):
+    """A times argument in any shape a model writes (an array, one number, a
+    JSON or comma-separated string, mm:ss) as a list of seconds; the value
+    unchanged when it holds no time at all (an empty list stays empty)."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+    elif isinstance(value, (int, float, dict)):
+        items = [value]
+    elif isinstance(value, str):
+        raw = value.strip()
+        try:
+            parsed = json.loads(raw)
+            items = parsed if isinstance(parsed, list) else [parsed]
+        except ValueError:
+            items = [p for chunk in raw.strip("[]()").split(",")
+                     for p in chunk.split()]
+    else:
+        return value
+    out = [x for x in (_seconds_one(i) for i in items) if x is not None]
+    return out if out or not items else value
+
+
 def look_at(ctx, times=None, question="", start=None, end=None,
             output_times=None, rendered=False, native_resolution=False,
             overlay=None):
@@ -2115,6 +2164,9 @@ def look_at(ctx, times=None, question="", start=None, end=None,
     missing chunk and says "measuring" meanwhile), `free_space` what type
     must avoid and the free rectangles, `beats` a ruler of stresses, cuts,
     the user's beats and device landings around each frame."""
+    # Times arrive as the model writes them (#1124, p5745 13 Nov: a string
+    # "3.2, 17.8" was refused twice): read every shape as seconds.
+    times, output_times = _seconds_list(times), _seconds_list(output_times)
     if overlay in ("", "none", None):
         overlay = None
     elif overlay not in motion_qa.OVERLAYS:

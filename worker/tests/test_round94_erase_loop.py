@@ -87,6 +87,12 @@ check("times + empty output_times reaches the FRAME path",
 r = agent_tools.look_at(_Ctx(), times="junk", output_times=[])
 check("a non-list times still teaches the array form",
       "times must be an array" in r)
+# #1124: a string of times is read as the times it names, not refused.
+r = agent_tools.look_at(_Ctx(), times="2.0, 6.0", output_times=[])
+check("a comma string of times reaches the FRAME path",
+      "Could not extract frames" in r)
+check("mm:ss and suffixed seconds are seconds",
+      agent_tools._seconds_list(["1:05", "3.5s", 2]) == [65.0, 3.5, 2.0])
 
 print("== 2. cover geometry, on the session's real rectangles ==")
 

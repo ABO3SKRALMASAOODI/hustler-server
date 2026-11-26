@@ -826,6 +826,40 @@ def _ramp_insert(ctx, ins_id, low_f, hold, curve, allow_duplicates):
     return res
 
 
+def _ramp_window(tl, s, e):
+    """Where a program window [s, e] can ramp: ("shot", s', e') inside the one
+    kept shot it overlaps most, ("insert", id) when it sits on a spliced
+    insert, or None when the film has no kept footage."""
+    import timeline as _timeline
+    s, e = min(s, e), max(s, e)
+    if e - s < 0.05:
+        e = s + 0.05
+    best = None
+    for off, L in zip(tl.offsets, tl.seg_out_len):
+        lo, hi = max(s, off), min(e, off + L)
+        if hi - lo > 1e-3 and (best is None or hi - lo > best[0]):
+            best = (hi - lo, lo, hi)
+    if best:
+        return ("shot", round(best[1], 3), round(best[2] - 1e-3, 3))
+    try:
+        items = sorted(tl.items, key=_timeline._ins_sort_key)
+        for item, (at, dur) in zip(items, tl.insert_positions()):
+            if at - 1e-3 <= s < at + dur and item.get("id"):
+                return ("insert", item["id"])
+    except Exception:  # noqa: BLE001 - fall through to the nearest shot
+        pass
+    if not tl.seg_out_len:
+        return None
+    # Past the end or on a gap: the same length on the nearest kept shot.
+    span = e - s
+    off, L = min(zip(tl.offsets, tl.seg_out_len),
+                 key=lambda r: min(abs(r[0] - s), abs(r[0] + r[1] - s)))
+    if s >= off + L:
+        lo = max(off, off + L - span)
+        return ("shot", round(lo, 3), round(off + L - 1e-3, 3))
+    return ("shot", round(off, 3), round(min(off + L, off + span) - 1e-3, 3))
+
+
 def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
                    curve="ease_in_out", allow_duplicates=False, id=None,
                    insert=None, allow_speech=False, ease_out=True):
@@ -864,13 +898,29 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
                     "joins are audible. Ramp B-roll (insert=id), a gesture, "
                     "a walk or a pause — or pass allow_speech true if the "
                     "user wants it there.")
+    # The window lands on the footage it means (p6238, 24 Nov: "window is not
+    # on kept footage" refused the ramp and the turn ended partial): over a
+    # spliced insert it ramps that insert; across a cut or past the end it is
+    # fitted to the kept shot it overlaps most.
+    snap = _ramp_window(tl, s, e)
+    if snap is None:
+        return "REJECTED: the film has no kept footage to ramp."
+    if snap[0] == "insert":
+        try:
+            res = _ramp_insert(ctx, str(snap[1]), low_f, float(hold),
+                               curve, allow_duplicates)
+        except (TypeError, ValueError) as err:
+            return f"REJECTED: {err}"
+        return (f"{s:.2f}-{e:.2f}s is on insert {snap[1]}: ramped that "
+                f"insert. {res}")
+    snapped_note = ""
+    if abs(snap[1] - s) > 0.02 or abs(snap[2] - e) > 0.02:
+        snapped_note = (f"The window {s:.2f}-{e:.2f}s was fitted to the kept "
+                        f"shot it covers: {snap[1]:.2f}-{snap[2]:.2f}s.")
+        s, e = snap[1], snap[2]
     a, b = tl.out_to_src(s), tl.out_to_src(max(s, e - 1e-3))
     if a is None or b is None:
-        return "REJECTED: that window is not on kept footage."
-    seg = tl.seg_program_range(a)
-    if seg and e > seg[1] + 0.02:
-        return ("REJECTED: a ramp stays inside one shot; that window crosses "
-                f"a cut at {seg[1]:.2f}s.")
+        return "REJECTED: the film has no kept footage to ramp."
     vid = (getattr(ctx, "index", None) or {}).get("video") or {}
     fps_src = float(vid.get("fps") or 30.0)
     fps_out = _fps(ctx, edl)
@@ -895,8 +945,16 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
            if not str(sp.get("id", "")).startswith(prefix + "_")]
     clash = ramps.fits(old, spans)
     if clash:
-        return ("REJECTED: the ramp overlaps speed span(s) " +
-                ", ".join(map(str, clash)) + "; remove_speed them first.")
+        # The newer ramp is what is asked on that footage: the spans under it
+        # give way (a refusal here cost a remove_speed round trip each time).
+        gone = {str(c) for c in clash}
+        old = [sp for sp in old if str(sp.get("id")) not in gone]
+        snapped_note = (snapped_note + " " if snapped_note else "") + (
+            "Replaced the speed span(s) under it: " + ", ".join(sorted(gone)) + ".")
+        if ramps.fits(old, spans):
+            return ("REJECTED: the ramp overlaps speed span(s) " +
+                    ", ".join(map(str, ramps.fits(old, spans))) +
+                    "; remove_speed them first.")
     prev = ctx.latest_edl()
     new = dict(prev["json"])
     new["speed"] = sorted(old + spans, key=lambda x: float(x["start"]))
@@ -915,6 +973,8 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
                  "stepping)")
     elif rep["dup_frames"]:
         tail += f"; {rep['dup_frames']} output frames repeat"
+    if snapped_note:
+        tail += "\n" + snapped_note
     return res + tail
 
 
