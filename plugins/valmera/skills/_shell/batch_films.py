@@ -149,6 +149,12 @@ def edit_film(wf, root, batch, index, idea, until_script):
         shell.jsave(str(directory / "ideas.json"), dict(plan, ideas=[dict(idea, style=style["id"])],
                                                        chosen=idea["title"], spend=[]))
         shell.jsave(str(state_path), state)
+    else:
+        state = shell.jload(state_path)
+        if "script" not in state["done"] and not shell.alive(state.get("pid")):
+            original = shell.jload(directory / "ideas.json")
+            original["ideas"][0]["style"] = idea["style"]
+            shell.jsave(str(directory / "ideas.json"), original)
     if until_script and "script" in shell.jload(state_path)["done"]:
         return None
     options = SimpleNamespace(state_root=str(local), work_root=str(directory.parent), resume=rid,
@@ -174,63 +180,100 @@ def edit_film(wf, root, batch, index, idea, until_script):
         raise RuntimeError(f"{rid} stopped in {stopped['stage']}: {stopped['error']}")
 
 
+def delivery_styles(wf, root, batch, items, target):
+    path = batch / "delivery-styles.json"
+    saved = shell.jload(path)
+    if saved:
+        return saved
+    previous = (shell.jload(root / "ledger.json") or {}).get(wf, [])
+    past = [r for r in previous if not r.get("run_id", "").startswith(batch.name + "-")][-3:]
+    permitted = [s["id"] for s in workflow(wf).cards().values() if s.get("buildable") and s.get("offer", True)]
+    order = []
+    for i in range(target):
+        available = [style for style in permitted if style not in {r["style"] for r in past}]
+        preferred = items[i][1].get("style") if i < len(items) else None
+        style = preferred if preferred in available else available[i % len(available)]
+        order.append(dict(style=style, previous=past))
+        past = (past + [dict(style=style)])[-3:]
+    shell.jsave(str(path), order)
+    return order
+
+
 def build_wave(wf, root, batch, target, slots, tried):
     plan = shell.jload(batch / "plan.json")
     items = list(enumerate(candidates(plan, wf)))
+    order = delivery_styles(wf, root, batch, items, target)
     style_plan = batch / "styles.json"
-    snapshots = shell.jload(style_plan, {}) or {}
-    if len(snapshots) < len(items):
-        past = (shell.jload(root / "ledger.json", {}) or {}).get(wf, [])[-3:]
-        permitted = [s["id"] for s in workflow(wf).cards().values()
-                     if s.get("buildable") and s.get("offer", True)]
-        for index, idea in items:
-            past = snapshots.setdefault(str(index), past)
-            available = [s for s in permitted if s not in {r["style"] for r in past}]
-            chosen = idea.get("style") if idea.get("style") in available else available[index % len(available)]
-            past = (past + [dict(style=chosen, idea=idea["title"])])[-3:]
-        shell.jsave(str(style_plan), snapshots)
-    films, errors = {}, {}
-    for index, _ in items:
-        saved = next((batch / "masters" / film_id(batch, index)).glob("*/film.json"), None)
-        if saved and finished(saved.parent):
-            films[index] = str(saved.parent)
-    prior = shell.jload(batch / "results.json", {}) or {}
-    # Give untried reserves the free slots first. A later run can revisit a stopped film with its checkpoints.
-    errors.update(prior.get("errors", {}))
-    for i, _ in items:
-        checkpoint = shell.jload(batch / "work" / film_id(batch, i) / "run.json") or {}
-        if checkpoint.get("stopped") and i not in films:
-            errors[str(i)] = checkpoint["stopped"]["error"]
-    items.sort(key=lambda row: str(row[0]) in errors)
-    todo = iter((i, item) for i, item in items if i not in films and i not in tried)
+    snapshots = shell.jload(style_plan) or {}
+    films = {}
+    errors = (shell.jload(batch / "results.json") or {}).get("errors", {})
+
+    def place(folder, preferred=None):
+        record = shell.jload(Path(folder) / "film.json")
+        style = record["style"]["id"]
+        matches = [n for n in range(target) if n not in films and order[n]["style"] == style]
+        if record["checks"]["ok"] and matches:
+            films[preferred if preferred in matches else matches[0]] = str(folder)
+
+    todo = []
+    for i, idea in items:
+        rid = film_id(batch, i)
+        saved = next((batch / "masters" / rid).glob("*/film.json"), None)
+        if saved:
+            place(saved.parent)
+            continue
+        if i in tried:
+            continue
+        directory = batch / "work" / rid
+        state = shell.jload(directory / "run.json") or {}
+        if state.get("stopped"):
+            errors[str(i)] = state["stopped"]["error"]
+        fixed = None
+        if "script" in state.get("done", []) or shell.alive(state.get("pid")):
+            script = shell.jload(directory / "script.json") or {}
+            scripted = (shell.jload(directory / "ideas.json") or {}).get("ideas", [])
+            fixed = script.get("style", {}).get("id") or (scripted[0]["style"] if scripted else None)
+        todo.append((i, idea, fixed))
+    todo.sort(key=lambda row: str(row[0]) in errors)
     config = dict(initializer=start_worker, initargs=(wf,))
     with (concurrent.futures.ProcessPoolExecutor(max_workers=slots, **config) as writers,
           concurrent.futures.ProcessPoolExecutor(max_workers=slots, **config) as editors):
         pending = {}
         while len(films) < target:
-            writing = sum(stage == "script" for _, _, stage in pending.values())
+            writing = sum(stage == "script" for _, _, stage, _ in pending.values())
             # Keep writing and recording while completed scripts move through supply, score and render.
-            free = min(slots - writing, target - len(films) - len(pending), 2 * slots - len(pending))
-            for _ in range(free):
-                job = next(todo, None)
-                if job is None:
+            occupied = set(films) | {pos for _, _, _, pos in pending.values()}
+            for pos in (n for n in range(target) if n not in occupied):
+                if writing >= slots or len(pending) >= 2 * slots:
                     break
-                i, idea = job
+                needed = order[pos]
+                job = next((j for j in todo if j[2] == needed["style"]), None)
+                if job is None:
+                    job = next((j for j in todo if j[2] is None), None)
+                if job is None:
+                    continue
+                todo.remove(job)
+                i, idea, fixed = job
                 tried.add(i)
+                if not fixed:
+                    snapshots[str(i)] = needed["previous"]
+                    shell.jsave(str(style_plan), snapshots)
+                idea = dict(idea, style=needed["style"])
                 future = writers.submit(make_film, wf, root, batch, i, idea, True)
-                pending[future] = (i, idea, "script")
+                pending[future] = (i, idea, "script", pos)
+                writing += 1
             if not pending:
                 break
             done, _ = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
             for task in done:
-                i, idea, stage = pending.pop(task)
+                i, idea, stage, pos = pending.pop(task)
                 try:
                     result = task.result()
                     if stage == "script" and result is None:
                         future = editors.submit(make_film, wf, root, batch, i, idea)
-                        pending[future] = (i, idea, "finish")
+                        pending[future] = (i, idea, "finish", pos)
                     elif finished(result):
-                        films[i] = result
+                        place(result, pos)
                         errors.pop(str(i), None)
                     else:
                         errors[str(i)] = "The private cut still has measured defects; continuing with the next source."

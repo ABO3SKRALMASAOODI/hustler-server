@@ -103,14 +103,16 @@ def test_scripts_continue_during_finishing_and_use_a_distinct_reserve(tmp_path, 
         assert started_third.wait(timeout=5)
         folder = batch_dir / idea["title"]
         folder.mkdir()
-        (folder / "film.json").write_text(json.dumps(dict(checks=dict(ok=index != 2))))
+        (folder / "film.json").write_text(json.dumps(dict(checks=dict(ok=index != 2), style=dict(id=idea["style"]))))
         return str(folder)
     engine = SimpleNamespace(cards=lambda: {i:dict(id=i, buildable=True) for i in "abcd"})
     monkeypatch.setattr(batch, "workflow", lambda wf: engine)
     monkeypatch.setattr(batch, "make_film", make)
     monkeypatch.setattr(batch.concurrent.futures, "ProcessPoolExecutor", ThreadPoolExecutor)
     films = batch.build("wf3", tmp_path, run, 6, 2)
-    assert [p.name for p in films] == ["Film 0", "Film 3", "Film 4", "Film 5", "Film 6", "Film 7"]
+    assert {p.name for p in films} == {"Film 0", "Film 3", "Film 4", "Film 5", "Film 6", "Film 7"}
+    ordered = [json.loads((p / "film.json").read_text())["style"]["id"] for p in films]
+    assert all(style not in ordered[max(0, i - 3):i] for i, style in enumerate(ordered))
     assert "unavailable source" in json.loads((run / "results.json").read_text())["errors"]["1"]
 
 
