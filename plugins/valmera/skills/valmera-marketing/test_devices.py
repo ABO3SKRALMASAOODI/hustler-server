@@ -438,17 +438,25 @@ CHECKLIST = [(7.933, 19.0), (8.633, 18.3), (10.766, 16.2)]
 
 def test_the_split_opens_on_the_completed_proof_and_pushes_in_until_it_reads(monkeypatch):
     monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: round(t, 3))
-    hook = P.showcase_hook(dict(file="/x/e.mp4"), 27.0, CHECKLIST)
-    landed = P.proof_landing(CHECKLIST, 27.0)
-    assert landed == 10.766 and hook[0] <= landed and hook[1] - landed >= P.PROOF_HOLD_S - 1e-6    # all three questions in the split
-    assert P.showcase_hook(dict(file="/x/e.mp4"), 24.2, [(6.31, 2.2), (13.9, 2.6)]) == [13.6, 16.4]  # no stack: as before
+    # the export check's receipt of the checklist (records/01.json and run fix58c-f1d224-310124: seen whole at 11.64 and
+    # 12.966 s; the edit cut away from the list by 13.17 s, measured on the copy's frames)
+    visible = [dict(seconds=[0.5, 5.533, 11.64, 27.15, 30.566]), dict(seconds=[7.933, 8.5, 10.766, 11.64, 12.966])]
+    span = P.proof_span(CHECKLIST, 27.0, visible)
+    assert span == (11.64, 12.966)
+    hook = P.showcase_hook(dict(file="/x/e.mp4"), 27.0, CHECKLIST, visible=visible)
+    assert hook[1] <= 12.966 - P.PROOF_LEAD_S + 1e-6 and abs(hook[1] - hook[0] - D.SPLIT_S) < 1e-6    # never held past the last sight
+    old = [7.633, 10.433]                                                   # the delivered split: the third question never in it
+    assert old[1] < 10.766 <= hook[1]
+    assert P.showcase_hook(dict(file="/x/e.mp4"), 24.2, [(6.31, 2.2), (13.9, 2.6)]) == [13.6, 16.4]  # no proof: as before
+    at = P.proof_push_at(span, hook)
+    assert span[0] <= at and at + (D.PROOF_PUSH_F + 8) / FPS <= hook[1] + 1e-6
     l1, beats = D.showcase(upload=UPLOAD, export=EXPORT, edl_b=EDL_B, typed=TYPED, window=[0.0, 18.58], hook=hook, ui=UI, page=UI["site"],
-                           lib=LIB, lead_f=3, later="8 MIN", proof_at=landed)
+                           lib=LIB, lead_f=3, later="8 MIN", proof_at=at)
     split = beats["devices"][0]
     ex = next(it for it in l1["items"] if it["id"] == "sp.ex")
     assert split["proof_push"] and ex["s"][-1] * ex["w"] >= D.PROOF_W - 1e-3 and abs(ex["x"][-1] - 0.5) < 1e-3
-    proof_f = int(round((landed - hook[0]) * FPS))
-    assert all(v == 1.0 for v in ex["s"][8:proof_f])            # the comparison holds until the proof is complete
+    proof_f = int(round((at - hook[0]) * FPS))
+    assert all(v == 1.0 for v in ex["s"][8:proof_f])                      # the comparison holds until the proof is complete
     assert not [s for s in l1["sound"] if s["event_f"] < 6]             # nothing sounds over a split already whole on f0
     for lab in (it for it in l1["items"] if it["id"] in ("sp.lab_up", "sp.lab_ex")):
         assert lab["op"][-1] == 0.0
@@ -456,14 +464,14 @@ def test_the_split_opens_on_the_completed_proof_and_pushes_in_until_it_reads(mon
 
 def test_a_checklist_drawn_as_one_title_lands_where_the_export_check_saw_it_whole(monkeypatch):
     """The second recording of the same sentence drew the checklist as ONE title (items inside it): the edit list shows
-    no stack, the export check's receipt does (its real seconds, records of run fix58b-f1d224-f51886)."""
+    no stack, the export check's receipt does (its real seconds, run fix58b-f1d224-f51886)."""
     monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: round(t, 3))
     visible = [dict(seconds=[0.5, 5.533, 11.64, 27.15]), dict(seconds=[8.2, 9.366, 11.6, 11.64, 12.7])]
     one_title = [(8.2, 18.0)]
-    assert P.proof_landing(one_title, 27.0) is None                       # the old reading: no stack, no landing
-    assert P.proof_landing(one_title, 27.0, visible) == 12.7
+    assert P.proof_span(one_title, 27.0) is None                          # the edit list alone: no stack
+    assert P.proof_span(one_title, 27.0, visible) == (11.64, 12.7)
     hook = P.showcase_hook(dict(file="/x/e.mp4"), 27.0, one_title, visible=visible)
-    assert hook[0] <= 12.7 and hook[1] - 12.7 >= P.PROOF_HOLD_S - 1e-6
+    assert hook[1] == round(12.7 - P.PROOF_LEAD_S, 3)
 
 
 def test_the_sent_prompt_stays_under_the_mark_and_clear_of_the_growing_result():

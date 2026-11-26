@@ -1606,45 +1606,54 @@ def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach
     return [0.0, round(end, 3)]
 
 
-PROOF_HOLD_S = 1.2              # the completed proof (every title of a stack on screen) holds the split's last 1.2 s
+PROOF_LEAD_S = 0.1              # the split ends this far inside the last second the proof was seen whole
 
 
-def proof_landing(pics, body, visible=()):
-    """Export second at which the export's proof is complete, or None. Two readings, the later one kept: the edit list
-    (`pics` (start, seconds)), where the most pictures and titles are on screen together (a stack's last card); and the
-    export check's own receipt (`visible`: [{seconds}], what it saw on the export), the last second of its most
-    concentrated row, the asked element seen whole (26 Nov: the Studio drew a checklist as ONE title whose items
-    appear inside it, so the edit list alone showed no stack)."""
+def proof_span(pics, body, visible=()):
+    """(start, end) export seconds over which the export's proof is complete, or None. Two readings: the edit list
+    (`pics` (start, seconds)), where the most pictures and titles are on screen together (a stack's last card) until the
+    first of them ends; and the export check's own receipt (`visible`: [{seconds}], what it saw on the export pixels),
+    the last two seconds of its most concentrated row, the asked element seen whole. The receipt is the measured one and
+    wins its end (26 Nov: a Studio checklist drawn as ONE title showed no stack in the edit list; another cut away from
+    the list 0.2 s after the check's last sight of it, so nothing may be held past that second)."""
     pics = [(float(a), float(d)) for a, d in pics if a < body - 0.2 and d > 0]
-    best, at = 1, None
+    best, span = 1, None
     for a, _ in sorted(pics):
-        n = sum(1 for b, e in pics if b <= a + 0.05 < b + e)
-        if n > best:
-            best, at = n, a
+        cover = [b + e for b, e in pics if b <= a + 0.05 < b + e]
+        if len(cover) > best:
+            best, span = len(cover), (a, min(cover))
     rows = []
     for row in visible or ():
         secs = sorted(float(t) for t in (row.get("seconds") or []) if isinstance(t, (int, float)) and 0 <= t < body - 0.2)
         if len(secs) >= 3:
-            rows.append((secs[-1] - secs[0], secs[-1]))
+            rows.append((secs[-1] - secs[0], secs[-2], secs[-1]))
     if rows:
-        seen = min(rows)[1]
-        at = seen if at is None else max(at, seen)
-    return round(at, 3) if at is not None else None
+        _, a, b = min(rows)
+        span = (max(span[0], a) if span and span[0] <= b else a, b)
+    return (round(span[0], 3), round(span[1], 3)) if span else None
+
+
+def proof_push_at(span, hook):
+    """Export second the split's push onto the proof starts from: inside the proof's whole stretch, with room for the
+    push and a hold before the split ends (devices.split)."""
+    if not span:
+        return None
+    f_room = (D.PROOF_PUSH_F + 8) / F.FPS
+    return round(min(max(float(span[0]), float(hook[0]) + 6 / F.FPS), float(hook[1]) - f_room), 3)
 
 
 def showcase_hook(ex, body, pics, span=None, visible=()):
-    """[start, end] export seconds of the split hook. When the export builds a proof out of several titles or pictures
-    (a checklist of three questions, a stack), the split shows it completed: the window ends PROOF_HOLD_S after its
-    last item lands (26 Nov, the checklist film: the split entered on the first item and ended before the third, so the
-    opening never showed the checklist it sells). Otherwise the export's longest picture or title, entered a breath
-    before it lands, SPLIT_S long; without one, the stretch of the same length at two fifths of the body. Snapped to
-    the quietest point near each end (between words)."""
+    """[start, end] export seconds of the split hook. When the export builds a proof (a checklist of three questions, a
+    stack), the split ends on it whole: PROOF_LEAD_S inside the last second it is seen whole (proof_span) (26 Nov, the
+    checklist film: the split entered on the first item and ended before the third, so the opening never showed the
+    checklist it sells). Otherwise the export's longest picture or title, entered a breath before it lands, SPLIT_S
+    long; without one, the stretch of the same length at two fifths of the body. Snapped to the quietest point near
+    each end (between words)."""
     span = float(span or D.SPLIT_S)
-    landed = proof_landing(pics, body, visible)
-    if landed is not None and landed + PROOF_HOLD_S <= body - 0.2:
-        t0 = quiet_snap(ex["file"], max(landed + PROOF_HOLD_S - span, 0.0), span=0.2)
-        t0 = min(max(t0, 0.0), landed, max(body - span - 0.1, 0.0))
-        return [round(t0, 3), round(t0 + span, 3)]
+    whole = proof_span(pics, body, visible)
+    if whole and whole[1] - PROOF_LEAD_S - span >= 0.0:
+        t1 = whole[1] - PROOF_LEAD_S
+        return [round(t1 - span, 3), round(t1, 3)]
     fit = [(a, d) for a, d in pics if a + min(d, span) <= body - 0.2]
     if fit:
         a, d = max(fit, key=lambda p: (p[1], p[0]))
@@ -1903,7 +1912,7 @@ def showcase_supply(ctx, script, sup_dir, pk):
                 voices=[], work=os.path.join(sup_dir, "finish"), fit=[],
                 product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
                              upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None,
-                             proof_at=proof_landing(pics, body, visible)))
+                             proof_at=proof_push_at(proof_span(pics, body, visible), hook)))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
                 format="showcase", studio_ui=bool(ui), site=bool(ui and ui.get("site")))
     jsave(pk, dict(pack=pack, record=rec_))
