@@ -31,7 +31,7 @@ CHECKOUT_WAIT = timedelta(seconds=60)
 TURN_SILENCE = timedelta(seconds=120)
 REVIEW_SETTLE = timedelta(minutes=10)   # the Reviewer files its own cause first
 MODEL_STREAK = 3
-# A failed call a fallback can still answer (the OpenAI credit gate hands the same job's call to
+# A failed call a fallback can still answer (the first provider's credit gate hands the same job's call to
 # Haiku within seconds, #1747) is judged only once this has passed or an answer landed.
 MODEL_ANSWER_SETTLE = timedelta(seconds=120)
 CANCEL_WITHIN = timedelta(hours=24)
@@ -336,7 +336,7 @@ def _model_failing(cur, since, now, p):
                    -- ticket 861 paged P0 on 18 of them in one index.
                    AND COALESCE(l.response->>'stop', '') <> 'budget'
                    -- #1747: a failed call whose fallback answered the same job
-                   -- and purpose (OpenAI out of credit, Haiku answered 2-4 s
+                   -- and purpose (the first provider out of credit, Haiku answered 2-4 s
                    -- later) delivered; it is not a dead model. A failure still
                    -- young may yet be answered, so it is judged once settled.
                    AND NOT (l.response->>'error' IS NOT NULL AND (
