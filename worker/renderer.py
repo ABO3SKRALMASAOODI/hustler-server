@@ -4015,6 +4015,13 @@ def _fx_cuts(order, keep, edl_keep, blk_frames):
 # dissolves on a 348 s slideshow took 505 s, 350 of them in the kernel.
 WEAVE_MIN_WINDOWS = 4
 
+# Kept blocks that draw the same picture share one picture chain from this
+# many blocks on (renderer.build_filtergraph's _shared_picture): each chain
+# keeps its frame pools for the whole render, so per-block chains made peak
+# memory grow with the number of cuts (p6311: 156 spans, 2.4-2.8 GB, OOM).
+# Below it a programme's graph is the per-block one, byte for byte.
+SHARED_PICTURE_MIN_BLOCKS = 8
+
 
 # A scale filter starts one thread per core for itself, on top of the graph's
 # pool, and keeps them for the life of the graph: 300 scalers measured 4,537
@@ -4094,12 +4101,15 @@ def _weave_windows(parts, blocks, frames, windows, fps):
             woven.append((vlab, alab, bd))
             continue
         pieces = [halves[k - 1][1]] if head else []
-        if head + tail >= nb:
-            parts.append(f"[{vlab}]nullsink")
-        else:
-            parts.append(f"[{vlab}]trim=start_frame={head}:end_frame="
-                         f"{nb - tail},setpts=PTS-STARTPTS[fxk{k}]")
-            pieces.append(f"fxk{k}")
+        # A block the two windows cover whole still drains through its own
+        # piece, as an empty trim: a nullsink here is a sink of the graph,
+        # and ffmpeg asks the sink with the oldest stamp for frames first,
+        # which pulled the source to that block's place at the very start
+        # and held every frame before it in the other branches (p6311:
+        # 135 dissolves, 1.4-3.0 GB, the executor's OOM killer).
+        parts.append(f"[{vlab}]trim=start_frame={head}:end_frame="
+                     f"{max(head, nb - tail)},setpts=PTS-STARTPTS[fxk{k}]")
+        pieces.append(f"fxk{k}")
         if tail:
             pieces.append(halves[k][0])
         chain = ("".join(f"[{p}]" for p in pieces)
@@ -5233,10 +5243,81 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 panel_conceal=(None if mask else card_layout[i][6]
                                if len(card_layout[i]) > 6 else None))
 
+        def _shared_key(i):
+            """What block i's picture chain depends on, when it is the plain
+            _normalize_video chain on the block clock (else None): blocks
+            with the same key draw the same picture from the same frames."""
+            if i in card_layout or blk_frames.get(("seg", i)) is None \
+                    or seg_out_len[i] is None or _fill_of(i):
+                return None
+            seg_focus, seg_mode = _frame_for(*keep[i])
+            if _fspans and seg_mode == "crop" and \
+                    follow.span_at(_fspans, _block_mid(*keep[i])):
+                return None
+            return (seg_focus, seg_mode)
+
+        def _shared_picture(run, key):
+            """Blocks ``run`` through ONE picture chain (p6311, ticket 1844).
+
+            Every block's chain (scale, crop, blurred backdrop, grade) keeps
+            its frame pools for the life of the graph, so memory grew with
+            the number of cuts: 156 spans of one 41 s upload peaked at 2.4-
+            2.8 GB and the executor's OOM killer took every dissolve. Here
+            each block is first put on its exact frames (block_tail's clock,
+            at source size: same frames, same count), the run is joined, the
+            picture is drawn once, and each block is cut back out by frame
+            count. The same frames meet the same per-frame filters, so the
+            picture is identical; the chain is one, however many cuts."""
+            seg_focus, seg_mode = key
+            u = f"sp{run[0]}"
+            for i in run:
+                nf = max(1, int(blk_frames[("seg", i)]))
+                parts.append(f"[segv{i}]tpad=stop_mode=clone:stop=2,"
+                             f"fps={fps:.3f},trim=end_frame={nf},"
+                             f"setpts=PTS-STARTPTS[{u}c{i}]")
+            # Restamped by frame number: the blocks are already exactly
+            # their frames, and concat's own offsets (a 1-frame block's
+            # length) must not let `fps` drop or repeat one.
+            parts.append("".join(f"[{u}c{i}]" for i in run)
+                         + f"concat=n={len(run)}:v=1:a=0,settb=AVTB,"
+                         f"setpts='round(N/{fxprims.fps3(fps):.3f}/TB)'"
+                         f"[{u}r]")
+            _normalize_video(parts, f"{u}r", f"{u}p", W, H, fps, seg_mode, u,
+                             focus=seg_focus,
+                             picture=(edl.get("frame") or {}).get("picture"),
+                             grade=block_grade, src_size=main_src_size)
+            parts.append(f"[{u}p]split={len(run)}"
+                         + "".join(f"[{u}s{i}]" for i in run))
+            at = 0
+            for i in run:
+                nf = max(1, int(blk_frames[("seg", i)]))
+                parts.append(f"[{u}s{i}]trim=start_frame={at}:end_frame="
+                             f"{at + nf},setpts=PTS-STARTPTS[v_seg{i}]")
+                at += nf
+
+        shared = {}
+        if n >= SHARED_PICTURE_MIN_BLOCKS:
+            keys = [_shared_key(i) for i in range(n)]
+            i = 0
+            while i < n:
+                j = i
+                while keys[i] is not None and j + 1 < n \
+                        and keys[j + 1] == keys[i]:
+                    j += 1
+                if j > i:
+                    shared[i] = list(range(i, j + 1))
+                    for k in range(i + 1, j + 1):
+                        shared[k] = None
+                i = j + 1
+
         for i in range(n):
             # frame_focus reaches ONLY the main footage: the focus point was
             # measured on the source video, so inserts (below) keep the
             # center crop.
+            if i in shared:
+                if shared[i]:
+                    _shared_picture(shared[i], _shared_key(i))
+                continue
             if i in card_layout:
                 cspan = card_layout[i][2] if len(card_layout[i]) > 2 else None
                 pspans = card_layout[i][4] if len(card_layout[i]) > 4 else None
@@ -5721,6 +5802,54 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"{pair}concat=n=2:v=1:a=0,{tail},format=gray[{uu}m]")
         return f"{uu}m"
 
+    # Many windows are drawn through shared chains (fxgraph.batch_junctions):
+    # a chain per window held its frame pools for the whole render.
+    batching = len(fx_juncs) >= SHARED_PICTURE_MIN_BLOCKS
+    if batching:
+        fxgraph.batch_junctions(parts, fx_plan)
+    # [key, [(raw label, out label, h)]]: source handles drawn through one
+    # picture chain per side and look (_shared_handles)
+    handle_batch = [] if batching else None
+
+    def _shared_handles(groups):
+        """Source handles through ONE picture chain per side and look
+        (ticket 1844, after review).
+
+        Each handle is h frames of the source past a cut, drawn through its
+        own scale, crop, blurred backdrop and grade: two chains a window,
+        each keeping its frame pools for the whole render (80 dissolves on
+        jump cuts: 159 backdrops, 1.8 GB at 1080x1920). Here a group's
+        handles, each already exactly its h frames on the render clock, are
+        joined in program order, drawn once and cut back out by frame
+        count: the same frames meet the same per-frame filters, so every
+        handle is the picture it was alone."""
+        picture = (edl.get("frame") or {}).get("picture")
+        f3s = fxprims.fps3(fps)
+        for g, ((side, seg_mode, seg_focus), rows) in enumerate(groups):
+            if len(rows) == 1:
+                raw, out, hh = rows[0]
+                _normalize_video(parts, raw, out, W, H, fps, seg_mode,
+                                 out[:-1] + "n", focus=seg_focus,
+                                 seg_dur=hh / f3s, frames=hh,
+                                 picture=picture, grade=block_grade,
+                                 src_size=main_src_size)
+                continue
+            u = f"hs{side}{g}"
+            total = sum(hh for _r, _o, hh in rows)
+            parts.append("".join(f"[{raw}]" for raw, _o, _h in rows)
+                         + f"concat=n={len(rows)}:v=1:a=0,settb=AVTB,"
+                         f"setpts='round(N/{f3s:.3f}/TB)'[{u}r]")
+            _normalize_video(parts, f"{u}r", f"{u}p", W, H, fps, seg_mode, u,
+                             focus=seg_focus, seg_dur=total / f3s,
+                             frames=total, picture=picture,
+                             grade=block_grade, src_size=main_src_size)
+            parts.append(f"[{u}p]split={len(rows)}"
+                         + "".join(f"[{u}s{k}]" for k in range(len(rows))))
+            at = 0
+            for k, (_raw, out, hh) in enumerate(rows):
+                parts.append(f"[{u}s{k}]trim=start_frame={at}:end_frame="
+                             f"{at + hh},setpts=PTS-STARTPTS[{out}]")
+                at += hh
     for spec in fx_juncs:
         h, ka, kb = spec["h"], spec["k"], spec["k"] + 1
         u = f"fxj{ka}"
@@ -5764,6 +5893,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 edge = float(keep[i][1]) if side == "a" else float(keep[i][0])
                 seg_focus = follow.centre_at(fspan, edge)
             hfill = _fill_of(i)
+            if handle_batch is not None and not hfill:
+                key = (side, seg_mode, seg_focus)
+                row = (f"{u}{side}r", f"{u}{side}h", h)
+                for group in handle_batch:
+                    if group[0] == key:
+                        group[1].append(row)
+                        break
+                else:
+                    handle_batch.append([key, [row]])
+                return f"{u}{side}h"
             _normalize_video(parts, f"{u}{side}r", f"{u}{side}h", W, H, fps,
                              seg_mode, f"{u}{side}n", focus=seg_focus,
                              seg_dur=h / f3, frames=h,
@@ -5822,6 +5961,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             fx_plan)
         if jw:
             fx_windows.append((spec["frame"], h, jw, ka))
+    if batching:
+        _shared_handles(handle_batch)
+        fxgraph.flush_junctions(parts, fx_plan)
 
     if _weaves_windows(fx_windows, pm, card_runs):
         # Many windows are woven in, not laid over: see _weave_windows.
