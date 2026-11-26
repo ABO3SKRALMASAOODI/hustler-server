@@ -10,7 +10,7 @@ import tempfile
 import brand
 import chain
 import delivered
-from wf1_storage import _swap_dirs, write_json
+from wf1_storage import exchange_dirs, settle_exchange, write_json
 
 
 def score_copy(clean, output, doc, used, scratch, *, replace_cue=False):
@@ -133,13 +133,21 @@ def sync_path(path):
         os.close(fd)
 
 
+def staged_folder(folder):
+    return folder.with_name("." + folder.name + ".music-finish")
+
+
 def private_folder(run, record):
+    """The run's private folder of an accepted short that holds its receipt, or
+    None. An exchange with its staging folder that stopped part way is
+    finished first; a record whose folder has no receipt has no film to finish."""
     if not record or not record.get("ok") or run.state.get("delivered") or Path(run.p("deliver.json")).exists():
         return None
     folder = Path(record["folder"]).resolve()
-    if folder.parent == Path(run.p("films")).resolve() and not delivered.in_delivery_root(str(folder)):
-        return folder
-    return None
+    if folder.parent != Path(run.p("films")).resolve() or delivered.in_delivery_root(str(folder)):
+        return None
+    settle_exchange(staged_folder(folder), folder)
+    return folder if (folder / "film.json").is_file() else None
 
 
 def recover_all(run, records):
@@ -169,7 +177,7 @@ def recover(run, record, *, duplicate=None, reserved=()):
     folder = private_folder(run, record)
     if folder is None:
         return
-    staged = folder.with_name("." + folder.name + ".music-finish")
+    staged = staged_folder(folder)
     receipt = folder / "film.json"
     doc = json.loads(receipt.read_text())
     def needs_refit(doc):
@@ -222,8 +230,7 @@ def recover(run, record, *, duplicate=None, reserved=()):
                 write_json(staged / "film.json", doc)
                 sync_path(staged / "film.mp4")
                 sync_path(staged)
-                if not _swap_dirs(staged, folder):
-                    raise OSError(f"Could not atomically exchange the private staging folder {folder}")
+                exchange_dirs(staged, folder)
                 sync_path(folder.parent)
         # If the process stopped after the exchange, the receipt has the chosen id
         # and the sibling still holds the original. Complete the ledger first.

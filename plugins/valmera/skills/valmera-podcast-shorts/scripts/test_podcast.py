@@ -835,3 +835,140 @@ def test_parent_replaces_only_second_use_and_resumes_exchanged_receipt(tmp_path,
         folder = Path(rec["folder"])
         assert (folder / "film_clean.mp4").read_bytes() == b"mp4:film_clean.mp4"
         assert (folder / "film.mp4").read_bytes() == (b"fresh" if rec["id"] in {"m45", "m46"} else b"mp4:film.mp4")
+
+
+def _pair(tmp_path):
+    new, dest = tmp_path / "films" / ".accepted.music-finish", tmp_path / "films" / "accepted"
+    for folder, body in [(new, b"finished"), (dest, b"original")]:
+        folder.mkdir(parents=True)
+        (folder / "film.mp4").write_bytes(body)
+    return new, dest
+
+
+def test_this_system_exchanges_two_folders_in_one_step(tmp_path):
+    """macOS swaps with renamex_np, Linux with renameat2 RENAME_EXCHANGE (CI runs this on Linux)."""
+    import wf1_storage
+
+    new, dest = _pair(tmp_path)
+    if sys.platform == "darwin" or sys.platform.startswith("linux"):
+        assert wf1_storage.exchange_call() is not None
+        assert wf1_storage._swap_dirs(new, dest)
+    else:
+        wf1_storage.exchange_dirs(new, dest)
+    assert (dest / "film.mp4").read_bytes() == b"finished" and (new / "film.mp4").read_bytes() == b"original"
+    assert sorted(p.name for p in dest.parent.iterdir()) == [".accepted.music-finish", "accepted"]
+
+
+def test_the_exchange_call_is_chosen_by_system_and_machine():
+    import wf1_storage
+
+    seen = []
+
+    def ok(*args):
+        seen.append([getattr(a, "value", a) for a in args])
+        return 0
+
+    call = wf1_storage.exchange_call("darwin", libc=SimpleNamespace(renamex_np=ok))
+    call(b"/n", b"/d")
+    call = wf1_storage.exchange_call("linux", "x86_64", SimpleNamespace(renameat2=ok, syscall=None))
+    call(b"/n", b"/d")
+    for machine in ("x86_64", "aarch64"):                      # glibc before 2.28: the system call by its number
+        wf1_storage.exchange_call("linux", machine, SimpleNamespace(syscall=ok))(b"/n", b"/d")
+    assert seen == [[b"/n", b"/d", 2], [-100, b"/n", -100, b"/d", 2],
+                    [316, -100, b"/n", -100, b"/d", 2], [276, -100, b"/n", -100, b"/d", 2]]
+    assert wf1_storage.exchange_call("linux", "mips", SimpleNamespace(syscall=ok)) is None
+    assert wf1_storage.exchange_call("linux", "x86_64", SimpleNamespace()) is None
+    assert wf1_storage.exchange_call("darwin", libc=SimpleNamespace()) is None
+    assert wf1_storage.exchange_call("win32") is None
+
+
+@pytest.mark.parametrize("code", ["EINVAL", "ENOSYS", "EOPNOTSUPP", None])
+def test_a_filesystem_without_the_exchange_trades_the_folders_by_renames(tmp_path, code):
+    import ctypes
+    import errno
+    import wf1_storage
+
+    def refuse(*args):
+        ctypes.set_errno(getattr(errno, code))
+        return -1
+
+    call = wf1_storage.exchange_call("linux", "x86_64", SimpleNamespace(renameat2=refuse)) if code else None
+    new, dest = _pair(tmp_path)
+    if call:
+        with pytest.raises(OSError) as refused:
+            call(os.fsencode(new), os.fsencode(dest))
+        assert refused.value.errno == getattr(errno, code)
+    assert not wf1_storage._swap_dirs(new, dest, exchange=call)            # nothing moved
+    assert (dest / "film.mp4").read_bytes() == b"original"
+    wf1_storage.exchange_dirs(new, dest, exchange=call)
+    assert (dest / "film.mp4").read_bytes() == b"finished" and (new / "film.mp4").read_bytes() == b"original"
+    assert sorted(p.name for p in dest.parent.iterdir()) == [".accepted.music-finish", "accepted"]
+
+
+def test_an_exchange_stopped_between_its_renames_is_finished(tmp_path):
+    import shutil
+    import wf1_storage
+
+    new, dest = _pair(tmp_path)
+    aside = wf1_storage.exchange_aside(dest)
+    os.rename(dest, aside)                                                 # stopped after the first rename
+    wf1_storage.settle_exchange(new, dest)
+    assert (dest / "film.mp4").read_bytes() == b"finished" and (new / "film.mp4").read_bytes() == b"original"
+    os.rename(new, aside)                                                  # stopped after the second rename
+    wf1_storage.settle_exchange(new, dest)
+    assert (new / "film.mp4").read_bytes() == b"original" and not aside.exists()
+    os.rename(dest, aside)
+    shutil.rmtree(new)                                                     # only the original is left: it goes back
+    wf1_storage.settle_exchange(new, dest)
+    assert (dest / "film.mp4").read_bytes() == b"finished" and not aside.exists() and not new.exists()
+    wf1_storage.settle_exchange(new, dest)                                 # nothing part way: nothing moves
+
+
+@pytest.mark.parametrize("stop_at", [".accepted.music-finish", ".accepted.exchanging"])
+def test_refit_resumes_an_exchange_the_process_stopped_between_renames(tmp_path, monkeypatch, stop_at):
+    """A filesystem without one-step exchange: the process dies between renames; the next parent run finishes the swap."""
+    import wf1_staged_music as finish
+    import wf1_storage
+
+    folder = tmp_path / "films" / "accepted"
+    folder.mkdir(parents=True)
+    prior = dict(cid="same", source_sha256="source", clean_export="film_clean.mp4",
+                 does=dict(encoded_balance={"lag_ms": 0}))
+    finish.write_json(folder / "film.json", dict(run_id="work", music=prior, rules={"music_picked": True}))
+    finish.write_json(tmp_path / "music_used.json", ["same"])
+    (folder / "film_clean.mp4").write_bytes(b"clean")
+    (folder / "film.mp4").write_bytes(b"first score")
+    run = SimpleNamespace(state={}, p=tmp_path.joinpath, log=lambda msg: None, refit_staged_music={"work"})
+    accepted = dict(id="m36", ok=True, folder=folder)
+    attempts = []
+
+    def remux(clean, output, receipt, used, scratch):
+        attempts.append(output)
+        output.write_bytes(b"second score")
+        return dict(prior, staged_mix_version=2)
+
+    class Stopped(BaseException):
+        pass
+
+    rename, stopped = os.rename, []
+
+    def stop(src, dst):
+        if Path(src).name == stop_at and not stopped:
+            stopped.append(dst)
+            raise Stopped()
+        rename(src, dst)
+
+    monkeypatch.setattr(finish, "score_copy", remux)
+    monkeypatch.setattr(wf1_storage, "exchange_call", lambda: None)
+    monkeypatch.setattr(os, "rename", stop)
+    with pytest.raises(Stopped):
+        finish.recover(run, accepted)
+    monkeypatch.setattr(os, "rename", rename)
+    finish.recover(run, accepted)
+    finish.recover(run, accepted)
+    assert stopped and len(attempts) == 1                                   # one remux, then the swap was finished
+    assert (folder / "film.mp4").read_bytes() == b"second score"
+    assert (folder / "film_clean.mp4").read_bytes() == b"clean"
+    assert json.loads((folder / "film.json").read_text())["music"]["staged_mix_version"] == 2
+    assert json.loads((tmp_path / "music_used.json").read_text()) == ["same"]
+    assert [p.name for p in folder.parent.iterdir()] == ["accepted"]
