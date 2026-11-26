@@ -390,7 +390,8 @@ class _Junction:
             # flush_junctions: the same frames through ONE mix
             u = ctx.uid("jdb")
             batch.setdefault("dissolve", []).append(
-                (ctx.a_label, ctx.b_label, vals, int(N), u))
+                (ctx.a_label, ctx.b_label, vals, int(N), u, ctx, item,
+                 int(h)))
             return self._settle(ctx, u, N), None
         m = self._strength(ctx, vals, N)
         return self._settle(ctx, self._over(ctx, ctx.a_label, ctx.b_label,
@@ -408,16 +409,41 @@ class _Junction:
         strengths are each joined in window order, scaled and mixed once, and
         every window is cut back out by frame count, so frame j of a window
         meets exactly the frames and strength it met alone. Memory no longer
-        grows with the number of dissolves."""
+        grows with the number of dissolves.
+
+        Every window's label is defined whatever happens: a batch that
+        cannot be drawn together is drawn window by window (each its own
+        mix, as without a batch), and a window that cannot be mixed at all
+        becomes the plain cut and is reported as left out, as apply_junction
+        does for a window that fails to compile."""
         rows = batch.get("dissolve") or []
         if not rows:
             return
+        mark = len(parts)
+        try:
+            self._mix_together(parts, plan, rows)
+            return
+        except Exception:  # noqa: BLE001 — drawn window by window below
+            del parts[mark:]
+        for a, b, vals, N, out, ctx, item, h in rows:
+            mark = len(parts)
+            try:
+                m = self._strength(ctx, vals, N)
+                parts.append(f"[{self._over(ctx, a, b, m)}]null[{out}]")
+            except Exception as e:  # noqa: BLE001
+                del parts[mark:]
+                parts.append(f"[{self._concat(ctx, a, b, h, N)}]null[{out}]")
+                ctx.note(item, "omit", f"compile failed ({type(e).__name__}"
+                         f": {str(e)[:120]})")
+
+    def _mix_together(self, parts, plan, rows):
+        """The batched dissolves through ONE mix (flush_junctions)."""
         fps3 = float(plan.fps3)
         W, H = int(plan.W), int(plan.H)
         u = f"jdx{len(rows)}"
         restamp = (f"settb=AVTB,setpts='round(N/{fps3:.3f}/TB)'")
         masks, sides = [], ([], [])
-        for k, (a, b, vals, N, _out) in enumerate(rows):
+        for k, (a, b, vals, N, *_rest) in enumerate(rows):
             # each side exactly its window's N frames, so the joined
             # streams stay in step window after window
             for x, lab, side in ((0, a, "a"), (1, b, "b")):
@@ -451,7 +477,7 @@ class _Junction:
         parts.append(f"[{u}o]split={n}" + "".join(f"[{u}s{k}]"
                                                   for k in range(n)))
         at = 0
-        for k, (_a, _b, _v, N, out) in enumerate(rows):
+        for k, (_a, _b, _v, N, out, *_rest) in enumerate(rows):
             parts.append(f"[{u}s{k}]trim=start_frame={at}:end_frame="
                          f"{at + N},setpts=PTS-STARTPTS[{out}]")
             at += N

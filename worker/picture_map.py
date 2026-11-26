@@ -56,6 +56,18 @@ NEIGHBOURS = 15                 # frames either side of the candidate
 # and a cut must tower over those steps, not over the noise between them.
 STEPS_PER_S = 12.0
 CUT_OVER_STEPS = 2.5
+# Only footage that IS drawn in steps takes that test: there most frames
+# between two drawings change at codec-noise level against the drawing's
+# own change (p6311: 0.1-1.5 against 13-25, at most 0.12 of it), while
+# footage moving at its file's rate changes on every frame. A frame is quiet
+# when it changes less than STEP_QUIET of the largest change of its step
+# (itself a visible change, STEP_VISIBLE); the footage around a candidate
+# is drawn in steps when STEPPED_SHARE of its frames are quiet. Fast
+# handheld footage at its own rate, whose frame changes come in bursts,
+# keeps the neighbours' test alone and so every cut that test finds.
+STEP_QUIET = 0.2
+STEP_VISIBLE = 2.0
+STEPPED_SHARE = 1.0 / 3.0
 # A change of most of the picture is a cut whatever steps surround it (a fast
 # montage of different pictures is also one picture every few frames): the
 # share of the frame's pixels that change by more than CUT_PIXEL levels.
@@ -115,9 +127,10 @@ def find_cuts(diffs, away, step=1, whole=None):
     ``whole[i]``: the share of frame i's pixels that changed by more than
     CUT_PIXEL (None: unknown, every candidate takes the step test).
 
-    A cut towers over its neighbours' frame-to-frame change, and a change
-    of part of the picture also over the steps the footage moves in (each
-    neighbour's largest change within ``step`` frames). p6311: a snow
+    A cut towers over its neighbours' frame-to-frame change, and in footage
+    drawn in steps (most frames between drawings quiet, STEPPED_SHARE) a
+    change of part of the picture also over the steps the footage moves in
+    (each neighbour's largest change within ``step`` frames). p6311: a snow
     animation drawn at ~24 a second in a 60 fps greeting moves 13-25 a step
     with 0.1-1.5 of codec noise between, so the frame median sat on the
     noise and every step read as a cut: 154 cuts in a 17-shot clip."""
@@ -133,6 +146,7 @@ def find_cuts(diffs, away, step=1, whole=None):
         env = np.lib.stride_tricks.sliding_window_view(pad, step).max(axis=1)
     else:
         env = d
+    quiet = (env >= STEP_VISIBLE) & (d < STEP_QUIET * env)
     hits = []
     for i in np.nonzero(d >= CUT_FLOOR)[0].tolist():
         if i == 0:
@@ -145,10 +159,12 @@ def find_cuts(diffs, away, step=1, whole=None):
             continue
         if step > 1 and (whole is None or whole[i] < CUT_WHOLE):
             # the steps around it: no window that holds frame i itself
-            steps = _moving_base(np.concatenate(
-                (env[lo:i], env[min(n, i + step):min(n, hi + step - 1)])))
-            if d[i] < CUT_OVER_STEPS * steps:
-                continue                    # a drawn step, not a new shot
+            far = slice(min(n, i + step), min(n, hi + step - 1))
+            q = np.concatenate((quiet[lo:i], quiet[far]))
+            if q.size and float(q.mean()) >= STEPPED_SHARE:
+                steps = _moving_base(np.concatenate((env[lo:i], env[far])))
+                if d[i] < CUT_OVER_STEPS * steps:
+                    continue                # a drawn step, not a new shot
         if d[i] < d[i - 1] or (i + 1 < n and d[i] < d[i + 1]):
             continue                        # the climb of a baked whip
         if a[i] < CUT_STAYS * d[i]:

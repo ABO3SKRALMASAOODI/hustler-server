@@ -5807,6 +5807,49 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     batching = len(fx_juncs) >= SHARED_PICTURE_MIN_BLOCKS
     if batching:
         fxgraph.batch_junctions(parts, fx_plan)
+    # [key, [(raw label, out label, h)]]: source handles drawn through one
+    # picture chain per side and look (_shared_handles)
+    handle_batch = [] if batching else None
+
+    def _shared_handles(groups):
+        """Source handles through ONE picture chain per side and look
+        (ticket 1844, after review).
+
+        Each handle is h frames of the source past a cut, drawn through its
+        own scale, crop, blurred backdrop and grade: two chains a window,
+        each keeping its frame pools for the whole render (80 dissolves on
+        jump cuts: 159 backdrops, 1.8 GB at 1080x1920). Here a group's
+        handles, each already exactly its h frames on the render clock, are
+        joined in program order, drawn once and cut back out by frame
+        count: the same frames meet the same per-frame filters, so every
+        handle is the picture it was alone."""
+        picture = (edl.get("frame") or {}).get("picture")
+        f3s = fxprims.fps3(fps)
+        for g, ((side, seg_mode, seg_focus), rows) in enumerate(groups):
+            if len(rows) == 1:
+                raw, out, hh = rows[0]
+                _normalize_video(parts, raw, out, W, H, fps, seg_mode,
+                                 out[:-1] + "n", focus=seg_focus,
+                                 seg_dur=hh / f3s, frames=hh,
+                                 picture=picture, grade=block_grade,
+                                 src_size=main_src_size)
+                continue
+            u = f"hs{side}{g}"
+            total = sum(hh for _r, _o, hh in rows)
+            parts.append("".join(f"[{raw}]" for raw, _o, _h in rows)
+                         + f"concat=n={len(rows)}:v=1:a=0,settb=AVTB,"
+                         f"setpts='round(N/{f3s:.3f}/TB)'[{u}r]")
+            _normalize_video(parts, f"{u}r", f"{u}p", W, H, fps, seg_mode, u,
+                             focus=seg_focus, seg_dur=total / f3s,
+                             frames=total, picture=picture,
+                             grade=block_grade, src_size=main_src_size)
+            parts.append(f"[{u}p]split={len(rows)}"
+                         + "".join(f"[{u}s{k}]" for k in range(len(rows))))
+            at = 0
+            for k, (_raw, out, hh) in enumerate(rows):
+                parts.append(f"[{u}s{k}]trim=start_frame={at}:end_frame="
+                             f"{at + hh},setpts=PTS-STARTPTS[{out}]")
+                at += hh
     for spec in fx_juncs:
         h, ka, kb = spec["h"], spec["k"], spec["k"] + 1
         u = f"fxj{ka}"
@@ -5850,6 +5893,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 edge = float(keep[i][1]) if side == "a" else float(keep[i][0])
                 seg_focus = follow.centre_at(fspan, edge)
             hfill = _fill_of(i)
+            if handle_batch is not None and not hfill:
+                key = (side, seg_mode, seg_focus)
+                row = (f"{u}{side}r", f"{u}{side}h", h)
+                for group in handle_batch:
+                    if group[0] == key:
+                        group[1].append(row)
+                        break
+                else:
+                    handle_batch.append([key, [row]])
+                return f"{u}{side}h"
             _normalize_video(parts, f"{u}{side}r", f"{u}{side}h", W, H, fps,
                              seg_mode, f"{u}{side}n", focus=seg_focus,
                              seg_dur=h / f3, frames=h,
@@ -5909,6 +5962,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         if jw:
             fx_windows.append((spec["frame"], h, jw, ka))
     if batching:
+        _shared_handles(handle_batch)
         fxgraph.flush_junctions(parts, fx_plan)
 
     if _weaves_windows(fx_windows, pm, card_runs):

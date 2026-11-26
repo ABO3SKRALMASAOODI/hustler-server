@@ -84,6 +84,23 @@ def test_a_fast_montage_still_cuts_on_every_picture():
     assert got == cuts
 
 
+def test_a_cut_in_fast_footage_at_its_own_rate_is_kept():
+    """Review of #1844: footage moving at its file's rate (here a shake
+    every third frame, 12-14 against 4-6 between) is not drawn in steps, so
+    a cut that towers over its neighbours is a cut even when it changes
+    part of the picture by less than its largest step-window change."""
+    rng = np.random.default_rng(7)
+    n = 300
+    d = rng.uniform(4.0, 6.0, n)
+    d[::3] = rng.uniform(12.0, 14.0, len(d[::3]))
+    whole = np.full(n, 0.15)
+    for c in (61, 151, 241):
+        d[c], whole[c] = 26.0, 0.4
+    assert picture_map.find_cuts(d, d) == [61, 151, 241]
+    assert picture_map.find_cuts(d, d, step=picture_map.step_frames(30.0),
+                                 whole=whole) == [61, 151, 241]
+
+
 def test_step_frames_spans_one_drawing_at_twelve_a_second():
     assert picture_map.step_frames(60.0) == 5
     assert picture_map.step_frames(30.0) == 3
@@ -129,8 +146,9 @@ def test_the_map_of_an_animated_card_holds_only_its_real_cuts(tmp_path):
 
 # ── 2. the render ────────────────────────────────────────────────────────
 
-def _montage(path, n_shots=24, shot_s=0.4, fps=30):
-    """``n_shots`` different moving pictures in one file."""
+def _montage(path, n_shots=24, shot_s=0.4, fps=30, rate=None):
+    """``n_shots`` different moving pictures in one file (``rate``: the
+    file's frame rate as ffmpeg reads it, else ``fps``)."""
     W, H = 320, 320
     rng = np.random.default_rng(5)
     pics = [rng.integers(0, 255, (H // 8 + 8, W // 8 + 8, 3), dtype=np.uint8)
@@ -138,7 +156,8 @@ def _montage(path, n_shots=24, shot_s=0.4, fps=30):
     dur = n_shots * shot_s
     p = subprocess.Popen(
         ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
-         "-s", f"{W}x{H}", "-r", str(fps), "-i", "-", "-f", "lavfi", "-i",
+         "-s", f"{W}x{H}", "-r", str(rate or fps), "-i", "-", "-f", "lavfi",
+         "-i",
          f"sine=f=330:sample_rate=48000:d={dur}", "-map", "0:v", "-map",
          "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
          "-g", "30", "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", str(dur),
@@ -153,26 +172,35 @@ def _montage(path, n_shots=24, shot_s=0.4, fps=30):
     return path, [round(k * shot_s, 2) for k in range(1, n_shots)], dur
 
 
-def _edl(cuts, dur, dissolves):
+def _edl(cuts, dur, dissolves, gap=0.0, mode="pad_blur"):
+    """Every shot kept, a dissolve on each join. ``gap``: seconds cut from
+    the head of every shot after the first (jump cuts: each side of a join
+    has source footage past it, its handle)."""
     edges = [0.0] + cuts + [dur]
-    edl = {"keep": [[a, b] for a, b in zip(edges, edges[1:])],
-           "frame": {"ratio": "9:16", "mode": "pad_blur"},
+    keep = [[a + (gap if k else 0.0), b]
+            for k, (a, b) in enumerate(zip(edges, edges[1:]))]
+    edl = {"keep": keep,
+           "frame": {"ratio": "9:16", "mode": mode},
            "effects": {"grade": "cinematic"},
            "captions": {"enabled": False}}
     if dissolves:
+        at, t = [], 0.0
+        for a, b in keep[:-1]:
+            t += b - a
+            at.append(round(t, 3))
         edl["fx"] = [{"id": f"jn{k + 1}", "type": "junction",
                       "stage": "junction", "at": t, "style": "dissolve",
-                      "duration_s": 0.2, "hold": True,
+                      "duration_s": 0.2, "hold": not gap,
                       "device": "junction_dissolve"}
-                     for k, t in enumerate(cuts)]
+                     for k, t in enumerate(at)]
     return edl
 
 
-def _idx(cuts, dur):
+def _idx(cuts, dur, fps=30.0):
     edges = [0.0] + cuts + [dur]
     return {"words": [], "silences": [], "sentences": [],
             "video": {"duration": dur, "width": 320, "height": 320,
-                      "fps": 30.0},
+                      "fps": fps},
             "shots": [{"id": k, "start": a, "end": b}
                       for k, (a, b) in enumerate(zip(edges, edges[1:]))]}
 
@@ -195,12 +223,15 @@ def _graphs(monkeypatch):
     return seen
 
 
-def _render_both(tmp_path, monkeypatch, dissolves):
+def _render_both(tmp_path, monkeypatch, dissolves, gap=0.0, fps=30,
+                 rate=None, mode="pad_blur"):
     from w1d_support import frames, lossless, render
-    src, cuts, dur = _montage(str(tmp_path / "montage.mp4"))
+    src, cuts, dur = _montage(str(tmp_path / "montage.mp4"), fps=fps,
+                              rate=rate)
     lossless(monkeypatch)
     graphs = _graphs(monkeypatch)
-    edl, idx = _edl(cuts, dur, dissolves), _idx(cuts, dur)
+    edl = _edl(cuts, dur, dissolves, gap=gap, mode=mode)
+    idx = _idx(cuts, dur, fps=float(fps))
     shared = str(tmp_path / "shared.mp4")
     d1, rep1 = render(edl, src, shared, idx=idx, duration=dur)
     g_shared = graphs[-1]
@@ -303,3 +334,88 @@ def test_peak_memory_does_not_grow_with_the_cuts(tmp_path, monkeypatch):
         rc, peak[name] = (int(x) for x in res.stdout.split())
         assert rc == 0
     assert peak["shared"] < 0.7 * peak["alone"], peak
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("fps,rate,mode", [(30, None, "pad_blur"),
+                                           (29.97, "30000/1001", "crop")])
+def test_dissolves_on_jump_cuts_share_their_handles_chains(
+        tmp_path, monkeypatch, fps, rate, mode):
+    """Review of #1844: a dissolve on a jump cut draws each side's source
+    handle; each handle drew its own picture chain (159 backdrops for 80
+    dissolves, 1.8 GB). One chain per side now, the same frames."""
+    (d1, rep1, a, g1), (d2, rep2, b, g2) = _render_both(
+        tmp_path, monkeypatch, dissolves=True, gap=0.15, fps=fps, rate=rate,
+        mode=mode)
+    assert [r["rung"] for r in rep1] == ["full"] * 23, rep1
+    assert [r["rung"] for r in rep2] == ["full"] * 23, rep2
+    import re
+    taps = int(re.search(r"split=(\d+)\[fxsrc\]", g1).group(1)) - 1
+    assert taps >= 10                           # the joins' source handles
+    assert re.search(r"split=(\d+)\[fxsrc\]", g2).group(1) == str(taps + 1)
+    if mode == "pad_blur":
+        # one backdrop for the blocks, one per handle side; alone, one per
+        # block and one per handle
+        assert g1.count("boxblur") <= 3
+        assert g2.count("boxblur") == 24 + taps
+    assert d1 == pytest.approx(d2, abs=1e-3)
+    assert a.shape == b.shape
+    assert np.array_equal(a, b)
+
+
+@needs_ffmpeg
+def test_batched_dissolves_laid_over_the_programme_keep_their_frames(
+        tmp_path, monkeypatch):
+    """The overlay path (cards, person matte) takes the batched windows as
+    the woven path does."""
+    monkeypatch.setattr(renderer, "_weaves_windows", lambda *a, **k: False)
+    (d1, rep1, a, g1), (d2, rep2, b, g2) = _render_both(
+        tmp_path, monkeypatch, dissolves=True)
+    assert [r["rung"] for r in rep1] == ["full"] * 23, rep1
+    assert g1.count("alphamerge") == 1 and g2.count("alphamerge") == 23
+    assert d1 == pytest.approx(d2, abs=1e-3)
+    assert np.array_equal(a, b)
+
+
+@needs_ffmpeg
+def test_a_batch_that_cannot_mix_together_mixes_window_by_window(
+        tmp_path, monkeypatch):
+    """Review of #1844: the batched mix is drawn after every window has
+    compiled; when it fails, each window is drawn with its own mix and the
+    film still has every dissolve."""
+    import junctions_v2
+
+    def boom(*_a, **_k):
+        raise ValueError("no batched mix")
+    monkeypatch.setattr(junctions_v2._Junction, "_mix_together", boom)
+    (d1, rep1, a, g1), (d2, rep2, b, g2) = _render_both(
+        tmp_path, monkeypatch, dissolves=True)
+    assert [r["rung"] for r in rep1] == ["full"] * 23, rep1
+    assert g1.count("alphamerge") == 23
+    assert d1 == pytest.approx(d2, abs=1e-3)
+    assert np.array_equal(a, b)
+
+
+@needs_ffmpeg
+def test_a_window_that_fails_after_joining_the_batch_leaves_it(
+        tmp_path, monkeypatch):
+    """Review of #1844: a window rolled back after its row joined the
+    batch drained its sides into nullsinks while the batch read them too,
+    and ffmpeg refused the whole graph. The row now leaves with it: that
+    one join is the plain cut and every other dissolve renders."""
+    import junctions_v2
+    from w1d_support import lossless, render
+    real = junctions_v2._Junction._settle
+
+    def settle(self, ctx, label, N):
+        if ctx.junction.get("k") == 5:
+            raise ValueError("this window cannot settle")
+        return real(self, ctx, label, N)
+    monkeypatch.setattr(junctions_v2._Junction, "_settle", settle)
+    src, cuts, dur = _montage(str(tmp_path / "montage.mp4"))
+    lossless(monkeypatch)
+    _d, rep = render(_edl(cuts, dur, True), src, str(tmp_path / "o.mp4"),
+                     idx=_idx(cuts, dur), duration=dur)
+    rungs = {r["id"]: r["rung"] for r in rep}
+    assert rungs.pop("jn6") == "omit"
+    assert set(rungs.values()) == {"full"} and len(rungs) == 22, rep
