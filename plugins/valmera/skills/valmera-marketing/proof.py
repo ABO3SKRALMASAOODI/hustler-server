@@ -1588,12 +1588,13 @@ def pauses(path, lo, hi, min_s=0.15, below_db=28.0):
     return out
 
 
-def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach=4.0):
+def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach=4.0, asked=()):
     """[start, end] export seconds: from the export's first frame (the product's own opening, growing out of the Studio)
     to the end of a spoken thought between lo and hi seconds: the longest pause the speaker
     makes there, measured on the export's own sound (the captions' clock is not the voice's). `pics`: the export's
     pictures and titles, (start, seconds) from its edit list; the film never ends inside one (17 Nov: a chair cut 0.4 s
-    in), so a pause inside a picture is passed over and the search reaches up to `reach` s past hi for one after it."""
+    in), so a pause inside a picture is passed over and the search reaches up to `reach` s past hi for one after it.
+    `asked`: asked_spans of the export check's receipt; the stretch never ends before the last of them."""
     hi = min(hi, body - 0.2)
     inside = lambda t: any(a - 0.2 <= t <= a + d + 0.1 for a, d in pics)  # noqa: E731
     ps = [p for p in pauses(ex["file"], lo, min(hi + reach, body - 0.2) + 0.5) if not inside(p[0])]
@@ -1603,7 +1604,42 @@ def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach
         end = a + min(0.25, (b - a) / 2)
     else:
         end = quiet_snap(ex["file"], hi, span=0.25)
-    return [0.0, round(end, 3)]
+    start = 0.0
+    if asked and asked[-1][1] > end - 0.1:
+        # the stretch holds every asked moment the export check saw (27 Nov, film 02: the PC landed at 34.2 s of a 41 s
+        # export and the stretch ended at 17.6 s, so the film showed the setup and never the turn): it ends in the
+        # longest pause after the last one and, when that is longer than a showcase holds, opens in the longest pause
+        # before the first one, both between words and never inside a picture
+        last, first = asked[-1][1], asked[0][0]
+        ps = [p for p in pauses(ex["file"], last, min(last + reach, body - 0.2) + 0.5) if not inside(p[0]) and last < p[0] <= body - 0.2]
+        if ps:
+            a, b = max(ps, key=lambda p: (p[1] - p[0], -p[0]))
+            end = a + min(0.25, (b - a) / 2)
+        else:
+            end = min(quiet_snap(ex["file"], min(last + 0.6, body - 0.2), span=0.25), body - 0.1)
+        if end > hi + reach:
+            ps = [p for p in pauses(ex["file"], max(first - 6.0, 0.0), first) if not inside(p[1]) and p[1] <= first - 0.1]
+            near = [p for p in ps if p[1] >= end - hi - reach] or ps
+            if near:
+                a, b = max(near, key=lambda p: (p[1] - p[0], p[1]))
+                start = b - min(0.25, (b - a) / 2)
+            else:
+                start = quiet_snap(ex["file"], max(first - 1.0, 0.0), span=0.25)
+            start = min(max(start, 0.0), first)
+    return [round(start, 3), round(end, 3)]
+
+
+def asked_spans(visible, body):
+    """(first, last) export seconds of each asked thing the export check saw at one moment (its receipt's `visible` rows:
+    [{seconds}], measured on the export's pixels), in export order. A row seen across more than a showcase's stretch (the
+    vertical frame itself, seen from start to end) is the whole export's, not a moment."""
+    out = []
+    for row in visible or ():
+        secs = sorted(float(t) for t in (row.get("seconds") or []) if isinstance(t, (int, float)) and t >= 0)
+        inside = [t for t in secs if t < body - 0.2]
+        if len(inside) >= 2 and secs[-1] - secs[0] <= SHOWCASE_S[1]:
+            out.append((inside[0], inside[-1]))
+    return sorted(out)
 
 
 PROOF_LEAD_S = 0.1              # the split ends this far inside the last second the proof was seen whole
@@ -1613,7 +1649,8 @@ def proof_span(pics, body, visible=()):
     """(start, end) export seconds over which the export's proof is complete, or None. Two readings: the edit list
     (`pics` (start, seconds)), where the most pictures and titles are on screen together (a stack's last card) until the
     first of them ends; and the export check's own receipt (`visible`: [{seconds}], what it saw on the export pixels),
-    the last two seconds of its most concentrated row, the asked element seen whole. The receipt is the measured one and
+    the last two seconds of its latest moment (the turn: a sentence asking for a cassette and then a PC builds to the
+    PC), else of its most concentrated row, the asked element seen whole. The receipt is the measured one and
     wins its end (26 Nov: a Studio checklist drawn as ONE title showed no stack in the edit list; another cut away from
     the list 0.2 s after the check's last sight of it, so nothing may be held past that second)."""
     pics = [(float(a), float(d)) for a, d in pics if a < body - 0.2 and d > 0]
@@ -1622,12 +1659,18 @@ def proof_span(pics, body, visible=()):
         cover = [b + e for b, e in pics if b <= a + 0.05 < b + e]
         if len(cover) > best:
             best, span = len(cover), (a, min(cover))
-    rows = []
+    rows, moments = [], []
     for row in visible or ():
-        secs = sorted(float(t) for t in (row.get("seconds") or []) if isinstance(t, (int, float)) and 0 <= t < body - 0.2)
+        every = sorted(float(t) for t in (row.get("seconds") or []) if isinstance(t, (int, float)) and t >= 0)
+        secs = [t for t in every if t < body - 0.2]
         if len(secs) >= 3:
             rows.append((secs[-1] - secs[0], secs[-2], secs[-1]))
-    if rows:
+            if every[-1] - every[0] <= SHOWCASE_S[1]:
+                moments.append((secs[-1], secs[-2]))
+    if moments:            # the last asked moment is the turn the sentence builds to (27 Nov, film 02: cassette, then PC)
+        b, a = max(moments)
+        span = (max(span[0], a) if span and span[0] <= b else a, b)
+    elif rows:
         _, a, b = min(rows)
         span = (max(span[0], a) if span and span[0] <= b else a, b)
     return (round(span[0], 3), round(span[1], 3)) if span else None
@@ -1873,12 +1916,12 @@ def showcase_supply(ctx, script, sup_dir, pk):
     edl = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
     prod = os.path.join(sup_dir, "footage", "product")
     os.makedirs(prod, exist_ok=True)
-    body = ex["dur"] - endcard_s()
+    body = export_program_seconds(ex, edl)    # 27 Nov: a Pro export ends on the edit, not on a card (41.2 s cut to 35.6)
     cut(ex["file"], 0.0, body, os.path.join(prod, "export_body.mp4"))
     pics = [(float(o["start"]), float(o["duration_s"])) for o in D.MF.pictures_of(edl) + D.MF.titles_of(edl)]
     d = W3.direction_of(ctx) if hasattr(ctx, "run_dir") else {}
-    win = [float(x) for x in d.get("export_window") or showcase_window(ex, body, pics)]
     visible = (script.get("receipts") or {}).get("visible") or ()
+    win = [float(x) for x in d.get("export_window") or showcase_window(ex, body, pics, asked=asked_spans(visible, body))]
     hook = [float(x) for x in d.get("hook_window") or showcase_hook(ex, body, pics, visible=visible)]
     ui = showcase_ui(rec)
     typed = typed_line(script["receipts"])

@@ -505,3 +505,36 @@ def test_the_sent_bubble_is_measured_on_the_photograph(tmp_path):
     im.save(tmp_path / "sent.png")
     b = P.sent_bubble(str(tmp_path / "sent.png"), [0.0588, 0.3187])
     assert b and abs(b[0] - 685 / 1688) < 0.01 and abs(b[1] - 819 / 1688) < 0.01
+
+
+# 27 Nov 2026, Marketing film 02 (cassette to office PC): the typed sentence asked for a cassette and an office PC; the
+# Studio export (41.2 s, a Pro export ending on the edit, no card) showed the cassette at 13.866-15.766 s and the PC at
+# 34.2-36.6 s (records/02.json, export_check.visible). The film opened on the cassette and played the export only to
+# 17.57 s, so the PC never appeared and the cassette played twice. Pauses: measured on the source window the export
+# plays 1:1 (0cn3VBjfN8g 1828.15 s + 0-41.2 s); pictures: the receipt's own seconds.
+FILM02_VISIBLE = [dict(asked="Make a vertical short", seconds=[0.5, 5.15, 25.75, 40.7]),
+                  dict(asked="Show a cassette on cue", seconds=[13.866, 14.5, 15.45, 15.766]),
+                  dict(asked="Show an old office PC on cue", seconds=[34.2, 34.533, 36.05, 36.6])]
+FILM02_PAUSES = [(8.38, 8.62), (11.42, 11.7), (13.48, 13.72), (15.24, 15.66), (19.38, 19.76), (21.96, 22.24), (23.96, 24.22),
+                 (28.78, 29.28), (33.08, 33.58), (34.54, 34.96), (37.62, 37.86)]
+FILM02_PICS = [(13.85, 2.0), (34.15, 2.5)]
+
+
+def test_the_showcase_holds_the_turn_the_sentence_asks_for_and_opens_on_it(monkeypatch):
+    monkeypatch.setattr(P, "pauses", lambda path, lo, hi, **k: [p for p in FILM02_PAUSES if lo <= p[0] <= hi])
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: round(t, 3))
+    body = 41.2
+    asked = P.asked_spans(FILM02_VISIBLE, body)
+    assert asked == [(13.866, 15.766), (34.2, 36.6)]                       # the frame itself is not a moment
+    win = P.showcase_window(dict(file="/x/e.mp4"), body, FILM02_PICS, asked=asked)
+    assert win[0] <= 13.866 and 36.6 <= win[1] <= body                      # cassette, then the PC, both in the stretch
+    assert any(a <= win[0] <= b for a, b in FILM02_PAUSES) and any(a <= win[1] <= b for a, b in FILM02_PAUSES)  # between words
+    assert not any(a - 0.2 <= t <= a + d + 0.1 for a, d in FILM02_PICS for t in win)                          # never inside a picture
+    old = P.showcase_window(dict(file="/x/e.mp4"), body, FILM02_PICS)
+    assert old[1] < 34.2                                                     # the delivered behaviour: the PC never reached
+    hook = P.showcase_hook(dict(file="/x/e.mp4"), body, FILM02_PICS, visible=FILM02_VISIBLE)
+    assert hook[0] < 34.2 <= hook[1] <= 36.6 - P.PROOF_LEAD_S + 1e-6       # the split lands on the PC, not the cassette
+    assert not hook[0] <= 13.866 <= hook[1]
+    # the checklist film keeps its stretch: its only moment is inside the old window
+    visible01 = [dict(seconds=[0.5, 5.533, 11.64, 27.15, 30.566]), dict(seconds=[7.933, 8.5, 10.766, 11.64, 12.966])]
+    assert P.asked_spans(visible01, 27.0) == [(7.933, 12.966)]
