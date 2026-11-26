@@ -1132,6 +1132,14 @@ def typeset(facts, ruler, max_width, case):
     return rows
 
 
+def personal_summary(fact, interview):
+    """The speaker's own remark summarized in the record, without a separate exhibit."""
+    claim = fact.get("chain") or {}
+    return (bool(interview and claim.get("speaker")) and claim["speaker"] == claim.get("subject")
+            and claim.get("report") == fact.get("value") and fact.get("source", {}).get("url") == interview
+            and not (fact.get("excerpt") or fact.get("statement") or fact.get("record")))
+
+
 def source_statement(fact, interview):
     """Retained citation cards already carry the source reader's indirect account."""
     if fact.get("chain"):

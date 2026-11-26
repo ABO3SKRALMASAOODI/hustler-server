@@ -697,10 +697,14 @@ def file_sha(path):
     return sha256_file(path).split(":", 1)[1]
 
 
-def cached_finish(ctx, programme, final, *, receipt=None, **options):
+def cached_finish(ctx, programme, final, *, receipt=None, caption_scene=None, **options):
     """Commit the movie first. A crash between renames leaves a detectable content mismatch."""
     from shell import jload, jsave
     key = dict(programme=file_sha(programme), receipt=receipt, options=options)
+    if caption_scene:
+        import caption_pixels
+        key["caption_scene"] = file_sha(caption_scene)
+        key["caption_renderer"] = file_sha(caption_pixels.__file__)
     bed = options.get("card_bed")
     if bed:
         key["recording"] = file_sha(bed.get("path"))
@@ -709,6 +713,11 @@ def cached_finish(ctx, programme, final, *, receipt=None, **options):
     if key == saved.get("inputs") and saved.get("sha256") and saved["sha256"] == file_sha(final):
         return saved, True
     info = brand.finish(programme, final + ".part.mp4", ctx.tmp, **options)
+    if caption_scene:
+        from scene.compile import compile as compile_scene
+        with open(caption_scene) as stream:
+            plan = compile_scene(json.load(stream), ctx.supply, tier="master", segment=False)
+        info["caption_pixels"] = caption_pixels.repair(final + ".part.mp4", plan.doc, brand.FF)
     saved = dict(inputs=key, sha256=file_sha(final + ".part.mp4"), finish=info)
     os.replace(final + ".part.mp4", final)
     jsave(sidecar, saved)
@@ -881,6 +890,7 @@ def music_version(ctx, rd, sc):
         if bed and ctx.workflow in ("wf2", "wf3"):
             bed = dict(bed, speech_room_db=9.)
         finished, _ = cached_finish(ctx, out, final, receipt=previous["receipt"], card_bed=bed,
+                                    caption_scene=rd.get("caption_scene"),
                                     last_word_s=last_word(ctx, sc), **end_accent(ctx, sc))
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:     # the clean film is delivered either way
         ctx.log(f"{tag} version not finished: {str(e)[:300]}")
@@ -920,6 +930,8 @@ def music_version(ctx, rd, sc):
                  tracks=ch.get("tracks"), pool=ch.get("pool"), entry=ch.get("entry"),
                  checks={k: chk.get(k) for k in ("length_ok", "endcard_ok", "mark_ok", "lufs", "lra", "true_peak_dbtp", "loud_ok")}, removable=True,
                  note="CC-BY: the credit line goes wherever the film is published; film_clean.mp4 is the same film without music")
+    if "caption_pixels" in finished["finish"]:
+        music["checks"]["caption_pixels"] = finished["finish"]["caption_pixels"]
     music["revision"] = dict(inputs=inputs, mix=previous["movie"],
                              receipt=previous["receipt"], final=finished["sha256"],
                              clean=file_sha(os.path.join(ctx.run_dir, "final.mp4")))
@@ -1012,14 +1024,15 @@ def last_word(ctx, sc):
 def finish_and_check(ctx, rd, sc):
     """Brand finish, then the measured checks. A failed check is reported, never a stop."""
     final = os.path.join(ctx.run_dir, "final.mp4")
-    finished, reused = cached_finish(ctx, rd["film"], final, last_word_s=last_word(ctx, sc), **end_accent(ctx, sc))
+    finished, reused = cached_finish(ctx, rd["film"], final, caption_scene=rd.get("caption_scene"),
+                                     last_word_s=last_word(ctx, sc), **end_accent(ctx, sc))
     info = finished["finish"]
     c = brand.check(rd["film"], final, ctx.tmp)
     if reused:
         # A resumed run still needs the measured programme boundary. Returning
         # an empty finish record makes downstream audits treat the card as
         # speech time (or fail), despite the cached film being valid.
-        info = dict(programme_s=c["programme_s"], outro_s=c["outro_s"], reused=True)
+        info = dict(info, programme_s=c["programme_s"], outro_s=c["outro_s"], reused=True)
     m = no_music(sc["l1"]) if sc.get("l1") and os.path.exists(sc["l1"]) else dict(ok=True, note="no plan")
     c.update(music=m, finish=info)
     c["ok"] = bool(c["ok"] and m["ok"])

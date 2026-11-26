@@ -40,7 +40,7 @@ for _p in (os.path.join(SKILLS, "_shell"), os.path.join(SKILLS, "valmera-stories
 import film as F  # noqa: E402
 
 FPS, W, H, LEAD_F = F.FPS, F.W, F.H, F.LEAD_F
-CAPTION_CONTRACT = 13
+CAPTION_CONTRACT = 14
 Clock, r4, smooth = F.Clock, F.r4, F.smooth
 
 WALL = "YouTube is refusing this Mac as a bot"       # the words a short stops with when its footage could not be fetched for that reason
@@ -1185,6 +1185,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     # Screen-share presenter tiles are only one of the possible live returns.
     live_spans = [(round(sp["t0"]*FPS)+LEAD_F, round(sp["t1"]*FPS)+LEAD_F)
                   for shot in tshots for sp in shot.get("spans", []) if sp["who"] == "speaker"]
+    personal_accounts = []
     for page in pages:
         a = word_frame(page["first"])
         b = min(f_end, Clock.f(clock.words[page["last"]]["t1"]))
@@ -1221,6 +1222,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         narrated = all(f.get("chain") and not f.get("relation") for f in facts)
         on_presenter = (any(lo <= a and b <= hi for lo,hi,_ in speakers)
                         or any(lo < b and a < hi for lo,hi in live_spans))
+        # A summary of the speaker's own interview supplies provenance. Reserving
+        # a reading surface for it displaced both the live camera and its timed words.
+        if (narrated and not qualified and not page.get("demo_note") and
+                all(wf1_display.personal_summary(f, script.get("source_url")) for f in facts)):
+            personal_accounts.append(page)
+            continue
         own_account = d.get("caption_ends") and all(
             f.get("chain") and f["chain"].get("speaker") == f["chain"].get("subject") for f in facts)
         if b > a and (page.get("demo_note") or qualified or not (on_evidence(a,b) or ((on_presenter or own_account) and narrated))):
@@ -1717,6 +1724,11 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         finally:
             capture.release()
 
+    interview_camera = None
+    if personal_accounts and not timed_facts and reading.get("authored_shots") and not reading.get("inserts"):
+        from wf1_interview_frame import interview_cameras, place
+        interview_camera = interview_cameras(take["path"], tuple(tuple(s) for s in reading["authored_shots"]))
+
     def on_study_reading(frame):
         return any(lo <= frame < hi and not page.get("analogy_step") for lo,hi,page in timed_facts)
 
@@ -2015,6 +2027,13 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 continue
             authored_span = next(((start, end) for start, end in authored if start <= (t0+t1)/2 < end), None)
             close_start = turn_f if turn_f is not None else f_last
+            if interview_camera and not on_report:
+                piece = pieces[k]
+                shot = tshots[piece["cut"]]
+                camera = interview_camera(tuple(authored_span or (shot["t0"], shot["t1"])))
+                if place(P,[fa,fb],piece["key"],[t0,t1],meta[piece["key"]],camera,(W,H)):
+                    cut_pts.append(fa)
+                    continue
             closing_speaker = (authored_span and fa >= close_start - FPS
                                and (round(authored_span[0]*FPS)+LEAD_F >= close_start or
                                     round(authored_span[1]*FPS)+LEAD_F >= f_voice_end)
@@ -3436,7 +3455,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                | {e["f"] for e in dev_events if 0 <= e["f"] < f_end}),
                  device_events=dev_events,
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=CAPTION_CONTRACT, display=[dict(f=[a, b], text=t) for a, b, t in shown],
-                 display_facts=fact_pages, publisher_reading=reading_plan, field_report=report, thought_experiment=thought,
+                 display_facts=fact_pages, interview_accounts=personal_accounts, publisher_reading=reading_plan, field_report=report, thought_experiment=thought,
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t, pic=pic) for a, b, t, pic in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=(sorted(set(layouts_used)) if dr and len(set(layouts_used)) > 1 else (layouts_used[0] if dr and layouts_used else st["layout"])), placement_check=placement_report, coverage=coverage_report,

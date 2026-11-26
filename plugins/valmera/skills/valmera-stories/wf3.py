@@ -2738,8 +2738,8 @@ def render(ctx, script, sc):
     pack = load_pack(ctx)
     sound = os.path.join(ctx.supply, "sound.m4a")
     marketing = getattr(ctx, "workflow", None) == "wf2" and (sc.get("devices") or {}).get("format") != "showcase"
-    scene = drawn
-    if marketing or not os.path.exists(out):
+    scene = composed or drawn
+    if marketing or getattr(ctx, "workflow", None) == "wf1" or not os.path.exists(out):
         scene = composed or chain.lay_devices(ctx, drawn)
     dirty = not os.path.exists(out)
     if marketing:
@@ -2786,7 +2786,8 @@ def render(ctx, script, sc):
         if marketing:
             jsave(marker, revision)
     j = json.load(open(out + ".log.json")) if os.path.exists(out + ".log.json") else {}
-    return dict(engine="scene", film=out, **(dict(composed_l1=scene, l1_audio=mix_scene) if marketing else {}), engine_check=dict(frames=j.get("frames"), seconds=j.get("seconds"), audio=j.get("mix"),
+    return dict(engine="scene", film=out, **(dict(composed_l1=scene) if getattr(ctx, "workflow", None) == "wf1" else {}),
+                **(dict(composed_l1=scene, l1_audio=mix_scene) if marketing else {}), engine_check=dict(frames=j.get("frames"), seconds=j.get("seconds"), audio=j.get("mix"),
                                                               degraded=j.get("degraded"), warnings=j.get("warnings"), settled_on=j.get("settled_on")))
 
 
@@ -2959,6 +2960,10 @@ def check(ctx, rd, sc):
 def check_once(ctx, rd, sc):
     if ctx.workflow == "wf2" and rd.get("l1_audio"):
         sc = dict(sc, l1=rd["l1_audio"], l1_audio=rd["l1_audio"])
+    if ctx.workflow == "wf1":
+        # A resumed render may predate the composed-scene path in its receipt.
+        path = rd.get("composed_l1") or sc.get("composed_l1") or chain.lay_devices(ctx, sc["l1"])
+        rd = dict(rd, caption_scene=path)
     r = chain.finish_and_check(ctx, rd, sc)
     c = r["checks"]
     rows = mark_samples(rd["film"], r["final"])
@@ -2980,13 +2985,19 @@ def check_once(ctx, rd, sc):
     rec = json.load(open(os.path.join(ctx.supply, "pack.json")))["record"]
     c["stories"]["narration"] = dict(seconds=rec.get("narration_s"), voice=rec.get("voice"), gate=rec.get("gate"))
     caption_scene = scene
-    if sc.get("composed_l1") and scene.get("workflow_text_layout"):
+    cap_result = ((r.get("music") or {}).get("checks", {}).get("caption_pixels")
+                  or c.get("finish", {}).get("caption_pixels"))
+    if not cap_result and sc.get("composed_l1") and scene.get("workflow_text_layout"):
         # The renderer moves captions around sources and palette illustrations. Measure
         # their final ink seat, including word reveals whose seat changes within a phrase.
         from scene.compile import compile as compile_scene
         with open(sc["composed_l1"]) as stream:
             caption_scene = compile_scene(json.load(stream), ctx.supply, tier="master", segment=False).doc
-    c["stories"]["caption_contrast"] = caption_contrast(rd["film"], caption_scene, pack["ffmpeg"])
+    if cap_result:
+        c["stories"]["caption_contrast"] = dict(captions_sampled=cap_result["sampled"],
+            unreadable=cap_result["unreadable"], repaired=cap_result["repaired"], ok=cap_result["unreadable"] == 0)
+    else:
+        c["stories"]["caption_contrast"] = caption_contrast(rd["film"], caption_scene, pack["ffmpeg"])
     c["ok"] = bool(c["ok"] and sc["taste"]["ok"] and c["stories"]["caption_contrast"]["ok"])
     c["stories"]["voices"] = voices_record(ctx, pack)
     if ctx.workflow == "wf3":

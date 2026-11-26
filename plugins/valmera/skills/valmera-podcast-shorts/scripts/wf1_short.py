@@ -1646,7 +1646,7 @@ def render_revision(sc):
     # Audio fixes must invalidate both an engine soundtrack and a cached final mix.
     worker=os.environ.get('VALMERA_WORKER')
     if worker:
-        for rel in ('score/music.py','score/audibility.py','score/sound.py','score/sfx_quality.json','scene/pace.py','scene/compile.py','scene/runtime.py','scene/text_layout.py','scene/run.py',
+        for rel in ('score/music.py','score/audibility.py','score/sound.py','score/sfx_quality.json','scene/pace.py','scene/compile.py','scene/type_atlas.py','scene/runtime.py','scene/text_layout.py','scene/run.py',
                     'scene/segments.py','scene/alien/answer.py','scene/alien/diecut.py','scene/palette/kit.py','scene/palette/match.py','scene/palette/layout.py','scene/palette/rhythm.py','scene/palette/__init__.py','scene/palette/behind.py',
                     'scene/palette/matte.py','scene/palette/type.py','scene/palette/sense.py','scene/palette/punct.py','scene/palette/instrument.py'):
             path=os.path.join(worker,rel)
@@ -2400,7 +2400,7 @@ def check(ctx, rd, sc):
         style=b.get("style"), layout=b.get("layout"), cutaway_share=b.get("cutaway_share"), finishes=b.get("finishes"), alien=b.get("alien"),
         pictures=len(pics), clips=len([p for p in pics if p.get("kind") == "clip"]), photographs=len([p for p in pics if p.get("kind") == "photo"]),
         new_pictures_10s=round(len(pics) / secs * 10, 2), display_words=[x.get("text") for x in b.get("display") or []],
-        display_facts=b.get("display_facts", []), field_report=b.get("field_report"), thought_experiment=b.get("thought_experiment"), placement_check=b.get("placement_check"), rendered_check=b.get("rendered_check"), render_reviews=rd.get("picture_review"),
+        display_facts=b.get("display_facts", []), interview_accounts=b.get("interview_accounts", []), field_report=b.get("field_report"), thought_experiment=b.get("thought_experiment"), placement_check=b.get("placement_check"), rendered_check=b.get("rendered_check"), render_reviews=rd.get("picture_review"),
         delivered_check=b.get("delivered_check"), delivery_reviews=history,
         sources=[dict(f=p.get("f"), visible_f=p.get("visible_f"), kind=p.get("kind"), name=p.get("name"), source=p.get("source"), time_range=p.get("time_range"),
                       mode=p.get("mode"), window=p.get("window"), w=p.get("w"), h=p.get("h"), rung=p.get("rung"), how=p.get("how"),

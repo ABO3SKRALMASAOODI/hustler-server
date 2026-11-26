@@ -583,3 +583,38 @@ def test_conditional_analogy_reveals_full_caption_on_the_spoken_image(tmp_path, 
     assert any(it["t"].lower() == "we become pets" and it["role"] == "cap" for it in texts)
     assert any(it.get("source_frame") and it["f"][0] <= 45 < it["f"][1] for it in scene["items"])
     assert any("who stays in control" in it["t"].lower() for it in texts)
+
+
+def test_live_interview_uses_both_camera_tiles_and_captions_its_own_account(tmp_path, quiet_engines, monkeypatch):
+    """A source split with a masthead, followed by an interviewee speaking for himself (Musk 35)."""
+    from PIL import Image, ImageDraw
+    import subprocess
+    import wf1_coverage
+    from scene.compile import compile as compile_scene
+    from scene.run import stills
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *args: ([], []))
+    frame = Image.new("RGB", (640,360))
+    draw = ImageDraw.Draw(frame)
+    draw.rectangle((16,52,313,307), fill="#4788c0")
+    draw.rectangle((325,52,623,307), fill="#d98549")
+    draw.text((28,15), "The original interview", fill="white")
+    frame.save(tmp_path / "source.png")
+    movie = str(tmp_path / "take.mp4")
+    subprocess.run(["ffmpeg","-v","error","-loop","1","-i",str(tmp_path/"source.png"),
+                    "-t","7","-pix_fmt","yuv420p","-c:v","libx264",movie], check=True)
+    pack = _sup(tmp_path,cuts_two_shot())
+    pack["take"].update(path=movie,w=640,h=360)
+    pack["coverage"]["source_reading"] = dict(authored_shots=[[0.,4.]])
+    words = pack["words"]["words"]
+    script = dict(title="Interview",source_url="episode",segments=[
+        dict(say=" ".join(w["w"] for w in words if w["seg"]==i)) for i in (0,1)])
+    page = dict(first=11,last=17,facts=[dict(source=dict(url="episode"),
+        value="The guest's assessment.",chain=dict(speaker="Guest",subject="Guest",report="The guest's assessment."))])
+    scene, beats = film.build(script,pack,"archive-reel",dict(coverage_final=True,display_facts=[page]))
+    plan = compile_scene(scene,str(tmp_path),size=(270,480),segment=False)
+    image = stills(plan,[36])[36]
+    # Actual lower-camera pixels survive rendering, below the centered caption gap.
+    pixel = image[360,135,:3]
+    assert int(pixel[0]) > int(pixel[2])+55, pixel
+    assert any(it.get("role")=="cap" and it["f"][0] <= 155 < it["f"][1] for it in plan.items)
+    assert beats["display_facts"] == [] and beats["interview_accounts"] == [page]
