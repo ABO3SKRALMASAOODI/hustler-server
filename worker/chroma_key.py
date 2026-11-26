@@ -396,8 +396,13 @@ def graph_parts(vsrc, item, bg_idx=None, src_w=None, src_h=None, tag="ck"):
                      f"color=0x{_hex(bg.get('colour'))}@1:t=fill[{t}bg]")
     else:
         w, h = int(src_w or 1920), int(src_h or 1080)
-        parts.append(f"[{bg_idx}:v]scale={w}:{h}:force_original_aspect_ratio="
-                     f"increase,crop={w}:{h},setsar=1,format=yuv420p[{t}bi]")
+        # an input index, or a label already carrying the picture
+        bsrc = f"{bg_idx}:v" if isinstance(bg_idx, int) else str(bg_idx)
+        off = float(item.get("_bg_offset") or 0.0)
+        shift = f"setpts=PTS+{off:.6f}/TB," if abs(off) > 1e-6 else ""
+        parts.append(f"[{bsrc}]{shift}scale={w}:{h}:force_original_aspect_"
+                     f"ratio=increase,crop={w}:{h},setsar=1,format=yuv420p"
+                     f"[{t}bi]")
         # The source branch is the MAIN input: the composite keeps the
         # source's clock; a still holds its one frame (eof_action=repeat).
         parts.append(f"[{t}b][{t}bi]overlay=eof_action=repeat:shortest=0"
@@ -422,6 +427,58 @@ def gradient_plate(path, w, h, colour, colour2):
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 FALLBACK_BG = {"kind": "gradient", "colour": "#2b3140", "colour2": "#0d0f14"}
+
+
+def per_input_ok(item):
+    """Whether the key can run once per bounded cluster input of the main
+    source: yes for a fringe clean, a solid colour and a still picture (one
+    frame, copied to every cluster), no for a looping video background
+    (each copy would buffer the frames the others have not yet used)."""
+    item = item or {}
+    if item.get("mode") == "fringe":
+        return True
+    bg = item.get("background") or {}
+    if bg.get("kind") != "asset":
+        return True
+    return os.path.splitext(str(bg.get("asset_key") or ""))[1].lower() \
+        in IMAGE_EXTS
+
+
+def kept_select(keep, pad):
+    """A ``select`` filter passing only the source frames within ``pad``
+    seconds of a keep span: the key's work is the kept picture, not the
+    stretches the edit cuts away. None when there is nothing to leave out."""
+    spans = sorted((max(0.0, float(a) - pad), float(b) + pad)
+                   for a, b in keep or [] if float(b) > float(a))
+    if not spans:
+        return None
+    merged = [list(spans[0])]
+    for a, b in spans[1:]:
+        if a <= merged[-1][1] + 1.0:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return "select='" + "+".join(f"between(t,{a:.3f},{b:.3f})"
+                                 for a, b in merged) + "'"
+
+
+def seek_background(args, item, seek_s):
+    """(args, item) for a looping video background when the main source is
+    read from ``seek_s`` on its own clock (-copyts): ``_bg_offset`` moves the
+    loop's starts onto the main clock up to the last whole loop before the
+    seek point, so at most one loop is decoded ahead of the first kept frame
+    (not everything from 0) and every frame shows the loop's phase the
+    unseeked render shows. (An input -ss on a looped input restarts every
+    later loop at that point, so the input itself is not seeked.)"""
+    try:
+        import media
+        dur = float(media.probe(args[-1]).get("duration") or 0.0)
+    except Exception:  # noqa: BLE001 - an unknown length: decoded from 0
+        dur = 0.0
+    if dur <= 0.05:
+        return list(args), dict(item)
+    whole = float(seek_s) - (float(seek_s) % dur)
+    return list(args), dict(item, _bg_offset=round(whole, 6))
 
 
 def input_args(edl, workdir, src_w, src_h, fetch, attempts=2):

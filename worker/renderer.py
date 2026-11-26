@@ -5085,18 +5085,40 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          f":enable='between(t,{pon:.6f},{ppe:.6f})'"
                          f"[vptc{pj}]")
             vsrc = f"vptc{pj}"
+    # Distant keep clusters read from their own bounded inputs (render_edl
+    # opens them only when nothing touches the [0:v] stream before the trims
+    # except a key on a still background). Decided here, before the key: a
+    # key then runs once per cluster input instead of on the whole source.
+    owners = None
+    if main_video_inputs and n > 1 and not patch_inputs and src_pad <= 0 \
+            and not fx_taps and (key_input is None
+                                 or chroma_key.per_input_ok(key_input[1])):
+        owners = []
+        for seg_a, seg_b in keep:
+            hit = [ix for ix, a, b in main_video_inputs
+                   if a - 0.01 <= seg_a and seg_b <= b + 0.01]
+            if not hit:
+                owners = None
+                break
+            owners.append(hit[0])
+    if n >= 1 and key_input is not None and owners is None:
         # Chroma key (worker/chroma_key.py): the screen keyed out of the
         # SOURCE picture and the new background laid under it, so every
         # trim, framing, grade and caption downstream sees the composite.
-        if key_input is not None:
-            kparts, vsrc = chroma_key.graph_parts(
-                vsrc, key_input[1], key_input[0], src_w or W, src_h or H)
-            parts.extend(kparts)
-    # Distant keep clusters read from their own bounded inputs (render_edl
-    # opens them only when nothing touches the [0:v] stream before the trims:
-    # no repaint patches, no picture-track pad). Each segment's video tap
-    # comes from the input that holds it; every frame it receives carries
-    # the same source timestamp (-copyts) the single split delivered.
+        # Only the frames the edit keeps (and its fx handles) go through
+        # it: a 60-minute upload cut to 10 keys 10 minutes, not 60.
+        handle_s = max([float(sp.get("h") or 0) / float(fps or 30.0)
+                        for sp in fx_juncs] or [0.0])
+        sel = chroma_key.kept_select(keep, 1.0 + handle_s)
+        if sel:
+            parts.append(f"[{vsrc}]{sel}[vkeysel]")
+            vsrc = "vkeysel"
+        kparts, vsrc = chroma_key.graph_parts(
+            vsrc, key_input[1], key_input[0], src_w or W, src_h or H)
+        parts.extend(kparts)
+    # With owners, each segment's video tap comes from the cluster input that
+    # holds it; every frame it receives carries the same source timestamp
+    # (-copyts) the single split delivered.
     if fx_taps:
         # Source handles for fx junctions read the main picture like the
         # blocks do: one more tap each (the bounded per-cluster reads stay
@@ -5112,25 +5134,29 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             for key in ("a_src", "b_src"):
                 if sp.get(key):
                     sp[key]["tap"] = next(t_iter)
-    owners = None
-    if main_video_inputs and n > 1 and not patch_inputs and src_pad <= 0 \
-            and not fx_taps and key_input is None:
-        owners = []
-        for seg_a, seg_b in keep:
-            hit = [ix for ix, a, b in main_video_inputs
-                   if a - 0.01 <= seg_a and seg_b <= b + 0.01]
-            if not hit:
-                owners = None
-                break
-            owners.append(hit[0])
 
     def _video_taps():
-        for ix in dict.fromkeys(owners):
+        uniq = list(dict.fromkeys(owners))
+        bgs = {}
+        if key_input is not None and key_input[0] is not None:
+            # one still background, one copy per cluster's key
+            bgs = {ix: f"kbg{ix}" for ix in uniq}
+            parts.append(f"[{key_input[0]}:v]split={len(uniq)}"
+                         + "".join(f"[{b}]" for b in bgs.values())
+                         if len(uniq) > 1 else
+                         f"[{key_input[0]}:v]null[{bgs[uniq[0]]}]")
+        for ix in uniq:
             segs = [i for i, o in enumerate(owners) if o == ix]
+            src = f"{ix}:v"
+            if key_input is not None:
+                kparts, src = chroma_key.graph_parts(
+                    src, key_input[1], bgs.get(ix), src_w or W, src_h or H,
+                    tag=f"ck{ix}_")
+                parts.extend(kparts)
             if len(segs) == 1:
-                parts.append(f"[{ix}:v]null[vin{segs[0]}]")
+                parts.append(f"[{src}]null[vin{segs[0]}]")
             else:
-                parts.append(f"[{ix}:v]split={len(segs)}"
+                parts.append(f"[{src}]split={len(segs)}"
                              + "".join(f"[vin{i}]" for i in segs))
 
     if speed and n >= 1:
@@ -8643,6 +8669,12 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         if key_item.get("fallback"):
             print(f"[render] key: {key_item['fallback']} — keyed onto the "
                   "neutral gradient", flush=True)
+        if args and seek_main_source and "-stream_loop" in args:
+            # A looping video background on the seeking path starts on the
+            # main clock at its last whole loop before the seek point: never
+            # decoded from 0 up to the seek point, same frames as unseeked.
+            args, key_item = chroma_key.seek_background(
+                args, key_item, source_seek_s)
         if args:
             extra_inputs += args
             key_input = (next_idx, key_item)
@@ -8834,7 +8866,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # picture-track pad), and never for an audio-only rebuild.
     main_video_inputs = None
     if seek_main_source and not patch_inputs and src_pad <= 0 \
-            and not audio_only and key_input is None:
+            and not audio_only and (key_input is None or
+                                    chroma_key.per_input_ok(key_input[1])):
         clusters = _keep_clusters(
             edl["keep"], config.KEEP_CLUSTER_GAP_S,
             _cluster_input_cap(info.get("width"), info.get("height")))

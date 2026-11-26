@@ -505,3 +505,120 @@ def test_the_dry_run_compares_each_frame_with_its_own_time(tmp_path):
     clean = ck.dry_run(src, item, [0.3, 1.5])
     gap = ck.dry_run(src, item, [0.3, 99.0, 1.5])
     assert gap == clean, (gap, clean)
+
+
+# ── the key's cost: only the kept picture goes through it ─────────────────
+
+def _key_graph(main_video_inputs=None, bg_idx=None, background=None):
+    import renderer
+    from timeline import Timeline
+    e = schemas.validate_edl({
+        "keep": [[600, 606], [610, 614], [1800, 1806]],
+        "frame": {"ratio": "9:16", "mode": "crop"},
+        "effects": {"key": {"id": "key1", "colour": "#1fb84a",
+                            "similarity": 0.1, "spill": "green",
+                            "background": background or {
+                                "kind": "solid", "colour": "#2030a0"}}}},
+        4000).model_dump()
+    return renderer.build_filtergraph(
+        e, 4000.0, True, Timeline(e["keep"]), None, [],
+        {"words": [], "silences": [], "sentences": []}, False,
+        W=360, H=640, fps=30.0, frame_mode="crop", src_w=640, src_h=360,
+        key_input=(bg_idx, e["effects"]["key"]),
+        main_video_inputs=main_video_inputs)
+
+
+def test_a_key_runs_on_each_bounded_cluster_read():
+    # Final review of 27 Nov: the key turned the per-cluster reads off, so
+    # every decoded source frame, the cut-away stretches included, went
+    # through the key graph.
+    g = _key_graph([(1, 600.0, 614.0), (2, 1800.0, 1806.0)])
+    assert "[0:v]" not in g, "the gap between clusters is never keyed"
+    assert "[1:v]split=3[ck1_f]" in g and "[2:v]split=3[ck2_f]" in g
+    # a still background is copied to each cluster's key
+    g = _key_graph([(1, 600.0, 614.0), (2, 1800.0, 1806.0)], bg_idx=3,
+                   background={"kind": "gradient", "colour": "#102040",
+                               "colour2": "#000000"})
+    assert "[3:v]split=2[kbg1][kbg2]" in g and "[0:v]" not in g
+
+
+def test_a_key_on_the_whole_source_takes_only_the_kept_frames():
+    g = _key_graph()
+    m = re.search(r"\[0:v\]select='([^']+)'\[vkeysel\]", g)
+    assert m, g[:400]
+    assert m.group(1) == ("between(t,599.000,607.000)+between(t,609.000,"
+                          "615.000)+between(t,1799.000,1807.000)")
+    assert "[vkeysel]split=3[ckf]" in g
+
+
+def test_a_looping_video_background_starts_at_the_seek_phase(monkeypatch):
+    import media
+    monkeypatch.setattr(media, "probe", lambda p: {"duration": 4.0})
+    args, item = ck.seek_background(
+        ["-stream_loop", "-1", "-i", "/x/bg.mp4"], {"id": "k"}, 61.2)
+    # an input -ss on a looped input restarts every loop there: not used
+    assert args == ["-stream_loop", "-1", "-i", "/x/bg.mp4"]
+    assert item["_bg_offset"] == 60.0
+    parts, _out = ck.graph_parts("0:v", dict(
+        item, colour="#1fb84a", background={"kind": "asset",
+                                            "asset_key": "u/bg.mp4"}), 3)
+    assert any(p.startswith("[3:v]setpts=PTS+60.000000/TB,") for p in parts)
+
+
+@needs_ffmpeg
+def test_cluster_keyed_reads_render_the_identical_programme(tmp_path,
+                                                             monkeypatch):
+    import renderer
+    src = _green_screen(str(tmp_path / "long.mp4"), dur=70.0)
+    edl = schemas.validate_edl({
+        "keep": [[8.0, 9.5], [61.0, 62.5]],
+        "frame": {"ratio": "source", "mode": "crop"},
+        "effects": {"key": {"id": "key1", "colour": "#1fb84a",
+                            "similarity": 0.1, "blend": 0.06,
+                            "despill": 0.7, "spill": "green",
+                            "background": {"kind": "gradient",
+                                           "colour": "#2030a0",
+                                           "colour2": "#a02030"}}}},
+        70.0).model_dump()
+    index = {"words": [], "sentences": [], "silences": [],
+             "video": {"duration": 70.0, "width": 320, "height": 320,
+                       "fps": 25.0}}
+    commands = {}
+    real_run = renderer._render_media_run
+
+    def capture(cmd, **kw):
+        if "[adlg]" in cmd:
+            return real_run(cmd, **kw)
+        cmd = list(cmd)
+        for flag in ("-/filter_complex", "-filter_complex_script"):
+            if flag in cmd:
+                i = cmd.index(flag)
+                with open(cmd[i + 1], encoding="utf-8") as fh:
+                    cmd[i:i + 2] = ["-filter_complex", fh.read()]
+        commands["cmd"] = [c for c in cmd
+                           if c not in ("-progress", "pipe:1", "-nostats")]
+        raise StopIteration
+
+    monkeypatch.setattr(renderer, "_render_media_run", capture)
+    digests = {}
+    for gap in (0.0, 20.0):
+        monkeypatch.setattr(renderer.config, "KEEP_CLUSTER_GAP_S", gap)
+        out = str(tmp_path / f"out_{int(gap)}.mp4")
+        work = tmp_path / f"work_{int(gap)}"
+        work.mkdir()
+        with pytest.raises(StopIteration):
+            renderer.render_edl(edl, index, src, out, str(work), preview=True)
+        graph = commands["cmd"][commands["cmd"].index("-filter_complex") + 1]
+        subprocess.run(commands["cmd"], check=True, capture_output=True,
+                       timeout=180)
+        frames = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", out, "-map", "0:v", "-f",
+             "framemd5", "-"], capture_output=True, text=True,
+            check=True).stdout
+        digests[gap] = (graph, [ln for ln in frames.splitlines()
+                                if not ln.startswith("#")])
+    assert "[0:v]" not in digests[20.0][0], "keyed per cluster read"
+    assert "select=" in digests[0.0][0], "only kept frames keyed"
+    assert digests[20.0][1] == digests[0.0][1], "every frame identical"
+    after = ck.sample_frames(str(tmp_path / "out_20.mp4"), [0.5, 2.0])
+    assert ck.screen_share(after, "green", "#1fb84a", 0.1) < 0.005
