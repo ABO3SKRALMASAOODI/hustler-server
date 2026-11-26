@@ -594,7 +594,9 @@ def editor_note(ledger, done_by=None):
             + (f" If it can't be done: {a['otherwise']}" if a.get("otherwise") else "")
             for a in ledger["asks"]]
     head = ("\n\nASK LEDGER: each thing the customer asked for and how it will be checked on the "
-            "rendered film before your reply goes out. Do every one; an ask you can't do, say so plainly.\n")
+            "rendered film before your reply goes out. Each want is their message already read in its "
+            "conversation (numbers, typos and references resolved): do it as written, never re-read it "
+            "into something else. Do every one; an ask you can't do, say so plainly.\n")
     tail = ""
     if done_by:
         tail = "\n" + done_by
@@ -1325,6 +1327,23 @@ def repair_note(ledger, verdict, extra=""):
                    "nothing of the kind the ask wants removed (0.0 s of dead air, no filler words), the film "
                    "already does what was asked: change nothing for it, never cut footage or music to make a "
                    "change, and say so with the measurement.")
+
+
+def unmoved_note(ledger, verdict):
+    """The follow-up when the editor answered the check without changing the
+    film: the asks still open, and that naming a miss is not doing it."""
+    want = {a["id"]: a for a in ledger["asks"]}
+    rows = [f"- {r['id']}: {want[r['id']]['want']}. On the film: {r['seen']}"
+            for r in open_asks(verdict) if r["id"] in want]
+    if not rows:
+        return None
+    return ("ASK CHECK: your last step changed nothing on the film, and these asks are still open:\n"
+            + "\n".join(rows) +
+            "\nThe customer asked for them as written; the want above is their message already read in "
+            "its conversation, its numbers and misspellings resolved. Change the film for each one now "
+            "with your tools and render. Naming a miss in the reply does not fix it, and a question "
+            "is not an answer to an ask that has one reading. Only an ask that no tool here can do at "
+            "all stays open, with the reason in one clause.")
 
 
 def reply_block(ledger, verdict):

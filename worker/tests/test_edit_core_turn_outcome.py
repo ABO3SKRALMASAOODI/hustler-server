@@ -56,8 +56,10 @@ def test_a_pass_that_changed_nothing_is_the_editors_answer_and_the_reply_stands(
         "asks": [{"id": "a1", "state": "partly", "seen": "s", "line": "l"}], "unasked": [], "usage": {}})
     monkeypatch.setattr(agent_loop, "_turn_change_list", lambda c: "")
     assert agent_loop._asks_check(ctx, "first draft")
-    # same version, same render: the editor replied without changing the film
-    assert agent_loop._asks_check(ctx, "second draft") is None
+    # same version, same render: the editor replied without changing the film. One follow-up
+    # says the film did not move (p5993, #1725); a pass that still changes nothing stands.
+    assert "changed nothing" in agent_loop._asks_check(ctx, "second draft")
+    assert agent_loop._asks_check(ctx, "third draft") is None
     assert ledger["repairs"] == 1
 
 
