@@ -284,7 +284,7 @@ def test_a_film_most_of_whose_frames_lose_to_the_upload_keeps_its_type_repaired_
     assert out is not None and len(wrote) == 1 and wrote[0][1] == "the Director's First cut, after the last look"
     assert any("THE CLAIM" in t["text"] and t["outline_width"] > 0 for t in wrote[0][0]["texts"])
     assert getattr(ctx, "director_fell_why", None) is None and ctx.director_version is not None
-    assert ctx.first_cut_phases["director"]["look"]["decision"] == "cut" and ctx.first_cut_phases["director"]["look"]["mended"] == {"b01.big": "unreadable"}
+    assert ctx.first_cut_phases["director"]["look"]["decision"] == "cut" and ctx.first_cut_phases["director"]["look"]["mended"] == {"b01.big": "measure"}   # no fault given: the frame decides (compiler.mend_type)
     assert [k for k, _ in db.events] == ["director_taste"] and db.events[0][1]["mended"] == ["b01.big"]
 
 

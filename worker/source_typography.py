@@ -87,10 +87,18 @@ def captioned(index):
 # A paragraph on a slide keeps the same box; a deck's headings change only
 # when the slide does (most samples in a row repeat the line), and scene
 # print wanders off the band.
-SUB_MIN_W, SUB_MAX_H, SUB_CENTRE, SUB_LOW, SUB_EDGE = .15, .14, .15, .35, .985
+# The line is also anchored where the upload's editor set it (its centre for
+# centred type, its left edge for left-set type, within SUB_ANCHOR across the
+# samples) and its width runs over a real range of line lengths (SUB_RANGE
+# between the 20th and 80th percentile): print on a moving speaker's chest
+# drifts with the body, and a detector's box on a fixed print jitters by a
+# few hundredths, neither a new line of words.
+SUB_MIN_W, SUB_MAX_H, SUB_CENTRE, SUB_LOW, SUB_EDGE = .15, .14, .08, .35, .985
 SUB_WIDE_W = .4
 SUB_BAND = .04
 SUB_TURNOVER = .5       # share of consecutive samples whose line changed
+SUB_ANCHOR = .04
+SUB_RANGE = .08
 
 
 def _subtitle_line(x0, y0, x1, y1):
@@ -138,6 +146,15 @@ def subtitle_share(index, t0, t1):
         return 0.0
     turned = sum(1 for p, q in zip(hits, hits[1:]) if p != q)
     if turned < SUB_TURNOVER * (len(hits) - 1):
+        return 0.0
+    on_band = [(x0, x1) for _t, (y, x0, x1) in lines if abs(y - band) <= SUB_BAND]
+
+    def spread(vals, lo=.2, hi=.8):
+        vals = sorted(vals)
+        return vals[int((len(vals) - 1) * hi)] - vals[int((len(vals) - 1) * lo)]
+    anchored = min(spread([(a + b) / 2 for a, b in on_band], 0., 1.),
+                   spread([a for a, _b in on_band], 0., 1.)) <= SUB_ANCHOR
+    if not anchored or spread([b - a for a, b in on_band]) < SUB_RANGE:
         return 0.0
     return len(hits) / seen
 

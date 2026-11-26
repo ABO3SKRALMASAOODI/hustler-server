@@ -488,7 +488,8 @@ def test_the_verdict_is_counted_from_the_pairs():
     assert '"same"' in taste.LOOK_SYSTEM
     faulted = json.dumps({"pairs": [{"n": 1, "post": "upload", "why": "dark on dark", "remove": ["b01.big"], "fault": {"b01.big": "unreadable", "b02.chip": "covers", "x": "covers"}}]})
     v = taste.read_look(faulted, 6, known)
-    assert v["remove"] == ["b01.big", "b02.chip"] and v["faults"] == {"b01.big": "unreadable", "b02.chip": "covers"}
+    # an id with a fault but not in `remove` is mended (type), never removed; an unknown id is ignored
+    assert v["remove"] == ["b01.big"] and v["mend"] == ["b02.chip"] and v["faults"] == {"b01.big": "unreadable", "b02.chip": "covers"}
 
 
 def test_the_look_sets_the_upload_above_the_film_and_asks_once(tmp_path, monkeypatch):

@@ -2954,6 +2954,9 @@ def _mended(ctx, it):
     return None
 
 
+MEND_FAULTS = ("unreadable", "covers")     # what compiler.mend_type repairs; any other named fault is measured
+
+
 def mend_type(ctx, l1):
     """Type the last look named is repaired, never taken off the film (owner, 16 Nov: a fix makes the product reach
     the outcome). Before, the look's named type was cut and the film lost its devices (p6311: the captions and a
@@ -2971,10 +2974,47 @@ def mend_type(ctx, l1):
     final.shots = [it for it in l1["items"] if it.get("k") == "shot"]
     final.items = [it for it in l1["items"] if it.get("k") != "shot"]
     authored = {it["id"]: it for it in ctx.items}
-    edged, boxed, moved, unresolved = [], [], [], []
+    edged, boxed, moved, unresolved, measured = [], [], [], [], {}
     units = {}
+
+    def unit_key(it):
+        original = authored.get(it["id"], {})
+        return original.get("_type_layout") or original.get("_g") or it.get("chunk") or it["id"]
+
+    def bounds(members):
+        boxes = [r for it in members if (r := type_rect(final, it)) is not None]
+        if not boxes:
+            return None
+        return [min(r[0] for r in boxes), min(r[1] for r in boxes), max(r[2] for r in boxes), max(r[3] for r in boxes)]
+
+    def frames_of(members):
+        a, z = min(it["f"][0] for it in members), max(it["f"][1] for it in members)
+        return a, z, sorted(set(range(a, z, max(1, round(ctx.fps / 4)))) | {z - 1})
+
+    # The look named this type but not what is wrong with it (no fault, or one it does not know): the frame says.
+    # Over a head or the upload's printed words it covers them and moves clear; anywhere else it is unreadable and
+    # stands on its panel. A panel under type that sits on a face made that frame worse (the reviewer, 27 Nov).
+    asked = {}
     for it in final.items:
-        fault = _mended(ctx, it)
+        if _mended(ctx, it) not in MEND_FAULTS and _mended(ctx, it) is not None and it.get("role") != "cap":
+            asked.setdefault(unit_key(it), []).append(it)
+    for key, members in asked.items():
+        r, (a, z, frames) = bounds(members), frames_of(members)
+        over = []
+        for f in frames:
+            s = shot_at(final, f)
+            if s:
+                over += taste._heads_near(final, s, f) + marks_of(final, s, f)
+        fault = "covers" if r is not None and any(rects_touch(r, q) for q in over) else "unreadable"
+        for it in members:
+            measured[it["id"]] = fault
+
+    def fault_of(it):
+        f = measured.get(it["id"]) or _mended(ctx, it)
+        return f if f is None or f in MEND_FAULTS else "unreadable"
+
+    for it in final.items:
+        fault = fault_of(it)
         if fault is None:
             continue
         if not it.get("edge"):
@@ -2984,25 +3024,16 @@ def mend_type(ctx, l1):
             it["boxed"] = True              # display type the look could not read: it stands on the dark panel
             boxed.append(it["id"])
         if fault == "covers" and it.get("role") != "cap":
-            original = authored.get(it["id"], {})
-            key = original.get("_type_layout") or original.get("_g") or it.get("chunk") or it["id"]
-            units.setdefault(key, []).append(it)
+            units.setdefault(unit_key(it), []).append(it)
 
-    def bounds(members):
-        boxes = [r for it in members if (r := type_rect(final, it)) is not None]
-        if not boxes:
-            return None
-        return [min(r[0] for r in boxes), min(r[1] for r in boxes), max(r[2] for r in boxes), max(r[3] for r in boxes)]
-
-    others = [it for it in final.items if it.get("k") == "word" and _mended(ctx, it) != "covers"]
-    step = max(1, round(ctx.fps / 4))
+    others = [it for it in final.items if it.get("k") == "word" and fault_of(it) != "covers"]
     for key, members in units.items():
         r = bounds(members)
         if r is None:
             continue
-        a, z = min(it["f"][0] for it in members), max(it["f"][1] for it in members)
+        a, z, frames = frames_of(members)
         obstacles = [_grow(r, TRAFFIC_GAP)]          # where it stood covers what the frame is about
-        for f in sorted(set(range(a, z, step)) | {z - 1}):
+        for f in frames:
             s = shot_at(final, f)
             if s:
                 obstacles += taste._heads_near(final, s, f) + marks_of(final, s, f)
@@ -3020,7 +3051,10 @@ def mend_type(ctx, l1):
         for it in members:
             _shift_item(it, dy)
         moved.append({"id": key, "dy": round(dy, 4)})
-    return {"edged": edged, "boxed": boxed, "moved": moved, "unresolved": unresolved}
+    out = {"edged": edged, "boxed": boxed, "moved": moved, "unresolved": unresolved}
+    if measured:
+        out["measured"] = measured
+    return out
 
 
 def under_plate(ctx, f):
@@ -6673,6 +6707,9 @@ def view_rect(ctx, v, asset, W, H):
     k = max((x1 - x0) * 1.3 / fw, (y1 - y0) * 1.3 / fh)         # the share of the film's framing the detail needs
     k = clamp(k, 1 / VIEW_ZOOM[1], 1 / VIEW_ZOOM[0])
     k = max(k, W / (ctx.max_up * fw * asset["w"]))                  # never past what the source can hold
+    # ...and never wider than the source itself: on a 480p/360p or square upload the ceiling asks for more picture
+    # than there is, so the view is the source's own fit at its tightest, still round the detail (#944 follow-up)
+    k = min(k, 1.0 / max(fw, fh, 1e-9))
     w, h = fw * k, fh * k
     cx, cy = clamp(cx, w / 2, 1 - w / 2), clamp(cy, h / 2, 1 - h / 2)
     return [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]

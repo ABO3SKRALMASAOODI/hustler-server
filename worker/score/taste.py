@@ -1281,7 +1281,7 @@ def read_look(text, n, known):
     pairs = d.get("pairs") if isinstance(d, dict) else None
     if not isinstance(pairs, list) or not pairs:
         return None
-    upload, remove, why, faults = 0, [], [], {}
+    upload, remove, why, faults, mend = 0, [], [], {}, []
     for p in pairs[:n]:
         if not isinstance(p, dict):
             continue
@@ -1289,14 +1289,23 @@ def read_look(text, n, known):
             upload += 1
             why.append(str(p.get("why", ""))[:160])
         named = p.get("fault") if isinstance(p.get("fault"), dict) else {}
-        for i in list(p.get("remove") or []) + [k for k in named if k not in (p.get("remove") or [])]:
-            i = str(i)
+        named = {str(k): str(f or "").strip().lower() for k, f in named.items()}
+        listed = [str(i) for i in (p.get("remove") or [])]
+        for i in listed:
             if (i in known or i == "cap") and i not in remove:
                 remove.append(i)
-            f = str(named.get(i) or "").strip().lower()
-            if i in remove and f in FAULTS and i not in faults:
-                faults[i] = f
+            if i in remove and named.get(i) in FAULTS and i not in faults:
+                faults[i] = named[i]
+        # An id the look gave a fault but did not list in `remove` was never asked to go: a repair it names
+        # (unreadable, covers, crops) is still made to type, and nothing is cut for it.
+        for i, f in named.items():
+            if i not in listed and (i in known or i == "cap") and f in FAULTS and f != "unearned" and i not in mend:
+                mend.append(i)
+                faults.setdefault(i, f)
     out = {"pairs": len(pairs[:n]), "upload": upload, "remove": remove, "why": why}
+    mend = [i for i in mend if i not in remove]
+    if mend:
+        out["mend"] = mend
     if faults:
         out["faults"] = faults
     return out
@@ -1338,12 +1347,23 @@ def split_named(comp, v):
     camera device leaves the take in the film's own framing: the picture stays)."""
     faults = v.get("faults") or {}
     mends, cuts = {}, []
+
+    def mend_as(gid, f):
+        # a fault the look did not give (or one it does not know) is measured on the frame (compiler.mend_type):
+        # read as 'unreadable' by default, a title over a face went onto a panel there and made it worse. Captions
+        # keep their seat and take the edge whatever the fault
+        if f in ("unreadable", "covers"):
+            return f
+        return "covers" if f == "crops" else ("unreadable" if gid == "cap" else "measure")
     for gid in v.get("remove") or []:
         f = faults.get(gid)
         if is_type(comp, gid) and f != "unearned":
-            mends[gid] = f if f in ("unreadable", "covers") else ("covers" if f == "crops" else "unreadable")
+            mends[gid] = mend_as(gid, f)
         else:
             cuts.append(gid)
+    for gid in v.get("mend") or []:           # named with a repair, never asked to go: type is mended, nothing cut
+        if gid not in mends and gid not in cuts and is_type(comp, gid):
+            mends[gid] = mend_as(gid, faults.get(gid))
     return mends, cuts
 
 

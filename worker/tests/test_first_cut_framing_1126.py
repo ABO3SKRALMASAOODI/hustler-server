@@ -138,6 +138,21 @@ def test_wandering_scene_print_and_a_fixed_footer_are_not_subtitles():
     assert source_typography.subtitle_share({"spatial": {"samples": edge}}, 0., 60.) == 0.
 
 
+def test_print_on_a_talking_heads_chest_is_not_the_uploads_subtitles():
+    # a talking head with chest print in the lower half: the detector's box moves with the speaker, or stays put and
+    # jitters by a few hundredths. Before: burned True, the first film went out with no captions, hook or slams
+    words = _words(0., 60.)
+    sway = [{"t": float(t), "text": [[.5 + d - w / 2, .58, .5 + d + w / 2, .64]], "faces": [[.4, .1, .6, .35]]}
+            for k, t in enumerate(range(0, 60, 3))
+            for d, w in [((-.06, .03, -.02, .06, 0., -.04)[k % 6], (.16, .20, .24, .18, .22)[k % 5])]]
+    jitter = [{"t": float(t), "text": [[.5 - w / 2, .58, .5 + w / 2, .64]], "faces": [[.4, .1, .6, .35]]}
+              for k, t in enumerate(range(0, 60, 3)) for w in [(.18, .20, .22, .19, .21)[k % 5]]]
+    for rows in (sway, jitter):
+        index = {"spatial": {"samples": rows}, "words": words}
+        assert source_typography.subtitle_share(index, 0., 60.) == 0.
+        assert not source_typography.kept_subtitles(index, [[0., 60.]])
+
+
 def test_director_reads_the_same_subtitle_measure():
     from score import taste
     index = _screen_index(_screen_rows(160., 212.))
@@ -164,6 +179,27 @@ def test_real_speech_in_a_loud_room_and_unknown_confidences_are_speech():
     assert first_cut._speech(party)
     corrected = {"words": [{"w": "word", "t0": i, "t1": i + .5, "confidence": None} for i in range(9)]}
     assert first_cut._speech(corrected)
+
+
+def test_an_accented_narrator_the_recognizer_doubts_is_still_speech():
+    # a faceless narration in a language whisper is less sure of: mean about
+    # 0.62, under NONSPEECH_MEAN, but most of its words different and a third
+    # of them heard clearly. Before: _speech False, cut and left as silent footage
+    text = ("today we look at how the old harbour was rebuilt after the storm and "
+            "why the fishermen came back to work there every single morning").split()
+    pattern = [.92, .55, .48, .85, .5, .6, .42, .88, .52, .58]
+    narration = {"words": [{"w": w, "t0": i * .4, "t1": i * .4 + .3, "confidence": pattern[i % len(pattern)]}
+                           for i, w in enumerate(text)]}
+    mean = sum(w["confidence"] for w in narration["words"]) / len(narration["words"])
+    assert .6 < mean < first_cut.NONSPEECH_MEAN
+    assert first_cut._speech(narration)
+    # a hallucinated sign-off repeated over a silent upload, the same mean: the same three words, never speech
+    signoff = {"words": [{"w": w, "t0": i * .4, "t1": i * .4 + .3, "confidence": pattern[i % len(pattern)]}
+                         for i, w in enumerate(["Thanks", "for", "watching!"] * 8)]}
+    assert not first_cut._speech(signoff)
+    # under the floor nothing counts
+    doubted = {"words": [dict(w, confidence=.4) for w in narration["words"]]}
+    assert not first_cut._speech(doubted)
 
 
 def test_captions_the_user_asks_for_keep_every_word_whatever_the_confidence():

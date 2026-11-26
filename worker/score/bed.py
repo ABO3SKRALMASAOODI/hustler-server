@@ -422,7 +422,8 @@ def source_volume(work, src_dur):
         out.append({"start": round(lo, 2), "end": round(hi, 2), "gain_db": g})
         if hi < b:
             out.append({"start": round(hi, 2), "end": round(b, 2), "gain_db": round(g / 2, 1)})
-    return [v for v in out if v["end"] > v["start"]]
+    # tied to the bed (VolumeItem.music_id): removed or muted with it, never left ducking the upload under nothing
+    return [dict(v, music_id="bed") for v in out if v["end"] > v["start"]]
 
 
 ARRANGE_S = 14.0            # what the film's write waits for the track to be cut to it; past it the plain bed plays

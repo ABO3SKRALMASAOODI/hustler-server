@@ -2009,6 +2009,33 @@ def _clean_word(w):
 # captions yet); a caption the user asks for is always written, and the
 # Director's first film has its own CAPTION_CONFIDENCE with that exception.
 NONSPEECH_MEAN = 0.65
+# 0.65 sits close to real speech's 0.68 floor, and an accented narrator or a
+# language whisper is less sure of can measure about 0.62. So under
+# NONSPEECH_MEAN the transcript is still speech when the recognizer heard
+# enough of it clearly: at least SPEECH_MIN_CLEAR different words at
+# CLEAR_WORD or above, a CLEAR_SHARE of its scored words. Noise has none of
+# that: MÚSICA x9 has no clear word, the fireworks two, and a hallucinated
+# "Thanks for watching!" repeats the same three. Under NONSPEECH_FLOOR the
+# recognizer doubts nearly every word and it is never speech.
+NONSPEECH_FLOOR = 0.45
+CLEAR_WORD = 0.8
+CLEAR_SHARE = 0.25
+SPEECH_MIN_CLEAR = 8
+
+
+def _heard_clearly(raw):
+    """Did the recognizer hear enough different words clearly for a doubtful
+    mean to be a hard voice rather than words heard in noise?"""
+    scored = [w for w in raw if isinstance(w, dict) and w.get("confidence") is not None]
+    clear = []
+    for w in scored:
+        try:
+            if float(w["confidence"]) >= CLEAR_WORD:
+                clear.append(str(w.get("w") or "").strip(".,!?;:…\"' ").lower())
+        except (TypeError, ValueError):
+            continue
+    distinct = {c for c in clear if c}
+    return len(distinct) >= SPEECH_MIN_CLEAR and len(clear) >= CLEAR_SHARE * max(1, len(scored))
 
 
 def _speech(index):
@@ -2020,7 +2047,8 @@ def _speech(index):
     for neither side."""
     raw = (index or {}).get("words") or []
     from score import transcript_confidence
-    if transcript_confidence.low_mean(raw, NONSPEECH_MEAN):
+    if transcript_confidence.low_mean(raw, NONSPEECH_MEAN) and (
+            transcript_confidence.low_mean(raw, NONSPEECH_FLOOR) or not _heard_clearly(raw)):
         return False        # the recognizer's own confidence: noise, not speech
     words = [str(w.get("w") or "").strip() for w in raw]
     if len(words) < 8:

@@ -865,6 +865,23 @@ class VolumeItem(BaseModel):
     start: float   # source-timeline seconds
     end: float
     gain_db: float
+    # The music item this level belongs to: the upload's own ambience set
+    # under a chosen bed (score.bed.source_volume). It sounds only while that
+    # music item is on the timeline and not muted (sounding_volume), and
+    # remove_music takes it with the track, so removing the bed never leaves
+    # the upload's own sound ducked under nothing. None (every hand-set level
+    # and every EDL written before the field) keeps its signature and render.
+    music_id: Optional[str] = None
+
+
+def sounding_volume(edl):
+    """The volume automation that plays: a level tied to a music item
+    (music_id) only while that item is present and unmuted."""
+    edl = edl or {}
+    live = {m.get("id") for m in (edl.get("music") or [])
+            if isinstance(m, dict) and m.get("id") and not m.get("mute")}
+    return [v for v in (edl.get("volume") or []) if isinstance(v, dict)
+            and (not v.get("music_id") or v.get("music_id") in live)]
 
 
 FRAME_RATIOS = ("source", "16:9", "9:16", "1:1", "4:5")

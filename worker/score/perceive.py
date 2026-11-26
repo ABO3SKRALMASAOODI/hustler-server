@@ -157,6 +157,7 @@ MUSIC_BEAT = 0.22        # the beat's self-similarity a song reaches: 63 of 64 l
 MUSIC_TONAL = 0.20       # share of sounding frames holding three or more sustained notes
 MUSIC_JOINT = 1.4        # or both part-way there: beat/MUSIC_BEAT + tonal/MUSIC_TONAL (a phone-recorded or lo-fi song)
 MUSIC_WINDOW_S = 60.0    # the upload is read in up to three windows (start, middle, end): music that starts late counts
+MUSIC_MED_ROWS = 32      # spectral frames per step of the peak finder's sliding median (bounded memory)
 
 
 def music_measure(x, sr=MUSIC_SR, max_s=None):
@@ -193,7 +194,12 @@ def _music_window(x, sr=MUSIC_SR):
         sounding = level > level.max() - 40
         lv = 10 * np.log10(sb)
         pad = np.pad(lv, ((0, 0), (12, 12)), mode="edge")
-        med = np.median(np.lib.stride_tricks.sliding_window_view(pad, 25, axis=1), axis=2)
+        # the sliding median, MUSIC_MED_ROWS frames at a time: over a whole 60 s window at once it copied every
+        # frame x bin x 25 neighbours (about 220 MB on top of the decoded audio); in rows it is a few MB, same values
+        med = np.empty_like(lv)
+        for a in range(0, len(lv), MUSIC_MED_ROWS):
+            med[a:a + MUSIC_MED_ROWS] = np.median(
+                np.lib.stride_tricks.sliding_window_view(pad[a:a + MUSIC_MED_ROWS], 25, axis=1), axis=2)
         peak = (lv - med > 12) & (lv >= np.roll(lv, 1, 1)) & (lv >= np.roll(lv, -1, 1))
         near = peak | np.roll(peak, 1, 1) | np.roll(peak, -1, 1)
         held = peak[:-3] & near[1:-2] & near[2:-1] & near[3:]

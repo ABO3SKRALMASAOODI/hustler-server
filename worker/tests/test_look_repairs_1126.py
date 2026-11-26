@@ -75,17 +75,24 @@ def test_mend_lines_keep_the_title_edge_it_and_box_it_when_unreadable(tmp_path):
 
 
 def test_a_title_that_covers_the_subject_moves_clear_of_where_it_stood(tmp_path):
-    idx, text = _titled()
+    """#1151 / #1820: a title the look says covers the subject moves, as one unit, to a clear height: its words,
+    size and timing stay. The frame has room (a face high in the frame, the title seated over it): it must move,
+    not stay 'unresolved' where it stood (before, the test passed either way)."""
+    idx = selfie(20.0, face=(0.38, 0.12, 0.62, 0.3))
+
+    def make(k, a, z):
+        return {"pic": "main", "do": [{"g": "big", "t": f"LINE {k}", "for": f"w{a}", "at": f"w{a}", "d": 40}]}
+    text = film(beats_over(idx, 3, make), dna={"seat": [0.5, 0.3]})
     c = comp(text, idx, voice(20.0))
     m = comp(taste.mend_text(text, {"b01.big": "covers"}), idx, voice(20.0))
-    ys0 = [i["y"] for i in c.l1["items"] if i["k"] == "word" and i["id"].startswith("b01.big")]
-    ys1 = [i["y"] for i in m.l1["items"] if i["k"] == "word" and i["id"].startswith("b01.big")]
+    before = [i for i in c.l1["items"] if i["k"] == "word" and i["id"].startswith("b01.big")]
+    after = [i for i in m.l1["items"] if i["k"] == "word" and i["id"].startswith("b01.big")]
     rep = m.meter["mended_type"]
-    assert rep["moved"] or rep["unresolved"]
-    if rep["moved"]:
-        dy = rep["moved"][0]["dy"]
-        assert abs(dy) > 0.02 and all(abs((b[-1] if isinstance(b, list) else b) - (a[-1] if isinstance(a, list) else a) - dy) < 1e-6 for a, b in zip(ys0, ys1))
-    assert [i["t"] for i in m.l1["items"] if i["k"] == "word" and i["id"].startswith("b01.big")]        # still on the film
+    assert rep["moved"] and not rep["unresolved"], rep
+    dy = rep["moved"][0]["dy"]
+    last = lambda v: v[-1] if isinstance(v, list) else v       # noqa: E731
+    assert abs(dy) > 0.02 and all(abs(last(b["y"]) - last(a["y"]) - dy) < 1e-3 for a, b in zip(before, after))   # dy is reported to 4 places
+    assert [i["t"] for i in after] == [i["t"] for i in before] and [i["f"] for i in after] == [i["f"] for i in before]
 
 
 def test_the_look_splits_type_to_mend_from_what_nothing_explains():
@@ -100,7 +107,40 @@ def test_the_look_splits_type_to_mend_from_what_nothing_explains():
 def test_the_look_is_told_the_film_frame_is_nine_sixteen_and_asked_for_faults():
     assert "9:16" in taste.LOOK_SYSTEM and '"fault"' in taste.LOOK_SYSTEM
     v = taste.read_look(json.dumps({"pairs": [{"n": 1, "post": "upload", "why": "x", "remove": [], "fault": {"cap": "unreadable"}}]}), 6, set())
-    assert v["remove"] == ["cap"] and v["faults"] == {"cap": "unreadable"}
+    assert v["remove"] == [] and v["mend"] == ["cap"] and v["faults"] == {"cap": "unreadable"}
+
+
+def test_a_fault_the_look_did_not_ask_to_remove_mends_type_and_cuts_nothing():
+    """read_look added ids that appeared only in `fault` to the removal list, so 'unearned' on an id the look did not
+    remove still cut the Director's device. A fault outside `remove` is never a cut: a repair it names is made to type."""
+    idx, text = _titled()
+    c = comp(text, idx, voice(20.0))
+    known = {"b01.big", "b02.big", "b03.big"}
+    v = taste.read_look(json.dumps({"pairs": [
+        {"n": 1, "post": "upload", "why": "x", "remove": [], "fault": {"b01.big": "unearned", "b02.big": "unreadable"}},
+        {"n": 2, "post": "upload", "why": "y", "remove": ["b03.big"], "fault": {"b03.big": "covers"}}]}), 6, known)
+    assert v["remove"] == ["b03.big"] and v["mend"] == ["b02.big"] and "b01.big" not in v["faults"]
+    mends, cuts = taste.split_named(c, v)
+    assert mends == {"b02.big": "unreadable", "b03.big": "covers"} and cuts == []
+
+
+def test_type_named_without_a_fault_is_measured_on_the_frame_not_put_on_a_panel():
+    """split_named mended type named with no fault as 'unreadable': a title the look meant as 'on his face' went onto
+    a dark panel there. Now the frame decides: over a head it covers it (edged, moved where there is room, never
+    panelled); clear of heads it is unreadable and stands on its panel."""
+    v = {"pairs": 6, "upload": 3, "remove": ["b01.big"], "why": ["type on the face"]}
+    idx, text = _titled()
+    c = comp(text, idx, voice(20.0))
+    mends, cuts = taste.split_named(c, v)
+    assert mends == {"b01.big": "measure"} and cuts == []
+    clear = comp(taste.mend_text(text, mends), idx, voice(20.0)).meter["mended_type"]
+    assert clear["measured"] == {"b01.big.0": "unreadable"} and clear["boxed"] == ["b01.big.0"]
+    on_face = selfie(20.0, face=(0.3, 0.45, 0.7, 0.75))
+    _, text2 = _titled()
+    rep = comp(taste.mend_text(text2, mends), on_face, voice(20.0))
+    got = rep.meter["mended_type"]
+    assert got["measured"] == {"b01.big.0": "covers"} and not got["boxed"]
+    assert not any(i.get("boxed") for i in rep.l1["items"] if i["k"] == "word" and i["id"].startswith("b01.big"))
 
 
 def test_the_look_hears_a_fit_to_nine_sixteen_as_a_fit_not_a_zoom():

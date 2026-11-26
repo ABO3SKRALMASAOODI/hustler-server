@@ -8547,10 +8547,19 @@ def remove_music(ctx, id):
         return (f"REJECTED: no music with id '{id}'. Existing music ids: "
                 f"{have}. Call get_edl to see them.")
     edl["music"] = [m for m in items if m.get("id") != id]
+    # The upload's own sound set under this track (score.bed's ambience duck)
+    # goes with it: removing the bed must not leave the film's sound ducked.
+    vol = [v for v in (edl.get("volume") or [])
+           if not (isinstance(v, dict) and v.get("music_id") == id)]
+    freed = len(edl.get("volume") or []) - len(vol)
+    if freed:
+        edl["volume"] = vol
     return ctx.write_edl(
         edl, f"removed music {id} "
              f"('{_music_name(ctx, hit['storage_key'])}', "
-             f"{hit['start']}-{hit['end']}s)")
+             f"{hit['start']}-{hit['end']}s)"
+             + (f"; the upload's own sound back at its level under it "
+                f"({freed} level{'s' if freed != 1 else ''})" if freed else ""))
 
 
 def _upload_name(ctx, key):

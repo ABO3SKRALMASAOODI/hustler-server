@@ -94,3 +94,32 @@ def test_invalid_detail_evidence_still_uses_local_safe_framing(fault):
     assert report[0]["reason"] != "named_detail_crop"
     assert all(0 <= c[0] < c[2] <= 1 and 0 <= c[1] < c[3] <= 1
                for c in item["crop"])
+
+
+@pytest.mark.parametrize("size", [(854, 480), (640, 360), (480, 480)])
+def test_named_detail_holds_on_a_small_upload(tmp_path, size):
+    # The 3x crop ceiling must not push a view past the source itself: on a 480p, 360p or square upload the view is as
+    # tight as the source allows, stays inside it, and still shows the named detail (not the saliency centre).
+    from score import compiler, lower
+    from tests.test_score_taste import film
+
+    _, index, _ = scene()
+    index.update(words=[], sentences=[])
+    index["video"].update(width=size[0], height=size[1], fps=30, has_audio=False)
+    view = {"id": 2, "src": "main@3.00-4.50", "at": 3.5,
+            "crop": [.72, .10, .878203125, .60],
+            "box": [.74, .2, .86, .5], "what": "the preview"}
+    (tmp_path / "bin.json").write_text(json.dumps({"own": [view], "items": []}))
+    (tmp_path / "index.json").write_text(json.dumps(index))
+    text = film([{"k": "b", "id": "b01", "at": "@0.0..@1.0",
+                  "job": "show the preview", "pic": "view:2"}])
+    result = compiler.compile_score(text, index=index, work_dir=str(tmp_path),
+                                    bin_items={}, perception={})
+    shot = next(i for i in result.l1["items"] if i.get("view") == "2")
+    rects = shot["crop"] if isinstance(shot["crop"][0], list) else [shot["crop"]]
+    assert all(0 <= c[0] < c[2] <= 1 and 0 <= c[1] < c[3] <= 1 for c in rects)
+    observed = next(r for r in result.meter["source_guard"] if r["id"] == shot["id"])
+    assert observed["reason"] == "named_detail_crop"
+    for c in rects:
+        assert c[0] <= .74 < .86 <= c[2]
+        assert c[1] <= .2 < .5 <= c[3]

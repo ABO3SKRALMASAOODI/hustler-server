@@ -76,7 +76,7 @@ def test_ambience_plays_under_the_bed_that_leads_a_wordless_film(tmp_path):
     g = bed.ambience_under(str(tmp_path))
     assert g == max(bed.AMBIENCE_FLOOR_DB, bed.LEAD_LUFS - bed.AMBIENCE_UNDER_DB + 13.0) and g < 0
     bed._write(str(tmp_path), {"on": True, "cid": "mk-1", "settled": True, "source_under_db": g})
-    assert bed.source_volume(str(tmp_path), 44.86) == [{"start": 0.0, "end": 44.86, "gain_db": g}]
+    assert bed.source_volume(str(tmp_path), 44.86) == [{"start": 0.0, "end": 44.86, "gain_db": g, "music_id": "bed"}]
     per["audio"]["music"] = {"beat": 0.5, "tonal": 0.3}
     (tmp_path / "perception.json").write_text(json.dumps(per))
     assert bed.ambience_under(str(tmp_path)) is None                    # the upload's song is never pushed down
@@ -111,7 +111,7 @@ def test_a_wordless_upload_of_machinery_gets_a_chosen_bed_with_its_sound_under_i
     assert got and got["lead"] and got["source_under_db"] < 0
     edl, _loc, rep = lower.lower(c.l1, work)
     assert edl["music"] and edl["music"][0]["storage_key"] == "bed:t-one"
-    assert edl["volume"] == [{"start": 0.0, "end": 20.0, "gain_db": got["source_under_db"]}] and rep["bed"]["source_under_db"] == got["source_under_db"]
+    assert edl["volume"] == [{"start": 0.0, "end": 20.0, "gain_db": got["source_under_db"], "music_id": "bed"}] and rep["bed"]["source_under_db"] == got["source_under_db"]
     schemas.validate_edl(edl, 20.0)
 
 
@@ -159,3 +159,77 @@ def test_a_cached_preparation_from_before_the_music_measure_is_rebuilt(monkeypat
     finally:
         monkeypatch.undo()
         preparation._code_key.cache_clear()
+
+
+def test_removing_the_bed_brings_the_uploads_own_sound_back(tmp_path):
+    """The ambience duck was plain source-time volume with no link to the bed: removing the chosen music left the
+    upload's own sound 10-24 dB down wherever nobody spoke. The duck now belongs to the bed (music_id): remove_music
+    takes it with the track, and the renderer never plays a level whose music is gone or muted."""
+    import json
+
+    import schemas
+    from agent_tools import remove_music
+    from renderer import build_filtergraph
+    from timeline import Timeline
+    bed._write(str(tmp_path), {"on": True, "cid": "mk-1", "settled": True, "source_under_db": -16.0,
+                               "source_speech": [[4.8, 6.4]]})
+    duck = bed.source_volume(str(tmp_path), 20.0)
+    assert duck and all(v["music_id"] == "bed" for v in duck)
+    hand = {"start": 10.0, "end": 12.0, "gain_db": -6.0}                 # the customer's own level stays
+    edl = schemas.validate_edl({"keep": [[0.0, 20.0]],
+                                "music": [{"id": "bed", "storage_key": "music/1/a.mp3", "start": 0.0, "end": 20.0,
+                                           "gain_db": -18.0, "duck": False}],
+                                "volume": duck + [hand]}, 20.0).model_dump()
+    assert [v["music_id"] for v in edl["volume"]].count("bed") == len(duck)
+
+    class Ctx:
+        written = None
+
+        def latest_edl(self):
+            return {"version": 1, "json": json.loads(json.dumps(edl))}
+
+        def write_edl(self, e, desc):
+            self.written = e
+            return f"EDL v1 -> v2: {desc}"
+
+        def run(self, fn, *a, **k):
+            return None
+    ctx = Ctx()
+    ctx.db = ctx
+    ctx.project_id = 1
+    out = remove_music(ctx, "bed")
+    assert out.startswith("EDL v") and "own sound" in out
+    assert ctx.written["volume"] == [dict(hand, music_id=None)]
+
+    # an EDL that lost its bed some other way (or muted it) never plays the duck
+    index = {"video": {"duration": 20}, "words": [], "sentences": []}
+    tl = Timeline(edl["keep"])
+    deep = f"volume={-16.0}dB:enable="
+    assert deep in build_filtergraph(edl, 20.0, True, tl, None, [], index, preview=True)
+    orphan = dict(edl, music=[])
+    g = build_filtergraph(orphan, 20.0, True, tl, None, [], index, preview=True)
+    assert deep not in g and "volume=-6.0dB:enable='between(t,10.00,12.00)'" in g
+    muted = dict(edl, music=[dict(edl["music"][0], mute=True)])
+    assert deep not in build_filtergraph(muted, 20.0, True, tl, None, [], index, preview=True)
+    assert schemas.sounding_volume(orphan) == [dict(hand, music_id=None)]
+
+
+def test_the_music_measure_reads_ten_minutes_in_bounded_memory(monkeypatch):
+    """The peak finder's sliding median copied every frame x bin x 25 neighbours of a 60 s window at once: 221 MB
+    measured on 10 minutes of audio, on top of the decoded track (a Linux worker is OOM-killed, not given a
+    MemoryError). Row by row it reads the same values in a few MB."""
+    import tracemalloc
+    rng = np.random.default_rng(1)
+    t = np.arange(SR * 600) / SR
+    x = (0.3 * np.sin(2 * np.pi * 220 * t) * (1 + np.sin(2 * np.pi * 2 * t)) + 0.05 * rng.standard_normal(len(t))).astype(np.float32)
+    tracemalloc.start()
+    try:
+        got = perceive.music_measure(x)
+        _cur, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert got is not None and peak < 80e6, peak
+    song = np.clip(_song(20.0), -1, 1)
+    rows = perceive.music_measure(song)
+    monkeypatch.setattr(perceive, "MUSIC_MED_ROWS", 10 ** 9)          # the whole window at once: the old reading
+    assert perceive.music_measure(x) == got and perceive.music_measure(song) == rows

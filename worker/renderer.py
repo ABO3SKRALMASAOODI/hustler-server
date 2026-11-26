@@ -62,8 +62,8 @@ import true_peak
 from schemas import (clean_fingerprint, patch_fingerprint, patch_clip_key,
                      EDLValidationError,
                      is_canvas_program, keep_boundaries, master_loudness,
-                     quad_bbox, speed_pieces, strip_unknown_fx,
-                     subject_matte_geom, validate_edl)
+                     quad_bbox, sounding_volume, speed_pieces,
+                     strip_unknown_fx, subject_matte_geom, validate_edl)
 from timeline import Timeline, merge_spans, transition_junctions
 
 DUCK_DB = -12.0            # music under speech AND program audio under voiceover
@@ -4437,7 +4437,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # windows are in source seconds — exactly what the agent wrote.
         vol_filters = "" if dialogue_probe else "".join(
             f",volume={v['gain_db']}dB:enable='between(t,{v['start']:.2f},{v['end']:.2f})'"
-            for v in edl.get("volume", []))
+            for v in sounding_volume(edl))   # a level tied to a removed or muted bed is gone with it
         parts.append(f"[{asrc}]anull{vol_filters}[asrc]")
 
     # Payoff holds (round 7): an image insert carrying ``hold`` plays the
