@@ -2290,6 +2290,8 @@ def test_mcp_guide_ending_matches_current_export_checks():
     # Describe the rendered motion the editor can actually inspect.
     assert 'natural tail after the last word' in flat
     assert 'Check the movement in the rendered ending when a speed ramp' in flat
+    # the same ending rule the worker skills and core prompt carry
+    assert 'never a freeze as the last picture before the branded end card' in flat
     assert "audio_mode='hold'" not in flat
 
 

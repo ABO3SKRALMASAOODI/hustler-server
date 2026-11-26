@@ -1235,9 +1235,11 @@ with the same names, arguments and effects.
       Duck music 13-20 dB under the voice.
    h. ENDING: let the payoff land on moving source: keep 0.8-1.5 s of the
       natural tail after the last word, with a payoff number ~2 s on screen
-      while the picture still moves. Check the movement in the rendered
-      ending when a speed ramp runs into the branded end card. the comment_cta, follow_cta and
-      save_cta templates belong after the payoff only when the user or brief asks for
+      while the picture still moves. Freeze-frames and stills belong
+      earlier in the edit, never a freeze as the last picture before the
+      branded end card. Check the movement in the rendered ending when a
+      speed ramp runs into the branded end card. The comment_cta, follow_cta
+      and save_cta templates belong after the payoff only when the user or brief asks for
       one, filled only with the handle, keyword and offer the user supplied
       - never an invented handle, verified badge, keyword or promised
       resource (save_cta needs no identity).
