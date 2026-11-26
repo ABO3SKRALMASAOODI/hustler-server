@@ -259,7 +259,9 @@ def build_wave(wf, root, batch, target, slots, tried, recorded_only=False):
             # Keep writing and recording while completed scripts move through supply, score and render.
             occupied = set(films) | {pos for _, _, _, pos in pending.values()}
             for pos in (n for n in range(target) if n not in occupied):
-                if writing >= slots or len(pending) >= 2 * slots:
+                # Script/record workers can prepare the remaining delivery positions while all finishing slots are busy.
+                # The collection size bounds queued work.
+                if writing >= slots:
                     break
                 needed = order[pos]
                 job = next((j for j in todo if j[2] == needed["style"]), None)

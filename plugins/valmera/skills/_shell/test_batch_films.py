@@ -92,15 +92,15 @@ def test_scripts_continue_during_finishing_and_use_a_distinct_reserve(tmp_path, 
     run.mkdir()
     ideas = [dict(title=f"Film {i}", subject=f"Subject {i}", supply=dict(ok=True), style="archive") for i in range(8)]
     (run / "plan.json").write_text(json.dumps(dict(ideas=[ideas[0], *ideas], spend=[])))
-    started_third = Event()
+    writers_filled_collection = Event()
     def make(wf, root, batch_dir, index, idea, until_script=False):
         if until_script:
-            if index >= 2:
-                started_third.set()
+            if index >= 6:
+                writers_filled_collection.set()
             if index == 1:
                 raise RuntimeError("unavailable source")
             return None
-        assert started_third.wait(timeout=5)
+        assert writers_filled_collection.wait(timeout=5)
         folder = batch_dir / idea["title"]
         folder.mkdir()
         (folder / "film.json").write_text(json.dumps(dict(checks=dict(ok=index != 2), style=dict(id=idea["style"]))))
