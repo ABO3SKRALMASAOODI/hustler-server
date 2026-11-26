@@ -2959,7 +2959,8 @@ def _typed_start_from_upload(ctx, ledger, job):
                     f"upload ({kept:.1f} s of {duration:.1f} s)" + (f", with {added}" if added else "")
                     + ". This request is about the upload, so it runs on this film: keep what the first cut "
                     "added unless the request changes it, and say in the reply that you edited their full video.")
-        fresh, carried, dropped = _upload_carrying_first_cut(current, duration)
+        fresh, carried, dropped = _upload_carrying_first_cut(
+            current, duration, keep_frame=ledger.get("frame") != "upload")
         result = str(ctx.write_edl(fresh, "start again from the full upload" + (
             ", carrying the first cut's " + "; ".join(carried) if carried else "")))
     except dbx.JobLeaseLost:
@@ -3014,9 +3015,10 @@ def _first_cut_additions(edl, duration):
         return ""
 
 
-def _upload_carrying_first_cut(edl, duration):
+def _upload_carrying_first_cut(edl, duration, keep_frame=True):
     """(fresh EDL of the full upload, carried, dropped): the frame (its follow keys are on the source
-    clock), the caption style and the mastering carry as they are; a sound effect moves to the source
+    clock; keep_frame False, the ledger's frame=upload, leaves the upload's own shape, #1837), the
+    caption style and the mastering carry as they are; a sound effect moves to the source
     moment it sat on, so it lands on the same picture in the full upload; a zoom that spanned the whole
     first cut spans the whole upload. What belonged to the first cut's own selection (titles on its
     first seconds, a zoom inside one of its moments) is named in ``dropped``."""
@@ -3026,9 +3028,14 @@ def _upload_carrying_first_cut(edl, duration):
     edl = edl or {}
     fresh = schemas.default_edl(duration)
     carried, dropped = [], []
-    if edl.get("frame"):
+    if edl.get("frame") and keep_frame:
         fresh["frame"] = copy.deepcopy(edl["frame"])
         carried.append(f"{(edl['frame'] or {}).get('ratio') or 'output'} frame")
+    elif edl.get("frame"):
+        # #1837: a long film of a 16:9 presentation kept the short's 9:16 centre crop and its slides
+        # were cut off; this film keeps the upload's own frame.
+        dropped.append(f"the first cut's {(edl['frame'] or {}).get('ratio') or 'output'} crop "
+                       "(this film keeps the upload's own frame)")
     if isinstance(edl.get("captions"), dict):
         fresh["captions"] = copy.deepcopy(edl["captions"])
         carried.append("caption style")

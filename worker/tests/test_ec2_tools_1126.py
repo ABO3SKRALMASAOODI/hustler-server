@@ -225,3 +225,44 @@ def test_a_montage_pool_never_holds_a_plate():
     ctx = SimpleNamespace(project_id=6309, db=_Db([PLATE, MASK, PHOTO]))
     rows = montage_tools._project_assets(ctx, ("image_ref",))
     assert [r["id"] for r in rows] == [42500]
+
+
+# ── #1837: a long film of a 16:9 presentation keeps the upload's frame ──
+
+def test_a_long_condense_of_the_upload_keeps_the_uploads_own_frame():
+    """p6307: 'reduce this 17-minute video to 10 minutes' started again from
+    the upload and carried the first cut's 9:16 centre crop; the projected
+    slides were off-frame for all 611 s."""
+    from types import SimpleNamespace as NS
+    import agent_loop
+    from score import asks
+    assert "frame" in asks.LEDGER_SCHEMA["required"]
+    assert asks.LEDGER_SCHEMA["properties"]["frame"]["enum"] == ["first_cut", "upload"]
+    base = {"lang": "es", "start": "upload", "asks": []}
+    assert asks.settle(dict(base, frame="upload"), {"keep": [[0, 1]]})["frame"] == "upload"
+    assert asks.settle(dict(base), {"keep": [[0, 1]]})["frame"] == "first_cut"
+
+    first = {"keep": [[30.0, 52.0], [400.0, 421.7]], "frame": {"mode": "crop", "ratio": "9:16"},
+             "captions": {"preset": "reels"}}
+    writes = []
+
+    def ctx():
+        c = NS(request_edit_origin={"made_by": "automatic_first_cut", "customer_requests_since": 0},
+               has_main_video=True, versions_written=[], duration=1042.25,
+               latest_edl=lambda: {"version": 19, "json": first})
+
+        def write(edl, what):
+            writes.append(edl)
+            c.versions_written.append(20)
+            return "EDL v19 -> v20: " + what
+        c.write_edl = write
+        return c
+    note = agent_loop._typed_start_from_upload(
+        ctx(), dict(base, frame="upload"), {"id": 139897})
+    fresh = writes[-1]
+    assert fresh["keep"] == [[0.0, 1042.25]]
+    assert not (fresh.get("frame") or {}).get("ratio")          # the upload's 16:9
+    assert "keeps the upload's own frame" in note
+    # a short or vertical film of the upload still keeps the first cut's shape
+    agent_loop._typed_start_from_upload(ctx(), dict(base, frame="first_cut"), {"id": 2})
+    assert writes[-1]["frame"]["ratio"] == "9:16"

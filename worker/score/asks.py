@@ -416,11 +416,13 @@ def _call(ctx, name, schema, system, content, max_tokens=4000, model=None):
 # ------------------------------------------------------------------ the ledger
 
 LEDGER_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["lang", "start", "asks"],
+    "type": "object", "additionalProperties": False, "required": ["lang", "start", "frame", "asks"],
     "properties": {
         "lang": {"type": "string", "description": "ISO code of the language the customer typed in."},
         "start": {"type": "string", "enum": ["current", "upload"],
                   "description": "upload when the current film is an automatic first cut the product made by itself and the customer's words are about their uploaded video, not that cut (they ask to keep the upload's length, format or narration, or to work on a part of it the first cut left out); current otherwise, and always when the customer has built on the current film. A request that changes how the film on screen looks or sounds (a grade, a look, grain, music, captions, effects, text) and needs nothing of the upload the cut left out is current: it applies to the film they see (p6303: a grade-only ask reset a finished first cut to the bare upload and lost its titles, overlays and music)."},
+        "frame": {"type": "string", "enum": ["first_cut", "upload"],
+                  "description": "The picture shape of the film this request delivers when start is upload. first_cut when they ask for a vertical or short-form social film (a short, a reel, a TikTok, a story) or name the first cut's shape; upload when they name their video's own shape, or want a long film of the upload (a full edit, a condensed talk, lecture or presentation, a film minutes long), where the upload's own frame keeps what is on screen (projected slides, a board, several people) whole. first_cut when start is current."},
         "asks": {"type": "array", "maxItems": 24, "items": {
             "type": "object", "additionalProperties": False,
             "required": ["id", "said", "want", "kind", "span", "cut", "length", "items", "how", "where", "pass", "otherwise", "devices"],
@@ -464,6 +466,8 @@ span: whole when the ask runs through the entire film or a long stretch of it (o
 cut, for a film ask: new when they want a new cut made from the upload (a short, a reel, highlights, a shorter or reordered film); keep when the upload's length and order stay and the work goes over it (keep my full narration and add pictures, keep the song and the photo order and add movement). none for the other kinds.
 
 start: the current film may be an automatic first cut the product made by itself (its origin says made_by automatic_first_cut): a short piece of the upload, often reframed. When the customer has not built on it (customer_requests_since 0) and their words are about their video rather than that cut (a part of the upload the cut left out, the transcript or story as a whole, their full narration or length, the upload's own format), start is upload. start is current when they talk about the cut they saw, or have edited it since, and when they only change how that film looks or sounds (a grade, a look, music, captions, effects, text) without needing footage, length or format the cut does not have.
+
+frame, when start is upload: the first cut was reframed by the product for a short. first_cut keeps that shape for a short or vertical film they ask for; upload keeps their video's own shape for a long film of the upload (p6307: a 10-minute condense of a 17-minute 16:9 class presentation kept the first cut's 9:16 centre crop, and the projected slides were cut off for all 611 s). A shape they name wins.
 
 how: look when the frames of the rendered film show it (text, pictures, framing, colour, motion). measure when the edit's numbers show it (length, captions on, music present, number of sound effects, loudness, aspect ratio). reply when only the reply can show it. There is no listening: a sound ask is measured.
 
@@ -553,6 +557,7 @@ def settle(value, edl, usage=None):
         asks.append(a)
     return {"lang": str(value.get("lang") or "en")[:8], "asks": asks, "route": route(asks),
             "start": value.get("start") if value.get("start") in ("current", "upload") else "current",
+            "frame": "upload" if value.get("frame") == "upload" else "first_cut",
             "usage": usage or {}, "checks": [], "repairs": 0}
 
 
