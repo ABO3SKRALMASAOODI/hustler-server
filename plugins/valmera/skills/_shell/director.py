@@ -1017,6 +1017,10 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
         args = dict(a.get("args") or {})
         dev = str(a["dev"])
         row = dict(args, dev=dev, id=f"dr{k}", beat=a.get("beat"))
+        if dev == "counter" and "to" in row:
+            # A factual reading lands on its stated figure. Animate the ink,
+            # leaving fictional intermediate values out of the display.
+            row["from"] = row["to"]
         row.pop("at", None)  # the word address above has already been resolved
         row.pop("until", None)
         row.pop("f", None)                                # the ask's own place is its at/until word, set below

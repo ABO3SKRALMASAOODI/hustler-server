@@ -2555,7 +2555,7 @@ def build(script, sup, style_id, direction=None):
                             roles_skip=("name",) if fit_on else (), anchored_only=fit_on, cap_floor_px=CAP_FLOOR_PX if fit_on else None) \
         if d.get("display", True) else []
     if fit_on and d.get("display", True):
-        supers = name_supers(P, clock, sc, timeline, st, pal, f_voice_end, shown, dropped, cards=card_type, bound=sourced)
+        supers = name_supers(P, clock, sc, timeline, st, pal, f_voice_end, shown, dropped, cards=card_type, bound=True)
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=f_voice_end + 8, hold=[(a - 1, b) for a, b, _ in (shown + supers if sourced else shown)] +
                             [(a, b) for a, b, _, _, r in timeline if r.get("depicted_name")], z=5,
                             script=sc if fit_on else None, ink_lag_s=CAPTION_LAG_S if fit_on else None)

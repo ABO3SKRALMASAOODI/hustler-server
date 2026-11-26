@@ -526,6 +526,13 @@ def spoken_alternatives(steps, words, first, last):
     return bound
 
 
+def audience_page(page):
+    """A research claim supplies the record. A designed illustration or authored viewer line supplies type."""
+    return bool(page.get("viewer_line") or any(page.get(k) for k in (
+        "sequence", "publisher_excerpt", "record_role", "analogy_step", "model_phase",
+        "principle_plate", "scope_cue", "episode_example", "demo_note", "estimate_landing")))
+
+
 def bind(direction, editorial, words):
     """Compile the writer's selected statements into complete display blocks. Addresses are spoken word IDs."""
     sources = editorial["sources"]
@@ -738,7 +745,7 @@ def bind(direction, editorial, words):
                 spoken = [w["w"].casefold().strip(string.punctuation) for w in words[first:last+1]]
                 offset = next((i for i in range(len(spoken)) if spoken[i:i+len(qualifier)] == qualifier), 0)
                 first += offset
-            pages.append(dict(first=first, last=last, facts=facts))
+            pages.append(dict(first=first, last=last, facts=facts, viewer_line=str(args.get("viewer_line") or "").strip()))
         else:
             asks.append(ask)
     # A qualification belongs on screen even when the Director uses a picture on that beat.

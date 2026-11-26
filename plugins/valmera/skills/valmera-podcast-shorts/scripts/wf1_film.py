@@ -1185,7 +1185,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     # Screen-share presenter tiles are only one of the possible live returns.
     live_spans = [(round(sp["t0"]*FPS)+LEAD_F, round(sp["t1"]*FPS)+LEAD_F)
                   for shot in tshots for sp in shot.get("spans", []) if sp["who"] == "speaker"]
-    for page in pages:
+    research_pages = [page for page in pages if not wf1_display.audience_page(page)]
+    for page in (p for p in pages if wf1_display.audience_page(p)):
         a = word_frame(page["first"])
         b = min(f_end, Clock.f(clock.words[page["last"]]["t1"]))
         next_word = word_frame(page["last"] + 1)
@@ -1223,7 +1224,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                         or any(lo < b and a < hi for lo,hi in live_spans))
         own_account = d.get("caption_ends") and all(
             f.get("chain") and f["chain"].get("speaker") == f["chain"].get("subject") for f in facts)
-        if b > a and (page.get("demo_note") or qualified or not (on_evidence(a,b) or ((on_presenter or own_account) and narrated))):
+        if b > a and (page.get("viewer_line") or page.get("demo_note") or qualified or not (on_evidence(a,b) or ((on_presenter or own_account) and narrated))):
             timed_facts.append((a,b,page))
     # Retained directions can predate the claims chain. A dense attributed block
     # still gets a reading interval, with all its authored copy and provenance.
@@ -2607,10 +2608,6 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             if (rec.get("attribution") or rec.get("action_caption")) and (rec.get("reframe") or rec.get("action_box")) and not label:
                 publisher = (rec.get("source") or {}).get("channel")
                 label = " · ".join(filter(None,(rec.get("action_caption") or rec.get("attribution"),publisher)))
-            if source_url and not label and rec.get("provider") != "interview-frame":
-                publisher = (rec.get("source") or {}).get("channel") or rec.get("credit")
-                if publisher:
-                    label = f"Source · {publisher}"
             if rec.get("action_box") and label:
                 wf1_display.reading_card(P, [f0,f1], "", "", label, pal, centre=.12, group="figure-credit")
                 continue
@@ -2734,26 +2731,6 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     for a,b,body,title,credit in report_cards:
         wf1_display.reading_card(P,[a,b],body,title,credit,pal,centre=.64,max_height=.22,group="field-report")
         P.events.append(a)
-    if record_span:
-        for pc in pieces:
-            lo, hi = max(record_span[0],pc["f"][0]), min(record_span[1],pc["f"][1])
-            if pc["who"] != "listener" or hi <= lo:
-                continue
-            # The show's reaction remains live. Credit the voice from the timed
-            # episode turns, including an interjection by the other participant.
-            for turn in script.get("speaking_turns") or []:
-                a = max(lo, round((turn["start"]-script["source_start"])*FPS)+LEAD_F)
-                b = min(hi, round((turn["end"]-script["source_start"])*FPS)+LEAD_F)
-                if a < b and turn["speaker"] == record["speaker"]:
-                    wf1_display.reading_card(P,[a,b],"","Voice · "+turn["speaker"],"",pal,
-                                             centre=.76,max_height=.09,group="interview-voice")
-    for lo,hi in returns:
-        owner = return_voices[lo]
-        for pc in pieces:
-            a,b = max(lo,pc["f"][0]),min(hi,pc["f"][1])
-            if a < b and pc["who"] == "listener":
-                wf1_display.reading_card(P,[a,b],"","Voice · "+owner,"",pal,centre=.684,
-                                         max_height=.09,group="interview-voice")
     for a,b,role in thought_spans:
         if b <= a:
             continue
@@ -2779,6 +2756,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         compose_notes(P,argument,word_frame,argument_end,pal,(W,H),publication)
     for a, b, page in timed_facts:
         facts = page["facts"]
+        if page.get("viewer_line"):
+            # Place a short annotation on the synchronous picture. The caption keeps its seat.
+            end = min(b, a + 3 * FPS)
+            wf1_display.reading_card(P,[a,end],page["viewer_line"],"","",pal,centre=.60)
+            fact_pages.append(dict(page, f=[a,end]))
+            continue
         if page.get("demo_note"):
             fact = facts[0]
             source = fact["source"]
@@ -2795,9 +2778,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             step = page["analogy_step"]
             if not step["label"].strip():
                 continue
-            heading = page.get("heading") or "Hypothetical"
-            if page.get("research_stage"):
-                heading += " · " + page["research_stage"]
+            heading = ""
             phases_so_far = page.get("comparison_labels") or []
             states = [(label, i == len(phases_so_far)-1) for i,label in enumerate(phases_so_far)] if len(phases_so_far)>1 else []
             wf1_display.reading_card(P,[a,b],"" if states else step["label"],heading,"",pal,
@@ -2962,40 +2943,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             fact_pages.append(dict(page, f=[a,b]))
             continue
         if opinion_byline(facts):
-            # The synchronous voice and captions carry the qualified words. Only identify their owner.
-            claim = facts[0]["chain"]
-            if claim.get("witness"):
-                credit = ("Interview recollection" if claim["witness"] == "recollection" else "Interview opinion")
-                body = claim["label"]
-                if claim["witness"] == "characterization":
-                    body = next((value.strip() for value in (claim.get("referent"), claim.get("statement"))
-                                 if isinstance(value,str) and value.strip()),claim["report"])
-                wf1_display.reading_card(P,[a,b],body,claim["speaker"]+" · "+credit,"",pal,
-                                         centre=.63,max_height=.31,group="interview-note")
-                fact_pages.append(dict(page,f=[a,b]))
-                continue
-            byline = claim["speaker"] + " · " + (claim.get("label") or wf1_display.OPINION_LABELS.get(claim["stance"]) or wf1_display.ESTIMATE_LABELS[claim["stance"]])
-            if (clock.words[page["first"]]["seg"] == clock.words[page["last"]]["seg"]
-                    and clock.words[page["first"]]["seg"] in (reading.get("quote_segments") or [])):
-                byline = "Voice · " + claim["speaker"]
-            voice = f"opinion_credit{a}"
-            P.voices[voice] = dict(P.voices["cap"], px=P.R.fit_px("cap", byline, .82*W, 48), track=0)
-            listeners = [(round(sp["t0"]*FPS)+LEAD_F, round(sp["t1"]*FPS)+LEAD_F)
-                         for shot in tshots for sp in shot.get("spans", []) if sp["who"] == "listener"]
-            listeners.extend((word_frame(r["first"]), Clock.f(clock.words[r["last"]]["t1"]))
-                             for r in reading.get("reactions", []))
-            bridges = [(lo,hi) for lo,hi,entry in entries if entry["speaker"] == claim["speaker"]]
-            edges = sorted({a,b, *(f for span in listeners+bridges for f in span if a < f < b)})
-            edges = sorted(set(edges) | {f for f in tenure_span or () if a < f < b})
-            for start,end in zip(edges,edges[1:]):
-                if tenure_span and tenure_span[0] <= start < tenure_span[1]:
-                    continue
-                if any(lo <= start < hi for lo,hi in bridges):
-                    continue
-                credit = "Voice · " + claim["speaker"] if any(lo <= start < hi for lo,hi in listeners) else byline
-                P.word([start,end], credit, voice, .5, cap_y - .09, pal["ink"], align="c", role="graphic", z=8,
-                       stroke=dict(w=4, c=DARK_INK), contrast_shadow=True, fact_type=True)
-            fact_pages.append(dict(page, f=[a,b]))
+            # The live voice and captions carry this claim. Its attribution stays in the record.
             continue
         if (a, b) in report_spans:
             for i, fact in enumerate(facts):
@@ -3436,7 +3384,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                | {e["f"] for e in dev_events if 0 <= e["f"] < f_end}),
                  device_events=dev_events,
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=CAPTION_CONTRACT, display=[dict(f=[a, b], text=t) for a, b, t in shown],
-                 display_facts=fact_pages, publisher_reading=reading_plan, field_report=report, thought_experiment=thought,
+                 display_facts=fact_pages, research_facts=research_pages, publisher_reading=reading_plan, field_report=report, thought_experiment=thought,
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t, pic=pic) for a, b, t, pic in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=(sorted(set(layouts_used)) if dr and len(set(layouts_used)) > 1 else (layouts_used[0] if dr and layouts_used else st["layout"])), placement_check=placement_report, coverage=coverage_report,

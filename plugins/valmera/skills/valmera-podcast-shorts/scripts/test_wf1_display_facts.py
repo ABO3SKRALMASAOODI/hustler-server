@@ -646,3 +646,10 @@ def test_interview_callback_names_the_referent_on_the_live_cue():
     page, = wf1_display.episode_pages([], dict(interview_cues=[cue]), words)
     assert page["facts"][0]["chain"]["label"] == cue["referent"]
     assert (page["first"], page["last"]) == (0, 5)
+
+def test_only_authored_viewer_copy_or_a_designed_illustration_reaches_type():
+    import wf1_display
+    claim = dict(first=1,last=18,facts=[dict(value="Internal sourcing note",chain={"stance":"concern"})])
+    assert not wf1_display.audience_page(claim)
+    assert wf1_display.audience_page(dict(claim, viewer_line="One tender per year"))
+    assert wf1_display.audience_page(dict(claim, sequence=[{"label":"Tender opens"}]))
