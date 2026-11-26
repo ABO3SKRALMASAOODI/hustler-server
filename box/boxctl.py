@@ -7,7 +7,8 @@
                          every 2 min; one run at a time)
     boxctl.py apply      make every configured slot container exist and run
                          the current release (boot, config changes)
-    boxctl.py clean      disk hygiene (systemd timer, every 15 min)
+    boxctl.py clean      disk hygiene and recycling of idle slots whose
+                         memory crept up (systemd timer, every 15 min)
     boxctl.py status     one JSON line: release, slots, disk
 
 Pull-based: the box reads the public repository over HTTPS and needs no
@@ -919,6 +920,105 @@ def free_gb(path=DATA_DIR):
     return shutil.disk_usage(path).free / 1024 ** 3
 
 
+# Idle slot containers creep (0.7-3.5 GiB each over a day: allocator arenas,
+# model caches). 27 Nov 2026 22:35 UTC: four idle batch slots held 10.9 GiB,
+# MemAvailable 2.5 < reserve 3.5, so four trial calls waited 19 minutes
+# with 30 slots free. ``clean`` (every 15 min) now restarts the fattest IDLE
+# slots before memory can hold calls back: retired first so admission gives
+# them nothing, re-checked idle, restarted, readmitted once healthy.
+IDLE_RECYCLE_GIB = 1.5          # an idle slot above this is always recycled
+IDLE_RECYCLE_TIGHT_GIB = 0.75   # ... above this while memory is near reserve
+IDLE_RECYCLE_MAX_PER_RUN = 3
+
+
+def slot_memory_gib():
+    out = sh(["docker", "stats", "--no-stream", "--format",
+              "{{.Name}} {{.MemUsage}}"], check=False, timeout=120)
+    if out.returncode != 0:
+        return {}
+    return parse_slot_memory(out.stdout)
+
+
+def parse_slot_memory(text):
+    mem = {}
+    for line in text.splitlines():
+        name, _, usage = line.strip().partition(" ")
+        if not name.startswith("vbox-"):
+            continue
+        used = usage.split("/")[0].strip().lower().replace("ib", "")
+        try:
+            mem[name[len("vbox-"):]] = _bytes(used) / 1024 ** 3
+        except ValueError:
+            continue
+    return mem
+
+
+def recycle_candidates(state, mem, cfg):
+    """Idle, admitted slots worth a restart, fattest first."""
+    memory = (state or {}).get("memory") or {}
+    threshold = float(cfg.get("idle_recycle_gib", IDLE_RECYCLE_GIB))
+    try:
+        if float(memory["available_gib"]) < \
+                float(memory["reserve_gib"]) + 1.5:
+            threshold = float(cfg.get("idle_recycle_tight_gib",
+                                      IDLE_RECYCLE_TIGHT_GIB))
+    except (KeyError, TypeError, ValueError):
+        pass
+    out = []
+    for s in (state or {}).get("slot_detail") or []:
+        name = s.get("name")
+        if not name or s.get("busy") or s.get("retiring") or \
+                not s.get("ready") or s.get("call"):
+            continue
+        used = mem.get(name, 0.0)
+        if used > threshold:
+            out.append((used, name))
+    out.sort(reverse=True)
+    limit = int(cfg.get("idle_recycle_max_per_run",
+                        IDLE_RECYCLE_MAX_PER_RUN))
+    return [name for _, name in out[:limit]]
+
+
+def recycle_idle_slots():
+    cfg = config()
+    state = admission_state()
+    if state is None or state.get("draining"):
+        return []
+    names = recycle_candidates(state, slot_memory_gib(), cfg)
+    plan = {s["name"]: s for s in cfg.get("slots", [])}
+    release_of = {s.get("name"): s.get("release")
+                  for s in state.get("slot_detail") or []}
+    done = []
+    for name in names:
+        slot = plan.get(name)
+        if slot is None:
+            continue
+        try:
+            admin("POST", "/admin/slot", {"name": name, "retiring": True})
+        except Exception as exc:  # noqa: BLE001
+            log(f"recycle {name}: could not retire: {exc}")
+            continue
+        try:
+            if slot_busy(admission_state(), name) or \
+                    slot_has_live_call(name):
+                log(f"recycle {name}: took a call meanwhile; kept")
+                continue
+            sh(["docker", "restart", "-t", "20", container_name(slot)],
+               check=False, timeout=120)
+            ready = wait_ready(slot, release_of.get(name), timeout_s=180)
+            log(f"recycled idle {name} (memory creep)"
+                f"{'' if ready else '; not ready yet'}")
+            done.append(name)
+        finally:
+            try:
+                admin("POST", "/admin/slot", {"name": name,
+                                              "retiring": False})
+                admin("POST", "/admin/refresh", {})
+            except Exception as exc:  # noqa: BLE001
+                log(f"recycle {name}: could not readmit: {exc}")
+    return done
+
+
 def cmd_clean():
     """Bounded disk use, never touching a busy slot's working files.
 
@@ -991,6 +1091,10 @@ def cmd_clean():
         "5GB" if tight else "20GB"], check=False, timeout=600)
     log(f"clean: removed {removed} scratch entries; "
         f"{free_gb():.1f} GB free{' (was tight)' if tight else ''}")
+    try:
+        recycle_idle_slots()
+    except Exception as exc:  # noqa: BLE001 - hygiene never fails clean
+        log(f"idle recycle: {type(exc).__name__}: {str(exc)[:200]}")
 
 
 def cmd_status():
