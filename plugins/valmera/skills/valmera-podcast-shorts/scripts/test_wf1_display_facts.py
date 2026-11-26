@@ -646,3 +646,11 @@ def test_interview_callback_names_the_referent_on_the_live_cue():
     page, = wf1_display.episode_pages([], dict(interview_cues=[cue]), words)
     assert page["facts"][0]["chain"]["label"] == cue["referent"]
     assert (page["first"], page["last"]) == (0, 5)
+
+def test_empty_video_provider_still_searches_the_authored_depiction():
+    windows = [dict(name="Headquarters", must_show="the actual factory exterior",
+                    video_searches=["factory opening ceremony"])]
+    [request] = wf.photo_requests(windows, [0], [], {}, [])
+    assert request["name"] == "Headquarters"
+    assert request["searches"] == ["factory opening ceremony", "the actual factory exterior", "Headquarters"]
+    assert wf.photo_requests(windows, [], [], {}, []) == []

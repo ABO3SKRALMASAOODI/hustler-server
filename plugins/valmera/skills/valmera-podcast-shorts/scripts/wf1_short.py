@@ -395,9 +395,7 @@ def supply(ctx, script):
         ctx.log(f"footage: {foot['counts']['clips']} clips on {foot['counts']['lines_with_footage']} of {foot['counts']['lines']} sentences; "
                 f"subjects {[s['name'] for s in subjects]}")
     # photographs of the same things, for the sentences the footage left bare
-    bare = photo_subjects(pack["footage"], {i:names for i,names in by_line.items() if i in video_windows})
-    named = [dict(name=s["name"], searches=[s["name"]], must_show=s.get("must_show") or s["name"], **{"is": s.get("kind") or "thing"})
-             for s in subjects if s["name"] in bare]
+    named = photo_requests(windows, video_windows, pack["footage"], by_line, subjects)
     if named:
         sys.modules.pop("llm", None)                           # the worker's own llm answers its picture check
         try:
@@ -501,6 +499,29 @@ def photo_subjects(footage, by_line):
     covered = {int(row["i"]) for row in footage if any(c.get("source") and not c.get("dull")
                                                        for c in row["clips"])}
     return {name for i, names in by_line.items() if i not in covered for name in names}
+
+
+def photo_requests(windows, eligible, footage, by_line, subjects):
+    """Keep the authored depiction and its searches when the video provider has no results."""
+    names = {i: by_line.get(i) or [windows[i]["name"]] for i in eligible}
+    bare = photo_subjects(footage, names)
+    details = {s["name"]: s for s in subjects}
+    requests = {}
+    for i, candidates in names.items():
+        window = windows[i]
+        for name in candidates:
+            if name not in bare:
+                continue
+            subject = details.get(name, {})
+            depiction = subject.get("must_show") or window["must_show"]
+            queries = [*(window.get("video_searches") or []), depiction, name]
+            # Different lines can refer to different events involving the same subject.
+            key = (name, depiction)
+            if key not in requests:
+                requests[key] = dict(name=name, must_show=depiction, searches=[],
+                                     **{"is": subject.get("kind") or "thing"})
+            requests[key]["searches"] = list(dict.fromkeys(requests[key]["searches"] + queries))
+    return list(requests.values())
 
 
 def has_footage(pack):
