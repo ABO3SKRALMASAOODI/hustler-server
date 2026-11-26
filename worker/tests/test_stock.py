@@ -247,3 +247,152 @@ def test_openverse_photos_carry_their_license_line(monkeypatch):
     assert seen.get("filter_dead") == "true"
     assert seen.get("unstable__authority") == "true"
     assert seen.get("page_size") >= 12
+
+
+def test_stock_acquires_same_pick_after_provider_timeout_and_oversize(monkeypatch, tmp_path):
+    """A broken-off transfer is fetched once more at the pick's full budget: a 4K delivery keeps
+    its 187 MB 4K file (budget 4 x 90 MB), never a 960-wide stand-in."""
+    files = _files((3840, 2160), (960, 540))
+    item = {"id": "pexels:video:31845593", "provider": "pexels", "kind": stock.KIND_VIDEO,
+            "_files": files}
+    seen = []
+    def download(url, path, **kwargs):
+        seen.append((url, kwargs["max_bytes"]))
+        if len(seen) == 1:
+            raise stock.net_fetch.FetchError("HTTP 503")
+        if url == files[0]["link"] and kwargs["max_bytes"] < 187 * 1024 * 1024:
+            raise stock.net_fetch.TooLarge("file is 187 MB, over the 90 MB limit")
+        path.write_bytes(b"clip")
+    monkeypatch.setattr(stock.net_fetch, "download", download)
+    path = tmp_path / "clip.mp4"
+    assert stock.download(item, path, 3840, 2160)["picked_width"] == 3840
+    assert seen == [(files[0]["link"], 4 * stock.MAX_VIDEO_BYTES)] * 2
+    assert path.read_bytes() == b"clip"
+
+
+def _renditions():
+    return _files((3840, 2160), (2560, 1440), (1920, 1080), (1280, 720), (640, 360))
+
+
+def test_a_4k_delivery_downloads_the_4k_file_its_budget_covers(monkeypatch, tmp_path):
+    """Finding 2: a 150 MB 4K file in a 2160x3840 project is inside the 360 MB budget; the first try
+    used to be cut to 90 MB and the export got 2560x1440 instead."""
+    calls = []
+    def download(url, path, max_bytes, timeout_s):
+        calls.append((url, max_bytes))
+        if url.endswith("/3840.mp4") and max_bytes < 150 << 20:
+            raise stock.net_fetch.TooLarge("file is 150 MB, over the 90 MB limit")
+    monkeypatch.setattr(stock.net_fetch, "download", download)
+    item = stock.download({"kind": stock.KIND_VIDEO, "_files": _renditions()}, str(tmp_path / "a.mp4"), 2160, 3840)
+    assert (item["picked_width"], item["picked_height"]) == (3840, 2160)
+    assert calls == [("https://cdn/3840.mp4", 4 * stock.MAX_VIDEO_BYTES)]
+
+
+def test_a_transfer_out_of_time_moves_to_the_next_smaller_rendition(monkeypatch, tmp_path):
+    """Finding 3: a slow CDN ran the 4K file out of time; the same 90 s transfer was repeated and then
+    the clip was lost. It goes to the next rendition at once, as before."""
+    calls = []
+    def download(url, path, max_bytes, timeout_s):
+        calls.append(url)
+        if url.endswith("/3840.mp4"):
+            raise stock.net_fetch.TimeLimit("download exceeded 90s")
+    monkeypatch.setattr(stock.net_fetch, "download", download)
+    item = stock.download({"kind": stock.KIND_VIDEO, "_files": _renditions()}, str(tmp_path / "b.mp4"), 1080, 1920)
+    assert calls == ["https://cdn/3840.mp4", "https://cdn/2560.mp4"]
+    assert item["source_url"] == "https://cdn/2560.mp4"
+
+
+def test_fallback_renditions_stay_sharp_in_their_frame():
+    """Finding 8: the floor follows the frame (0.6 of its short side), never stricter than 720 lines."""
+    files = _renditions() + _files((960, 540))
+    small = [f["width"] for f in stock._smaller_renditions(files, 3840, 2160, 1080, 1920)]
+    assert small == [2560, 1920, 1280]                      # 960x540 and 640x360: a 3.6x / 5x upscale
+    assert [f["width"] for f in stock._smaller_renditions(files, 3840, 2160, 720, 1280)] == [2560, 1920, 1280, 960]
+    assert [f["width"] for f in stock._smaller_renditions(files, 3840, 2160, 2160, 3840)] == [2560, 1920, 1280]
+
+
+def _clock(monkeypatch, start=1000.0):
+    """stock's own clock, moved by the fake transfers (no real waiting)."""
+    import time as real
+    now = [start]
+    fake = type(real)("fake_time")
+    fake.__dict__.update({k: getattr(real, k) for k in dir(real) if not k.startswith("_")})
+    fake.monotonic = lambda: now[0]
+    monkeypatch.setattr(stock, "time", fake)
+    return now
+
+
+def test_a_pick_that_breaks_twice_moves_to_a_smaller_rendition(monkeypatch, tmp_path):
+    """pr179 review: an edge that resets long transfers broke the 4K pick and its repeat, and the shot
+    was lost with the raw error while the 1440p file would have arrived in seconds."""
+    calls = []
+
+    def download(url, path, max_bytes, timeout_s):
+        calls.append(url)
+        if url.endswith("/3840.mp4"):
+            raise stock.net_fetch.FetchError("transfer from videos.pexels.com was interrupted "
+                                             "(ChunkedEncodingError)")
+    monkeypatch.setattr(stock.net_fetch, "download", download)
+    item = stock.download({"kind": stock.KIND_VIDEO, "_files": _renditions()}, str(tmp_path / "c.mp4"), 1080, 1920)
+    assert calls == ["https://cdn/3840.mp4", "https://cdn/3840.mp4", "https://cdn/2560.mp4"]
+    assert (item["picked_width"], item["source_url"]) == (2560, "https://cdn/2560.mp4")
+
+
+def test_a_dead_fallback_link_is_asked_once_and_the_next_rendition_answers(monkeypatch, tmp_path):
+    calls = []
+
+    def download(url, path, max_bytes, timeout_s):
+        calls.append(url)
+        if url.endswith("/3840.mp4"):
+            raise stock.net_fetch.TooLarge("file is 150 MB, over the 90 MB limit")
+        if url.endswith("/2560.mp4"):
+            err = stock.net_fetch.FetchError("HTTP 404")
+            err.status = 404
+            raise err
+    monkeypatch.setattr(stock.net_fetch, "download", download)
+    item = stock.download({"kind": stock.KIND_VIDEO, "_files": _renditions()}, str(tmp_path / "d.mp4"), 1080, 1920)
+    assert calls == ["https://cdn/3840.mp4", "https://cdn/2560.mp4", "https://cdn/1920.mp4"]
+    assert item["picked_width"] == 1920
+
+
+def test_every_rendition_failing_raises_the_pick_error_and_policy_is_never_routed_around(monkeypatch, tmp_path):
+    def download(url, path, max_bytes, timeout_s):
+        if url.endswith("/3840.mp4"):
+            raise stock.net_fetch.TooLarge("file is 150 MB, over the 90 MB limit")
+        raise stock.net_fetch.FetchError("HTTP 503")
+    monkeypatch.setattr(stock.net_fetch, "download", download)
+    with pytest.raises(stock.net_fetch.TooLarge):
+        stock.download({"kind": stock.KIND_VIDEO, "_files": _renditions()}, str(tmp_path / "e.mp4"), 1080, 1920)
+    calls = []
+
+    def refused(url, path, max_bytes, timeout_s):
+        calls.append(url)
+        raise stock.net_fetch.PolicyError("refusing a URL that points inside our network")
+    monkeypatch.setattr(stock.net_fetch, "download", refused)
+    with pytest.raises(stock.net_fetch.PolicyError):
+        stock.download({"kind": stock.KIND_VIDEO, "_files": _renditions()}, str(tmp_path / "f.mp4"), 1080, 1920)
+    assert calls == ["https://cdn/3840.mp4"]
+
+
+def test_one_stock_download_ends_inside_one_budget(monkeypatch, tmp_path):
+    """pr179 review: each repeat got a fresh 90 s, so one download could run about 12 minutes inside a
+    420 s turn. A rendition's repeat now gets what is left of that rendition's window, and the
+    renditions share one budget."""
+    now = _clock(monkeypatch)
+    start = now[0]
+    asked = []
+
+    def download(url, path, max_bytes, timeout_s):
+        asked.append((url.rsplit("/", 1)[1], round(timeout_s, 3)))
+        spent = min(60.0, timeout_s)          # an edge that resets every transfer at 60 s
+        now[0] += spent
+        if spent < 60.0:
+            raise stock.net_fetch.TimeLimit(f"download exceeded {timeout_s:.0f}s")
+        raise stock.net_fetch.FetchError("transfer from videos.pexels.com was interrupted (ConnectionResetError)")
+    monkeypatch.setattr(stock.net_fetch, "download", download)
+    with pytest.raises(stock.net_fetch.FetchError):
+        stock.download({"kind": stock.KIND_VIDEO, "_files": _renditions()}, str(tmp_path / "g.mp4"), 1080, 1920)
+    window = stock.DOWNLOAD_TIMEOUT_S
+    assert asked[:2] == [("3840.mp4", window), ("3840.mp4", window - 60.0)]
+    assert now[0] - start <= stock.DOWNLOAD_BUDGET_S
+    assert [u for u, _ in asked] == ["3840.mp4", "3840.mp4", "2560.mp4", "2560.mp4", "1920.mp4", "1920.mp4"]

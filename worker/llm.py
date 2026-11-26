@@ -567,6 +567,32 @@ def paid_failover_client():
     return _paid_failover_client
 
 
+def provider_recovery_clients():
+    """Yield independent provider wallets in recovery order, building clients on demand.
+
+    The separately funded R5 failover first, then the OpenAI wallet: the order
+    paid_editor_lanes uses. The xAI FRONTIER and PAID lanes come last and only
+    with a key set for them in the environment. Their keys otherwise inherit
+    IMAGE_API_KEY (same api.x.ai URL), and a refused Claude call then ran a
+    customer's edit on grok-4.5 against the Grok Imagine wallet, draining
+    image generation for everyone (config.py: the xAI wallets are not
+    spending fallbacks)."""
+    seen = set()
+    routes = ((paid_failover_available, "PAID_FAILOVER", paid_failover_client, config.PAID_FAILOVER_MODEL),
+              (lambda: bool(config.OPENAI_API_KEY), "OPENAI", client, config.EDITOR_MODEL),
+              (lambda: config.FRONTIER_API_KEY_EXPLICIT and frontier_available(),
+               "FRONTIER", frontier_client, config.FRONTIER_AGENT_MODEL),
+              (lambda: config.PAID_API_KEY_EXPLICIT and paid_available(),
+               "PAID", paid_client, config.PAID_AGENT_MODEL))
+    for configured, prefix, get_client, model in routes:
+        if configured():
+            wallet = (getattr(config, prefix + "_BASE_URL").rstrip("/"),
+                      getattr(config, prefix + "_API_KEY"))
+            if wallet not in seen:
+                seen.add(wallet)
+                yield model, get_client()
+
+
 def paid_editor_lanes(plan=None):
     """New Advanced contracts use Sol; all grandfathered routes stay unchanged.
 
@@ -1976,8 +2002,22 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
     agent loop integrates the same helpers into its richer retry chain.
 
     A call bound for OpenAI while its credit is out raises openai_credit.CreditOut at once (no
-    request sent), and a credit refusal latches every OpenAI role (worker/openai_credit.py)."""
+    request sent), and a credit refusal latches every OpenAI role (worker/openai_credit.py).
+
+    deadline= (time.monotonic()) bounds the whole call, retries included: each request gets the
+    time left, a transient failure is retried only while its wait still fits, and a rate limit is
+    raised at once, for the caller's next wallet or the agent loop's budget-aware wait (a recovery
+    call made six 300 s requests and slept up to 5 x 60 s before its 429 reached the loop)."""
     import openai_credit
+    deadline = extra.pop("deadline", None)
+    asked_timeout = extra.pop("timeout", None)
+
+    def request_timeout(default=None):
+        wanted = asked_timeout or default
+        if deadline is None:
+            return wanted
+        left = max(1.0, deadline - time.monotonic())
+        return min(float(wanted), left) if wanted else left
     if is_openai_client(client_obj) and str(model or "").startswith("claude-"):
         # api.openai.com serves no Claude id: a 404 after a paid round trip. Refused before sending.
         raise ValueError(f"{model!r} is a Claude model; it is not sent to api.openai.com")
@@ -2000,7 +2040,7 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
                 str(client_obj.base_url), client_obj.api_key, model, messages,
                 extra["tools"], max_tokens=max_tokens,
                 effort=extra.get("reasoning_effort") or "high",
-                timeout=config.AGENT_LANE_TIMEOUT_S,
+                timeout=request_timeout(config.AGENT_LANE_TIMEOUT_S),
                 tool_choice=extra.get("tool_choice"), cache_role=purpose)
         except Exception as e:
             if openai_bound and openai_credit.note(e, "llm:" + str(model)):
@@ -2021,6 +2061,9 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
     if not str(model or "").startswith("claude-"):   # claude_lane.create fences
         fence(model)
     while True:
+        timeout = request_timeout()
+        if timeout:
+            kw["timeout"] = timeout
         try:
             return openai_budget.completion(client_obj, purpose=purpose, lane=spend_lane(),
                 model=model, messages=messages, **kw)
@@ -2029,8 +2072,13 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
                 raise openai_credit.CreditOut(str(e)[:300]) from e
             if openai_bound and transient < int(config.LLM_MAX_RETRIES) \
                     and sdk_would_retry(e):
+                if deadline is not None and is_rate_limit_error(e):
+                    raise
+                wait = transient_retry_wait(e, transient + 1)
+                if deadline is not None and deadline - time.monotonic() - wait <= 1.0:
+                    raise
                 transient += 1
-                time.sleep(transient_retry_wait(e, transient))
+                time.sleep(wait)
                 continue
             attempts += 1
             if attempts > 3:

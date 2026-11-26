@@ -47,7 +47,6 @@ turns when the cycle's credit is used up or Anthropic refuses for billing.
 """
 
 import json
-import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -631,7 +630,7 @@ def meter(model, usd, kind="llm"):
             # fallback's card and, like an extra, never on the Claude line.
             spent, pool = _metering_db().run(
                 _meter_tx, scope.user_id, usd, scope.granted,
-                kind in ("extras", "openai"), customer, analysis)
+                kind in ("extras", "openai", "provider_fallback"), customer, analysis)
             if spent is not None and not analysis:
                 scope.spent_usd = max(scope.spent_usd, float(spent))
         except Exception as exc:  # noqa: BLE001 - the live scope still caps
@@ -733,35 +732,19 @@ def _pool_alerts(pool, pool_cap):
 
 
 def provider_refused(kind, exc):
-    """Anthropic refused for billing or auth: flip the automatic credit
-    switch OFF (claude_credit), which queues the ONE admin alert of that
-    event. A second "lane closed" mail for the same refusal was noise (T1,
-    30 Oct: one real billing refusal sent two). This process's own alert is
-    sent only when the switch could not be written, and at most once a day
-    (owner: "a model provider out of credit", only the owner can pay)."""
-    day = datetime.now(timezone.utc).strftime("%Y%m%d")
-    detail = re.sub(r"sk-ant-[A-Za-z0-9_\-]+", "[REDACTED]", str(exc))[:400]
-    try:
-        import claude_credit
-        _metering_db().run(
-            claude_credit.switch_off,
-            claude_credit.REASON_BILLING if kind == "billing"
-            else claude_credit.REASON_AUTH, detail)
-        reset_flag_cache()
-        return
-    except Exception as switch_exc:  # noqa: BLE001 - never breaks a turn
-        print(f"[claude-trial] credit switch write failed: "
-              f"{str(switch_exc)[:160]}", flush=True)
-    _alert(f"provider_{kind}_{day}", f"provider_{kind}",
-           f"Claude trial lane closed: Anthropic {kind} refusal",
-           f"<p>Anthropic refused a trial-lane call ({kind}). The lane is "
-           "closed for this worker process for "
-           f"{int(config.CLAUDE_TRIAL_OUTAGE_LATCH_S // 60)} minutes and trial "
-           "users see the plan cards (never the OpenAI wallet).</p>"
-           f"<p>Provider said: <code>{detail}</code></p>"
-           "<p>The automatic credit switch could not be written, so this "
-           "mail is the signal. Check the Anthropic console balance and that "
-           "ANTHROPIC_API_KEY belongs to the account holding the credit.</p>")
+    """Anthropic refused the key in force for billing or auth AFTER the live
+    key was re-read (a rotation the retry absorbed never reaches here). One
+    mail per incident through the durable owner outbox: the dedupe key names
+    the refused key's fingerprint, so a false alarm or an earlier incident the
+    same day never hides a new key's failure."""
+    import claude_lane
+    now = datetime.now(timezone.utc)
+    key = claude_lane._key_fingerprint(config.ANTHROPIC_API_KEY)[:16]
+    subject = f"Anthropic refused the key at {now:%Y-%m-%d %H:%M UTC}"
+    action = ("Rotate it in the console and in provider_api_keys." if kind == "auth"
+              else "Check credit and billing in the Anthropic console.")
+    _alert(f"anthropic_{kind}_{key}_{now:%Y%m%d}", f"provider_{kind}", subject,
+           f"<p>{subject}. {action}</p>")
 
 
 # ------------------------------------------------------------------ #
@@ -839,15 +822,12 @@ def resolve(worker_db, user_id, subscribed, project_id=None,
     import claude_lane
     if not claude_lane.configured():
         return Decision(Decision.UNAVAILABLE, reason="no_anthropic_key")
-    if not claude_lane.available():
-        return Decision(Decision.UNAVAILABLE,
-                        reason="provider_closed: " + claude_lane.closed_reason())
     credit = credit_status(worker_db)
     if not credit.get("on"):
         import claude_credit
         finishing = continuing and credit.get("reason") == \
             claude_credit.REASON_BUDGET
-        if not finishing:
+        if not finishing and credit.get("reason") not in claude_credit.REFUSALS:
             return Decision(Decision.UNAVAILABLE,
                             reason="credit_switch_off: "
                                    + str(credit.get("reason") or ""))

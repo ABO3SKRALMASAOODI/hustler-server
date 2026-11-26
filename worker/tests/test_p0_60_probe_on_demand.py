@@ -59,7 +59,6 @@ def test_a_successful_probe_runs_the_request_on_claude(billing_off, monkeypatch)
         return True, "stop_reason=end_turn"
 
     monkeypatch.setattr(claude_lane, "probe", probe)
-    claude_lane._close("billing: credit balance is too low")
     db = _Db({"action": "probe", "may_switch_on": False})
     got = agent_loop._claude_paid_lane(db, JOB, True, "plus_2026", {})
     assert got and got["lane"]["name"] == "claude_paid"

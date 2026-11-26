@@ -30,9 +30,9 @@ Translation rules (all deterministic, so the prompt cache holds):
 
 Errors: 429s propagate unchanged so the loop's budget-aware rate-limit waits
 run. Overloaded/5xx refusals (nothing was billed) are retried here, twice.
-Billing, credit and authentication refusals LATCH the lane closed for
-``CLAUDE_TRIAL_OUTAGE_LATCH_S`` and alert the admin, and are re-raised with
-the provider's words so ``llm.is_quota_error`` recognises them.
+Billing and auth refusals retry once on the live credential; a second
+refusal alerts the owner and carries the same call to a configured recovery
+provider. Nothing latches: the next call asks Anthropic again.
 
 The key comes only from ``config.ANTHROPIC_API_KEY`` (live: the sealed
 provider row outranks the environment). It is never logged, never returned
@@ -72,8 +72,6 @@ _SYSTEM_NOTE = "[Valmera system note — operator instruction, not user text]\n"
 _lock = threading.Lock()
 _client = None
 _client_key = None
-_closed_until = 0.0
-_closed_reason = ""
 
 
 def is_claude_model(model):
@@ -86,25 +84,17 @@ def configured():
 
 
 def available():
-    """Configured and not latched closed by a billing/auth refusal."""
-    return configured() and time.monotonic() >= _closed_until
-
-
-def closed_reason():
-    return _closed_reason if time.monotonic() < _closed_until else ""
-
-
-def _close(reason, seconds=None):
-    global _closed_until, _closed_reason
-    _closed_until = time.monotonic() + float(
-        config.CLAUDE_TRIAL_OUTAGE_LATCH_S if seconds is None else seconds)
-    _closed_reason = str(reason)[:300]
+    """Configured. A billing or auth refusal never closes the lane: the call
+    that met it re-reads the key and then finishes on a recovery provider
+    (create, score.call.stream), so the next call asks Anthropic again (#1796:
+    a 10-minute latch set by one refused lookup blocked every trial, paid lane
+    and recovery in the process)."""
+    return configured()
 
 
 def reopen():
-    """Tests/operators: clear the outage latch."""
-    global _closed_until, _closed_reason
-    _closed_until, _closed_reason = 0.0, ""
+    """Nothing to reopen since the latch was removed; kept for callers that
+    still clear it after a successful credit probe."""
 
 
 PROBE_MODEL = os.getenv("CLAUDE_CREDIT_PROBE_MODEL", "claude-haiku-5-5")
@@ -150,24 +140,62 @@ def _sdk():
         return _client
 
 
-def _rotated_key():
-    """An auth refusal may mean the key was rotated a moment ago: re-read the
-    sealed provider row now (provider_creds.invalidate: at most once per
-    retry window) and say whether a DIFFERENT key is in force. True means
-    the caller retries the same request once on the new key. Never raises."""
+def _refresh_live_key():
+    """Re-read the sealed row before repeating a refused call."""
     try:
         import provider_creds
-        before = _key_fingerprint(config.ANTHROPIC_API_KEY)
         creds = provider_creds.CREDENTIALS
         if creds.invalidate() and creds._lock.acquire(timeout=5.0):
             try:                      # synchronous: the retry needs it now
                 creds._refresh()
             finally:
                 creds._lock.release()
-        after = _key_fingerprint(config.ANTHROPIC_API_KEY)
-        return bool(config.ANTHROPIC_API_KEY) and after != before
-    except Exception:  # noqa: BLE001 - a refusal stays a refusal
-        return False
+    except Exception:  # the cached credential still gets a retry
+        pass
+
+
+def _provider_fallback(messages, tools, max_tokens, tool_choice, timeout):
+    import claude_trial
+    import edit_rung
+    import llm
+
+    options = {}
+    if tools:
+        options["tools"] = tools
+        if tool_choice is not None:
+            options["tool_choice"] = tool_choice
+    # The whole chain is bounded like the Claude call it replaces: one deadline
+    # across every wallet and retry, and no SDK retries. A recovery call used
+    # to send up to six 300 s requests per wallet and sleep up to 5 x 60 s on a
+    # 429 before the agent loop's budget-aware wait saw it; now a 429 moves to
+    # the next wallet or reaches the loop after one request.
+    deadline = time.monotonic() + float(timeout or config.CLAUDE_TRIAL_TIMEOUT_S)
+    last_error = limited = None
+    for model, client in llm.provider_recovery_clients():
+        if deadline - time.monotonic() <= 1.0:
+            break
+        try:
+            result = llm.create_with_dialect(llm.without_sdk_retries(client), model,
+                                             edit_rung._strip(messages),
+                                             max_tokens=max_tokens, deadline=deadline,
+                                             **options)
+        except Exception as exc:
+            if llm.is_budget_stop(exc):
+                raise
+            last_error = exc
+            if llm.is_rate_limit_error(exc):
+                limited = exc
+            continue
+        if result.usage is not None:
+            result.usage.answered_model = model
+            if claude_trial.current() is not None:
+                claude_trial.meter(model, edit_rung.allowance_usd(result.usage),
+                                   kind="provider_fallback")
+        return result
+    if limited is not None:
+        raise limited           # the loop's budget-aware wait, then this call again
+    raise ClaudeLaneUnavailable("No configured provider accepted the editing call "
+                                "(credit balance or key)") from last_error
 
 
 # ------------------------------------------------------------------ #
@@ -890,10 +918,6 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
         raise ClaudeLaneUnavailable(
             "Claude lane is not configured (no ANTHROPIC_API_KEY): no credit "
             "balance can be reached")
-    if not available():
-        raise ClaudeLaneUnavailable(
-            "Claude lane is closed after a provider refusal (credit balance "
-            "or key): " + closed_reason())
     import claude_trial            # metering + hard per-account ceiling
     claude_trial.guard_call()
     plan = tool_plan if plan_usable(tool_plan, model) else None
@@ -945,23 +969,19 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
                 message = stream.get_final_message()
             break
         except Exception as exc:          # noqa: BLE001 - classified below
-            if is_auth_error(exc) and not rekeyed and _rotated_key():
-                # The key was rotated under this process: the same request
-                # on the new key, not a closed lane (P0 #60).
-                rekeyed = True
-                client = _sdk()
-                if timeout:
-                    client = client.with_options(timeout=float(timeout))
-                print("[claude] auth refusal on a rotated key: retrying on "
-                      "the key now in force", flush=True)
-                continue
             if is_billing_error(exc) or is_auth_error(exc):
-                kind = "billing" if is_billing_error(exc) else "auth"
-                _close(f"{kind}: {str(exc)[:200]}")
-                claude_trial.provider_refused(kind, exc)
-                raise ClaudeLaneUnavailable(
-                    f"Anthropic refused the trial lane ({kind}; credit "
-                    f"balance or key): {str(exc)[:300]}") from exc
+                if not rekeyed:
+                    # A key rotated a moment ago (P0 #60): the same request on
+                    # the key now in force, and no alert when it answers.
+                    _refresh_live_key()
+                    rekeyed = True
+                    client = _sdk()
+                    if timeout:
+                        client = client.with_options(timeout=float(timeout))
+                    continue
+                claude_trial.provider_refused(
+                    "billing" if is_billing_error(exc) else "auth", exc)
+                return _provider_fallback(messages, tools, max_tokens, tool_choice, timeout)
             if plan and _plan_refused(exc):
                 # Never a customer's problem: the same request, the old way.
                 global _plan_off

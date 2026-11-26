@@ -111,10 +111,6 @@ def test_fail_closed_without_key_balance_tables_or_pool(world, monkeypatch):
     monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "")
     assert claude_trial.resolve(_Db(), 5, False).reason == "no_anthropic_key"
     monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "k")
-    claude_lane._close("billing: credit balance is too low")
-    d = claude_trial.resolve(_Db(), 5, False)
-    assert d.kind == "unavailable" and d.reason.startswith("provider_closed")
-    claude_lane.reopen()
     world.totals = dict(world.totals, pool=200.0)
     assert claude_trial.resolve(_Db(), 5, False).reason == "pool_spent"
     world.totals = dict(world.totals, pool=10.0)
@@ -157,10 +153,10 @@ def test_the_credit_switch_closes_new_turns_and_lets_a_running_one_finish(world)
     # a later slice of a request that already started finishes (budget only)
     d = claude_trial.resolve(_Db(), 5, False, project_id=9, continuing=True)
     assert d.kind == "active"
-    # a billing refusal cannot be finished on: plan cards
+    # A provider refusal still runs the request on the recovery route.
     world.credit = {"on": False, "reason": "billing_error"}
     d = claude_trial.resolve(_Db(), 5, False, project_id=9, continuing=True)
-    assert d.kind == "unavailable"
+    assert d.kind == "active"
 
 
 def test_an_unreadable_credit_switch_reads_as_off(monkeypatch):
@@ -333,23 +329,30 @@ def test_provider_refusal_alert_never_contains_the_key(monkeypatch):
     monkeypatch.setattr(claude_trial, "_metering_db", lambda: _SwitchDb())
     claude_trial.provider_refused(
         "auth", Exception("bad key sk-ant-api03-SECRETSECRET-xyz"))
-    # the refusal flips the automatic credit switch, without the key either;
-    # the switch queues the event's ONE alert, so no second mail from here
-    assert switched and switched[0][0] == "switch_off"
-    assert switched[0][1][0] == "auth_error"
-    assert "sk-ant-" not in switched[0][1][1]
-    assert queued == []
+    assert not switched
+    assert len(queued) == 1 and "sk-ant-" not in queued[0]
+    assert "provider_api_keys" in queued[0]
 
-    class _BrokenDb:
-        def run(self, fn, *args):
-            raise RuntimeError("database down")
 
-    # only when the switch cannot be written is this process's alert the
-    # signal, and it never carries the key
-    monkeypatch.setattr(claude_trial, "_metering_db", lambda: _BrokenDb())
-    claude_trial.provider_refused(
-        "auth", Exception("bad key sk-ant-api03-SECRETSECRET-xyz"))
-    assert queued and "sk-ant-" not in queued[0] and "[REDACTED]" in queued[0]
+def test_each_refused_key_alerts_once_and_a_new_key_is_never_hidden(monkeypatch):
+    """Finding 4: the dedupe key was anthropic_auth_<day>, so one alert used the day's only slot and a
+    real expiry of another key later that day queued nothing. The key names the refused key."""
+    queued = []
+
+    class _Outbox:
+        def run(self, fn, key, *args):
+            queued.append(key)
+
+    monkeypatch.setattr(claude_trial, "_metering_db", lambda: _Outbox())
+    monkeypatch.setattr(claude_trial, "_alerted", set())
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "sk-ant-api03-first-key")
+    claude_trial.provider_refused("auth", Exception("invalid x-api-key"))
+    claude_trial.provider_refused("auth", Exception("invalid x-api-key"))
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "sk-ant-api03-second-key")
+    claude_trial.provider_refused("auth", Exception("invalid x-api-key"))
+    claude_trial.provider_refused("billing", Exception("credit balance is too low"))
+    assert len(queued) == 3 and len(set(queued)) == 3
+    assert not any("sk-ant" in k for k in queued)
 
 
 class _Cur:

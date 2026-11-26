@@ -184,6 +184,10 @@ PAID_API_KEY = (
     or (_VISION_ENV_KEY if PAID_BASE_URL == VISION_BASE_URL else "")
     or (IMAGE_API_KEY if PAID_BASE_URL == IMAGE_BASE_URL else "")
     or (_OPENAI_ENV_KEY if PAID_BASE_URL == OPENAI_BASE_URL else ""))
+# Set for this lane in the environment, not inherited from the image or vision
+# wallet that shares its URL: only such a key may answer a refused Claude call
+# (llm.provider_recovery_clients).
+PAID_API_KEY_EXPLICIT = bool(os.getenv("PAID_API_KEY", "").strip())
 
 # EMPTY = this lane is off and every non-Frontier plan runs AGENT_MODEL. The
 # provider above stays configured so switching it on is one variable, not four.
@@ -226,6 +230,9 @@ FRONTIER_API_KEY = (
     or (IMAGE_API_KEY if FRONTIER_BASE_URL == IMAGE_BASE_URL else "")
     or (PAID_API_KEY if FRONTIER_BASE_URL == PAID_BASE_URL else "")
     or (_OPENAI_ENV_KEY if FRONTIER_BASE_URL == OPENAI_BASE_URL else ""))
+# Same rule as PAID_API_KEY_EXPLICIT: on the box FRONTIER_API_KEY is otherwise
+# the Grok Imagine key (IMAGE_API_KEY, same api.x.ai URL).
+FRONTIER_API_KEY_EXPLICIT = bool(os.getenv("FRONTIER_API_KEY", "").strip())
 
 # Plans that route to the frontier provider. A set, so adding a higher tier
 # later is one edit and no new branch.
@@ -419,10 +426,6 @@ CLAUDE_TRIAL_DAILY_USD = float(os.getenv("CLAUDE_TRIAL_DAILY_USD", "40"))
 # At most this many trial accounts per device_id per 30 days (D2).
 CLAUDE_TRIAL_ACCOUNTS_PER_DEVICE = int(
     os.getenv("CLAUDE_TRIAL_ACCOUNTS_PER_DEVICE", "2"))
-# How long an Anthropic billing/auth refusal keeps the lane closed in this
-# process before one call is allowed to probe it again.
-CLAUDE_TRIAL_OUTAGE_LATCH_S = float(
-    os.getenv("CLAUDE_TRIAL_OUTAGE_LATCH_S", "600"))
 # Haiku 5.5 bills a whole request at 5x once its prompt passes 100K tokens.
 # Below this estimate (chars/4 units) the loop keeps the history append-only
 # for the cache; above it, it compacts old tool results and look frames first.

@@ -403,29 +403,275 @@ def test_the_shim_is_a_drop_in_client_and_meters_each_call(lane):
     assert len(lane.paid) == 1
 
 
-def test_billing_refusal_closes_the_lane_and_alerts(lane):
-    sdk = _FakeSdk([_StatusError(400, "Your credit balance is too low to "
-                                      "access the Anthropic API.")])
+def _wallets(monkeypatch, *, openai="sk-openai", failover=True, frontier_explicit=False,
+             paid_explicit=False):
+    """The box's provider config: FRONTIER_* and PAID_* inherit the Grok Imagine key (IMAGE_API_KEY,
+    same api.x.ai URL) unless set for themselves."""
+    monkeypatch.setattr(config, "OPENAI_API_KEY", openai)
+    monkeypatch.setattr(config, "IMAGE_API_KEY", "xai-image")
+    for prefix, explicit in (("FRONTIER", frontier_explicit), ("PAID", paid_explicit)):
+        monkeypatch.setattr(config, prefix + "_BASE_URL", "https://api.x.ai/v1")
+        monkeypatch.setattr(config, prefix + "_API_KEY", f"xai-{prefix.lower()}" if explicit else "xai-image")
+        monkeypatch.setattr(config, prefix + "_API_KEY_EXPLICIT", explicit)
+    monkeypatch.setattr(config, "PAID_FAILOVER_BASE_URL", "https://failover.example/v1" if failover else "")
+    monkeypatch.setattr(config, "PAID_FAILOVER_API_KEY", "fo-key" if failover else "")
+    monkeypatch.setattr(config, "PAID_FAILOVER_MODEL", "failover-model" if failover else "")
+    for name, tag in (("client", "openai"), ("paid_failover_client", "failover"),
+                      ("frontier_client", "frontier"), ("paid_client", "paid")):
+        monkeypatch.setattr(llm, name, lambda tag=tag: tag)
+
+
+def test_recovery_never_spends_the_image_wallet_and_asks_the_funded_failover_first(monkeypatch):
+    """pr179 review: with only IMAGE_API_KEY and OPENAI_API_KEY on the box, every refused Claude call went
+    first to grok-4.5 on the Grok Imagine wallet (FRONTIER_API_KEY inherits it), ahead of the
+    separately funded R5 failover; draining it would stop image generation for every customer."""
+    _wallets(monkeypatch)
+    assert list(llm.provider_recovery_clients()) == [
+        ("failover-model", "failover"), (config.EDITOR_MODEL, "openai")]
+    _wallets(monkeypatch, failover=False)
+    assert list(llm.provider_recovery_clients()) == [(config.EDITOR_MODEL, "openai")]
+    # an xAI key set for its own lane is the owner's choice: asked, after the funded wallets
+    _wallets(monkeypatch, frontier_explicit=True, paid_explicit=True)
+    assert [tag for _, tag in llm.provider_recovery_clients()] == ["failover", "openai", "frontier", "paid"]
+
+
+def test_the_box_config_infers_no_editing_wallet_from_the_image_key():
+    """The real config import with the box's variables only (box-provision.yml): no xAI recovery wallet."""
+    import os
+    import subprocess
+    import sys
+    worker = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("FRONTIER_", "PAID_", "IMAGE_", "VISION_", "OPENAI_", "ANTHROPIC_"))}
+    env.update(IMAGE_API_KEY="xai-image-test", OPENAI_API_KEY="sk-openai-test",
+               PYTHONPATH=os.pathsep.join([worker, os.path.dirname(worker)]))
+    out = subprocess.run(
+        [sys.executable, "-c", "import config, llm; print(config.FRONTIER_API_KEY == config.IMAGE_API_KEY, "
+         "config.FRONTIER_API_KEY_EXPLICIT, config.PAID_API_KEY_EXPLICIT, "
+         "[m for m, _ in llm.provider_recovery_clients()])"],
+        cwd=worker, env=env, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr[-800:]
+    assert out.stdout.strip().splitlines()[-1] == "True False False ['gpt-6-luna']"
+
+
+@pytest.mark.parametrize(("status", "kind"), [(401, "auth"), (402, "billing")])
+def test_refused_request_refreshes_then_finishes_on_the_funded_failover(lane, monkeypatch, status, kind):
+    refused = _StatusError(status, "provider refusal")
+    sdk = _FakeSdk([refused, refused])
     lane.use(sdk)
-    with pytest.raises(claude_lane.ClaudeLaneUnavailable) as err:
-        claude_lane.create("claude-haiku-5-5",
-                           [{"role": "user", "content": "x"}])
-    assert lane.refused == ["billing"]
-    assert not claude_lane.available()
-    assert llm.is_quota_error(err.value)        # the loop treats it as a wallet
-    # closed: the next call does not even reach Anthropic
-    with pytest.raises(claude_lane.ClaudeLaneUnavailable):
-        claude_lane.create("claude-haiku-5-5",
-                           [{"role": "user", "content": "x"}])
-    assert len(sdk.bodies) == 1
+    _wallets(monkeypatch)
+    requests = []
+    def complete(client_obj, model, messages, **kwargs):
+        requests.append((client_obj, model, messages, kwargs["tools"]))
+        return SimpleNamespace(usage=SimpleNamespace(), choices=["finished"])
+    monkeypatch.setattr(llm, "create_with_dialect", complete)
+    messages = [{"role": "user", "content": "cut the pauses"}]
+    result = claude_lane.create("claude-haiku-5-5", messages, tools=TOOLS)
+    assert result.choices == ["finished"]
+    assert requests == [("failover", "failover-model", messages, TOOLS)]
+    assert len(sdk.bodies) == 2 and lane.refused == [kind]
+    assert claude_lane.available()
+    assert result.usage.answered_model == "failover-model"
 
 
-def test_auth_refusal_also_fails_closed(lane):
-    lane.use(_FakeSdk([_StatusError(401, "invalid x-api-key")]))
+class _RetryCounting:
+    """An OpenAI-SDK-shaped client: with_options records what each call was allowed."""
+
+    def __init__(self):
+        self.options = []
+
+    def with_options(self, **kw):
+        self.options.append(kw)
+        return self
+
+
+def test_recovery_calls_send_one_request_each_and_a_rate_limit_reaches_the_loop(lane, monkeypatch):
+    """Finding 7: the recovery clients carry LLM_MAX_RETRIES (5); a slow or 429ing provider was retried
+    inside the SDK for minutes before the next wallet was asked or the loop could wait."""
+    refused = _StatusError(401, "invalid x-api-key")
+    first, second = _RetryCounting(), _RetryCounting()
+    monkeypatch.setattr(llm, "provider_recovery_clients",
+                        lambda: iter([("grok-4.5", first), ("gpt-6-luna", second)]))
+    seen = []
+
+    def complete(client_obj, model, messages, **kwargs):
+        seen.append((model, kwargs.get("deadline"), kwargs.get("timeout")))
+        if model == "grok-4.5":
+            raise _StatusError(503, "upstream unavailable")
+        return SimpleNamespace(usage=SimpleNamespace(), choices=["finished"])
+    monkeypatch.setattr(llm, "create_with_dialect", complete)
+    lane.use(_FakeSdk([refused, refused]))
+    import time
+    t0 = time.monotonic()
+    out = claude_lane.create("claude-haiku-5-5", [{"role": "user", "content": "x"}])
+    assert out.choices == ["finished"]
+    assert first.options == [{"max_retries": 0}] and second.options == [{"max_retries": 0}]
+    # one deadline for the whole chain, the Claude call's own bound; no fresh timeout per wallet
+    assert [m for m, _, _ in seen] == ["grok-4.5", "gpt-6-luna"] and seen[0][1] == seen[1][1]
+    assert seen[0][2] is None
+    assert t0 + config.CLAUDE_TRIAL_TIMEOUT_S <= seen[0][1] <= time.monotonic() + config.CLAUDE_TRIAL_TIMEOUT_S
+    # the chain ends on a rate limit: the 429 itself, so the loop's budget-aware wait runs
+    limited = _StatusError(429, "rate_limit_error")
+    monkeypatch.setattr(llm, "provider_recovery_clients", lambda: iter([("grok-4.5", first)]))
+    monkeypatch.setattr(llm, "create_with_dialect",
+                        lambda *a, **k: (_ for _ in ()).throw(limited))
+    lane.use(_FakeSdk([refused, refused]))
+    with pytest.raises(_StatusError) as err:
+        claude_lane.create("claude-haiku-5-5", [{"role": "user", "content": "x"}], timeout=40)
+    assert err.value is limited
+
+
+def _luna_on(monkeypatch, handler):
+    """The real OpenAI SDK client (LLM_MAX_RETRIES) on a mock transport, as the only recovery wallet, and
+    a fake clock both modules read: each request takes the time handler says, nothing really waits."""
+    import time as real
+    import httpx
+    import openai_credit
+    from openai import OpenAI
+    now, slept = [1000.0], []
+    fake = type(real)("fake_time")
+    fake.__dict__.update({k: getattr(real, k) for k in dir(real) if not k.startswith("_")})
+    fake.monotonic = lambda: now[0]
+    fake.sleep = lambda s: (slept.append(s), now.__setitem__(0, now[0] + s))
+    monkeypatch.setattr(llm, "time", fake)
+    monkeypatch.setattr(claude_lane, "time", fake)
+    monkeypatch.setattr(llm, "fence", lambda model: None)
+    monkeypatch.setattr(llm, "record", lambda *a, **k: None)
+    openai_credit.reopen()
+    sent = []
+
+    def serve(request):
+        sent.append(request.extensions["timeout"]["read"])
+        return handler(request, now)
+    luna = OpenAI(base_url="https://api.openai.com/v1", api_key="sk-test", max_retries=config.LLM_MAX_RETRIES,
+                  http_client=httpx.Client(transport=httpx.MockTransport(serve)))
+    monkeypatch.setattr(llm, "provider_recovery_clients", lambda: iter([("gpt-6-luna", luna)]))
+    return now, slept, sent
+
+
+def test_a_hung_recovery_wallet_ends_inside_the_claude_call_bound(lane, monkeypatch):
+    """pr179 review: create_with_dialect retried api.openai.com five more times at 300 s each, so one step
+    could block for about 30 minutes before the agent loop heard of it."""
+    import httpx
+
+    def hang(request, now):
+        now[0] += request.extensions["timeout"]["read"]
+        raise httpx.ReadTimeout("timed out", request=request)
+    now, slept, sent = _luna_on(monkeypatch, hang)
+    lane.use(_FakeSdk([_StatusError(401, "invalid x-api-key")] * 2))
     with pytest.raises(claude_lane.ClaudeLaneUnavailable):
-        claude_lane.create("claude-haiku-5-5",
-                           [{"role": "user", "content": "x"}])
-    assert lane.refused == ["auth"]
+        claude_lane.create("claude-haiku-5-5", [{"role": "user", "content": "x"}])
+    assert sent == [config.CLAUDE_TRIAL_TIMEOUT_S] and slept == []
+    assert now[0] - 1000.0 <= config.CLAUDE_TRIAL_TIMEOUT_S
+
+
+def test_a_recovery_429_reaches_the_loop_after_one_request(lane, monkeypatch):
+    """pr179 review: a 429 'try again in 60s' was slept on 5 x 60 s inside create_with_dialect (no lease
+    heartbeat) before the loop's budget-aware wait saw it."""
+    import httpx
+    import openai
+
+    def limited(request, now):
+        return httpx.Response(429, headers={"retry-after": "60"}, json={"error": {
+            "message": "Rate limit reached for gpt-6-luna. Please try again in 60s.",
+            "type": "requests", "code": "rate_limit_exceeded"}})
+    now, slept, sent = _luna_on(monkeypatch, limited)
+    lane.use(_FakeSdk([_StatusError(401, "invalid x-api-key")] * 2))
+    with pytest.raises(openai.RateLimitError) as err:
+        claude_lane.create("claude-haiku-5-5", [{"role": "user", "content": "x"}])
+    assert llm.is_rate_limit_error(err.value)
+    assert len(sent) == 1 and slept == []
+
+
+def test_a_recovery_blip_is_asked_again_inside_the_same_deadline(lane, monkeypatch):
+    """The outcome is kept: a quick 503 is repeated after the SDK's short backoff, on the time left."""
+    import httpx
+    replies = [httpx.Response(503, json={"error": {"message": "overloaded"}}),
+               httpx.Response(200, json={
+                   "id": "c1", "object": "chat.completion", "created": 1, "model": "gpt-6-luna",
+                   "choices": [{"index": 0, "finish_reason": "stop",
+                                "message": {"role": "assistant", "content": "done"}}],
+                   "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}})]
+    now, slept, sent = _luna_on(monkeypatch, lambda request, now: replies.pop(0))
+    lane.use(_FakeSdk([_StatusError(401, "invalid x-api-key")] * 2))
+    out = claude_lane.create("claude-haiku-5-5", [{"role": "user", "content": "x"}])
+    assert out.choices[0].message.content == "done"
+    assert slept == [0.5] and sent == [config.CLAUDE_TRIAL_TIMEOUT_S, config.CLAUDE_TRIAL_TIMEOUT_S - 0.5]
+
+
+def test_a_refused_film_call_recovers_and_never_closes_the_lane(lane, monkeypatch):
+    """#1796 / finding 1: score.call.stream latched the lane for 10 minutes on one refused lookup,
+    and every later create, trial resolve and paid lane in the process skipped Anthropic and its
+    recovery. Now the film call re-reads the key, asks once more, then answers on a recovery
+    provider inside its deadline, and the next call asks Anthropic again."""
+    import time
+    from score import call
+    refused = _StatusError(401, "invalid x-api-key (key expired)")
+    lane.use(_FakeSdk([refused, refused]))
+    refreshed, recorded = [], []
+    monkeypatch.setattr(claude_lane, "_refresh_live_key", lambda: refreshed.append(1))
+    monkeypatch.setattr(claude_trial, "guard_call", lambda *a: None)
+    monkeypatch.setattr(llm, "record", lambda purpose, req, resp, usage=None: recorded.append((req, resp)))
+    sent = []
+
+    def complete(client_obj, model, messages, **kwargs):
+        sent.append((model, messages, kwargs))
+        return SimpleNamespace(
+            id="r1", usage=SimpleNamespace(prompt_tokens=100, completion_tokens=20, cost_in_usd_ticks=40_000_000),
+            choices=[SimpleNamespace(finish_reason="stop",
+                                     message=SimpleNamespace(content='{"subjects": []}'))])
+    monkeypatch.setattr(llm, "provider_recovery_clients", lambda: iter([("grok-4.5", _RetryCounting())]))
+    monkeypatch.setattr(llm, "create_with_dialect", complete)
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}}
+    r = call.stream("claude-haiku-5-5", "name subjects", [image, {"type": "text", "text": "Oscar Piastri"}],
+                    max_tokens=600, effort="low", purpose="named_subjects", thinking=False,
+                    deadline=time.monotonic() + 10)
+    assert r.text == '{"subjects": []}' and r.stop == "end_turn"
+    assert r.usage.output_tokens == 20 and abs(r.usd - 0.004) < 1e-9
+    assert refreshed == [1] and lane.refused == ["auth"]
+    model, messages, kwargs = sent[0]
+    assert model == "grok-4.5" and 0 < kwargs["deadline"] - time.monotonic() <= 10
+    assert "timeout" not in kwargs
+    assert messages[0] == {"role": "system", "content": "name subjects"}
+    assert messages[1]["content"][0] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}
+    assert recorded[0][0]["model"] == "grok-4.5" and recorded[0][1]["provider_fallback"] is True
+    assert claude_lane.available()
+    # the next call reaches Anthropic: nothing latched
+    ok = _FakeSdk([_message([SimpleNamespace(type="text", text="ok")], stop="end_turn")])
+    lane.use(ok)
+    assert claude_lane.create("claude-haiku-5-5", [{"role": "user", "content": "x"}]
+                              ).choices[0].message.content == "ok"
+    assert len(ok.bodies) == 1
+
+
+def test_a_film_call_on_a_just_rotated_key_answers_on_claude_without_an_alert(lane, monkeypatch):
+    import time
+    from score import call
+
+    class _Text:
+        text_stream = ["ok"]
+        request_id = "req_2"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_final_message(self):
+            return _message([], stop="end_turn")
+    sdk = _FakeSdk([_StatusError(401, "invalid x-api-key")])
+    sdk.stream = lambda **body: (sdk.bodies.append(body),
+                                 _Stream(sdk.results.pop(0)) if sdk.results else _Text())[1]
+    lane.use(sdk)
+    monkeypatch.setattr(claude_lane, "_refresh_live_key", lambda: None)
+    monkeypatch.setattr(claude_trial, "guard_call", lambda *a: None)
+    monkeypatch.setattr(llm, "record", lambda *a, **k: None)
+    monkeypatch.setattr(llm, "provider_recovery_clients",
+                        lambda: pytest.fail("the retry on the live key answered"))
+    r = call.stream("claude-haiku-5-5", "s", "c", max_tokens=50, effort="low", purpose="named_subjects",
+                    thinking=False, deadline=time.monotonic() + 10)
+    assert r.text == "ok" and len(sdk.bodies) == 2 and lane.refused == []
 
 
 def test_overloaded_is_retried_but_rate_limits_reach_the_loop(lane):
