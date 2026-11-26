@@ -320,10 +320,13 @@ def _image_assets(conn, project_id, limit=200):
     # notice on subsequent turns: the caller could not know rows existed
     # beyond its SQL LIMIT. Two hundred matches list_assets' durable inventory
     # bound without injecting two hundred image payloads into the prompt.
+    # The First cut director's own plates (black plate, vignette mask) are
+    # the product's working layers, never the customer's images (#1838).
     with conn.cursor() as cur:
-        cur.execute("""SELECT * FROM assets
+        cur.execute(f"""SELECT * FROM assets
                        WHERE project_id = %s AND kind = 'image_ref'
                          AND COALESCE(meta->>'staged', '') != 'true'
+                         AND {read_tools.NOT_DESIGN_PLATE_SQL}
                        ORDER BY id ASC LIMIT %s""",
                     (project_id, max(1, int(limit or 1))))
         return cur.fetchall()
@@ -614,7 +617,8 @@ def filmstrip_parts(ctx, worker_db, priority_asset_ids=None):
             attached = worker_db.run(dbx.get_asset, aid)
         except Exception:
             attached = None
-        if attached and attached.get("kind") == "image_ref":
+        if attached and attached.get("kind") == "image_ref" \
+                and not read_tools.product_design_plate(attached):
             priority_images.append(attached)
     deduped = []
     for row in priority_images + images:

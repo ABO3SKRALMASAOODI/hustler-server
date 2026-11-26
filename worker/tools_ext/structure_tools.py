@@ -91,8 +91,10 @@ def entries(ctx, keys=None, main=True):
     import db as dbx
     import library
     docs, sizes = {}, {}
-    rows = ctx.db.run(dbx.assets_by_kinds, ctx.project_id,
-                      list(CLIP_KINDS)) or []
+    import read_tools
+    rows = [r for r in ctx.db.run(dbx.assets_by_kinds, ctx.project_id,
+                                  list(CLIP_KINDS)) or []
+            if not read_tools.product_design_plate(r)]
     if keys:
         rows = [r for r in rows if r.get("storage_key") in set(keys)]
     for r in rows[:60]:
@@ -124,8 +126,10 @@ def _paths(ctx):
     import db as dbx
     out = {}
     try:
-        rows = ctx.db.run(dbx.assets_by_kinds, ctx.project_id,
-                          list(CLIP_KINDS)) or []
+        import read_tools
+        rows = [r for r in ctx.db.run(dbx.assets_by_kinds, ctx.project_id,
+                                      list(CLIP_KINDS)) or []
+                if not read_tools.product_design_plate(r)]
         for r in rows[:60]:
             asset, _e = agent_tools._resolve_media_asset(
                 ctx, r["storage_key"], CLIP_KINDS)

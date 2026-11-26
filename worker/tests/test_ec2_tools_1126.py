@@ -151,3 +151,77 @@ def test_whole_word_snap_still_keeps_a_word_an_edge_really_cuts():
     spans, moves = word_edges.whole([[60.0, 74.60]], WORDS, 90.0,
                                     previous=[[60.0, 80.0]])
     assert spans[0][1] >= 74.815 and "Kept the whole word 'con'" in moves[0]
+
+
+# ── #1838: the First cut director's plates are not the customer's images ──
+
+PLATE = {"id": 42421, "kind": "image_ref", "storage_key": "fetched/6309/d883d9b57349.png",
+         "meta": {"director": True, "filename": "7eaeb7362a5ca7.png",
+                  "made_from": "design", "pixel_opaque": True}}
+MASK = {"id": 42422, "kind": "image_ref", "storage_key": "fetched/6309/8aca301b260d.png",
+        "meta": {"director": True, "filename": "11d6960e78db75.png",
+                 "made_from": "design", "pixel_opaque": False}}
+PHOTO = {"id": 42500, "kind": "image_ref", "storage_key": "uploads/6309/meme.png",
+         "meta": {"filename": "meme.png"}}
+
+
+class _Db:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def run(self, fn, *args, **kw):
+        return list(self.rows)
+
+
+def test_list_assets_never_offers_the_first_cut_plates():
+    import read_tools
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(project_id=6309, db=_Db([PLATE, MASK]),
+                          latest_edl=lambda: {"version": 3, "json": {}})
+    res = read_tools.list_assets(ctx, "image")
+    assert "d883d9b57349" not in res and "8aca301b260d" not in res
+    assert res.startswith("No image assets")
+    ctx.db = _Db([PLATE, MASK, PHOTO])
+    res = read_tools.list_assets(ctx, "image")
+    assert "uploads/6309/meme.png" in res and "d883d9b57349" not in res
+
+
+def test_the_turns_still_inventory_query_leaves_the_plates_out():
+    import agent_loop
+    import read_tools
+    seen = {}
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, args):
+            seen["sql"] = sql
+
+        def fetchall(self):
+            return []
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    agent_loop._image_assets(_Conn(), 6309)
+    assert read_tools.NOT_DESIGN_PLATE_SQL in seen["sql"]
+    assert read_tools.product_design_plate(PLATE)
+    assert read_tools.product_design_plate(
+        {**MASK, "meta": '{"director": true, "made_from": "design"}'})
+    assert not read_tools.product_design_plate(PHOTO)
+    # a director-made sound or moving still is not a plate
+    assert not read_tools.product_design_plate(
+        {"kind": "video_clip", "meta": {"director": True, "made_from": "design"}})
+
+
+def test_a_montage_pool_never_holds_a_plate():
+    from types import SimpleNamespace
+    from tools_ext import montage_tools
+    ctx = SimpleNamespace(project_id=6309, db=_Db([PLATE, MASK, PHOTO]))
+    rows = montage_tools._project_assets(ctx, ("image_ref",))
+    assert [r["id"] for r in rows] == [42500]
