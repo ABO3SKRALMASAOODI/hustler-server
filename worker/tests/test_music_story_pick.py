@@ -123,7 +123,8 @@ def test_tracks_an_earlier_film_of_the_run_plays_go_behind_the_others(lib, monke
         return {"order": [1, 4], "why": "x"}
     ch, _p, _t = MF.choose(_film(), _marks(), "/nonexistent", used=["cue-0", "cue-1"], call=model)
     assert "Already under an earlier film of this run (choose another unless nothing else fits): 1, 2" in seen[0]
-    assert ch["cid"] == "cue-3" and "already plays under an earlier film" in ch["why"]
+    # the receipt is the track that plays: cue-3 and its own account, never the model's reason for cue-1 it passed over
+    assert ch["cid"] == "cue-3" and ch["why"].startswith(ch["title"]) and "Cue 3." in ch["why"]
 
 
 def test_the_story_prompt_shares_one_cacheable_prefix_across_films(lib, monkeypatch):
