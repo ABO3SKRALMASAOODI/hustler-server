@@ -31813,7 +31813,7 @@ TOOLS = {
     "apply_edit_batch": (apply_edit_batch,
         "Apply a complete group of ordinary edits atomically, with no render wait. "
         "Read get_edl first; base_version must be current. operation_id is a unique "
-        "16-80 character retry id (letters/digits/hyphens/underscores); reuse it on transport retry. "
+        "1-80 character retry id (letters/digits/hyphens/underscores); reuse it on transport retry. "
         "Each operation is {action,layer,value?,id?}. set replaces one complete layer; "
         "upsert patches or adds a named item; remove deletes a named item; reorder accepts "
         "all insert ids for a canvas sequence. Layers: keep,speed,inserts,frame,captions,"
