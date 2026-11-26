@@ -220,20 +220,40 @@ def script(ctx, ideas_out):
         raise RuntimeError("no idea with a buildable style and enough free pictures: " +
                            json.dumps([(i.get("title"), i.get("style"), (i.get("supply") or {}).get("covered")) for i in ideas_out["ideas"]])[:600])
     spend, tried, got = [], [], None
-    for n, pick in enumerate(picks[:SPINE_IDEAS]):
+    queue, n, fresh = list(picks), 0, 0
+    while True:
+        while not queue and fresh < REPLACEMENT_ROUNDS:
+            # every idea of this run's list is let go: a replacement is found (in a batch it keeps the delivery style of the
+            # idea it replaces), never a stop while an idea can still be found (factory fix 64, 27 Nov)
+            fresh += 1
+            try:
+                queue = replacement_ideas(ctx, [t.get("title") for t in tried], able, picks[0].get("style"), spend)
+            except Exception as e:  # noqa: BLE001 - no replacement could be found: the stage stops with the reasons it has
+                ctx.log(f"replacement ideas: none found ({e!r})"[:300])
+                queue = []
+            ctx.log(f"spine: no idea of the list stands; replacement round {fresh}: {[q.get('title') for q in queue]}")
+        if not queue:
+            break
+        pick = queue.pop(0)
         card = able[pick["style"]]
         got = from_spine(ctx, pick, card, spend, n)
+        n += 1
         if got["ok"]:
-            break
+            sc, rep, bank = got["script"], got["verify"], got["bank"]
+            try:
+                sc, rep = for_the_ear(ctx, sc, rep, spend)
+                sc, rep = final_gate(ctx, sc, rep, spend)          # the last text gate: the narration's words are frozen after it
+                sc, rep = timed(ctx, sc, rep, spend)               # the hook's lead and the close's length, measured on the read itself
+                break
+            except RuntimeError as e:
+                if "the final support pass does not stand" not in str(e):
+                    raise
+                got = dict(ok=False, tried=dict(got["tried"], why=f"its script did not stand at the final support pass: {e}"[:600]))
         tried.append(got["tried"])
         ctx.log(f"spine: {pick.get('title')!r} cannot stand: {got['tried']['why'][:300]}; the next idea")
     if not got or not got["ok"]:
-        raise RuntimeError("no idea's spine stands on verified quotes (each claim searched at least three ways): " +
-                           json.dumps(tried, ensure_ascii=False)[:900])
-    sc, rep, bank = got["script"], got["verify"], got["bank"]
-    sc, rep = for_the_ear(ctx, sc, rep, spend)
-    sc, rep = final_gate(ctx, sc, rep, spend)          # the last text gate: the narration's words are frozen after it
-    sc, rep = timed(ctx, sc, rep, spend)               # the hook's lead and the close's length, measured on the read itself
+        raise RuntimeError("no idea's spine stands on verified quotes (each claim searched at least three ways; "
+                           f"{n} ideas tried, replacements searched {fresh} times): " + json.dumps(tried, ensure_ascii=False)[:900])
     frozen = [s_.get("say") for s_ in sc["segments"]]
     ann = None
     if card["id"] in R.STYLES:
@@ -247,7 +267,39 @@ def script(ctx, ideas_out):
                 spine=spine_record(sc, bank), ideas_tried=tried)
 
 
-SPINE_IDEAS = 3           # ideas whose spine is researched before the stage stops
+SPINE_IDEAS = 3           # kept for the callers that read it; the stage now takes every idea of its list, then replacements
+REPLACEMENT_ROUNDS = 2    # searches for replacement ideas after the run's own list is let go
+REPLACEMENT_N = 3         # candidates a replacement search asks for
+
+
+def replacement_ideas(ctx, avoid_titles, able, style_id, spend):
+    """[idea]: new ideas for a run whose own list cannot stand, probed like the ideas stage's (pictures, own-source spine) and
+    ranked the same way. They avoid every idea tried, the delivered ones and, in a batch, the batch's other subjects. In a batch
+    each takes the style of the idea it replaces (its delivery position), when that style is buildable."""
+    avoid = [r.get("idea") for r in ledger_rows(ctx) if r.get("idea")] + list(ctx.args.get("batch_previous", [])) + [t for t in avoid_titles if t]
+    try:
+        plan = json.load(open(os.path.join(ctx.run_dir, "..", "..", "plan.json")))
+        avoid += [i.get("subject") or i.get("title") for i in plan.get("ideas") or []]
+    except (OSError, ValueError):
+        pass
+    cards = list(able.values())
+    if style_id in able and ctx.args.get("shared_style_root"):
+        cards = [able[style_id]]
+    got, use = writer.find_ideas(FORM, cards, avoid=avoid, line=ctx.args.get("line"), n=REPLACEMENT_N, delivered=DL.prompt_block(ctx.workflow))
+    spend.append(dict(stage="script", what="replacement ideas", **(use or {})))
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(4) as ex:
+        sp = list(ex.map(spine_probe, got[:REPLACEMENT_N]))
+    out = []
+    for i, p in zip(got[:REPLACEMENT_N], sp):
+        if style_id in able and ctx.args.get("shared_style_root"):
+            i["style"] = style_id
+        i["supply"], i["spine_probe"] = probe(i), p
+        ctx.log(f"replacement idea {i.get('title')!r}: pictures {i['supply'].get('covered')}, spine verified by its own sources {p['beats']}")
+        if i.get("style") in able and i["supply"].get("ok"):
+            out.append(i)
+    out.sort(key=idea_rank)
+    return out
 BANK_TRIES = 2            # scripts written from one idea's bank before the next idea is taken
 
 
@@ -302,6 +354,9 @@ def from_spine(ctx, pick, card, spend, n, bank_fn=None, write=None, settle=None,
         sc2, hr, more2, state["bank"] = hold(sc_, state["bank"])
         json.dump(dict(script=sc2, report=hr), open(os.path.join(ctx.run_dir, f"spine{n}_hold.json"), "w"), ensure_ascii=False, indent=1)
         rep2 = dict(hr["verify"], settle=dict(rep_.get("settle") or {}, hold=dict({k: v for k, v in hr.items() if k != "verify"})))
+        if hr.get("core_repaired") or hr.get("spine_regenerated"):
+            ctx.log(f"repaired instead of stopping: core lines restated on their quotes {len(hr.get('core_repaired') or [])}, "
+                    f"spine beats written again from the bank {[b for r in hr.get('spine_regenerated') or [] for b in r['beats']]}")
         if not hr.get("ok"):
             rep2["ok"] = False
             rep2["spine_lost"] = (hr.get("why") if hr.get("why") != "core_unsupported" else
