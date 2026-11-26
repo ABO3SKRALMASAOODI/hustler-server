@@ -108,3 +108,66 @@ def test_a_truly_gone_upload_still_says_so_after_the_wait(monkeypatch):
     payload, status = video._finish_multipart(
         1, 5592, KEY, "u-1", [], {"kind": "original"})
     assert status == 400 and payload["upload_kept"] is False
+
+
+# P0 #883 (23 Nov 2026, project 6173): a 1-part image's completion never came
+# back from storage; under the 1800 s read the request thread held the key's
+# completion lock and every retry of the page answered 503 until it left.
+def test_a_few_parts_are_assembled_with_a_bounded_read(monkeypatch):
+    _env(monkeypatch)
+    quick = storage.client(assemble="quick")
+    long_ = storage.client(assemble=True)
+    assert quick is not long_
+    assert quick.meta.config.retries["total_max_attempts"] == 1   # still once
+    assert quick.meta.config.read_timeout == storage.S3_QUICK_ASSEMBLE_READ_TIMEOUT_S
+    assert quick.meta.config.read_timeout <= 60
+    assert long_.meta.config.read_timeout >= 900
+
+
+def _profiles_for(monkeypatch, n_parts):
+    seen = []
+
+    class _C:
+        def complete_multipart_upload(self, **kw):
+            seen.append(len(kw["MultipartUpload"]["Parts"]))
+
+    def fake_store_client(name, public=False, fast=False, assemble=False):
+        seen.append(assemble)
+        return _C()
+
+    monkeypatch.setattr(storage, "store_client", fake_store_client)
+    monkeypatch.setattr(storage, "store_bucket", lambda name: "b")
+    storage.complete_multipart(
+        KEY, "u-1", [{"part_number": i, "etag": f"e{i}"}
+                     for i in range(1, n_parts + 1)], store="legacy")
+    return seen
+
+
+def test_completion_profile_follows_the_part_count(monkeypatch):
+    assert _profiles_for(monkeypatch, 1) == ["quick", 1]
+    n = storage.QUICK_ASSEMBLE_MAX_PARTS
+    assert _profiles_for(monkeypatch, n) == ["quick", n]
+    assert _profiles_for(monkeypatch, n + 1) == [True, n + 1]
+    assert _profiles_for(monkeypatch, 496) == [True, 496]
+
+
+def test_a_stalled_small_completion_lands_from_the_parts_storage_holds(monkeypatch):
+    """The quick read times out; storage still holds the open upload with its
+    part, so finish_multipart completes again from storage's own list."""
+    from botocore.exceptions import ReadTimeoutError
+    calls = []
+
+    def fake_complete(key, upload_id, parts, store=None):
+        calls.append([p["etag"] for p in parts])
+        if len(calls) == 1:
+            raise ReadTimeoutError(endpoint_url="https://b2.example")
+
+    monkeypatch.setattr(storage, "_upload_store", lambda k, u: "legacy")
+    monkeypatch.setattr(storage, "complete_multipart", fake_complete)
+    monkeypatch.setattr(storage, "list_parts", lambda k, u, store=None: [
+        {"part_number": 1, "etag": '"e1"', "size": 2477334}])
+    res = storage.finish_multipart(
+        "images/6173/a9296e0463a6.jpg", "u-883",
+        [{"part_number": 1, "etag": '"e1"'}])
+    assert res == {"ok": True, "repaired": []}
+    assert len(calls) == 2

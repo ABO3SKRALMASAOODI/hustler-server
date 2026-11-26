@@ -192,17 +192,39 @@ S3_MAX_ATTEMPTS = int(os.getenv("S3_MAX_ATTEMPTS", "3"))
 # completion therefore waits as long as storage takes, and is sent once.
 S3_ASSEMBLE_READ_TIMEOUT_S = float(os.getenv("S3_ASSEMBLE_READ_TIMEOUT_S",
                                              "1800"))
+# A completion of a few parts is assembled in seconds. P0 #883 (23 Nov 2026,
+# project 6173): a 1-part, 2.4 MB image's CompleteMultipartUpload never came
+# back from storage (the upload id was still open three days later: storage
+# never began assembling). Under the 1800 s read above the request thread sat
+# on it holding the key's completion lock, so every retry of the page answered
+# 503 "still being put together" until the customer left. Up to
+# QUICK_ASSEMBLE_MAX_PARTS parts the completion is still sent once, but read
+# for at most S3_QUICK_ASSEMBLE_READ_TIMEOUT_S; a stalled call then raises, and
+# finish_multipart reads the parts storage holds and completes again with
+# them, inside the page's own retries.
+QUICK_ASSEMBLE_MAX_PARTS = int(os.getenv("QUICK_ASSEMBLE_MAX_PARTS", "64"))
+S3_QUICK_ASSEMBLE_READ_TIMEOUT_S = float(os.getenv(
+    "S3_QUICK_ASSEMBLE_READ_TIMEOUT_S", "45"))
 
 
 def _client_limits(fast=False, assemble=False):
     """(connect_timeout, read_timeout, max_attempts) of a client profile.
     botocore's ``max_attempts`` counts RETRIES (total = max_attempts + 1),
-    so the assembly's 0 means the complete is sent exactly once."""
+    so the assembly's 0 means the complete is sent exactly once.
+    ``assemble="quick"`` is the completion of a few parts: sent once too,
+    read for a bounded time (see QUICK_ASSEMBLE_MAX_PARTS)."""
+    if assemble == "quick":
+        return S3_CONNECT_TIMEOUT_S, S3_QUICK_ASSEMBLE_READ_TIMEOUT_S, 0
     if assemble:
         return S3_CONNECT_TIMEOUT_S, S3_ASSEMBLE_READ_TIMEOUT_S, 0
     if fast:
         return 5.0, 15.0, 2
     return S3_CONNECT_TIMEOUT_S, S3_READ_TIMEOUT_S, S3_MAX_ATTEMPTS
+def _assemble_profile(assemble):
+    """The client-cache part of an assemble profile: off, quick or long."""
+    return "quick" if assemble == "quick" else bool(assemble)
+
+
 _clients = {}
 # The process-wide client-build lock (storage_routing.CLIENT_BUILD_LOCK): the
 # health probe builds under the same one, so no two builds overlap.
@@ -229,7 +251,7 @@ def client(public=False, fast=False, assemble=False):
     key = (endpoint, os.environ["S3_ACCESS_KEY_ID"],
            hashlib.sha256(os.environ["S3_SECRET_ACCESS_KEY"].encode())
            .hexdigest(), os.getenv("S3_REGION", "auto"), boto3.client,
-           bool(fast), bool(assemble))
+           bool(fast), _assemble_profile(assemble))
     connect_s, read_s, attempts = _client_limits(fast, assemble)
     with _clients_lock:
         cached = _clients.get(key)
@@ -424,7 +446,7 @@ def _next_client(public=False, fast=False, assemble=False):
     key = ("next", endpoint, cfg["access_key_id"],
            hashlib.sha256(cfg["secret_access_key"].encode()).hexdigest(),
            cfg["region"], cfg["addressing_style"], boto3.client, bool(fast),
-           bool(assemble))
+           _assemble_profile(assemble))
     connect_s, read_s, attempts = _client_limits(fast, assemble)
     with _clients_lock:
         cached = _clients.get(key)
@@ -1002,7 +1024,8 @@ def complete_multipart(key, upload_id, parts, store=None):
     """parts: [{"part_number": int, "etag": str}] from the browser."""
     ordered = sorted(parts, key=lambda p: int(p["part_number"]))
     store = store or _upload_store(key, upload_id)
-    store_client(store, assemble=True).complete_multipart_upload(
+    profile = "quick" if len(ordered) <= QUICK_ASSEMBLE_MAX_PARTS else True
+    store_client(store, assemble=profile).complete_multipart_upload(
         Bucket=store_bucket(store), Key=key, UploadId=upload_id,
         MultipartUpload={"Parts": [
             {"PartNumber": int(p["part_number"]), "ETag": p["etag"]}
