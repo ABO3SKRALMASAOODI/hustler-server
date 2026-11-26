@@ -372,6 +372,45 @@ def vignette_filter(intensity, aspect=None, en=""):
     return f"vignette=a={0.30 + 0.55 * i_:.3f}{asp}{en}"
 
 
+def takes_tone(item):
+    """Whether an overlay is the take itself shown full-frame (the main
+    upload, fit cover or picture, opacity not animated): the render grades
+    it with the take's own keyed grade windows (take_tone_windows), so a
+    film that cuts its take in as a picture keeps one colour."""
+    return (item or {}).get("asset_key") == "main" \
+        and item.get("fit") in ("cover", "picture") \
+        and item.get("kind") in ("video", "image") \
+        and not isinstance(item.get("opacity"), list)
+
+
+def take_tone_windows(edl, o_start, o_dur):
+    """The grade windows cutaway_look_chain leaves to the footage (a keyed
+    tone, a hue isolate, skin protection: gradewin.grade_graph), whole over
+    [o_start, o_start + o_dur], with no region, LUT or ramp. A take overlay
+    (takes_tone) takes them too."""
+    a0, a1 = float(o_start), float(o_start) + float(o_dur)
+    out = []
+    try:
+        import gradewin
+        for it in (edl or {}).get("fx") or []:
+            if not isinstance(it, dict) or it.get("type") != "grade_window" \
+                    or it.get("region") or it.get("lut") \
+                    or it.get("start") is None \
+                    or it.get("ramp_in_f") or it.get("ramp_out_f"):
+                continue
+            need = gradewin._needs(it, it.get("brand_hue"))
+            if not (need.get("iso") or need.get("protect")
+                    or need.get("tone")):
+                continue
+            if float(it["start"]) <= a0 + 1e-3 and \
+                    float(it["end"]) >= a1 - 1e-3:
+                out.append(it)
+    except Exception as e:  # noqa: BLE001 - the overlay keeps the plain look
+        print(f"[render] take tone windows skipped ({str(e)[:120]})",
+              flush=True)
+    return out
+
+
 def cutaway_look_chain(edl, o_start, o_dur, aspect=None):
     """Filters that give a FULL-FRAME cutaway (an overlay with fit
     'cover' or 'picture': b-roll that replaces the speaker) the Look the
@@ -6861,6 +6900,20 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         if look:
             # the Look of the footage it replaces, at the cutaway's own size
             chain += ["format=yuv420p"] + look
+        ov_src = f"{idx}:v"
+        tone = take_tone_windows(edl, o_start, o_dur) \
+            if takes_tone(item) else []
+        if tone:
+            # The take shown as a picture takes the take's own keyed grade,
+            # exactly the windows the footage under it gets (gradewin).
+            import gradewin
+            parts.append(f"[{idx}:v]{','.join(chain + ['format=yuv420p'])}"
+                         f"[ovt{j}]")
+            ov_src = f"ovt{j}"
+            for k, it in enumerate(tone):
+                ov_src = gradewin.grade_graph(parts, ov_src, f"ovt{j}_{k}",
+                                              it, rect[2], rect[3])
+            chain = []
         if not opacity_animated:
             chain.append("format=rgba")
         if not opacity_animated and op is not None and float(op) < 0.999:
@@ -6915,7 +6968,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             chain.append(f"rotate={rad:.4f}:c=black@0.0"
                          f":ow=rotw({rad:.4f}):oh=roth({rad:.4f})")
         chain.append(f"setpts=PTS+{o_start:.3f}/TB")
-        parts.append(f"[{idx}:v]{','.join(chain)}[ovp{j}]")
+        parts.append(f"[{ov_src}]{','.join(chain)}[ovp{j}]")
         # position: keyframed fractions of the MAIN frame, center-anchored.
         # Slide entrance/exit rides the position expression (quadratic ease
         # from/to one frame-width/height away).
@@ -8829,7 +8882,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         prepared = overlay_stream.prepare(
             overlay_items, edl, W, H, fps, workdir,
             lambda key: _fetch(key, 'overlay_stream', next_idx),
-            _overlay_input, cutaway_look_chain, cancelled_cb)
+            _overlay_input, cutaway_look_chain, cancelled_cb,
+            graph_only=lambda it: takes_tone(it) and bool(take_tone_windows(
+                edl, float(it['start']), float(it['duration_s']))))
         if prepared:
             local, item, count, overlay_folder = prepared
             extra_inputs += ['-i', local]

@@ -17,12 +17,13 @@ def _clock(value):
     return float(f'{float(value):.3f}')
 
 
-def plan(items, fps):
+def plan(items, fps, graph_only=None):
     prefix = []
     for item in items:
         if (item.get('kind') != 'video' or item.get('fit') != 'cover'
                 or item.get('opacity') not in (None, 1, 1.0)
-                or any(item.get(k) for k in ('entrance', 'exit', 'rotation', 'screen'))):
+                or any(item.get(k) for k in ('entrance', 'exit', 'rotation', 'screen'))
+                or (graph_only is not None and graph_only(item))):
             break
         prefix.append(item)
     if len(prefix) < 8:
@@ -45,8 +46,11 @@ def plan(items, fps):
 
 
 def prepare(items, edl, width, height, fps, workdir, fetch, input_args,
-            look_chain, cancelled_cb=None):
-    planned = plan(items, fps)
+            look_chain, cancelled_cb=None, graph_only=None):
+    """graph_only(item): the cutaway needs the full filter graph (the take
+    shown as a picture takes its keyed grade there), so the streamed prefix
+    stops before it."""
+    planned = plan(items, fps, graph_only)
     if not planned:
         return None
     prefix, pieces = planned

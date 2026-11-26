@@ -1240,8 +1240,10 @@ def lower(l1, work):
         rep["bed_error"] = f"{type(e).__name__}: {str(e)[:160]}"
     if look:
         # the keyed tone grades the take's own stream; a cutaway takes plain windows only (renderer.cutaway_look_chain).
-        # A film that cuts its take in as a picture would come out in two colours, so that film goes without it
-        keyed = not any(o.get("asset_key") == "main" for o in edl["overlays"])
+        # The take shown full-frame as a picture (the collage spine's photo fills, #1830) takes the keyed windows too
+        # (renderer.takes_tone); a film that shows its take any other way would come out in two colours, so it goes without
+        import renderer
+        keyed = not any(o.get("asset_key") == "main" and not renderer.takes_tone(o) for o in edl["overlays"])
         edl["fx"] = grade.windows(look, 0.0, lim, keyed) + edl["fx"]
         rep["look"] = dict({k: look.get(k) for k in ("name", "card", "amount", "de", "skin_de")}, keyed=bool(keyed and look.get("key")),
                            **({"de": look.get("key_de"), "skin_de": look.get("key_skin_de")} if keyed and look.get("key") else {}))
