@@ -32714,7 +32714,7 @@ TOOLS = {
                      "clips), then fetch_url(url, as_kind='clip'), "
                      "look_at_asset for the right seconds, and a cutaway "
                      "or insert at the mention. Tell the user what footage "
-                     "you used (title + channel).",
+                     "you used (title + channel). Memes: find_meme.",
                      {"query": {"type": "string"}}),
     "search_sfx": (search_sfx, "Search the web for a REAL recorded sound "
                    "effect — the editor's whoosh, camera shutter, UI "
@@ -34519,7 +34519,8 @@ TOOLS = {
                     "quality — prefer enhance_video, which orders them "
                     "correctly), 'motion_blur' (real frame blending; only "
                     "reads on movement, does nothing on a static shot), "
-                    "'stabilize' (smooths modest HANDHELD wobble via deshake; "
+                    "'stabilize' (prefer stabilize_video, which measures it; "
+                    "smooths modest HANDHELD wobble via deshake; "
                     "mirrored edges may soften and it cannot fix a whip, a "
                     "walk or rolling shutter; say that rather than promising "
                     "stabilization). Stabilize is whole-video only. For other "
@@ -34543,7 +34544,7 @@ TOOLS = {
                       "start/end are PROGRAM seconds; omit both for the whole "
                       "video. resolution '2k' or '4k' makes the EXPORTED "
                       "file that size (2560x1440 / 3840x2160 class, lanczos "
-                      "upscale of the whole edit; 'hd' goes back): use it "
+                      "upscale plus a detail pass; 'hd' goes back): use it "
                       "when the user asks for 2K, 1440p, 4K or UHD. "
                       "Sharpening alone never adds resolution, and an "
                       "upscale adds pixels, not detail the source never had "

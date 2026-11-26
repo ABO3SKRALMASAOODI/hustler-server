@@ -155,6 +155,18 @@ def rank_footage(candidates, query):
                   reverse=True)
 
 
+def rank_memes(candidates):
+    """Meme clips: the short ones first (a meme is seconds long; a long
+    upload is a compilation or a video about it, and fetch_url pays for
+    every byte). Unknown durations sit between."""
+    def score(c):
+        d = c.get("duration_s") or 0
+        if not d:
+            return 1
+        return 4 if d <= 20 else 3 if d <= 60 else 1 if d <= 180 else -2
+    return sorted(candidates or [], key=score, reverse=True)
+
+
 def search_footage(query, count=SEARCH_COUNT):
     """Candidate links for real b-roll of a named topic, best guess first."""
     return rank_footage(_yt_candidates(query, count,

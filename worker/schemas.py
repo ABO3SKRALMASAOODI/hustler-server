@@ -1962,6 +1962,46 @@ class PictureCard(BaseModel):
         return self
 
 
+def _key_hex(v):
+    if v is None:
+        return v
+    if not isinstance(v, str) or not HEX_COLOR.match(v):
+        raise ValueError("a colour is '#rrggbb'")
+    return v.lower()
+
+
+class KeyBackground(BaseModel):
+    """What shows where the keyed backdrop was: a solid colour, a vertical
+    two-colour gradient, or an image / video asset (storage key) filling the
+    source frame."""
+    model_config = {"extra": "forbid", "allow_inf_nan": False}
+    kind: Literal["solid", "gradient", "asset"]
+    colour: Optional[str] = None
+    colour2: Optional[str] = None
+    asset_key: Optional[str] = Field(default=None, max_length=512)
+
+    _hex = field_validator("colour", "colour2")(_key_hex)
+
+
+class KeyItem(BaseModel):
+    """Chroma key of the main footage (a green or blue screen), applied to
+    the SOURCE picture before any trim, framing or grade, so every later
+    stage sees the composite exactly as it would a source shot on that
+    background. ``colour`` is the backdrop colour measured on the footage;
+    ``similarity`` / ``blend`` are ffmpeg chromakey's; ``despill`` (0-1)
+    takes the backdrop's colour cast off the subject's edges."""
+    model_config = {"extra": "forbid", "allow_inf_nan": False}
+    id: str = Field(min_length=1, max_length=40)
+    colour: str
+    similarity: float = Field(default=0.12, ge=0.01, le=0.6)
+    blend: float = Field(default=0.06, ge=0.0, le=0.5)
+    despill: float = Field(default=0.6, ge=0.0, le=1.0)
+    spill: Literal["green", "blue"] = "green"
+    background: KeyBackground
+
+    _hex = field_validator("colour")(_key_hex)
+
+
 class Effects(BaseModel):
     """Whole-program visual effects. grade is a color-grade preset applied
     to all footage (never to burned captions); zooms are punch-in/eased/
@@ -1990,6 +2030,9 @@ class Effects(BaseModel):
     # Round 96 — agent-written filter chains (the open-ended stylize).
     # Optional-None for the same signature reason as screen_frame above.
     custom: Optional[List[CustomFilterItem]] = None
+    # Chroma key of the main footage (green / blue screen). Optional-None for
+    # the same signature reason as screen_frame above.
+    key: Optional[KeyItem] = None
 
 
 # Canvas (round 34) — output geometry for a program that has NO main source
@@ -4394,7 +4437,7 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 and fx.regions is None and fx.stylize is None \
                 and fx.grade_custom is None and fx.screen_frame is None \
                 and fx.frame_shifts is None and fx.custom is None \
-                and fx.picture_cards is None:
+                and fx.picture_cards is None and fx.key is None:
             edl.effects = None
 
     if edl.source_clean is not None:

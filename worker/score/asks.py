@@ -745,6 +745,27 @@ def output_size(edl, index=None):
         return None
 
 
+def export_size(edl, index=None):
+    """The exported file's size and how it is reached. Previews stay small so
+    they load fast; a 2K/4K export is upscaled at delivery (lanczos plus a
+    contrast-adaptive detail pass), so render_size alone reads as 'no
+    upscale' (p6311)."""
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    res = str(frame.get("resolution") or "").lower()
+    base = output_size(edl, index)
+    if not base:
+        return {"resolution": res or "hd"}
+    if res not in ("2k", "4k"):
+        return {"resolution": "hd", "size": base}
+    try:
+        import renderer
+        W2, H2 = renderer.delivery_resolution_dims(base[0], base[1], res)
+    except Exception:  # noqa: BLE001 - the class is still the truth
+        return {"resolution": res, "master_size": base}
+    return {"resolution": res, "master_size": base, "size": [W2, H2],
+            "upscale": "lanczos + contrast-adaptive detail at the export size"}
+
+
 def _pct(v):
     try:
         return f"{float(v) * 100:.0f}%"
@@ -1008,6 +1029,7 @@ def measured(edl, shots=None, source_s=None, preview=None, index=None):
         "render_size": ([preview.get("width"), preview.get("height")] if preview.get("width")
                         else output_size(edl, index)),
         "rendered_seconds": preview.get("duration_s"),
+        "export": export_size(edl, index),
         "shots_measured": len(shots),
         "shots_with_a_camera_move": moved,
         "camera_moves": len(moving),
