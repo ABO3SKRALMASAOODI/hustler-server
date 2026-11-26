@@ -712,6 +712,23 @@ def face_aim(index, bands=None, vertical_source=True):
     return round(min(max(cx, 0.2), 0.8), 3), round(min(max(cy, 0.3), 0.72), 3)
 
 
+CUT_IN_VISIBLE = 0.05    # a zoom under this reads as no move at all
+
+
+def _move_room(ctx, edl, start, end):
+    """The zoom strength the main footage still holds over PROGRAM
+    start-end before it passes the Studio's upscale ceiling, after the
+    framing's own enlargement and the zooms already stacked in that window
+    (agent_tools._zoom_room, the same measure add_zoom applies there); None
+    when unknown or unbounded."""
+    try:
+        import agent_tools
+        room, _base, _stacked = agent_tools._zoom_room(ctx, edl, float(start), float(end))
+    except Exception:  # noqa: BLE001 - unmeasured: the moves are written
+        return None
+    return None if room is None else float(room)
+
+
 def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
             levels=None, target=None, hi=None):
     """Ease a modest move at a measured phrase turn; never fake a shot cut.
@@ -745,9 +762,19 @@ def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
                         hi=hi or CUT_IN_MAX_S)
     levels = levels or (CUT_IN_BANDED if bands else CUT_IN_STRENGTH)
     cx, cy = aim or (0.5, 0.4)
-    n = 0
+    n, held = 0, []
     for a, b, close in segs:
         if not close:
+            continue
+        room = _move_room(ctx, edl, a, b)
+        if room is not None and room < CUT_IN_VISIBLE:
+            # Here the frame (and any zoom already over these seconds)
+            # enlarges the source to its ceiling (p6269: a 640x360 party
+            # clip cropped to 9:16): the move would be written at the 2%
+            # floor, a step nobody sees that still counts as a camera
+            # change. This stretch stays one continuous framing; a stretch
+            # with room still gets its move.
+            held.append((round(a, 2), round(b, 2), round(room, 3)))
             continue
         strength = min(0.10, levels[n % len(levels)])
         res = run(ctx, steps, "add_zoom", {
@@ -758,6 +785,11 @@ def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
         if res is not None and not str(res).lstrip().upper().startswith(
                 ("REJECTED", "FAILED", "CORRECTION")):
             n += 1
+    if held:
+        steps.append({"tool": "cut_ins", "ok": True,
+                      "note": f"{len(held)} camera move(s) not written: the "
+                              "source holds under a visible move there "
+                              f"(program start, end, room): {held[:6]}"})
     return n
 
 

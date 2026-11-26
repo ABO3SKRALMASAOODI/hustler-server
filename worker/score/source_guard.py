@@ -48,6 +48,122 @@ def static_text_needs_fit(perception, start, end, width, height):
                for b in boxes)
 
 
+# Printed text a crop must keep whole: a line the Director's perception saw
+# in this many frames, or a printed LINE (one row of text, its words joined
+# across word gaps) wider than the crop window in at least this share of the
+# interval's samples (a screen recording's UI rows, a slide's lines, an
+# upload's own subtitles). Separate pieces of text far apart on the frame
+# (a channel bug and a date stamp, HUD corners, two street signs) are not
+# one line: each fits a crop on its own and the footage keeps its crop.
+TEXT_SEEN = 3
+SPREAD_SHARE = .6
+SPREAD_ROWS = 3
+SPREAD_AROUND_S = 4.0
+ROW_OVERLAP = .5        # two boxes share a row: this share of the lower one's height
+WORD_GAP_H = 1.2        # ... and sit at most this many line heights apart
+
+
+def _line_boxes(row):
+    """A spatial sample's line-shaped text boxes (geometry only)."""
+    out = []
+    for b in row.get("text") or []:
+        try:
+            x0, y0, x1, y1 = (float(v) for v in b[:4])
+        except (TypeError, ValueError):
+            continue
+        w, h = x1 - x0, y1 - y0
+        if w > 0 and 0 < h <= .2:
+            out.append((x0, y0, x1, y1))
+    return out
+
+
+def printed_lines(row):
+    """The sample's text boxes joined into printed lines: boxes on one row
+    (vertical overlap) whose horizontal gap is a word gap (a line height or
+    so). Returns [(x0, y0, x1, y1)]. Geometry only."""
+    boxes = sorted(_line_boxes(row))
+    lines = []
+    for b in boxes:
+        for i, l in enumerate(lines):
+            h = min(b[3] - b[1], l[3] - l[1])
+            overlap = min(b[3], l[3]) - max(b[1], l[1])
+            gap = b[0] - l[2]
+            if overlap >= ROW_OVERLAP * h and gap <= WORD_GAP_H * max(
+                    b[3] - b[1], l[3] - l[1]):
+                lines[i] = (min(l[0], b[0]), min(l[1], b[1]),
+                            max(l[2], b[2]), max(l[3], b[3]))
+                break
+        else:
+            lines.append(b)
+    return lines
+
+
+def text_needs_fit(perception, start, end, width, height, samples=None):
+    """Measured printed text wider (or taller) than the possible crop, in
+    footage with no person to frame: the whole picture is fitted instead.
+
+    Geometry, not an interpretation of the words. It holds for a still slide
+    and for a moving screen recording alike (p6312: a 16:9 tutorial whose
+    subtitle line and UI rows were centre-cropped to 32% of their width). A
+    face or a missing face reading keeps the subject crop, and so does text
+    in pieces that each fit the crop.
+    """
+    per = perception or {}
+    shots = [s for s in per.get("shots") or []
+             if s.get("t") and _overlaps(start, end, *s["t"])]
+    if any(s.get("faces_seen") is None or s["faces_seen"] > 0 for s in shots):
+        return False
+    def within(a, b):
+        return [r for r in samples or [] if r.get("t") is not None
+                and a <= float(r["t"]) <= b]
+    rows = within(start, end) if end > start else within(start - .75, start + .75)
+    if sum(1 for r in rows if "text" in r) < SPREAD_ROWS:
+        # Index samples sit seconds apart; a one-second piece reads the
+        # printed layout around it (a page or a screen holds for seconds).
+        mid = (start + end) / 2
+        rows = within(min(start, mid - SPREAD_AROUND_S), max(end, mid + SPREAD_AROUND_S))
+    if any(_boxes(r) for r in rows):
+        return False
+    if not shots and not (rows and all("faces" in r for r in rows)):
+        return False
+    boxes = [r["box"] for r in per.get("text") or []
+             if r.get("box") and len(r["box"]) == 4 and r.get("t") and
+             _overlaps(start, end, *r["t"]) and r.get("seen", 0) >= TEXT_SEEN]
+    if any(b[2] - b[0] > width + .005 or b[3] - b[1] > height + .005
+           for b in boxes):
+        return True
+    read = [r for r in rows if "text" in r]      # samples that measured text
+    wide = sum(1 for r in read if any(
+        l[2] - l[0] > width + .005 or l[3] - l[1] > height + .005
+        for l in printed_lines(r)))
+    return len(read) >= SPREAD_ROWS and wide >= SPREAD_SHARE * len(read)
+
+
+def kept_text_needs_fit(index, keep=None, ratio="9:16"):
+    """text_needs_fit over the footage an edit keeps, for a frame of
+    ``ratio``: True when the source text a crop would cut runs through at
+    least half of the kept seconds. The legacy first-cut chain and the
+    fallback reframer read the same indexed measurements as the Director."""
+    index = index or {}
+    prepared = index.get("director_preparation") or {}
+    per = prepared.get("perception") if prepared.get("version") == 1 else None
+    video = index.get("video") or {}
+    try:
+        fw, fh = (float(n) for n in str(ratio).split(":"))
+        relative = (fw / fh) * (float(video["height"]) / float(video["width"]))
+        spans = [(float(a), float(b)) for a, b in keep or []] or \
+            [(0., float(video["duration"]))]
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return False
+    if relative >= 1.:
+        return False            # the frame is wider than the source: no side crop
+    rows = (index.get("spatial") or {}).get("samples") or []
+    need = sum(b - a for a, b in spans if text_needs_fit(
+        per, a, b, min(1., relative), min(1., 1 / relative), rows))
+    return need > 0 and need >= .5 * sum(b - a for a, b in spans)
+
+
+
 def _named_detail(item, views, rects, ratio, shots, boxes):
     """Keep the model's shot-local detail when its measured geometry is safe.
 
@@ -142,7 +258,7 @@ def apply(l1, index, perception, *, views=None):
         reason = "named_detail_crop" if detail else "subject_boxes_contained"
         # A verified named view is already a model-selected source detail;
         # unrelated desktop headings must not replace it with the whole screen.
-        if not detail and static_text_needs_fit(perception, start, end, w, h):
+        if not detail and text_needs_fit(perception, start, end, w, h, samples):
             # Lowering already supports a source rectangle extending past
             # the canvas: the on-spine source is fitted over its blurred
             # backdrop. Do not override that geometry with a saliency crop.

@@ -912,6 +912,53 @@ def stutter_spans(words, keep):
     return spans
 
 
+# A removal shorter than this inside one source shot saves no time anyone
+# hears and makes the picture jump: a hard step in a continuous take (p6269:
+# the silence cuts left 1759.76 -> 1759.80, 40 ms, in the middle of shot 199).
+MICRO_CUT_S = 0.12
+
+
+def micro_cut_keep(keep, shots, words=None):
+    """``keep`` with every sub-MICRO_CUT_S sliver of SILENCE that lies inside
+    one source shot closed (the two kept pieces joined); None when there is
+    none. A removal on a source cut is a real edit and stays, and so is one
+    that takes out a transcribed word (a filler, a stutter, a repeat cut at
+    its word times): only a gap no word's middle falls in is a pause sliver."""
+    if not keep or len(keep) < 2:
+        return None
+    edges = sorted(float(s["start"]) for s in shots or []
+                   if s.get("start") is not None)
+    mids = []
+    for w in words or []:
+        try:
+            mids.append((float(w["t0"]) + float(w["t1"])) / 2)
+        except (KeyError, TypeError, ValueError):
+            continue
+    out, healed = [list(map(float, keep[0]))], False
+    for a, b in keep[1:]:
+        a, b = float(a), float(b)
+        gap0 = out[-1][1]
+        on_cut = any(gap0 - 0.04 <= e <= a + 0.04 for e in edges)
+        spoken = any(gap0 < m < a for m in mids)
+        if 0 <= a - gap0 < MICRO_CUT_S and not on_cut and not spoken:
+            out[-1][1] = b
+            healed = True
+        else:
+            out.append([a, b])
+    return [[round(a, 3), round(b, 3)] for a, b in out] if healed else None
+
+
+def heal_micro_cuts(ctx, steps, started):
+    """Join the kept pieces a sub-perceptual silence cut split inside one
+    take (one keep write). None when nothing was split that way."""
+    index = ctx.index or {}
+    new = micro_cut_keep(_keep(ctx), index.get("shots"), index.get("words"))
+    if not new:
+        return None
+    return _run(ctx, steps, "keep_segments",
+                {"segments": new, "snap_to_words": False}, started)
+
+
 def drop_stutters(ctx, steps, started):
     """Cut each stutter out of the kept program (one keep write), so the
     audio and the captions both carry the word once. None when there is none."""
@@ -1005,6 +1052,19 @@ def dense_ui(index):
     ui = sum(1 for s in samples if s.get("dense_ui") or len(s.get("text") or []) >= 3)
     faces = sum(1 for s in samples if s.get("faces"))
     return not (ui < 0.6 * len(samples) or faces > 0.15 * len(samples))
+
+
+def _text_wider_than_crop(ctx):
+    """The kept footage prints text wider than a 9:16 crop and shows no
+    person to frame (measured: score.source_guard.text_needs_fit). It is
+    composed like a screen: fitted whole, its camera on the text, no slam
+    over its own words (p6312: a SmartPDF tutorial centre-cropped through
+    its UI and subtitles, the storyboard's wording never naming a screen)."""
+    from score import source_guard
+    try:
+        return source_guard.kept_text_needs_fit(ctx.index, _keep(ctx))
+    except Exception:  # noqa: BLE001 - no measurement: the footage path
+        return False
 
 
 def _screen_like(index):
@@ -1940,12 +2000,29 @@ def _clean_word(w):
     return letters >= 1 and (len(t) <= 2 or len(set(t.lower())) > 1)
 
 
+# Under this mean recognizer confidence the first film reads its transcript
+# as the recognizer hearing words in noise, not speech: "MÚSICA" over a
+# sugarcane harvest's music (p6304, 0.52), "Tämä on hän" over fireworks
+# (p5571, 0.64), "Thanks for watching!" on a 24-minute silent upload (p5756,
+# 0.58). Real speech in a loud room still measures 0.68-0.80 (p5530, p6269,
+# p6125). Only the first film's own choice reads it (nobody has asked for
+# captions yet); a caption the user asks for is always written, and the
+# Director's first film has its own CAPTION_CONFIDENCE with that exception.
+NONSPEECH_MEAN = 0.65
+
+
 def _speech(index):
     """Real speech: at least 8 words, most of the longer tokens words (C2: a
     music promo's song transcribed as "ʰʰʰʰ", "ლ" was trimmed to a 2 s
-    fragment and captioned with garbage glyphs). One-character tokens count
+    fragment and captioned with garbage glyphs), and a recognizer that
+    heard them as speech (NONSPEECH_MEAN; unknown confidences, a word a
+    correction rewrote, never count against it). One-character tokens count
     for neither side."""
-    words = [str(w.get("w") or "").strip() for w in (index or {}).get("words") or []]
+    raw = (index or {}).get("words") or []
+    from score import transcript_confidence
+    if transcript_confidence.low_mean(raw, NONSPEECH_MEAN):
+        return False        # the recognizer's own confidence: noise, not speech
+    words = [str(w.get("w") or "").strip() for w in raw]
     if len(words) < 8:
         return False
     longer = [w for w in words if len(w.strip(".,!?;:…")) >= 2]
@@ -2374,6 +2451,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             # whisper's early or late word start) and the tail bounded
             import talk_craft
             talk_craft.cut_audio_pauses(ctx, steps, started, _run)
+        heal_micro_cuts(ctx, steps, started)
     # RS_ENGINE (#52): a short source never loses most of its footage to
     # the trim and pause cuts without a reason the footage gives.
     restore = kept_share_restore(_keep(ctx), duration, picked)
@@ -2390,6 +2468,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         applied.append("the app's end card left out")
     faces = _faces(ctx.index)
     talking = bool(speech and faces and faces["share"] >= 0.5)
+    # The upload's own subtitle line, measured over the speech this cut
+    # keeps: a second running caption track would repeat it on top of it
+    # (p6312: our pill and display words over the tutorial's own subtitles).
+    burned = burned or source_typography.kept_subtitles(ctx.index, _keep(ctx))
     if q1 and cut_speech and not talking:
         import first_cut_visual as fcv
         # Q6: the last sentence is complete and its picture live (u4899
@@ -2411,7 +2493,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             applied.append("the full scene fitted to vertical")
             vertical_out = True
     elif not vertical_source:
-        if _screen_like(ctx.index) and not talking:
+        if (_screen_like(ctx.index) or _text_wider_than_crop(ctx)) and not talking:
             # Keep source text whole inside the promised portrait canvas.
             # The travelling content window below supplies readable detail.
             if _ok(_run(ctx, steps, "set_frame",
