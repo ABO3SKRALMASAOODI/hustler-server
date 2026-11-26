@@ -834,7 +834,9 @@ def _sources_md(pod_line, rows):
                 out.append(f"- Photograph ({subject}): {c.get('title') or c.get('name')} | {c.get('credit')} | {c.get('licence')} | {p.get('source')} | {at}")
         episode = f.get("source") or {}
         episode_url = episode.get("source_url") if isinstance(episode, dict) else episode
-        for page in (ch.get("podcast") or {}).get("display_facts") or []:
+        checked = ch.get("podcast") or {}
+        # Research the film keeps in its record (research_facts, not drawn) is cited here as fully as what it shows.
+        for page in [*(checked.get("display_facts") or []), *(checked.get("research_facts") or [])]:
             if page.get("context_cue"):
                 fact = page["facts"][0]
                 at = fact["chain"]["context_start"]

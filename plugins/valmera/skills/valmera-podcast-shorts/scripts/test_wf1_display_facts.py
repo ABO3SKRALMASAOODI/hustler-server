@@ -178,10 +178,11 @@ def test_reported_forecast_and_verified_original(tmp_path, monkeypatch):
     assert cited["source"]["url"] == INTERVIEW and cited["relation"] == "54:50"
 
 
-def test_estimate_cards_own_a_phone_reading_interval(tmp_path, monkeypatch, quiet_engines):
+def test_estimate_bylines_stay_in_the_record_and_captions_keep_the_frame(tmp_path, monkeypatch, quiet_engines):
+    """Was "estimate cards own a phone reading interval" (e009d501, 23 Nov). The 26 Nov research-record contract
+    (e62a49a8, c4751332, af163864; week-1120/quality/film-merge-1126.md) took the estimate bylines off the screen:
+    who estimated and the stance stay in the record, and the speaker's timed captions carry every passage."""
     import wf1_display
-    from wf1_layout import _bounds, intersects
-
     ctx, script, pack = material(tmp_path)
     passages = ["The idea that there's a 10% chance that 7 billion people die because of AI seems so farcical and out there",
                 "when you pick a number it makes you seem credible", "But for me that risk is close to zero"]
@@ -203,23 +204,13 @@ def test_estimate_cards_own_a_phone_reading_interval(tmp_path, monkeypatch, quie
         direction["display_facts"].append(dict(first=ids[0],last=ids[-1],facts=[fact]))
     monkeypatch.setattr(wf1_coverage,"speaker_moves",lambda *a:([],[]))
     scene,beats=wf.wf1_film.build(script,pack,"prints",direction)
-    ruler=wf.wf1_film.F.Ruler(scene["voices"])
     caps=[it for it in scene["items"] if it.get("role")=="cap"]
-    assert [it["t"].lower() for it in caps] == passages[1].lower().split()
-    for page, speaker in zip(beats["display_facts"], ["Jason Calacanis","Ali Ghodsi"]):
-        a,b=page["f"]
-        lettering=[it for it in scene["items"] if it.get("fact_type") and a<=it["f"][0]<b]
-        assert page["facts"][0]["source"]["url"]==INTERVIEW
-        copy=" ".join(it["t"] for it in lettering).casefold()
-        assert speaker.lower() in copy and 'estimate' in copy and 'all-in podcast' in copy
-        assert min(scene["voices"][it["v"]]["px"]/3 for it in lettering)>=16
-        for f in range(a,b):
-            visible=[it for it in lettering if it["f"][0]<=f<it["f"][1]]
-            boxes=[box for it in visible for _,box,_ in _bounds(scene,[dict(it,f=[f,f+1])],ruler)]
-            assert boxes and all(.05<=x0<x1<=.86 and .46<=y0<y1<=.81 for x0,y0,x1,y1 in boxes)
-            assert not any(intersects(box,other,pad=0) for i,box in enumerate(boxes) for other in boxes[i+1:])
-        body=" ".join(it["t"] for it in lettering if it.get("ink")==wf.wf1_film.STYLES["prints"]["ink"])
-        assert body.strip("“”") == page["facts"][0]["value"].strip("“”")
+    assert [it["t"].lower() for it in caps] == " ".join(passages).lower().split()
+    assert beats["display_facts"] == [] and not any(it.get("fact_type") for it in scene["items"])
+    research = beats["research_facts"]
+    assert [p["facts"][0]["attribution"] for p in research] == ["Jason Calacanis","Ali Ghodsi"]
+    assert all(p["facts"][0]["source"]["url"]==INTERVIEW for p in research)
+    assert [p["facts"][0]["chain"]["stance"] for p in research] == ["discussed_estimate","personal_estimate"]
 
 
 def test_retained_multi_fact_estimate_pages_keep_the_qualifications(tmp_path, monkeypatch, quiet_engines):
@@ -405,7 +396,10 @@ def test_dense_scenario_keeps_each_active_thought_with_its_credit():
             assert plan.voices["sequence_label"]["px"] >= 54
 
 
-def test_m20_verified_author_and_review_own_their_reading_intervals(tmp_path, quiet_engines, monkeypatch):
+def test_m20_verified_author_and_review_stay_in_the_record_and_the_sources(tmp_path, quiet_engines, monkeypatch):
+    """Was "own their reading intervals" (d186ca1a, 24 Nov). Under the 26 Nov research-record contract (e62a49a8,
+    c4751332, af163864) a verified excerpt with no viewer line is research: the live speaker and captions keep the
+    frame, and the excerpt, its author, date and URL reach the delivered sources from the record."""
     import wf1_display as display
     import podcast
     ctx, script, pack = material(tmp_path)
@@ -431,17 +425,13 @@ def test_m20_verified_author_and_review_own_their_reading_intervals(tmp_path, qu
     direction.update(coverage_final=True, turn_seg=4)
     monkeypatch.setattr(wf1_coverage,"speaker_moves",lambda *a: ([],[]))
     scene, beats = wf.wf1_film.build(script, pack, "prints", direction)
-    pages = beats["display_facts"]
-    assert [p["facts"][0]["source"]["url"] for p in pages] == ["essay","fda"]
-    for page, body, byline in zip(pages,[essay,review],["Dario Amodei","FDA"]):
-        a,b = page["f"]
-        ink = " ".join(i["t"] for i in scene["items"] if i.get("fact_type") and a<=i["f"][0]<b)
-        assert body in ink and byline in ink and "Concern" not in ink
-        assert all(i.get("pic")=="plate" for i in scene["items"] if i["k"] in ("shot","card")
-                   and i["f"][0]<b and a<i["f"][1])
-    assert "September 2026" in " ".join(i.get("t","") for i in scene["items"])
+    assert beats["display_facts"] == [] and not any(i.get("fact_type") for i in scene["items"])
+    research = beats["research_facts"]
+    assert [p["facts"][0]["source"]["url"] for p in research] == ["essay","fda"]
+    assert [p["facts"][0]["excerpt"]["words"] for p in research] == [essay, review]
+    assert any(i.get("role")=="cap" for i in scene["items"])
     report = podcast._sources_md("episode", [dict(n=1,title="Forecast",style="prints",
-        film=dict(window=[0,38.14],checks=dict(podcast=dict(display_facts=pages))))])
+        film=dict(window=[0,38.14],checks=dict(podcast=dict(display_facts=[],research_facts=research))))])
     assert all(t in report for t in (essay,"essay",review,"fda","September 2026"))
 
 

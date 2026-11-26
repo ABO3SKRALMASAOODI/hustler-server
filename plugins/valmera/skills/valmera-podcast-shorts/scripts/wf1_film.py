@@ -2169,6 +2169,15 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     cut_pts.append(fa)
                     continue
             kw = dict(grade=dict(TAKE_PAST)) if any(s0 <= fa < s1 for s0, s1 in take_past) else {}
+            prev = P.items[-1] if P.items else None
+            if (prev is not None and prev["id"] in drive_ids and prev["pic"] == pieces[k]["key"] and prev["f"][1] == fa
+                    and abs(prev["src"][1] - t0) < 1e-3 and set(prev) == {"id","k","f","pic","src",*kw}
+                    and prev.get("grade") == kw.get("grade")):
+                # A layout edge where this framing's picture does not change (the payoff word, a page that drew
+                # elsewhere) is no cut: the running shot continues, so no join and no flash lands inside it.
+                prev["f"][1] = fb
+                prev["src"][1] = round(max(t1,prev["src"][0]+1/FPS),4)
+                continue
             it = P.shot([fa,fb], pieces[k]["key"], None, src=[round(t0,4),round(max(t1,t0+1/FPS),4)], **kw)
             it.pop("crop")
             drive_ids.add(it["id"])
@@ -3202,8 +3211,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     cue_starts = {step["at"] for _,_,page in timed_facts if page.get("sequence_kind") == "comparison"
                   for step in page["sequence"]}
     cue_starts.update(r['first'] for r in reading.get('voice_entries', []))
-    reveal_words = {p["first"] for _,_,p in timed_facts if (p.get("analogy_step") or {}).get("reveal")
-                    and (p["analogy_step"].get("label") or p["last"] < len(clock.words)-1)}
+    # A comparison's consequence is withheld until it is heard, the closing one too: the closing phrase still
+    # becomes one caption held to the end once its last word lands (closing_phrase below), never printed early.
+    reveal_words = {p["first"] for _,_,p in timed_facts if (p.get("analogy_step") or {}).get("reveal")}
     reveal_words.update(c["reveal"] for _,_,c in research_views)
     for _,end,dial in instrument_scenes:
         # As the speaker acts out the change and its consequence, ink each word

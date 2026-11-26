@@ -168,11 +168,12 @@ def test_a_rebuild_with_no_open_holds_adds_no_stress_moves(tmp_path, quiet_engin
     assert sup["coverage"]["unresolved_holds"] == [] and second["coverage"]["stress_moves"] == []
 
 
-@pytest.mark.parametrize("story_word,flashed", [(7, True), (3, False)])
-def test_the_story_turn_flash_snaps_to_a_real_cut_or_stays_off(tmp_path, quiet_engines, monkeypatch, story_word, flashed):
-    """Integration of the craft and take lanes (20 Nov): the story turn's flash lands on the film's real cut nearest it
-    (here the speaker change inside the two-shot), never on a join of its own inside a continuous shot; with no real
-    cut within a second there is no story flash, and the take is never split at the story turn."""
+@pytest.mark.parametrize("story_word,punched", [(7, False), (3, True)])
+def test_the_story_turn_flash_lands_on_a_real_cut(tmp_path, quiet_engines, monkeypatch, story_word, punched):
+    """Integration of the craft and take lanes (20 Nov): the story turn's flash lands on a real cut, never on a join of
+    its own inside a continuous shot. Since 08c8d142 (23 Nov) a story turn that no footage covers and that comes more
+    than three seconds before the payoff is the speaker's punch-in (a real cut to the close-up framing), so its flash
+    lands on that cut; a story turn near the payoff never splits the take and its flash snaps to the show's own cut."""
     words = _sup(tmp_path, cuts_two_shot())
     for i, w in enumerate(words["words"]["words"]):
         w["seg"] = 0 if i < story_word else 1 if i < 15 else 2
@@ -183,14 +184,15 @@ def test_the_story_turn_flash_snaps_to_a_real_cut_or_stays_off(tmp_path, quiet_e
     l1, beats = film.build(script, words, "footage-cut", dict(turn_seg=2, story_turn_seg=1, coverage_final=True))
     starts = {it["f"][0] for it in l1["items"] if it["k"] == "shot"}
     story_f = beats["story_turn_f"]
-    assert story_f is not None and story_f not in starts
     flashes = _flash_frames(l1)
-    assert set(flashes) <= starts
-    real = sorted(f for f in starts if 0 < f and abs(f - story_f) <= 30)
-    if flashed:
-        assert real and min(real, key=lambda f: (abs(f - story_f), f)) in flashes
+    assert story_f is not None and set(flashes) <= starts
+    framing = next((p for p in beats["coverage"]["take_pieces"] if p["f"][0] == story_f), None)
+    if punched:
+        assert framing and framing["punch"] and story_f in flashes
     else:
-        assert not real and len(flashes) == 1                              # the payoff's flash alone
+        assert framing is None and story_f not in starts
+        real = sorted(f for f in starts if 0 < f and abs(f - story_f) <= 30)
+        assert real and min(real, key=lambda f: (abs(f - story_f), f)) in flashes
 
 
 def test_scarce_footage_keeps_live_argument_and_attributes_listener_cut(tmp_path,quiet_engines,monkeypatch):
