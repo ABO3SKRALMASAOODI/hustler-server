@@ -67,6 +67,27 @@ def start_worker(wf):
     warm_film_tools.enabled = wf == "wf3"
 
 
+def recorded_cut(engine, options, directory, batch):
+    """Cut the same Studio session in its native format when a narrated picture doesn't carry its words."""
+    state = shell.jload(directory / "run.json")
+    retry = batch / "recuts" / state["run_id"]
+    if not (retry / "run.json").exists():
+        checked = shell.jload(directory / "check.json")["checks"]
+        script = shell.jload(directory / "script.json")
+        replacement = engine.recorded_recut(script, checked)
+        if not replacement:
+            return
+        retry.mkdir(parents=True, exist_ok=True)
+        shell.jsave(str(retry / "ideas.json"), shell.jload(directory / "ideas.json"))
+        shell.jsave(str(retry / "script.json"), replacement)
+        shell.jsave(str(retry / "run.json"), dict(state, pid=None, done=["ideas", "script"]))
+    options.work_root = str(retry.parent)
+
+
+def finished(folder):
+    return bool(shell.jload(Path(folder) / "film.json")["checks"]["ok"])
+
+
 def make_film(wf, root, batch, index, idea, until_script=False):
     from contextlib import redirect_stdout, redirect_stderr
     from types import SimpleNamespace
@@ -111,11 +132,19 @@ def make_film(wf, root, batch, index, idea, until_script=False):
                               out=str(out), engine=_ENGINE, until="script" if until_script else None)
     with (batch / (rid + ".log")).open("a", buffering=1) as log, redirect_stdout(log), redirect_stderr(log):
         for attempt in range(2):
+            if wf == "wf2" and not until_script:
+                options.work_root = str(directory.parent)
+                options.until = "check"
+                if "check" not in shell.jload(state_path)["done"] and shell.run(options):
+                    stopped = shell.jload(Path(options.work_root) / rid / "run.json")["stopped"]
+                    continue
+                recorded_cut(_ENGINE, options, directory, batch)
+                options.until = None
             if shell.run(options) == 0:
                 if until_script:
                     return None
                 return str(next(out.glob("*/film.json")).parent)
-            stopped = shell.jload(state_path)["stopped"]
+            stopped = shell.jload(Path(options.work_root) / rid / "run.json")["stopped"]
             if attempt == 0 and stopped["stage"] == "script":
                 # A candidate whose facts or recording could not support the film gives way to a reserve.
                 break
@@ -140,7 +169,7 @@ def build_wave(wf, root, batch, target, slots, tried):
     films, errors = {}, {}
     for index, _ in items:
         saved = next((batch / "masters" / film_id(batch, index)).glob("*/film.json"), None)
-        if saved:
+        if saved and finished(saved.parent):
             films[index] = str(saved.parent)
     prior = shell.jload(batch / "results.json", {}) or {}
     # Give untried reserves the free slots first. A later run can revisit a stopped film with its checkpoints.
@@ -173,9 +202,11 @@ def build_wave(wf, root, batch, target, slots, tried):
                     if stage == "script" and result is None:
                         future = editors.submit(make_film, wf, root, batch, i, idea)
                         pending[future] = (i, idea, "finish")
-                    else:
+                    elif finished(result):
                         films[i] = result
                         errors.pop(str(i), None)
+                    else:
+                        errors[str(i)] = "The private cut still has measured defects; continuing with the next source."
                 except Exception as exc:
                     errors[str(i)] = str(exc)
     shell.jsave(str(batch / "results.json"), dict(films=films, errors=errors))

@@ -1537,6 +1537,25 @@ def showcase_script(idea, card, rec, rc, chk, stt, tag, spend):
                 cta=dict(say=None, show="valmera.io", needs_fulfilment=False), words=0, spend=spend)
 
 
+def recorded_recut(script, checks):
+    if checks["ok"] or script["script"].get("format") == "showcase":
+        return None
+    receipts = script["receipts"]
+    if len(receipts["asks"]) != 1:
+        return None
+    rec = jload(script["record"])
+    if not rec or not ui_shots(rec):
+        return None
+    card = cards()[script["style"]["id"]]
+    result = showcase_script(script["idea_full"], card, rec, receipts, script["export_check"],
+                             {"original": {"record": script["record"]}}, "original", script.get("spend", []))
+    result["styles_banned"] = script.get("styles_banned", [])
+    result["recut"] = dict(from_format="tutorial", recording=rec["sid"],
+                           picture_repairs=(checks.get("marketing") or {}).get("picture_check"),
+                           narration=(checks.get("stories") or {}).get("narration", {}).get("gate"))
+    return result
+
+
 SHOWCASE_S = (12.0, 20.0)      # the export's own stretch in a showcase: one complete thought, ended where he pauses (17 Nov: the
                                # film no longer spends 2.4 s on a raw intro, so the edit gets the seconds of a whole thought)
 

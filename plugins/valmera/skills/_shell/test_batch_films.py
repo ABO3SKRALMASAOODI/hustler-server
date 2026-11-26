@@ -90,7 +90,7 @@ def test_scripts_continue_during_finishing_and_use_a_distinct_reserve(tmp_path, 
     from types import SimpleNamespace
     run = tmp_path / "batch"
     run.mkdir()
-    ideas = [dict(title=f"Film {i}", subject=f"Subject {i}", supply=dict(ok=True), style="archive") for i in range(7)]
+    ideas = [dict(title=f"Film {i}", subject=f"Subject {i}", supply=dict(ok=True), style="archive") for i in range(8)]
     (run / "plan.json").write_text(json.dumps(dict(ideas=[ideas[0], *ideas], spend=[])))
     started_third = Event()
     def make(wf, root, batch_dir, index, idea, until_script=False):
@@ -101,13 +101,16 @@ def test_scripts_continue_during_finishing_and_use_a_distinct_reserve(tmp_path, 
                 raise RuntimeError("unavailable source")
             return None
         assert started_third.wait(timeout=5)
-        return str(batch_dir / idea["title"])
+        folder = batch_dir / idea["title"]
+        folder.mkdir()
+        (folder / "film.json").write_text(json.dumps(dict(checks=dict(ok=index != 2))))
+        return str(folder)
     engine = SimpleNamespace(cards=lambda: {i:dict(id=i, buildable=True) for i in "abcd"})
     monkeypatch.setattr(batch, "workflow", lambda wf: engine)
     monkeypatch.setattr(batch, "make_film", make)
     monkeypatch.setattr(batch.concurrent.futures, "ProcessPoolExecutor", ThreadPoolExecutor)
     films = batch.build("wf3", tmp_path, run, 6, 2)
-    assert [p.name for p in films] == ["Film 0", "Film 2", "Film 3", "Film 4", "Film 5", "Film 6"]
+    assert [p.name for p in films] == ["Film 0", "Film 3", "Film 4", "Film 5", "Film 6", "Film 7"]
     assert "unavailable source" in json.loads((run / "results.json").read_text())["errors"]["1"]
 
 
