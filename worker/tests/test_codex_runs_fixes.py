@@ -365,13 +365,14 @@ def test_a_stock_clip_over_the_cap_uses_the_next_smaller_rendition(monkeypatch, 
     assert tried == ["https://v/3840", "https://v/2560", "https://v/1920"]
     assert (item["picked_width"], item["picked_height"]) == (1920, 1080)
     assert item["source_url"] == "https://v/1920"
-    # another failure is not retried; nothing under 720 lines is tried
+    # When every higher rendition is too large, the smallest available file is tried.
     tried.clear()
     monkeypatch.setattr(net_fetch, "download", lambda url, *a, **k: (
         tried.append(url), (_ for _ in ()).throw(net_fetch.FetchError("file is 99 MB, over the 90 MB limit")))[1])
     with pytest.raises(net_fetch.FetchError):
         stock.download({"kind": stock.KIND_VIDEO, "_files": files}, str(tmp_path / "t.mp4"), 1080, 1920)
-    assert "https://v/640" not in tried
+    assert tried[:5] == ["https://v/3840", "https://v/2560", "https://v/1920",
+                         "https://v/1280", "https://v/640"]
 
 
 # ── the render review quotes the corrected words ────────────────────────────
