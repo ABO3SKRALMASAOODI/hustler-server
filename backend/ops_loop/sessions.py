@@ -769,3 +769,158 @@ def brief(s):
                                  or m.get("blocked_prompt")),
             "failed_jobs": c["failed_jobs"], "error_replies": c["error_replies"],
             "re_review": bool(s.get("previous_review"))}
+
+
+def chat(cur, session, presign):
+    """Hydrate only this card's visible rows, without the reviewer text limits."""
+    jobs = session.rows["jobs"]
+    message_ids = {m["id"] for m in session.rows["messages"]
+                   if m["role"] in ("user", "assistant")}
+    message_ids.update(mid for j in jobs if j["type"] == "agent_turn"
+                       and (mid := _int(j.get("message_id"))) is not None)
+    cur.execute("""
+        SELECT m.id, p.id AS project_id, m.created_at, m.role, m.content,
+               m.meta->>'edl_version' AS version, m.meta->>'error' AS error,
+               m.meta->'preview'->>'render_asset_id' AS preview_id,
+               m.meta->'blocked_prompt'->>'text' AS held
+          FROM chat_messages m JOIN projects p ON p.chat_session_id = m.session_id
+         WHERE m.id = ANY(%s) AND p.id = ANY(%s)
+           AND m.role IN ('user', 'assistant')
+           AND COALESCE(m.meta->>'shorts_boot', '') <> 'true'
+         ORDER BY m.created_at, m.id""",
+                (sorted(message_ids), list(session.data["projects"])))
+    messages = cur.fetchall()
+    mcp_ids = [j["id"] for j in jobs if j["type"] == "mcp_tool"]
+    calls = []
+    if mcp_ids:
+        cur.execute("""
+            SELECT id, project_id, created_at, updated_at, state,
+                   payload->>'tool' AS tool, payload->'args' AS args,
+                   COALESCE(result->>'text', error, (result - 'timings')::text) AS text,
+                   result->>'edl_version' AS version,
+                   COALESCE(result->>'render_asset_id', result->'preview'->>'render_asset_id',
+                            result->'download_receipt'->>'asset_id') AS preview_id,
+                   (result->>'is_error') IN ('true','1') AS error
+              FROM video_jobs WHERE id = ANY(%s) ORDER BY created_at, id""",
+                    (mcp_ids,))
+        calls = cur.fetchall()
+
+    # Include the state already on screen when a returning user opens the
+    # project. The reply's stamped asset wins even for a reused older preview.
+    cur.execute("""
+        SELECT id, project_id, created_at, storage_key, duration_s,
+               meta->>'edl_version' AS version, meta->>'variant' AS variant,
+               meta->>'r2_purged_at' IS NOT NULL AS purged
+          FROM assets WHERE project_id = ANY(%s) AND kind = 'render'
+           AND created_at <= %s AND COALESCE(meta->>'variant','') <> 'preview_check'
+         ORDER BY created_at, id""", (list(session.data["projects"]), session["ended_at"]))
+    renders = cur.fetchall()
+    entries = chat_entries(session, messages, calls, renders)
+
+    failure_kinds = {"player_error", "upload_failed", "upload_rejected", "export_blocked"}
+    failure_ids = [e["id"] for e in session.next_events
+                   if e["project_id"] in session.data["projects"] and e["kind"] in failure_kinds]
+    if failure_ids:
+        cur.execute("""SELECT id, created_at, kind, COALESCE(detail->>'reason',
+                       detail->>'message', detail->>'media_message', detail->>'code') AS text
+                       FROM client_events WHERE id = ANY(%s) ORDER BY created_at, id""",
+                    (failure_ids,))
+        for e in cur.fetchall():
+            entries.append({"at": _aware(e["created_at"]), "role": "failure",
+                            "label": e["kind"].replace("_", " "), "text": e["text"]})
+    entries.sort(key=lambda e: e["at"])
+    urls = {}
+    for entry in entries:
+        entry["at"] = entry["at"].isoformat()
+        media = entry.get("video")
+        if media:
+            key = media.pop("play_key", None)
+            if key and key not in urls:
+                urls[key] = presign(key)
+            media["url"] = urls.get(key)
+    return {"key": session["key"], "entries": entries}
+
+
+def chat_entries(session, messages, calls, renders):
+    """Studio stamps the final version of a turn on its assistant message.
+    For legacy unstamped replies use only media already present at that time.
+    Never cross project boundaries, even when siblings share version numbers.
+    """
+    jobs = session.rows["jobs"]
+    job_assets = {_int(j.get("render_asset_id")): j for j in jobs
+                  if j.get("render_asset_id")}
+    entries, used = [], set()
+
+    def asset_version(asset):
+        version = _int(asset["version"])
+        if version is None:
+            version = _int(job_assets.get(asset["id"], {}).get("edl_version"))
+        return version
+
+    def attach(entry, asset):
+        j = job_assets.get(asset["id"], {})
+        entry["video"] = {
+            "asset_id": asset["id"],
+            "version": asset_version(asset),
+            "kind": "export" if asset["variant"] == "final" or j.get("type") == "final" else "preview",
+            "duration_s": _num(asset["duration_s"]) or _num(j.get("duration_s")),
+            "purged": asset["purged"],
+            "play_key": None if asset["purged"] else asset["storage_key"]}
+        used.add(asset["id"])
+
+    by_id = {a["id"]: a for a in renders}
+    by_project = {}
+    for asset in renders:
+        by_project.setdefault(asset["project_id"], []).append(asset)
+
+    def at_reply(entry, row):
+        version = _int(row["version"])
+        asset = by_id.get(_int(row["preview_id"]))
+        pid = row["project_id"]
+        if (asset is None or asset["project_id"] != pid or
+                (version is not None and asset_version(asset) not in (None, version))):
+            asset = next((a for a in reversed(by_project.get(pid, []))
+                          if _aware(a["created_at"]) <= entry["at"] and
+                          (version is None or asset_version(a) == version)), None)
+        if asset:
+            attach(entry, asset)
+        entry["version"] = version
+
+    typed = {(m["project_id"], m["content"]) for m in messages if m["role"] == "user"}
+    for m in messages:
+        at = _aware(m["created_at"])
+        if m["held"] and (m["project_id"], m["held"]) not in typed:
+            entries.append({"role": "user", "at": at, "text": m["held"]})
+        entry = {"role": m["role"], "at": at, "text": m["content"],
+                 "error": bool(m["error"])}
+        if m["role"] == "assistant":
+            at_reply(entry, m)
+        entries.append(entry)
+    for call in calls:
+        entry = {"role": "tool", "at": _aware(call["created_at"]),
+                 "tool": call["tool"], "args": call["args"], "text": call["text"],
+                 "state": call["state"], "error": bool(call["error"]) or call["state"] == "failed"}
+        if call["preview_id"]:
+            at_reply(entry, call)
+        entries.append(entry)
+    replies = {(m["project_id"], _int(m["version"])) for m in messages
+               if m["role"] == "assistant"}
+    for asset in renders:
+        at = _aware(asset["created_at"])
+        if asset["id"] in used or at < session["started_at"]:
+            continue
+        if (replies and session["surface"] != "mcp" and asset["variant"] != "final"
+                and (asset["project_id"], asset_version(asset)) not in replies):
+            continue
+        # A final, a delayed preview, or media made without an assistant
+        # message (including MCP). Keep these at their actual delivery time.
+        entry = {"role": "video", "at": at}
+        attach(entry, asset)
+        entries.append(entry)
+    for job in jobs:
+        if job["state"] == "failed" and job["type"] in (
+                "agent_turn", "preview", "final", "shorts_plan", "index"):
+            entries.append({"role": "failure", "at": _aware(job["updated_at"]),
+                            "label": job["type"].replace("_", " ") + " failed",
+                            "text": job.get("error")})
+    return entries

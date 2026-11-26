@@ -41,7 +41,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 import storage
 from ops_loop import (EVIDENCE_PREFIX, VERDICTS, journeys,
-                      session_list, views)
+                      session_list, sessions, views)
 from routes.admin import (admin_required, gzip_large_json,
                           legacy_error_response)
 
@@ -147,6 +147,29 @@ def ops_sessions():
         conn.close()
 
 
+@admin_ops_bp.get("/admin/video/ops/session_chat")
+@admin_required
+def ops_session_chat():
+    key = request.args.get("key", "")
+    match = re.fullmatch(r"p([1-9][0-9]{0,9})-([0-9]{1,10})", key)
+    if not match:
+        return jsonify(error="Expected a session key such as p4746-1792941458"), 400
+    project, epoch = map(int, match.groups())
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        found, _ = sessions.discover(cur, datetime.fromtimestamp(epoch, timezone.utc),
+                                     project_ids=[project], include_unsettled=True)
+        session = next((s for s in found if s["key"] == key), None)
+        if session is None:
+            return jsonify(error="This session is no longer in this window. Refresh Journeys."), 404
+        response = jsonify(sessions.chat(cur, session, _admin_presign))
+        response.cache_control.no_store = True
+        return response
+    finally:
+        conn.close()
+
+
 @admin_ops_bp.route("/admin/video/ops/session-list", methods=["GET"])
 @admin_required
 def ops_session_list():
@@ -219,7 +242,7 @@ def _journey_snapshot(window, fresh=False):
         finally:
             conn.close()
     got = admin_cache.shared_report(JOURNEYS_ENDPOINT,
-                                    {"window": window, "version": 2}, compute,
+                                    {"window": window, "version": 3}, compute,
                                     fresh=fresh,
                                     logger=current_app.logger)
     if got.get("pending"):
