@@ -707,3 +707,16 @@ def test_verified_export_titles_fill_their_own_anchors_and_only_missing_lines_re
     assert report["clips"] == report["lines"] == 2
     assert [r["clips"][0]["path"] for r in pack["footage"]] == [
         str(tmp_path / "footage/kept.mp4"), str(tmp_path / "footage_plain/kept.mp4")]
+
+
+def test_showcase_passes_the_requested_music_setting_to_the_finisher(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    (tmp_path / "script.json").write_text("{}")
+    received = []
+    def check(ctx, rd, sc):
+        received.append(dict(ctx.args))
+        return {"checks": {"ok": True}}
+    monkeypatch.setattr(P.W3, "check", check)
+    for args in ({}, {"music": True}, {"music": False}):
+        P.check(SimpleNamespace(args=args, run_dir=str(tmp_path)), {}, {"devices": {"format": "showcase"}})
+    assert received == [{}, {"music": True}, {"music": False}]

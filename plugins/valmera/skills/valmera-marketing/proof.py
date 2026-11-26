@@ -3669,12 +3669,6 @@ def render(ctx, script, sc):
 
 
 def check(ctx, rd, sc):
-    if (sc.get("devices") or {}).get("format") == "showcase":
-        # The showcase's sound is the speaker's own and the Studio's (owner, 17 Nov: "what does Mark Cuban talking have to do
-        # with a music type that's in Turkish series"). The references under a talking edit are speech-led (DUQzZ_kE3O7 music
-        # in 9% of the reel, DJrjetsKPHW 33%): no library bed is baked in; the song is the platform's own catalog hit chosen at
-        # delivery (platform_music.json, the whole film at a quarter of the voice), as the judge plays under marketing talk.
-        ctx.args = dict(ctx.args or {}, music=False)
     r = W3.check(ctx, rd, sc)
     c = r["checks"]
     c["marketing"] = dict(receipts=json.load(open(os.path.join(ctx.run_dir, "script.json"))).get("receipts"),
