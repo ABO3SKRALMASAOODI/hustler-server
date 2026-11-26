@@ -155,6 +155,23 @@ def rank_footage(candidates, query):
                   reverse=True)
 
 
+def rank_memes(candidates):
+    """Meme clips: the short ones first (a meme is seconds long; a long
+    upload is a compilation or a video about it, and fetch_url pays for
+    every byte). Unknown durations sit between. Within a length class the
+    search engine's own order decides (``search_rank``), not the footage
+    ranker's title rules: a reaction clip is what a meme search is for
+    (#935)."""
+    def score(ic):
+        i, c = ic
+        d = c.get("duration_s") or 0
+        cls = 1 if not d else (4 if d <= 20 else 3 if d <= 60 else
+                               1 if d <= 180 else -2)
+        rank = c.get("search_rank")
+        return (-cls, rank if isinstance(rank, int) else 10_000 + i)
+    return [c for _, c in sorted(enumerate(candidates or []), key=score)]
+
+
 def search_footage(query, count=SEARCH_COUNT):
     """Candidate links for real b-roll of a named topic, best guess first."""
     return rank_footage(_yt_candidates(query, count,
@@ -284,6 +301,9 @@ def _candidates(engine, query, count, what="a search query"):
                          "").strip() or None,
             "duration_s": dur,
             "url": url,
+            # the engine's own relevance order, so a ranker that must not
+            # inherit another ranker's title rules can return to it
+            "search_rank": len(out),
         }
         if thumb:
             entry["_thumb"] = thumb

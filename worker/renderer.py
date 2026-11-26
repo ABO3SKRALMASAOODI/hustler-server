@@ -32,6 +32,7 @@ import engine_branch
 import audit
 import camera
 import captions as caplib
+import chroma_key
 import config
 import execution_inputs
 import db as dbx
@@ -1035,6 +1036,17 @@ def frame_dims(src_w, src_h, ratio, *, delivery=False):
 DELIVERY_BOX = {"2k": (1440, 2560), "4k": (2160, 3840)}
 
 
+def stabilize_filter(intensity=0.5):
+    """The stabilize stylize's deshake chain. FFmpeg accepts only multiples
+    of 16 for the search radii (#1199); ``edge=mirror`` hides the small
+    transformed borders without a permanent crop. stabilize_video dry-runs
+    this exact chain to measure the jitter it removes."""
+    i_ = max(0.0, min(1.0, float(0.5 if intensity is None else intensity)))
+    radius = max(16, 16 * int(round((8 + 40 * i_) / 16)))
+    return (f"deshake=rx={radius}:ry={radius}:edge=mirror:"
+            "blocksize=8:search=less")
+
+
 def delivery_resolution_dims(W, H, resolution):
     """(W, H) of a final export at ``resolution`` ("2k" / "4k"): the HD master
     scaled up, aspect kept, until it fills that class's box (a 9:16 master
@@ -1047,6 +1059,32 @@ def delivery_resolution_dims(W, H, resolution):
     if k <= 1.0:
         return int(W), int(H)
     return _even(W * k), _even(H * k)
+
+
+# Contrast-adaptive sharpening at the upscaled size (p6311: "sharpen,
+# denoise, improve the detail (upscale)" got a plain lanczos 2K whose frames
+# read soft). Measured at 0.6 (26 Nov) on three p6311 frames scaled
+# 540->270 and back, against the real 540 frames: Laplacian detail 9.7 ->
+# 12.0, 10.7 -> 12.9, 7.8 -> 10.3 and PSNR 28.05 -> 28.21, 28.33 -> 28.49,
+# 28.31 -> 28.43 dB against plain lanczos: closer to the true picture, not
+# merely crisper. A malformed UPSCALE_DETAIL falls back to 0.6.
+def _upscale_detail(raw):
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0.6
+    return v if v == v and v >= 0 else 0.6
+
+
+UPSCALE_DETAIL = _upscale_detail(os.getenv("UPSCALE_DETAIL", "0.6"))
+
+
+def upscale_filter(W2, H2):
+    """The 2K/4K delivery scale: lanczos, then the detail step."""
+    chain = f"scale={W2}:{H2}:flags=lanczos"
+    if UPSCALE_DETAIL > 0:
+        chain += f",cas=strength={min(1.0, UPSCALE_DETAIL):.2f}"
+    return chain + ",setsar=1"
 
 
 def delivery_upscale(edl, out_path, workdir, cancelled_cb=None):
@@ -1066,7 +1104,7 @@ def delivery_upscale(edl, out_path, workdir, cancelled_cb=None):
     target = export_video_kbps(edl, float(info.get("duration") or 0.0))
     media.run(["ffmpeg", "-y", "-v", "error", "-i", out_path,
                "-map", "0:v:0", "-map", "0:a?",
-               "-vf", f"scale={W2}:{H2}:flags=lanczos,setsar=1",
+               "-vf", upscale_filter(W2, H2),
                *final_video_encode(W2, H2, fps, target), "-pix_fmt", "yuv420p",
                "-c:a", "copy", "-movflags", "+faststart", tmp],
               cancelled_cb=cancelled_cb)
@@ -4197,6 +4235,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       wm_anchor_y=None,
                       plate_idx=None, plate_box=None, behind_inputs=None,
                       patch_inputs=None, cap_burn_offset=None,
+                      key_input=None,
                       picture_card_inputs=None, main_video_inputs=None,
                       loudness="auto", dialogue_gain=None,
                       dialogue_probe=False, focus_origin=None,
@@ -5046,6 +5085,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          f":enable='between(t,{pon:.6f},{ppe:.6f})'"
                          f"[vptc{pj}]")
             vsrc = f"vptc{pj}"
+        # Chroma key (worker/chroma_key.py): the screen keyed out of the
+        # SOURCE picture and the new background laid under it, so every
+        # trim, framing, grade and caption downstream sees the composite.
+        if key_input is not None:
+            kparts, vsrc = chroma_key.graph_parts(
+                vsrc, key_input[1], key_input[0], src_w or W, src_h or H)
+            parts.extend(kparts)
     # Distant keep clusters read from their own bounded inputs (render_edl
     # opens them only when nothing touches the [0:v] stream before the trims:
     # no repaint patches, no picture-track pad). Each segment's video tap
@@ -5068,7 +5114,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                     sp[key]["tap"] = next(t_iter)
     owners = None
     if main_video_inputs and n > 1 and not patch_inputs and src_pad <= 0 \
-            and not fx_taps:
+            and not fx_taps and key_input is None:
         owners = []
         for seg_a, seg_b in keep:
             hit = [ix for ix, a, b in main_video_inputs
@@ -6305,10 +6351,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # FFmpeg accepts only multiples of 16 here, despite exposing
             # rx/ry as integer options. Intermediate strengths used to
             # compile (e.g. 28 at .5) but fail at filter initialization.
-            radius = max(16, 16 * int(round((8 + 40 * i_) / 16)))
-            parts.append(
-                f"[{vlabel}]deshake=rx={radius}:ry={radius}:edge=mirror:"
-                f"blocksize=8:search=less[{out_lab}]")
+            parts.append(f"[{vlabel}]{stabilize_filter(i_)}[{out_lab}]")
         else:
             continue
         if card_runs and kind in ("shake", "motion_blur"):
@@ -8587,6 +8630,26 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         patch_inputs.append((next_idx, item))
         next_idx += 1
 
+    # Chroma key (green / blue screen): its background picture is one more
+    # input, keyed on the source clock right after the patches. A fetch that
+    # fails is tried again; a picture that still cannot be read keys onto the
+    # neutral gradient plate (never black, never a failed render) and the
+    # render log says why. A fringe clean needs no input.
+    key_input = None
+    if (edl.get("effects") or {}).get("key") and not audio_only:
+        args, key_item = chroma_key.input_args(
+            edl, workdir, info.get("width"), info.get("height"),
+            lambda k: _fetch(k, "overlay", next_idx))
+        if key_item.get("fallback"):
+            print(f"[render] key: {key_item['fallback']} — keyed onto the "
+                  "neutral gradient", flush=True)
+        if args:
+            extra_inputs += args
+            key_input = (next_idx, key_item)
+            next_idx += 1
+        else:
+            key_input = (None, key_item)
+
     # Separated stems (round 97): when the EDL rebalances music vs voice,
     # the two stem files become inputs and build_filtergraph premixes them
     # in place of the original track. Any failure here DEGRADES to the
@@ -8771,7 +8834,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # picture-track pad), and never for an audio-only rebuild.
     main_video_inputs = None
     if seek_main_source and not patch_inputs and src_pad <= 0 \
-            and not audio_only:
+            and not audio_only and key_input is None:
         clusters = _keep_clusters(
             edl["keep"], config.KEEP_CLUSTER_GAP_S,
             _cluster_input_cap(info.get("width"), info.get("height")))
@@ -9130,6 +9193,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                  plate_idx=plate_idx, plate_box=plate_box,
                                  behind_inputs=behind_inputs,
                                  patch_inputs=patch_inputs,
+                                 key_input=key_input,
                                  cap_burn_offset=cap_burn_offset,
                                  picture_card_inputs=picture_card_inputs,
                                  motion_inputs=motion_inputs,
