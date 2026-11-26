@@ -983,7 +983,11 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
 
 
 def action_holds(rows, coverage, fps=30, lead=3, detail=None):
-    """Carry a verified result to the end of its clause. A held result keeps its actual clock."""
+    """One verified action per single-action clause, playing at its actual clock. The row ends where the action
+    ends, so the take returns there and every credit and label laid on the row ends with the picture (26 Nov: a
+    row carried three seconds past the action left its result credit over the live speaker). A sliver under two
+    frames before the next picture or the clause end stays with the clip: no take shot is that short, and the
+    frame would be empty."""
     windows = coverage["windows"]
     actions = {}
     for row in rows:
@@ -1009,7 +1013,7 @@ def action_holds(rows, coverage, fps=30, lead=3, detail=None):
         stop = min(end, a+motion_frames)
         for r in choices:
             out.remove(r)
-        end = min(end, stop + 3*fps) if best[4].get("action_box") else stop
+        end = stop if end - stop >= 2 else end
         rec = dict(best[4], action_end=stop)
         if "audit_until" in rec:
             rec["audit_until"] = end

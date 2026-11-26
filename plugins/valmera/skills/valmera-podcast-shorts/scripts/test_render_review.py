@@ -147,6 +147,19 @@ def test_resume_rebuilds_caption_pagination_before_reusing_render(tmp_path,monke
     assert wf.render(ctx,{},sc)['film']=='complete-captions.mp4'
 
 
+def test_a_score_planned_before_the_research_record_captions_is_rebuilt(tmp_path,monkeypatch):
+    """Contract 14 (main, a7e36bab) planned research reading cards and omitted the captions under them: such a
+    score is planned again before it renders."""
+    assert wf.wf1_film.CAPTION_CONTRACT > 14
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda _:None)
+    sc=dict(beats=dict(pictures=[],caption_lines=4,caption_contract=14),spend=[])
+    rebuilt=[]
+    monkeypatch.setattr(wf,'score',lambda *a:rebuilt.append(1) or dict(beats=dict(pictures=[],caption_lines=4,caption_contract=wf.wf1_film.CAPTION_CONTRACT),spend=[]))
+    monkeypatch.setattr(wf.wf3,'render',lambda ctx,script,score:dict(film='rebuilt.mp4'))
+    monkeypatch.setattr(wf,'_render_review',lambda *a:dict(rejected=0,moving_share=1.,placements=[],spend=[]))
+    assert wf.render(ctx,{},sc)['film']=='rebuilt.mp4' and rebuilt
+
+
 def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkeypatch):
     ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
     names=['a.jpg','b.jpg','c.jpg','d.jpg','good.jpg']

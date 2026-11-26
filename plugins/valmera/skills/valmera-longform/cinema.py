@@ -1024,7 +1024,7 @@ def build(sc,pack):
             else:
                 n=row['f'][1]-row['f'][0]
                 ratio=c['w']/c['h']
-                if ratio>=BLEED_RATIO and c['w']>=960:
+                if BLEED_RATIO <= ratio <= (W/H)/.84 and c['w'] >= 960:
                     # A landscape photograph fills the frame and the camera
                     # pushes in; its cover crop keeps at least 84% of it.
                     P.shot(row['f'],key,F.push(F.cover_crop(c['w'],c['h'],W/H,(.5,.45),(.5,.45)),n,.10 if n>240 else .07,(.5,.45)))
@@ -1040,7 +1040,7 @@ def build(sc,pack):
                     else:
                         P.page(row['f'],'#14161A',grain=.005)
                     growth=.12 if n>240 else .06
-                    height=min(.70,.80/(1+growth),.88*W/H/ratio);width=height*ratio/(W/H)
+                    height=min(.70,.80/(1+growth),.88*W/H/(ratio*(1+growth)));width=height*ratio/(W/H)
                     P.card(row['f'],key,[.5-width/2,.45-height/2,.5+width/2,.45+height/2],
                            s=[1+growth*q/max(n-1,1) for q in range(n)])
         else:
