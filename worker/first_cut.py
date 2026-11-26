@@ -914,24 +914,33 @@ def stutter_spans(words, keep):
 
 # A removal shorter than this inside one source shot saves no time anyone
 # hears and makes the picture jump: a hard step in a continuous take (p6269:
-# the pause cuts left 1759.76 -> 1759.80, 40 ms, in the middle of shot 199).
+# the silence cuts left 1759.76 -> 1759.80, 40 ms, in the middle of shot 199).
 MICRO_CUT_S = 0.12
 
 
-def micro_cut_keep(keep, shots):
-    """``keep`` with every sub-MICRO_CUT_S removal that lies inside one
-    source shot closed (the two kept pieces joined); None when there is none.
-    A removal on a source cut is a real edit and stays."""
+def micro_cut_keep(keep, shots, words=None):
+    """``keep`` with every sub-MICRO_CUT_S sliver of SILENCE that lies inside
+    one source shot closed (the two kept pieces joined); None when there is
+    none. A removal on a source cut is a real edit and stays, and so is one
+    that takes out a transcribed word (a filler, a stutter, a repeat cut at
+    its word times): only a gap no word's middle falls in is a pause sliver."""
     if not keep or len(keep) < 2:
         return None
     edges = sorted(float(s["start"]) for s in shots or []
                    if s.get("start") is not None)
+    mids = []
+    for w in words or []:
+        try:
+            mids.append((float(w["t0"]) + float(w["t1"])) / 2)
+        except (KeyError, TypeError, ValueError):
+            continue
     out, healed = [list(map(float, keep[0]))], False
     for a, b in keep[1:]:
         a, b = float(a), float(b)
         gap0 = out[-1][1]
         on_cut = any(gap0 - 0.04 <= e <= a + 0.04 for e in edges)
-        if 0 <= a - gap0 < MICRO_CUT_S and not on_cut:
+        spoken = any(gap0 < m < a for m in mids)
+        if 0 <= a - gap0 < MICRO_CUT_S and not on_cut and not spoken:
             out[-1][1] = b
             healed = True
         else:
@@ -940,9 +949,10 @@ def micro_cut_keep(keep, shots):
 
 
 def heal_micro_cuts(ctx, steps, started):
-    """Join the kept pieces a sub-perceptual pause cut split inside one
+    """Join the kept pieces a sub-perceptual silence cut split inside one
     take (one keep write). None when nothing was split that way."""
-    new = micro_cut_keep(_keep(ctx), (ctx.index or {}).get("shots"))
+    index = ctx.index or {}
+    new = micro_cut_keep(_keep(ctx), index.get("shots"), index.get("words"))
     if not new:
         return None
     return _run(ctx, steps, "keep_segments",
@@ -1990,14 +2000,27 @@ def _clean_word(w):
     return letters >= 1 and (len(t) <= 2 or len(set(t.lower())) > 1)
 
 
+# Under this mean recognizer confidence the first film reads its transcript
+# as the recognizer hearing words in noise, not speech: "MÚSICA" over a
+# sugarcane harvest's music (p6304, 0.52), "Tämä on hän" over fireworks
+# (p5571, 0.64), "Thanks for watching!" on a 24-minute silent upload (p5756,
+# 0.58). Real speech in a loud room still measures 0.68-0.80 (p5530, p6269,
+# p6125). Only the first film's own choice reads it (nobody has asked for
+# captions yet); a caption the user asks for is always written, and the
+# Director's first film has its own CAPTION_CONFIDENCE with that exception.
+NONSPEECH_MEAN = 0.65
+
+
 def _speech(index):
     """Real speech: at least 8 words, most of the longer tokens words (C2: a
     music promo's song transcribed as "ʰʰʰʰ", "ლ" was trimmed to a 2 s
-    fragment and captioned with garbage glyphs). One-character tokens count
+    fragment and captioned with garbage glyphs), and a recognizer that
+    heard them as speech (NONSPEECH_MEAN; unknown confidences, a word a
+    correction rewrote, never count against it). One-character tokens count
     for neither side."""
     raw = (index or {}).get("words") or []
-    import captions
-    if not captions.measured_speech(raw):
+    from score import transcript_confidence
+    if transcript_confidence.low_mean(raw, NONSPEECH_MEAN):
         return False        # the recognizer's own confidence: noise, not speech
     words = [str(w.get("w") or "").strip() for w in raw]
     if len(words) < 8:

@@ -28,14 +28,39 @@ def missing_shot_boxes(index, keep):
                for s in shots if any(s["start"] < b and s["end"] > a for a, b in keep))
 
 
-# Printed text a crop must keep whole: a line seen in this many samples, or
-# the measured text of at least this share of the interval's samples spread
-# wider than the crop window (a screen recording's UI, a slide's lines, an
-# upload's own subtitles).
+def static_text_needs_fit(perception, start, end, width, height):
+    """A measured still with persistent text wider than the possible crop.
+
+    This is geometry, not an interpretation of the slide or its words. A
+    missing motion reading is not evidence that the source is a still.
+    """
+    per = perception or {}
+    shots = [s for s in per.get("shots") or []
+             if s.get("t") and _overlaps(start, end, *s["t"])]
+    if not shots or any(s.get("change") is None or s["change"] > .01 or
+                        s.get("faces_seen") is None or s["faces_seen"] > 0
+                        for s in shots):
+        return False
+    boxes = [r["box"] for r in per.get("text") or []
+             if r.get("box") and len(r["box"]) == 4 and r.get("t") and
+             _overlaps(start, end, *r["t"]) and r.get("seen", 0) >= 3]
+    return any(b[2] - b[0] > width + .005 or b[3] - b[1] > height + .005
+               for b in boxes)
+
+
+# Printed text a crop must keep whole: a line the Director's perception saw
+# in this many frames, or a printed LINE (one row of text, its words joined
+# across word gaps) wider than the crop window in at least this share of the
+# interval's samples (a screen recording's UI rows, a slide's lines, an
+# upload's own subtitles). Separate pieces of text far apart on the frame
+# (a channel bug and a date stamp, HUD corners, two street signs) are not
+# one line: each fits a crop on its own and the footage keeps its crop.
 TEXT_SEEN = 3
 SPREAD_SHARE = .6
 SPREAD_ROWS = 3
 SPREAD_AROUND_S = 4.0
+ROW_OVERLAP = .5        # two boxes share a row: this share of the lower one's height
+WORD_GAP_H = 1.2        # ... and sit at most this many line heights apart
 
 
 def _line_boxes(row):
@@ -47,9 +72,30 @@ def _line_boxes(row):
         except (TypeError, ValueError):
             continue
         w, h = x1 - x0, y1 - y0
-        if row.get("dense_ui") or (w >= .05 and 0 < h <= .2 and w / h >= 2.):
+        if w > 0 and 0 < h <= .2:
             out.append((x0, y0, x1, y1))
     return out
+
+
+def printed_lines(row):
+    """The sample's text boxes joined into printed lines: boxes on one row
+    (vertical overlap) whose horizontal gap is a word gap (a line height or
+    so). Returns [(x0, y0, x1, y1)]. Geometry only."""
+    boxes = sorted(_line_boxes(row))
+    lines = []
+    for b in boxes:
+        for i, l in enumerate(lines):
+            h = min(b[3] - b[1], l[3] - l[1])
+            overlap = min(b[3], l[3]) - max(b[1], l[1])
+            gap = b[0] - l[2]
+            if overlap >= ROW_OVERLAP * h and gap <= WORD_GAP_H * max(
+                    b[3] - b[1], l[3] - l[1]):
+                lines[i] = (min(l[0], b[0]), min(l[1], b[1]),
+                            max(l[2], b[2]), max(l[3], b[3]))
+                break
+        else:
+            lines.append(b)
+    return lines
 
 
 def text_needs_fit(perception, start, end, width, height, samples=None):
@@ -58,8 +104,9 @@ def text_needs_fit(perception, start, end, width, height, samples=None):
 
     Geometry, not an interpretation of the words. It holds for a still slide
     and for a moving screen recording alike (p6312: a 16:9 tutorial whose
-    subtitle line and UI were centre-cropped to 32% of their width). A face
-    or a missing face reading keeps the subject crop.
+    subtitle line and UI rows were centre-cropped to 32% of their width). A
+    face or a missing face reading keeps the subject crop, and so does text
+    in pieces that each fit the crop.
     """
     per = perception or {}
     shots = [s for s in per.get("shots") or []
@@ -86,10 +133,9 @@ def text_needs_fit(perception, start, end, width, height, samples=None):
            for b in boxes):
         return True
     read = [r for r in rows if "text" in r]      # samples that measured text
-    spans = [(max(b[2] for b in lines) - min(b[0] for b in lines),
-              max(b[3] for b in lines) - min(b[1] for b in lines))
-             for lines in (_line_boxes(r) for r in read) if lines]
-    wide = sum(1 for w, h in spans if w > width + .005 or h > height + .005)
+    wide = sum(1 for r in read if any(
+        l[2] - l[0] > width + .005 or l[3] - l[1] > height + .005
+        for l in printed_lines(r)))
     return len(read) >= SPREAD_ROWS and wide >= SPREAD_SHARE * len(read)
 
 
@@ -116,10 +162,6 @@ def kept_text_needs_fit(index, keep=None, ratio="9:16"):
         per, a, b, min(1., relative), min(1., 1 / relative), rows))
     return need > 0 and need >= .5 * sum(b - a for a, b in spans)
 
-
-# The name the Director and the legacy chain called before moving footage
-# was measured too.
-static_text_needs_fit = text_needs_fit
 
 
 def _named_detail(item, views, rects, ratio, shots, boxes):

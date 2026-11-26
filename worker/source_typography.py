@@ -79,19 +79,34 @@ def captioned(index):
 
 
 # A burned-in subtitle line, measured on the index's spatial text boxes: a
-# short line, centred, in the lower two thirds and clear of the frame's edge,
-# that holds one height band while its width changes as the voice goes on.
-# A paragraph on a slide keeps the same box; scene print wanders. p6312's own
-# subtitle pill measured 0.20-0.50 of the frame wide at y 0.85-0.91, under
-# the old 0.4 width floor.
+# line in the lower part of the frame that holds one height band while its
+# width changes as the voice goes on, from one sample to the next. Either a
+# short centred line clear of the frame's edge (p6312's own subtitle pill
+# measured 0.20-0.50 of the frame wide at y 0.85-0.91, under the old 0.4
+# width floor) or, as the Director always read it, any wide one (WIDE_W).
+# A paragraph on a slide keeps the same box; a deck's headings change only
+# when the slide does (most samples in a row repeat the line), and scene
+# print wanders off the band.
 SUB_MIN_W, SUB_MAX_H, SUB_CENTRE, SUB_LOW, SUB_EDGE = .15, .14, .15, .35, .985
+SUB_WIDE_W = .4
 SUB_BAND = .04
+SUB_TURNOVER = .5       # share of consecutive samples whose line changed
+
+
+def _subtitle_line(x0, y0, x1, y1):
+    if not (y1 - y0 <= SUB_MAX_H and (y0 + y1) / 2 >= SUB_LOW):
+        return False
+    if x1 - x0 >= SUB_WIDE_W:
+        return True
+    return (x1 - x0 >= SUB_MIN_W and y1 < SUB_EDGE
+            and abs((x0 + x1) / 2 - .5) <= SUB_CENTRE)
 
 
 def subtitle_share(index, t0, t1):
     """Share of the spatial samples in source [t0, t1] that carry the
-    upload's own subtitle line (0.0 when the line does not change or fewer
-    than four samples were read). Geometry only, never the words."""
+    upload's own subtitle line (0.0 when the line does not turn over as the
+    samples go on, or fewer than four samples were read). Geometry only,
+    never the words."""
     rows = ((index or {}).get("spatial") or {}).get("samples") or []
     seen, lines = 0, []
     for r in rows:
@@ -105,22 +120,24 @@ def subtitle_share(index, t0, t1):
         found = []
         for b in r.get("text") or []:
             try:
-                x0, y0, x1, y1 = (float(v) for v in b)
+                x0, y0, x1, y1 = (float(v) for v in b[:4])
             except (TypeError, ValueError):
                 continue
-            if (x1 - x0 >= SUB_MIN_W and y1 - y0 <= SUB_MAX_H and y1 < SUB_EDGE
-                    and abs((x0 + x1) / 2 - .5) <= SUB_CENTRE
-                    and (y0 + y1) / 2 >= SUB_LOW):
+            if _subtitle_line(x0, y0, x1, y1):
                 found.append(((y0 + y1) / 2, x0, x1))
         if found:
-            lines.append(max(found, key=lambda q: q[2] - q[1]))
+            lines.append((t, max(found, key=lambda q: q[2] - q[1])))
     if seen < 4 or not lines:
         return 0.0
-    ys = sorted(q[0] for q in lines)
+    lines.sort(key=lambda q: q[0])
+    ys = sorted(q[1][0] for q in lines)
     band = ys[len(ys) // 2]
-    hits = [(round(x0 / .02), round(x1 / .02)) for y, x0, x1 in lines
+    hits = [(round(x0 / .02), round(x1 / .02)) for _t, (y, x0, x1) in lines
             if abs(y - band) <= SUB_BAND]
     if len(set(hits)) < max(3, len(hits) // 4):
+        return 0.0
+    turned = sum(1 for p, q in zip(hits, hits[1:]) if p != q)
+    if turned < SUB_TURNOVER * (len(hits) - 1):
         return 0.0
     return len(hits) / seen
 

@@ -1122,38 +1122,9 @@ def _wget(w, key):
     return w.get(key) if isinstance(w, dict) else getattr(w, key, None)
 
 
-# Under this mean recognizer confidence a transcript is the recognizer
-# hearing words in noise, not speech: "MÚSICA" over a sugarcane harvest's
-# music (p6304, 0.52), "Tämä on hän" over fireworks (p5571, 0.64), "Thanks
-# for watching!" on a 24-minute silent upload (p5756, 0.58). Real speech in
-# a loud room still measures 0.68-0.80 (p5530, p6269, p6125). The Director
-# reads the same measure (score/compiler.py CAPTION_CONFIDENCE).
-NONSPEECH_MEAN = 0.65
-
-
-def measured_speech(words):
-    """False when the recognizer's own confidence says the transcript is
-    not speech (mean under NONSPEECH_MEAN). Unknown confidences (a word a
-    correction rewrote, an older index) never count against it."""
-    values = []
-    for w in words or []:
-        c = w.get("confidence") if isinstance(w, dict) else getattr(w, "confidence", None)
-        try:
-            if c is not None:
-                values.append(float(c))
-        except (TypeError, ValueError):
-            continue
-    return not values or sum(values) / len(values) >= NONSPEECH_MEAN
-
-
 def _spoken_index_words(index):
-    """Index words minus hesitation fillers (never burned; see compiled_events),
-    and none at all when the transcript measures as noise (measured_speech):
-    no caption, graphic or quote is set from words nobody said."""
-    words = index.get("words") or []
-    if not measured_speech(words):
-        return []
-    return [w for w in words
+    """Index words minus hesitation fillers (never burned; see compiled_events)."""
+    return [w for w in (index.get("words") or [])
             if not (w.get("filler") if isinstance(w, dict)
                     else getattr(w, "filler", False))]
 
