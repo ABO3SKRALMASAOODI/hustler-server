@@ -519,7 +519,12 @@ def test_batch_write_path_is_apply_batch(monkeypatch):
     assert _write.commit(Ctx(), [op], "added a word") == \
         "EDL v4 -> v5: added a word"
     assert written[0][0]["texts"][0]["id"] == "t1"
-    bad = dict(op, value=dict(op["value"], colr="red"))
+    # 26 Nov: a colour name is repaired to its hex; only a value that names
+    # no colour is refused.
+    named = dict(op, value=dict(op["value"], colr="red"))
+    assert _write.commit(Ctx(), [named], "x").startswith("EDL v4 -> v5")
+    assert written[-1][0]["texts"][0]["color"] == "#FF0000"
+    bad = dict(op, value=dict(op["value"], colr="banana"))
     assert _write.commit(Ctx(), [bad], "x").startswith(
         "REJECTED (EDL v4 unchanged): texts[0].color")
     assert _write.upsert_fx({"id": "a", "type": "accent"}) == {

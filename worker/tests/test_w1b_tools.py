@@ -334,7 +334,8 @@ def test_remove_takes_only_subject_and_background_ids():
     ctx = Ctx()
     st.add_subject_effect(ctx, kind="glow", start=1.0, end=2.0)
     st.set_background(ctx, kind="solid", start=3.0, end=4.0, colour="black")
-    assert st.remove_subject_effect(ctx, ids=["nope"]).startswith("REJECTED")
+    # #1690: an id already gone is the asked-for absence, not a refusal.
+    assert "already absent" in st.remove_subject_effect(ctx, ids=["nope"])
     out = st.remove_subject_effect(ctx, ids=["sx1", "bg1"])
     assert out.startswith("EDL") and _fx(ctx) == []
 

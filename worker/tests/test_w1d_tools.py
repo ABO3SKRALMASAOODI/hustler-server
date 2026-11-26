@@ -339,7 +339,9 @@ def test_remove_punctuation():
     ids = [i["id"] for i in _fx(ctx)]
     out = P.remove_punctuation(ctx, ids[:1])
     assert out.startswith("EDL") and len(_fx(ctx)) == 2
-    assert P.remove_punctuation(ctx, ["nope"]).startswith("REJECTED")
+    # #1690: an id already gone is the asked-for absence, not a refusal.
+    gone = P.remove_punctuation(ctx, ["nope"])
+    assert not gone.startswith("REJECTED") and "already absent" in gone
     assert P.remove_punctuation(ctx, "all").startswith("EDL")
     assert _fx(ctx) == []
     assert P.remove_punctuation(ctx, "all").startswith("NO CHANGE")
