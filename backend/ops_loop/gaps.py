@@ -31,6 +31,9 @@ CHECKOUT_WAIT = timedelta(seconds=60)
 TURN_SILENCE = timedelta(seconds=120)
 REVIEW_SETTLE = timedelta(minutes=10)   # the Reviewer files its own cause first
 MODEL_STREAK = 3
+# A failed call a fallback can still answer (the OpenAI credit gate hands the same job's call to
+# Haiku within seconds, #1747) is judged only once this has passed or an answer landed.
+MODEL_ANSWER_SETTLE = timedelta(seconds=120)
 CANCEL_WITHIN = timedelta(hours=24)
 BAR = 10
 LOOKBACK = timedelta(days=3)
@@ -317,7 +320,8 @@ def _model_failing(cur, since, now, p):
     """24 byte-identical canned replies went to 8 accounts over 39 hours while
     one provider was dry. Three failures in a row would have fired on the
     first day. One ticket per purpose; ref per hour, so it cannot flood."""
-    q = dict(p, streak=MODEL_STREAK, lookback=now - timedelta(days=1))
+    q = dict(p, streak=MODEL_STREAK, lookback=now - timedelta(days=1),
+             settle=MODEL_ANSWER_SETTLE, settled=now - MODEL_ANSWER_SETTLE)
     cur.execute("""
         SELECT c.purpose, max(c.id) AS id, max(c.created_at) AS at
           FROM (SELECT l.purpose, l.id, l.created_at,
@@ -330,11 +334,25 @@ def _model_failing(cur, since, now, p):
                    -- One account's own trial budget refusing a call is a
                    -- budget stop (P2 by the intake's rule), not a dead model:
                    -- ticket 861 paged P0 on 18 of them in one index.
-                   AND COALESCE(l.response->>'stop', '') <> 'budget') c
+                   AND COALESCE(l.response->>'stop', '') <> 'budget'
+                   -- #1747: a failed call whose fallback answered the same job
+                   -- and purpose (OpenAI out of credit, Haiku answered 2-4 s
+                   -- later) delivered; it is not a dead model. A failure still
+                   -- young may yet be answered, so it is judged once settled.
+                   AND NOT (l.response->>'error' IS NOT NULL AND (
+                         l.created_at > %(settled)s
+                         OR EXISTS (
+                           SELECT 1 FROM llm_calls a
+                            WHERE a.purpose = l.purpose AND a.id > l.id
+                              AND a.job_id IS NOT DISTINCT FROM l.job_id
+                              AND a.project_id IS NOT DISTINCT FROM l.project_id
+                              AND a.response->>'error' IS NULL
+                              AND a.created_at <= l.created_at + %(settle)s
+                              AND a.created_at <= %(now)s)))) c
          WHERE c.n <= %(streak)s
          GROUP BY c.purpose
         HAVING count(*) = %(streak)s AND bool_and(c.bad)
-           AND max(c.created_at) > %(since)s""", q)
+           AND max(c.created_at) + %(settle)s > %(since)s""", q)
     out = []
     for r in cur.fetchall():
         hour = _i()._aware(r["at"]).strftime("%Y%m%d%H")

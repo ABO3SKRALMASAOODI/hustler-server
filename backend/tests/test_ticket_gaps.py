@@ -206,17 +206,24 @@ def test_tidying_a_reply_is_not_hiding(world):    # noqa: F811
     assert fired(world, gaps._reply_hid_a_failure) == []
 
 
-def calls(world, purpose, *bad):    # noqa: F811
+def calls(world, purpose, *bad, job=None):    # noqa: F811
     for i, b in enumerate(bad):
         world.c.execute(
-            "INSERT INTO llm_calls (purpose, response, created_at) VALUES "
-            "(%s, %s, %s)", (purpose, Json({"error": "429"} if b else {"ok": 1}),
-                             world.clock.now - timedelta(seconds=len(bad) - i)))
+            "INSERT INTO llm_calls (purpose, job_id, response, created_at) VALUES "
+            "(%s, %s, %s, %s)", (purpose, job, Json({"error": "429"} if b else {"ok": 1}),
+                                 world.clock.now - timedelta(seconds=len(bad) - i)))
+
+
+def settle(world):    # noqa: F811
+    world.clock.now += gaps.MODEL_ANSWER_SETTLE
 
 
 def test_three_failed_model_calls_in_a_row_fire_at_once(world):    # noqa: F811
-    """24 canned replies to 8 accounts over 39 hours."""
+    """24 canned replies to 8 accounts over 39 hours. Fires as soon as nothing
+    answered the failures in their settle window."""
     calls(world, "concierge", False, True, True, True)
+    assert fired(world, gaps._model_failing) == [], "a fallback may still answer"
+    settle(world)
     got = fired(world, gaps._model_failing)
     assert got[0]["cause_key"] == "auto-gap-model-failing-concierge"
     assert got[0]["severity"] == "P0"
@@ -242,9 +249,31 @@ def test_an_accounts_trial_budget_stops_are_not_a_failing_model(world):    # noq
     assert fired(world, gaps._model_failing) == []
     # A real failure streak behind the budget stops still fires.
     calls(world, "visual_index_semantics_fallback", True, True, True)
+    settle(world)
     got = fired(world, gaps._model_failing)
     assert [f["cause_key"] for f in got] == [
         "auto-gap-model-failing-visual-index-semantics-fallback"]
+
+
+def test_failures_their_fallback_answered_are_not_a_dead_model(world):    # noqa: F811
+    """#1747: OpenAI out of credit; three parallel jobs' search_descriptions
+    probes failed (429 credit_balance_exhausted) at 10:48:20-22 and Haiku
+    answered each job 2-4 s later. That was paged P0 as a dead model twice."""
+    for job in (139429, 139426, 139430):
+        calls(world, "search_descriptions", True, job=job)
+    for job in (139429, 139426, 139430):
+        calls(world, "search_descriptions", False, job=job)
+    assert fired(world, gaps._model_failing) == []
+    settle(world)
+    assert fired(world, gaps._model_failing, minutes=3) == []
+    # Unanswered failures of the same purpose still fire once settled, once.
+    for job in (1, 2, 3):
+        calls(world, "search_descriptions", True, job=job)
+    settle(world)
+    got = fired(world, gaps._model_failing)
+    assert [f["cause_key"] for f in got] == ["auto-gap-model-failing-search-descriptions"]
+    world.clock.now += timedelta(minutes=1)
+    assert fired(world, gaps._model_failing) == [], "the next scan does not fire again"
 
 
 def test_a_cancel_within_a_day_of_paying_fires_and_a_later_one_does_not(world):    # noqa: F811
