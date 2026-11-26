@@ -498,7 +498,7 @@ class Ctx:
         self.own = {}
         self.views = {}
         self.matte = None
-        self.max_up = 6.0
+        self.max_up = MAX_UP
         self.work = None
         self.thumb_cache = {}
         self.waiting = None
@@ -1636,17 +1636,26 @@ def base_rect(ctx, ref, asset, t, W, H, rng, repeat):
     return limit_up(ctx, r, asset, W, H, ref.get("asset"))
 
 
+# The most a source pixel is enlarged by a crop: the Studio's own zoom ceiling (agent_tools.ZOOM_UPSCALE_MAX, "past
+# 3x combined the footage smears under sharp type"). It was 6x here: a 480-wide firework clip was punched in 1.45-1.75x
+# over a frame that already enlarged it 2.25x, and every frame of the first film was blocks (p5571, #944).
+MAX_UP = 3.0
+
+
 def limit_up(ctx, r, asset, W, H, name):
-    """A crop past 6x of the source is mush, whatever was asked. It backs off and says so."""
+    """A crop that enlarges the source past MAX_UP is mush, whatever was asked. It backs off (never wider than the
+    picture, never off its shape) and says so; a framing the source cannot hold at all becomes its widest one."""
     upscale = W / max(1.0, (r[2] - r[0]) * asset["w"])
-    if upscale > ctx.max_up:
-        ctx.find(f"crop on {name} asked {upscale:.0f}x, held at {ctx.max_up:.0f}x: this source is {asset['w']} wide")
-        k = upscale / ctx.max_up
-        cx, cy = (r[0] + r[2]) / 2, (r[1] + r[3]) / 2
-        w, h = min(1.0, (r[2] - r[0]) * k), min(1.0, (r[3] - r[1]) * k)
-        cx, cy = clamp(cx, w / 2, 1 - w / 2), clamp(cy, h / 2, 1 - h / 2)
-        r = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
-        upscale = ctx.max_up
+    if upscale > ctx.max_up + 1e-9:
+        w0, h0 = r[2] - r[0], r[3] - r[1]
+        k = min(upscale / ctx.max_up, 1.0 / max(w0, 1e-9), 1.0 / max(h0, 1e-9))
+        if k > 1.0 + 1e-9:
+            ctx.find(f"crop on {name} asked {upscale:.1f}x, held at {upscale / k:.1f}x: this source is {asset['w']} wide")
+            cx, cy = (r[0] + r[2]) / 2, (r[1] + r[3]) / 2
+            w, h = min(1.0, w0 * k), min(1.0, h0 * k)
+            cx, cy = clamp(cx, w / 2, 1 - w / 2), clamp(cy, h / 2, 1 - h / 2)
+            r = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
+            upscale /= k
     if upscale > ctx.soft_at:
         ctx.soft[name] = max(ctx.soft.get(name, 0), round(upscale, 1))
     return r

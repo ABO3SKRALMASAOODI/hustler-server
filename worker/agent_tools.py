@@ -6122,14 +6122,20 @@ def add_captions(ctx, mode=None, items=None, style=None,
         # Filler words are in the index but never burned (see captions.py), so
         # this gate counts what will actually be SHOWN — otherwise a video of
         # nothing but hesitations would pass a check about visible text.
-        all_words = [w for w in (ctx.index.get("words") or [])
-                     if not w.get("filler")]
+        all_words = caplib._spoken_index_words(ctx.index)
         keep_spans = edl.get("keep") or []
         visible = sum(
             1 for w in all_words
             if any(s - 0.05 <= (float(w["t0"]) + float(w["t1"])) / 2 <= e + 0.05
                    for s, e in keep_spans))
-        if not all_words:
+        if not all_words and ctx.index.get("words"):
+            karaoke_note += (
+                "\nWARNING: the transcript measures as noise, not speech (the "
+                "recognizer's mean confidence is under "
+                f"{caplib.NONSPEECH_MEAN:g}), so these captions show NO "
+                "text: nothing is captioned that nobody said. Tell the user "
+                "honestly that no clear speech was detected.")
+        elif not all_words:
             karaoke_note += (
                 "\nWARNING: the transcript is EMPTY — nothing was "
                 "transcribed from this video, so these captions will show NO "
@@ -11037,18 +11043,14 @@ def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
     index = getattr(ctx, "index", None) or {}
     if index.get("_first_film_source_guard"):
         # The legacy first-cut chain shares the same indexed measurements
-        # as the Director. A static slide must not lose its printed words
+        # as the Director. Printed text wider than the crop (a slide, a
+        # screen recording's UI and subtitles) must not lose its words
         # merely because the Director fell back or was not selected.
-        prepared = index.get("director_preparation") or {}
-        per = prepared.get("perception") if prepared.get("version") == 1 else None
-        video = index.get("video") or {}
         try:
-            fw, fh = (float(n) for n in str(ratio).split(":"))
-            relative = (fw / fh) * (float(video["height"]) / float(video["width"]))
-            fit = source_guard.static_text_needs_fit(
-                per, 0., float(video["duration"]), min(1., relative), min(1., 1 / relative))
-        except (KeyError, TypeError, ValueError, ZeroDivisionError):
-            fit = False
+            keep = ctx.latest_edl()["json"].get("keep") or []
+        except Exception:  # noqa: BLE001 - no EDL yet: the whole source
+            keep = []
+        fit = source_guard.kept_text_needs_fit(index, keep, ratio)
         if fit:
             return set_frame(ctx, ratio, "pad_blur")
         mode = "crop"  # local face/saliency tracking below, never a first-film strip

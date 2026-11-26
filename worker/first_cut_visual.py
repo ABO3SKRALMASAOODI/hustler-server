@@ -712,6 +712,21 @@ def face_aim(index, bands=None, vertical_source=True):
     return round(min(max(cx, 0.2), 0.8), 3), round(min(max(cy, 0.3), 0.72), 3)
 
 
+CUT_IN_VISIBLE = 0.05    # a zoom under this reads as no move at all
+
+
+def _move_room(ctx, edl, prog):
+    """The zoom strength the main footage still holds over the program
+    before it passes the Studio's upscale ceiling (agent_tools._zoom_room);
+    None when unknown or unbounded."""
+    try:
+        import agent_tools
+        room, _base, _stacked = agent_tools._zoom_room(ctx, edl, 0.0, float(prog))
+    except Exception:  # noqa: BLE001 - unmeasured: the moves are written
+        return None
+    return None if room is None else float(room)
+
+
 def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
             levels=None, target=None, hi=None):
     """Ease a modest move at a measured phrase turn; never fake a shot cut.
@@ -745,6 +760,16 @@ def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
                         hi=hi or CUT_IN_MAX_S)
     levels = levels or (CUT_IN_BANDED if bands else CUT_IN_STRENGTH)
     cx, cy = aim or (0.5, 0.4)
+    room = _move_room(ctx, edl, prog)
+    if room is not None and room < CUT_IN_VISIBLE:
+        # The frame already enlarges the source to its ceiling (p6269: a
+        # 640x360 party clip cropped to 9:16): every move would be written
+        # at the 2% floor, a step nobody sees that still counts as a camera
+        # change. The take stays one continuous framing.
+        steps.append({"tool": "cut_ins", "ok": True,
+                      "note": f"no camera move: the source holds {room:.2f} "
+                              "more zoom, under a visible move"})
+        return 0
     n = 0
     for a, b, close in segs:
         if not close:

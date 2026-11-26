@@ -28,24 +28,98 @@ def missing_shot_boxes(index, keep):
                for s in shots if any(s["start"] < b and s["end"] > a for a, b in keep))
 
 
-def static_text_needs_fit(perception, start, end, width, height):
-    """A measured still with persistent text wider than the possible crop.
+# Printed text a crop must keep whole: a line seen in this many samples, or
+# the measured text of at least this share of the interval's samples spread
+# wider than the crop window (a screen recording's UI, a slide's lines, an
+# upload's own subtitles).
+TEXT_SEEN = 3
+SPREAD_SHARE = .6
+SPREAD_ROWS = 3
+SPREAD_AROUND_S = 4.0
 
-    This is geometry, not an interpretation of the slide or its words. A
-    missing motion reading is not evidence that the source is a still.
+
+def _line_boxes(row):
+    """A spatial sample's line-shaped text boxes (geometry only)."""
+    out = []
+    for b in row.get("text") or []:
+        try:
+            x0, y0, x1, y1 = (float(v) for v in b[:4])
+        except (TypeError, ValueError):
+            continue
+        w, h = x1 - x0, y1 - y0
+        if row.get("dense_ui") or (w >= .05 and 0 < h <= .2 and w / h >= 2.):
+            out.append((x0, y0, x1, y1))
+    return out
+
+
+def text_needs_fit(perception, start, end, width, height, samples=None):
+    """Measured printed text wider (or taller) than the possible crop, in
+    footage with no person to frame: the whole picture is fitted instead.
+
+    Geometry, not an interpretation of the words. It holds for a still slide
+    and for a moving screen recording alike (p6312: a 16:9 tutorial whose
+    subtitle line and UI were centre-cropped to 32% of their width). A face
+    or a missing face reading keeps the subject crop.
     """
     per = perception or {}
     shots = [s for s in per.get("shots") or []
              if s.get("t") and _overlaps(start, end, *s["t"])]
-    if not shots or any(s.get("change") is None or s["change"] > .01 or
-                        s.get("faces_seen") is None or s["faces_seen"] > 0
-                        for s in shots):
+    if any(s.get("faces_seen") is None or s["faces_seen"] > 0 for s in shots):
+        return False
+    def within(a, b):
+        return [r for r in samples or [] if r.get("t") is not None
+                and a <= float(r["t"]) <= b]
+    rows = within(start, end) if end > start else within(start - .75, start + .75)
+    if sum(1 for r in rows if "text" in r) < SPREAD_ROWS:
+        # Index samples sit seconds apart; a one-second piece reads the
+        # printed layout around it (a page or a screen holds for seconds).
+        mid = (start + end) / 2
+        rows = within(min(start, mid - SPREAD_AROUND_S), max(end, mid + SPREAD_AROUND_S))
+    if any(_boxes(r) for r in rows):
+        return False
+    if not shots and not (rows and all("faces" in r for r in rows)):
         return False
     boxes = [r["box"] for r in per.get("text") or []
              if r.get("box") and len(r["box"]) == 4 and r.get("t") and
-             _overlaps(start, end, *r["t"]) and r.get("seen", 0) >= 3]
-    return any(b[2] - b[0] > width + .005 or b[3] - b[1] > height + .005
-               for b in boxes)
+             _overlaps(start, end, *r["t"]) and r.get("seen", 0) >= TEXT_SEEN]
+    if any(b[2] - b[0] > width + .005 or b[3] - b[1] > height + .005
+           for b in boxes):
+        return True
+    read = [r for r in rows if "text" in r]      # samples that measured text
+    spans = [(max(b[2] for b in lines) - min(b[0] for b in lines),
+              max(b[3] for b in lines) - min(b[1] for b in lines))
+             for lines in (_line_boxes(r) for r in read) if lines]
+    wide = sum(1 for w, h in spans if w > width + .005 or h > height + .005)
+    return len(read) >= SPREAD_ROWS and wide >= SPREAD_SHARE * len(read)
+
+
+def kept_text_needs_fit(index, keep=None, ratio="9:16"):
+    """text_needs_fit over the footage an edit keeps, for a frame of
+    ``ratio``: True when the source text a crop would cut runs through at
+    least half of the kept seconds. The legacy first-cut chain and the
+    fallback reframer read the same indexed measurements as the Director."""
+    index = index or {}
+    prepared = index.get("director_preparation") or {}
+    per = prepared.get("perception") if prepared.get("version") == 1 else None
+    video = index.get("video") or {}
+    try:
+        fw, fh = (float(n) for n in str(ratio).split(":"))
+        relative = (fw / fh) * (float(video["height"]) / float(video["width"]))
+        spans = [(float(a), float(b)) for a, b in keep or []] or \
+            [(0., float(video["duration"]))]
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return False
+    if relative >= 1.:
+        return False            # the frame is wider than the source: no side crop
+    rows = (index.get("spatial") or {}).get("samples") or []
+    need = sum(b - a for a, b in spans if text_needs_fit(
+        per, a, b, min(1., relative), min(1., 1 / relative), rows))
+    return need > 0 and need >= .5 * sum(b - a for a, b in spans)
+
+
+# The name the Director and the legacy chain called before moving footage
+# was measured too.
+static_text_needs_fit = text_needs_fit
 
 
 def _named_detail(item, views, rects, ratio, shots, boxes):
@@ -142,7 +216,7 @@ def apply(l1, index, perception, *, views=None):
         reason = "named_detail_crop" if detail else "subject_boxes_contained"
         # A verified named view is already a model-selected source detail;
         # unrelated desktop headings must not replace it with the whole screen.
-        if not detail and static_text_needs_fit(perception, start, end, w, h):
+        if not detail and text_needs_fit(perception, start, end, w, h, samples):
             # Lowering already supports a source rectangle extending past
             # the canvas: the on-spine source is fitted over its blurred
             # backdrop. Do not override that geometry with a saliency crop.

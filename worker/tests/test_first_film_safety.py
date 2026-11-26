@@ -267,8 +267,8 @@ def test_legacy_first_cut_preserves_the_same_measured_static_text(monkeypatch):
     assert agent_tools._auto_reframe(SimpleNamespace(index=index)) == ("9:16", "pad_blur")
 
 
-@pytest.mark.parametrize("change,faces", [(None, 0.), (.18, 0.), (0., .5)])
-def test_missing_motion_or_a_live_subject_does_not_trigger_slide_fit(change, faces):
+@pytest.mark.parametrize("change,faces", [(0., None), (.18, None), (0., .5), (.18, .5)])
+def test_missing_face_reading_or_a_live_subject_does_not_trigger_slide_fit(change, faces):
     film, index = _scene()
     per = _static_text_perception()
     per["shots"][0].update(change=change, faces_seen=faces)

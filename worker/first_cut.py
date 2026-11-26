@@ -912,6 +912,43 @@ def stutter_spans(words, keep):
     return spans
 
 
+# A removal shorter than this inside one source shot saves no time anyone
+# hears and makes the picture jump: a hard step in a continuous take (p6269:
+# the pause cuts left 1759.76 -> 1759.80, 40 ms, in the middle of shot 199).
+MICRO_CUT_S = 0.12
+
+
+def micro_cut_keep(keep, shots):
+    """``keep`` with every sub-MICRO_CUT_S removal that lies inside one
+    source shot closed (the two kept pieces joined); None when there is none.
+    A removal on a source cut is a real edit and stays."""
+    if not keep or len(keep) < 2:
+        return None
+    edges = sorted(float(s["start"]) for s in shots or []
+                   if s.get("start") is not None)
+    out, healed = [list(map(float, keep[0]))], False
+    for a, b in keep[1:]:
+        a, b = float(a), float(b)
+        gap0 = out[-1][1]
+        on_cut = any(gap0 - 0.04 <= e <= a + 0.04 for e in edges)
+        if 0 <= a - gap0 < MICRO_CUT_S and not on_cut:
+            out[-1][1] = b
+            healed = True
+        else:
+            out.append([a, b])
+    return [[round(a, 3), round(b, 3)] for a, b in out] if healed else None
+
+
+def heal_micro_cuts(ctx, steps, started):
+    """Join the kept pieces a sub-perceptual pause cut split inside one
+    take (one keep write). None when nothing was split that way."""
+    new = micro_cut_keep(_keep(ctx), (ctx.index or {}).get("shots"))
+    if not new:
+        return None
+    return _run(ctx, steps, "keep_segments",
+                {"segments": new, "snap_to_words": False}, started)
+
+
 def drop_stutters(ctx, steps, started):
     """Cut each stutter out of the kept program (one keep write), so the
     audio and the captions both carry the word once. None when there is none."""
@@ -1005,6 +1042,19 @@ def dense_ui(index):
     ui = sum(1 for s in samples if s.get("dense_ui") or len(s.get("text") or []) >= 3)
     faces = sum(1 for s in samples if s.get("faces"))
     return not (ui < 0.6 * len(samples) or faces > 0.15 * len(samples))
+
+
+def _text_wider_than_crop(ctx):
+    """The kept footage prints text wider than a 9:16 crop and shows no
+    person to frame (measured: score.source_guard.text_needs_fit). It is
+    composed like a screen: fitted whole, its camera on the text, no slam
+    over its own words (p6312: a SmartPDF tutorial centre-cropped through
+    its UI and subtitles, the storyboard's wording never naming a screen)."""
+    from score import source_guard
+    try:
+        return source_guard.kept_text_needs_fit(ctx.index, _keep(ctx))
+    except Exception:  # noqa: BLE001 - no measurement: the footage path
+        return False
 
 
 def _screen_like(index):
@@ -1945,7 +1995,11 @@ def _speech(index):
     music promo's song transcribed as "ʰʰʰʰ", "ლ" was trimmed to a 2 s
     fragment and captioned with garbage glyphs). One-character tokens count
     for neither side."""
-    words = [str(w.get("w") or "").strip() for w in (index or {}).get("words") or []]
+    raw = (index or {}).get("words") or []
+    import captions
+    if not captions.measured_speech(raw):
+        return False        # the recognizer's own confidence: noise, not speech
+    words = [str(w.get("w") or "").strip() for w in raw]
     if len(words) < 8:
         return False
     longer = [w for w in words if len(w.strip(".,!?;:…")) >= 2]
@@ -2374,6 +2428,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             # whisper's early or late word start) and the tail bounded
             import talk_craft
             talk_craft.cut_audio_pauses(ctx, steps, started, _run)
+        heal_micro_cuts(ctx, steps, started)
     # RS_ENGINE (#52): a short source never loses most of its footage to
     # the trim and pause cuts without a reason the footage gives.
     restore = kept_share_restore(_keep(ctx), duration, picked)
@@ -2390,6 +2445,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         applied.append("the app's end card left out")
     faces = _faces(ctx.index)
     talking = bool(speech and faces and faces["share"] >= 0.5)
+    # The upload's own subtitle line, measured over the speech this cut
+    # keeps: a second running caption track would repeat it on top of it
+    # (p6312: our pill and display words over the tutorial's own subtitles).
+    burned = burned or source_typography.kept_subtitles(ctx.index, _keep(ctx))
     if q1 and cut_speech and not talking:
         import first_cut_visual as fcv
         # Q6: the last sentence is complete and its picture live (u4899
@@ -2411,7 +2470,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             applied.append("the full scene fitted to vertical")
             vertical_out = True
     elif not vertical_source:
-        if _screen_like(ctx.index) and not talking:
+        if (_screen_like(ctx.index) or _text_wider_than_crop(ctx)) and not talking:
             # Keep source text whole inside the promised portrait canvas.
             # The travelling content window below supplies readable detail.
             if _ok(_run(ctx, steps, "set_frame",

@@ -585,29 +585,15 @@ def snap(seats, want):
 
 
 def upload_captions(ctx):
-    """P7, measured on boxes: the share of speech samples where the upload already prints a caption-like line: wide,
-    short, in the lower part of the frame, and changing as the voice goes on. A paragraph on a slide stays the same
+    """P7, measured on boxes (source_typography.subtitle_share): the share of speech samples where the upload already
+    prints a caption-like line: short, centred, in the lower part of the frame, and changing as the voice goes on. A paragraph on a slide stays the same
     box for its whole life and is not a caption. At a half or more the film adds no captions of its own."""
     import source_typography
     if source_typography.captioned(ctx.index):
         return 1.0
-    rows = (ctx.index.get("spatial") or {}).get("samples") or []
-    if not rows or not ctx.words:
+    if not ctx.words:
         return 0.0
-    t0, t1 = ctx.words[0]["t0"], ctx.words[-1]["t1"]
-    seen, hits = 0, []
-    for r in rows:
-        t = float(r.get("t", -1))
-        if not t0 <= t <= t1:
-            continue
-        seen += 1
-        lines = [b for b in r.get("text") or [] if len(b) == 4 and b[2] - b[0] >= 0.4 and b[3] - b[1] <= 0.14 and (b[1] + b[3]) / 2 >= 0.35]
-        if lines:
-            b = max(lines, key=lambda q: q[2] - q[0])
-            hits.append((round(b[0] / 0.02), round(b[2] / 0.02)))
-    if seen < 4 or len(set(hits)) < max(3, len(hits) // 4):
-        return 0.0
-    return len(hits) / seen
+    return source_typography.subtitle_share(ctx.index, ctx.words[0]["t0"], ctx.words[-1]["t1"])
 
 
 # ----------------------------------------------------------------- the decision

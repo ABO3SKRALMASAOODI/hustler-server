@@ -78,6 +78,69 @@ def captioned(index):
     return ((index or {}).get("source_typography") or {}).get("caption_track") == "complete"
 
 
+# A burned-in subtitle line, measured on the index's spatial text boxes: a
+# short line, centred, in the lower two thirds and clear of the frame's edge,
+# that holds one height band while its width changes as the voice goes on.
+# A paragraph on a slide keeps the same box; scene print wanders. p6312's own
+# subtitle pill measured 0.20-0.50 of the frame wide at y 0.85-0.91, under
+# the old 0.4 width floor.
+SUB_MIN_W, SUB_MAX_H, SUB_CENTRE, SUB_LOW, SUB_EDGE = .15, .14, .15, .35, .985
+SUB_BAND = .04
+
+
+def subtitle_share(index, t0, t1):
+    """Share of the spatial samples in source [t0, t1] that carry the
+    upload's own subtitle line (0.0 when the line does not change or fewer
+    than four samples were read). Geometry only, never the words."""
+    rows = ((index or {}).get("spatial") or {}).get("samples") or []
+    seen, lines = 0, []
+    for r in rows:
+        try:
+            t = float(r.get("t", -1))
+        except (TypeError, ValueError):
+            continue
+        if not t0 <= t <= t1:
+            continue
+        seen += 1
+        found = []
+        for b in r.get("text") or []:
+            try:
+                x0, y0, x1, y1 = (float(v) for v in b)
+            except (TypeError, ValueError):
+                continue
+            if (x1 - x0 >= SUB_MIN_W and y1 - y0 <= SUB_MAX_H and y1 < SUB_EDGE
+                    and abs((x0 + x1) / 2 - .5) <= SUB_CENTRE
+                    and (y0 + y1) / 2 >= SUB_LOW):
+                found.append(((y0 + y1) / 2, x0, x1))
+        if found:
+            lines.append(max(found, key=lambda q: q[2] - q[1]))
+    if seen < 4 or not lines:
+        return 0.0
+    ys = sorted(q[0] for q in lines)
+    band = ys[len(ys) // 2]
+    hits = [(round(x0 / .02), round(x1 / .02)) for y, x0, x1 in lines
+            if abs(y - band) <= SUB_BAND]
+    if len(set(hits)) < max(3, len(hits) // 4):
+        return 0.0
+    return len(hits) / seen
+
+
+def kept_subtitles(index, keep):
+    """True when the upload prints its own subtitles over at least half of
+    the kept speech (subtitle_share over the kept spans that hold words)."""
+    words = [w for w in (index or {}).get("words") or []
+             if w.get("t0") is not None and w.get("t1") is not None]
+    spans = []
+    for a, b in keep or []:
+        inside = [w for w in words if float(w["t1"]) > a and float(w["t0"]) < b]
+        if inside:
+            spans.append((max(a, float(inside[0]["t0"])), min(b, float(inside[-1]["t1"]))))
+    if not spans:
+        return False
+    t0, t1 = spans[0][0], spans[-1][1]
+    return subtitle_share(index, t0, t1) >= .5
+
+
 def refresh_index(ctx, worker_db, sha=None):
     """Join an already completed storyboard; never wait behind indexing.
 
