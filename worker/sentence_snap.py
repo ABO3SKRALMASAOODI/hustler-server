@@ -141,21 +141,45 @@ def snap_keep(keep, words, duration=None, prev_keep=None, sentences=None):
     for s, e in prev_keep or []:
         prev_edges += [float(s), float(e)]
     dur = float(duration) if duration else None
+    keep.sort()
+    # A removed stretch with no sentence or clause boundary in it (a repeated
+    # word, a stutter, a false start: "de de", "con con") is a trim INSIDE
+    # one sentence: the sentence reads on across it, so neither of its edges
+    # is a piece starting or ending mid-sentence. Snapping both to the
+    # nearest boundary moved them to the same gap and closed the cut, so the
+    # requested trim silently vanished (#1841). Those edges stay.
+    inner = set()
+    for i in range(len(keep) - 1):
+        a, b = keep[i][1], keep[i + 1][0]
+        if b - a >= 0.05 and not _had(a, prev_edges) \
+                and not _had(b, prev_edges) \
+                and not any(ga < b and gb > a for ga, gb, _k in bounds):
+            inner.update(((i, "end"), (i + 1, "start")))
     out, notes = [], []
-    for s, e in keep:
+    for i, (s, e) in enumerate(keep):
         ns, ne = s, e
         ks = ke = None
-        if s > 0.05 and not _had(s, prev_edges):
+        if s > 0.05 and not _had(s, prev_edges) and (i, "start") not in inner:
             ns, ks = snap_point(s, "start", bounds, dur)
-        if (dur is None or e < dur - 0.05) and not _had(e, prev_edges):
+        if (dur is None or e < dur - 0.05) and not _had(e, prev_edges) \
+                and (i, "end") not in inner:
             ne, ke = snap_point(e, "end", bounds, dur)
         if ne - ns < MIN_PIECE_S:
             ns, ne, ks, ke = s, e, None, None
+        out.append([ns, ne, ks, ke, s, e])
+    # A snap never closes a cut the write made: when two neighbouring pieces
+    # would meet, both edges of that cut stay where the write put them.
+    for i in range(len(out) - 1):
+        left, right = out[i], out[i + 1]
+        if left[5] < right[4] - 0.01 and right[0] <= left[1] + 0.01:
+            left[1], left[3] = left[5], None
+            right[0], right[2] = right[4], None
+    for ns, ne, ks, ke, s, e in out:
         if ks:
             notes.append((s, ns, "start", ks))
         if ke:
             notes.append((e, ne, "end", ke))
-        out.append([ns, ne])
+    out = [[ns, ne] for ns, ne, *_rest in out]
     out.sort()
     merged = []
     for s, e in out:

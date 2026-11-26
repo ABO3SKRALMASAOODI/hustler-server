@@ -3352,7 +3352,7 @@ def _index_fps(index):
     return fps if 1.0 <= fps <= 240.0 else 30.0
 
 
-def _snap_keep_to_shots(keep, index, words=None):
+def _snap_keep_to_shots(keep, index, words=None, prev_keep=None):
     """(keep, notes) with every keep edge pulled off a nearby camera cut.
 
     An indexed cut is the new shot's first frame index over the frame rate,
@@ -3366,7 +3366,12 @@ def _snap_keep_to_shots(keep, index, words=None):
     touch are one continuous source run, not a cut, and are left alone.
     Speech takes priority: never remove an indexed word or part of one to
     hide a visual sliver. Retain that edge and report the visual tradeoff.
-    notes is empty when no edge moved or needed speech protection."""
+    notes is empty when no edge moved or needed speech protection.
+    With prev_keep, an edge the previous keep already had stays where that
+    version saved it (#1841): the write boundary had moved the end 1040.22
+    -> 1040.26 because the word's sound still ran there, this pass moved it
+    back to 1040.22 on every later write, and every cut, even one that
+    changed nothing, re-reported that same stale repair."""
     cuts = _shot_cuts(index)
     if not cuts or not keep:
         return keep, []
@@ -3377,6 +3382,11 @@ def _snap_keep_to_shots(keep, index, words=None):
     moved = []
     protected = []
     speech = words if words is not None else (index or {}).get("words", [])
+    old_starts = [float(a) for a, _b in prev_keep or []]
+    old_ends = [float(b) for _a, b in prev_keep or []]
+
+    def kept_before(t, edges):
+        return any(abs(t - x) <= 1e-3 for x in edges)
 
     def trimmed_words(lo, hi):
         return [str(w.get("w") or "").strip() for w in speech or []
@@ -3387,7 +3397,8 @@ def _snap_keep_to_shots(keep, index, words=None):
         s, e = span
         # Past the LAST cut in reach for a start, before the FIRST for an
         # end: two cuts a few frames apart are a sliver shot of their own.
-        if not (i > 0 and abs(src[i - 1][1] - s) <= 0.011):
+        if not (i > 0 and abs(src[i - 1][1] - s) <= 0.011) \
+                and not kept_before(s, old_starts):
             b = max((c for c in cuts if c - reach <= s < c + step),
                     default=None)
             # EDL keep times are hundredths (schemas._r): at least 0.01 past
@@ -3402,7 +3413,8 @@ def _snap_keep_to_shots(keep, index, words=None):
                 else:
                     moved.append(("start", s, first, b))
                     s = first
-        if not (i + 1 < len(src) and abs(src[i + 1][0] - e) <= 0.011):
+        if not (i + 1 < len(src) and abs(src[i + 1][0] - e) <= 0.011) \
+                and not kept_before(e, old_ends):
             b = min((c for c in cuts if c - step / 2.0 < e <= c + reach),
                     default=None)
             last = round(b - step / 2.0, 2) if b is not None else None
@@ -3791,7 +3803,8 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     # including shot hygiene. Warnings may explain a rough edge, not move it.
     shot_notes = []
     if snap_to_words is not False:
-        new_keep, shot_notes = _snap_keep_to_shots(new_keep, ctx.index, words)
+        new_keep, shot_notes = _snap_keep_to_shots(
+            new_keep, ctx.index, words, prev_keep=prev_keep)
     if never_grow:
         clipped = _within_keep(new_keep, prev_keep)
         if clipped:
@@ -4439,9 +4452,21 @@ def cut_range(ctx, start, end, snap_to_words=None):
         repeats = []  # uncertain alignment retains the ordinary clause guard
     repetition_repair = any(abs(s - r["cut"][0]) <= 0.02 and
                             abs(e - r["cut"][1]) <= 0.02 for r in repeats)
-    return _write_keep(ctx, new, f"cut {s}-{e}s ({e - s:.2f}s removed)",
-                       snap_to_words=_snap_choice(snap_to_words),
-                       repetition_repair=repetition_repair)
+    desc = f"cut {s}-{e}s ({e - s:.2f}s removed)"
+    snap = _snap_choice(snap_to_words)
+    res = _write_keep(ctx, new, desc, snap_to_words=snap,
+                      repetition_repair=repetition_repair)
+    if snap is not False and str(res).startswith("NO CHANGE"):
+        # The range is in the edit, yet the edge placement passes closed the
+        # cut up again (#1841): place it at the asked times instead. The
+        # write boundary still keeps every edge off a spoken word.
+        exact = _write_keep(ctx, new, desc, snap_to_words=False,
+                            repetition_repair=repetition_repair)
+        if str(exact).startswith("EDL v"):
+            return (exact + "\nPLACED EXACTLY: snapping the edges to word, "
+                    "sentence and shot boundaries closed this cut up again, "
+                    f"so it was placed at {s:g}-{e:g}s as asked.")
+    return res
 
 
 def restore_range(ctx, start, end, snap_to_words=None):
@@ -14676,7 +14701,7 @@ def cut_output_range(ctx, start, end):
         new_keep, audio_notes, _quiet = _audio_safe_keep(
             ctx, new_keep, keep, ctx.index.get("words") or [])
         new_keep, shot_notes = _snap_keep_to_shots(
-            new_keep, ctx.index, ctx.index.get("words"))
+            new_keep, ctx.index, ctx.index.get("words"), prev_keep=keep)
         shot_notes = audio_notes + shot_notes
     else:
         shot_notes = []

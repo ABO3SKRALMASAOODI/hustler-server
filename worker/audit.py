@@ -425,23 +425,29 @@ def snap_keep_to_words(keep, words, duration, prev_keep=None):
 
 
 def subtract_spans(a, b):
-    """Parts of span list a not covered by span list b (all [start,end])."""
+    """Parts of span list a not covered by span list b (all [start,end]).
+
+    Only the edges b makes are rounded to the EDL's hundredths; an edge of a
+    that no span of b touches stays exactly as a had it. Rounding every edge
+    (#1841) moved the earlier write's word-exact edges (511.525 -> 511.52)
+    on every cut_range, so each cut re-placed and re-reported edges far from
+    the range it was asked to cut."""
     out = []
     for s, e in a:
-        pieces = [(float(s), float(e))]
+        pieces = [(float(s), float(e), False, False)]
         for bs, be in b:
             nxt = []
-            for ps, pe in pieces:
+            for ps, pe, rs, re_ in pieces:
                 if be <= ps or bs >= pe:
-                    nxt.append((ps, pe))
+                    nxt.append((ps, pe, rs, re_))
                     continue
                 if ps < bs:
-                    nxt.append((ps, bs))
+                    nxt.append((ps, float(bs), rs, True))
                 if be < pe:
-                    nxt.append((be, pe))
+                    nxt.append((float(be), pe, True, re_))
             pieces = nxt
-        out.extend((round(ps, 2), round(pe, 2))
-                   for ps, pe in pieces if pe - ps > 0.02)
+        out.extend((round(ps, 2) if rs else ps, round(pe, 2) if re_ else pe)
+                   for ps, pe, rs, re_ in pieces if pe - ps > 0.02)
     return out
 
 
