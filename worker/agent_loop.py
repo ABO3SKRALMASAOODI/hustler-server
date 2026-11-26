@@ -320,10 +320,13 @@ def _image_assets(conn, project_id, limit=200):
     # notice on subsequent turns: the caller could not know rows existed
     # beyond its SQL LIMIT. Two hundred matches list_assets' durable inventory
     # bound without injecting two hundred image payloads into the prompt.
+    # The First cut director's own plates (black plate, vignette mask) are
+    # the product's working layers, never the customer's images (#1838).
     with conn.cursor() as cur:
-        cur.execute("""SELECT * FROM assets
+        cur.execute(f"""SELECT * FROM assets
                        WHERE project_id = %s AND kind = 'image_ref'
                          AND COALESCE(meta->>'staged', '') != 'true'
+                         AND {read_tools.NOT_DESIGN_PLATE_SQL}
                        ORDER BY id ASC LIMIT %s""",
                     (project_id, max(1, int(limit or 1))))
         return cur.fetchall()
@@ -614,7 +617,8 @@ def filmstrip_parts(ctx, worker_db, priority_asset_ids=None):
             attached = worker_db.run(dbx.get_asset, aid)
         except Exception:
             attached = None
-        if attached and attached.get("kind") == "image_ref":
+        if attached and attached.get("kind") == "image_ref" \
+                and not read_tools.product_design_plate(attached):
             priority_images.append(attached)
     deduped = []
     for row in priority_images + images:
@@ -2955,7 +2959,8 @@ def _typed_start_from_upload(ctx, ledger, job):
                     f"upload ({kept:.1f} s of {duration:.1f} s)" + (f", with {added}" if added else "")
                     + ". This request is about the upload, so it runs on this film: keep what the first cut "
                     "added unless the request changes it, and say in the reply that you edited their full video.")
-        fresh, carried, dropped = _upload_carrying_first_cut(current, duration)
+        fresh, carried, dropped = _upload_carrying_first_cut(
+            current, duration, keep_frame=ledger.get("frame") != "upload")
         result = str(ctx.write_edl(fresh, "start again from the full upload" + (
             ", carrying the first cut's " + "; ".join(carried) if carried else "")))
     except dbx.JobLeaseLost:
@@ -3010,9 +3015,10 @@ def _first_cut_additions(edl, duration):
         return ""
 
 
-def _upload_carrying_first_cut(edl, duration):
+def _upload_carrying_first_cut(edl, duration, keep_frame=True):
     """(fresh EDL of the full upload, carried, dropped): the frame (its follow keys are on the source
-    clock), the caption style and the mastering carry as they are; a sound effect moves to the source
+    clock; keep_frame False, the ledger's frame=upload, leaves the upload's own shape, #1837), the
+    caption style and the mastering carry as they are; a sound effect moves to the source
     moment it sat on, so it lands on the same picture in the full upload; a zoom that spanned the whole
     first cut spans the whole upload. What belonged to the first cut's own selection (titles on its
     first seconds, a zoom inside one of its moments) is named in ``dropped``."""
@@ -3022,12 +3028,26 @@ def _upload_carrying_first_cut(edl, duration):
     edl = edl or {}
     fresh = schemas.default_edl(duration)
     carried, dropped = [], []
-    if edl.get("frame"):
+    if edl.get("frame") and keep_frame:
         fresh["frame"] = copy.deepcopy(edl["frame"])
         carried.append(f"{(edl['frame'] or {}).get('ratio') or 'output'} frame")
+    elif edl.get("frame"):
+        # #1837: a long film of a 16:9 presentation kept the short's 9:16 centre crop and its slides
+        # were cut off; this film keeps the upload's own frame.
+        dropped.append(f"the first cut's {(edl['frame'] or {}).get('ratio') or 'output'} crop "
+                       "(this film keeps the upload's own frame)")
     if isinstance(edl.get("captions"), dict):
         fresh["captions"] = copy.deepcopy(edl["captions"])
         carried.append("caption style")
+        if not keep_frame:
+            # The first cut placed its captions for its own 9:16 frame (chest height, a track measured on
+            # that crop). On the upload's own frame they sit at the bottom, off the slides it keeps visible.
+            caps = fresh["captions"]
+            caps.pop("placement_track", None)
+            if isinstance(caps.get("style"), dict):
+                caps["style"].pop("anchor_y", None)
+                caps["style"]["position"] = "bottom"
+            carried[-1] = "caption style (placed at the bottom of the upload's own frame)"
     if edl.get("master"):
         fresh["master"] = copy.deepcopy(edl["master"])
     try:
@@ -4360,6 +4380,8 @@ def _request_media_keys(worker_db, ctx):
         if meta.get("role") in ("edit_reference", "shorts_reference") \
                 or meta.get("staged") in (True, "true"):
             continue
+        if read_tools.product_design_plate(row):
+            continue  # the First cut's own plates are not photos the customer gave (#1838)
         if row.get("storage_key"):
             keys.append(row["storage_key"])
     return keys or None

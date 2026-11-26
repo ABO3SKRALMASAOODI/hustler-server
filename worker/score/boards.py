@@ -20,8 +20,9 @@ def font(size):
     return _fonts[size]
 
 
-def grab(path, t, width=None, height=None):
-    """One frame as a PIL image, or None."""
+def grab(path, t, width=None, height=None, timeout=60):
+    """One frame as a PIL image, or None. `timeout` bounds the one ffmpeg seek (a caller with a budget passes
+    what is left of it)."""
     scale = f"scale={width}:-2" if width else f"scale=-2:{height}"
     # One frame has no frame-level parallelism. Auto decoder/encoder pools
     # multiplied by every board cell throttle the 1.5-vCPU Director slots.
@@ -29,7 +30,7 @@ def grab(path, t, width=None, height=None):
            "-ss", f"{max(t, 0):.3f}", "-i", path, "-frames:v", "1",
            "-vf", scale, "-filter_threads", "1", "-f", "image2pipe",
            "-vcodec", "mjpeg", "-threads:v", "1", "-q:v", "3", "-"]
-    r = subprocess.run(cmd, capture_output=True, timeout=60)
+    r = subprocess.run(cmd, capture_output=True, timeout=timeout)
     if r.returncode != 0 or not r.stdout:
         return None
     return Image.open(io.BytesIO(r.stdout)).convert("RGB")

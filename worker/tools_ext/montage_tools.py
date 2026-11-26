@@ -116,7 +116,11 @@ def _clock(ctx, edl, music_id=None, clock="auto"):
 
 def _project_assets(ctx, kinds):
     import db as dbx
-    return ctx.db.run(dbx.assets_by_kinds, ctx.project_id, list(kinds)) or []
+    import read_tools
+    # the First cut director's own plates are never montage material (#1838)
+    return [r for r in ctx.db.run(dbx.assets_by_kinds, ctx.project_id,
+                                  list(kinds)) or []
+            if not read_tools.product_design_plate(r)]
 
 
 def pool_from_assets(rows, library=None):

@@ -163,6 +163,29 @@ def find_render_asset(conn, project_id, variant, edl_version):
         return cur.fetchone()
 
 
+def product_design_plate(asset):
+    """Is this asset a still the First cut's director drew for its own
+    layers (a black plate, a vignette mask, a matte: score/film.py writes
+    them with meta director=true, made_from='design')? It is the product's
+    working material, not media the customer gave or asked for (#1838: the
+    agent read a 1080x1920 black plate and a radial vignette mask as the
+    customer's 'empty' images and dropped the meme they asked for)."""
+    meta = (asset or {}).get("meta") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except ValueError:
+            return False
+    return (asset or {}).get("kind") == "image_ref" and \
+        meta.get("director") in (True, "true") and \
+        meta.get("made_from") == "design"
+
+
+# The SQL twin of product_design_plate, for queries that list media.
+NOT_DESIGN_PLATE_SQL = ("NOT (COALESCE(meta->>'director', '') = 'true' "
+                        "AND COALESCE(meta->>'made_from', '') = 'design')")
+
+
 def assets_by_kinds(conn, project_id, kinds, limit=200):
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM assets
@@ -861,7 +884,8 @@ def list_assets(ctx, kind=None):
     if not sel:
         return ("REJECTED: kind must be one of "
                 f"{', '.join(sorted(kinds))}.")
-    rows = ctx.db.run(assets_by_kinds, ctx.project_id, sel)
+    rows = [a for a in ctx.db.run(assets_by_kinds, ctx.project_id, sel)
+            or [] if not product_design_plate(a)]
     if not rows:
         if sel == kinds["music"]:
             return ("No audio uploaded to this project. fetch_url ingests a "
