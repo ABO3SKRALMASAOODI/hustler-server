@@ -28705,6 +28705,9 @@ def apply_edit_recipe(ctx, operations, brief=None, completes_steps=None):
             return _recipe_abort(
                 ctx, f"RECIPE ABORTED at operation {i} ({name}); no EDL "
                 f"version was created.\n{result}")
+        if "is already absent; nothing to remove" in result:
+            notes.append(f"{i}) {name}: already absent")
+            continue
         if result.startswith("NO CHANGE"):
             notes.append(f"{i}) {name}: no change"
                          + (f" ({'; '.join(repairs)})" if repairs else ""))

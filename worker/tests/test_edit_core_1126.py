@@ -114,3 +114,66 @@ def test_speed_span_upsert_and_remove_by_id():
         {"action": "upsert", "layer": "speed", "id": "sp1", "value": {"factor": 0.5}},
         {"action": "remove", "layer": "speed", "id": "sp2"}], 40.0, {})
     assert [(s["id"], s["factor"]) for s in out["speed"]] == [("sp1", 0.5)]
+
+
+class _VerCtx:
+    """A project with versions v1..v4; requests made v1->v2 and v2->v4."""
+    project_id = 7
+
+    def __init__(self):
+        self.versions = {1: {"keep": [[0, 30]]}, 2: {"keep": [[0, 20]]},
+                         3: {"keep": [[0, 15]]}, 4: {"keep": [[0, 10]]}}
+        self.job = {"id": 99}
+        self.turn_start_edl = {"version": 4}
+        self.written = None
+        outer = self
+
+        class _DB:
+            def run(self, fn, *a):
+                name = fn.__name__
+                if name == "edl_lineage":
+                    return [], [{"id": 11, "first_cut": False, "before_version": 1, "after_version": 2},
+                                {"id": 12, "first_cut": False, "before_version": 2, "after_version": 4}]
+                if name == "get_edl_version":
+                    v = a[1]
+                    return {"version": v, "json": outer.versions[v]} if v in outer.versions else None
+                if name == "edl_history":
+                    return [{"version": v} for v in sorted(outer.versions, reverse=True)]
+                raise AssertionError(name)
+        self.db = _DB()
+
+    def latest_edl(self):
+        v = max(self.versions)
+        return {"version": v, "json": self.versions[v]}
+
+    def write_edl(self, edl, desc):
+        self.written = (edl, desc)
+        v = max(self.versions) + 1
+        self.versions[v] = edl
+        return f"EDL v{v - 1} -> v{v}: {desc}"
+
+
+def test_restore_version_lands_the_film_before_the_last_request():
+    # #1697: "go back to the one before" restores that version exactly.
+    from tools_ext import version_tools as agent_tools
+    ctx = _VerCtx()
+    out = agent_tools.restore_version(ctx)
+    assert out.startswith("EDL v4 -> v5"), out
+    assert ctx.written[0] == {"keep": [[0, 20]]}
+
+
+def test_restore_version_by_number_and_two_requests_back():
+    from tools_ext import version_tools as agent_tools
+    ctx = _VerCtx()
+    assert agent_tools.restore_version(ctx, version=3).startswith("EDL v4 -> v5")
+    assert ctx.written[0] == {"keep": [[0, 15]]}
+    ctx = _VerCtx()
+    agent_tools.restore_version(ctx, requests_back=2)
+    assert ctx.written[0] == {"keep": [[0, 30]]}
+    assert agent_tools.restore_version(_VerCtx(), version=4).startswith("NO CHANGE")
+
+
+def test_restore_version_is_a_registered_editor_tool():
+    import agent_tools
+    assert "restore_version" in agent_tools.TOOLS
+    assert "restore_version" in agent_tools.TOOL_DOMAINS["direction"]

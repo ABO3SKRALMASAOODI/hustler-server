@@ -60,6 +60,10 @@ def _without_inert(dump):
     for c in ([caps] if isinstance(caps, dict) else caps or []):
         if isinstance(c, dict) and isinstance(c.get("style"), dict):
             assert c["style"].pop("anchor_x") is None
+    # EDIT-CORE 26 Nov: VectorItem.fill_opacity, inert (None) on every
+    # stored EDL, as in test_w0_seams._without_inert.
+    for v in d.get("vectors") or []:
+        assert v.pop("fill_opacity", None) is None
     return d
 
 

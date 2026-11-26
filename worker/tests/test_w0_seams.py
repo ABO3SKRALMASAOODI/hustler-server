@@ -82,6 +82,10 @@ def _without_inert(dump):
     for c in ([caps] if isinstance(caps, dict) else caps or []):
         if isinstance(c, dict) and isinstance(c.get("style"), dict):
             assert c["style"].pop("anchor_x") is None
+    # EDIT-CORE 26 Nov: VectorItem.fill_opacity, set only when a colour is
+    # written with its alpha ('#FFFFFF00'). Inert on every stored EDL.
+    for v in d.get("vectors") or []:
+        assert v.pop("fill_opacity", None) is None
     return d
 
 

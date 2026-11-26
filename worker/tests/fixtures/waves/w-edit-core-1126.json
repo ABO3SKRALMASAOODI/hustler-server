@@ -1,0 +1,5 @@
+{
+  "wave": "edit-core-1126",
+  "doc": "EDIT-CORE 26 Nov 2026: restore_version (tools_ext/version_tools.py, direction department) puts an earlier version back exactly for go back / undo (#1697). No core catalog growth.",
+  "verbs": ["restore_version"]
+}

@@ -183,7 +183,8 @@ def test_add_region_effect_and_remove():
     out = ct.remove_region_effect(ctx, ["rg1", "rg2"])
     assert out.startswith("EDL"), out
     assert [i["id"] for i in ctx.edl["fx"]] == ["rg3"]
-    assert ct.remove_region_effect(ctx, "m1").startswith("REJECTED")
+    # #1690: not a region effect id: nothing of that kind to remove.
+    assert "already absent" in ct.remove_region_effect(ctx, "m1")
 
 
 def test_a_fourth_flash_in_a_second_is_written_and_said():
