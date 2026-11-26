@@ -29,6 +29,8 @@ def discover(wf, root, batch, topic, count, previous=()):
     result = batch / (f"ideas-after-{len(previous)}.json" if previous else "plan.json")
     if result.is_file():
         return shell.jload(result)
+    import openai_budget
+    openai_budget.raise_if_stopped(lane="workflow")
     ctx = shell.Ctx(str(batch), dict(run_id=batch.name, workflow=wf,
                                      args=dict(line=topic, batch_candidates=count + 3, batch_previous=list(previous))), str(root))
     engine = workflow(wf)
@@ -120,7 +122,7 @@ def make_film(wf, root, batch, index, idea, until_script=False):
         raise RuntimeError(f"{rid} stopped in {stopped['stage']}: {stopped['error']}")
 
 
-def build(wf, root, batch, target, slots, replenish=True):
+def build_wave(wf, root, batch, target, slots, tried):
     plan = shell.jload(batch / "plan.json")
     items = list(enumerate(candidates(plan, wf)))
     style_plan = batch / "styles.json"
@@ -143,7 +145,8 @@ def build(wf, root, batch, target, slots, replenish=True):
     prior = shell.jload(batch / "results.json", {}) or {}
     # Give untried reserves the free slots first. A later run can revisit a stopped film with its checkpoints.
     items.sort(key=lambda row: str(row[0]) in prior.get("errors", {}))
-    todo = iter((i, item) for i, item in items if i not in films)
+    errors.update(prior.get("errors", {}))
+    todo = iter((i, item) for i, item in items if i not in films and i not in tried)
     config = dict(initializer=start_worker, initargs=(wf,))
     with (concurrent.futures.ProcessPoolExecutor(max_workers=slots, **config) as writers,
           concurrent.futures.ProcessPoolExecutor(max_workers=slots, **config) as editors):
@@ -157,6 +160,7 @@ def build(wf, root, batch, target, slots, replenish=True):
                 if job is None:
                     break
                 i, idea = job
+                tried.add(i)
                 future = writers.submit(make_film, wf, root, batch, i, idea, True)
                 pending[future] = (i, idea, "script")
             if not pending:
@@ -171,20 +175,29 @@ def build(wf, root, batch, target, slots, replenish=True):
                         pending[future] = (i, idea, "finish")
                     else:
                         films[i] = result
+                        errors.pop(str(i), None)
                 except Exception as exc:
                     errors[str(i)] = str(exc)
     shell.jsave(str(batch / "results.json"), dict(films=films, errors=errors))
-    if len(films) < target and replenish:
-        # Keep completed masters and broaden research once for subjects whose source or recording fell short.
+    return [Path(films[i]) for i in sorted(films)]
+
+
+def build(wf, root, batch, target, slots):
+    tried = set()
+    while True:
+        films = build_wave(wf, root, batch, target, slots, tried)
+        if len(films) >= target:
+            return films
+        plan = shell.jload(batch / "plan.json")
+        before = len(list(candidates(plan, wf)))
         previous = [i.get("subject") or i.get("pain") or i["title"] for i in plan["ideas"]]
         more = discover(wf, root, batch, plan.get("topic"), target - len(films), previous)
         plan["ideas"].extend(more["ideas"])
         plan["spend"].extend(more.get("spend", []))
         shell.jsave(str(batch / "plan.json"), plan)
-        return build(wf, root, batch, target, slots, replenish=False)
-    if len(films) < target:
-        raise RuntimeError(f"{len(films)} of {target} films finished; resumable results at {batch}/results.json")
-    return [Path(films[i]) for i in sorted(films)]
+        if len(list(candidates(plan, wf))) == before:
+            # No new usable source in this search. Preserve that search and already completed work for resume.
+            raise RuntimeError(f"Discovery returned only previously tried subjects or unavailable sources; see {batch}/plan.json")
 
 
 def cost(batch, tags, films, calls_path=None):

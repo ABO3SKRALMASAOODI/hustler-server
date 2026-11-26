@@ -131,3 +131,19 @@ def test_public_drivers_enter_batch_with_parsed_topic_and_destination(tmp_path, 
         monkeypatch.setattr(sys, "argv", [filename, "one", "--test-out", test, "theme"])
         assert driver.main() == 0
         assert received == [(wf, driver.STATE_ROOT, "one theme", test, driver.sources_md)]
+
+
+def test_replacements_continue_from_finished_films_across_research_rounds(tmp_path, monkeypatch):
+    def idea(i):
+        return dict(subject=str(i), title=str(i), supply=dict(ok=True))
+    (tmp_path / "plan.json").write_text(json.dumps(dict(ideas=[idea(0)], spend=[])))
+    waves = []
+    def wave(wf, root, run, target, slots, tried):
+        waves.append(len(tried))
+        tried.add(len(waves))
+        return [tmp_path / str(i) for i in range(len(waves))]
+    monkeypatch.setattr(batch, "build_wave", wave)
+    monkeypatch.setattr(batch, "discover", lambda wf, root, run, topic, count, previous:
+                        dict(ideas=[idea(len(previous))], spend=[]))
+    assert len(batch.build("wf3", tmp_path, tmp_path, 3, 2)) == 3
+    assert waves == [0, 1, 2]
