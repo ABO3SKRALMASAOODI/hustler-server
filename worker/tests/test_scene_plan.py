@@ -562,3 +562,13 @@ def test_tiny_type_is_truer_from_coverage_than_from_the_distance_field():
         errs["field"].append(float(np.abs(from_field - truth).mean()))
     assert max(errs["coverage"]) < 1e-3, errs
     assert min(errs["field"]) > 4 * max(errs["coverage"]), errs
+
+
+def test_two_type_devices_share_one_factual_value_only_while_their_ink_overlaps():
+    from scene.text_layout import share_display_copy
+    figure = dict(k="word",v="card",role="big",t="$250,000",f=[0,12],z=2)
+    counter = dict(k="word",v="palette",role="big",t="$250,000",f=[3,6],z=8)
+    repeated = [dict(k="word",v="cap",role="cap",t="very",f=[0,5]) for _ in range(2)]
+    share_display_copy([figure,counter,*repeated])
+    assert figure["op"] == [1]*3 + [0]*3 + [1]*6
+    assert "op" not in counter and all("op" not in item for item in repeated)
