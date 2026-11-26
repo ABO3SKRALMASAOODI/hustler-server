@@ -474,7 +474,8 @@ def ideas(ctx):
     srcs = sources()
     if not srcs:
         raise RuntimeError(f"no source clip with captions under {SRC_ROOT}")
-    recordings = recorded_pool(srcs)
+    count = ctx.args.get("batch_candidates")
+    recordings = {} if count else recorded_pool(srcs)
     rows = ledger_rows(ctx)
     used = {}
     for r in rows:
@@ -527,6 +528,10 @@ def ideas(ctx):
                "the film tells ONE story a stranger follows from its first two seconds: one continuous thought of the "
                "speaker (the before and the after are the same moment of the clip), every picture inside the export set "
                "up by the words he says just before it, and Valmera named on screen early.")
+    if ctx.args.get("batch_previous"):
+        content += "\nChoose new pains or techniques beyond these already researched for this collection: " + json.dumps(ctx.args["batch_previous"])
+    if count:
+        content = content.replace("three items, best first", f"{count} items, each a different editing pain or technique, best first")
     if recordings:
         content += ("\n# Existing REAL synthetic Studio recordings\n" + json.dumps(recordings, ensure_ascii=False)
                     + "\nFor each idea select recording_id from this menu. Build a NEW editing-pain argument around "
@@ -609,14 +614,17 @@ def record(ctx, idea, k, ask_text, follow_ups=None):
     spec = dict(settings=record_settings(ctx.run_id), sessions=[row])
     sp = os.path.join(ctx.run_dir, f"studio_spec_{k}.json")
     jsave(sp, spec)
-    run = f"wf2-{ctx.run_id}-{k}"
+    shared_stack = os.environ.get("VALMERA_BATCH_STUDIO")
+    run = shared_stack or f"wf2-{ctx.run_id}-{k}"
     env = dict(os.environ, VALMERA_STUDIO=studio_root)
     env.pop("ANTHROPIC_API_KEY", None)
     ctx.log(f"recording {sid}: {idea['source']} {t0}-{t1} s, typed {ask_text!r} (stack {run}, up to {n_follow} follow-ups)")
     t = time.time()
     command = ["zsh", HEAVY, f"wf-studio-{ctx.run_id}", PY, os.path.join(HERE, "studio.py"), "record", "--spec", sp, "--run", run,
                "--parallel", "1"]
-    if os.environ.get("GAUNTLET_LOCK_HELD") != "1":
+    if shared_stack:
+        command = [PY, os.path.join(HERE, "studio.py"), "record", "--spec", sp, "--run", run, "--attached"]
+    elif os.environ.get("GAUNTLET_LOCK_HELD") != "1":
         command = ["zsh", f"{VV}/ops-loop/tools/gauntlet_lock.sh", *command]
     out_p = os.path.join(studio_root, f"{sid}.out.txt")
     os.makedirs(studio_root, exist_ok=True)
@@ -636,12 +644,13 @@ def record(ctx, idea, k, ask_text, follow_ups=None):
     tail = open(out_p, errors="replace").read()[-4500:]
     ctx.log_raw(tail)
     rd = os.path.join(G, "runs", run)
-    try:          # the stack is down after the recording; its database and its folder (the clip, the browser's files) go too
-        subprocess.run([PY, os.path.join(G, "runner", "stack.py"), "down", run, "--drop-db"], cwd=os.path.join(G, "runner"),
-                       capture_output=True, text=True, timeout=300)
-    except subprocess.SubprocessError:
-        pass
-    shutil.rmtree(rd, ignore_errors=True)
+    if not shared_stack:
+        try:          # the stack is down after the recording; its database and its folder (the clip, the browser's files) go too
+            subprocess.run([PY, os.path.join(G, "runner", "stack.py"), "down", run, "--drop-db"], cwd=os.path.join(G, "runner"),
+                           capture_output=True, text=True, timeout=300)
+        except subprocess.SubprocessError:
+            pass
+        shutil.rmtree(rd, ignore_errors=True)
     shutil.rmtree(os.path.join(studio_root, "corpus", sid), ignore_errors=True)
     for name in os.listdir(live) if os.path.isdir(live) else []:     # the turns' export copies: the record keeps every export
         shutil.rmtree(os.path.join(live, name, "exports"), ignore_errors=True)

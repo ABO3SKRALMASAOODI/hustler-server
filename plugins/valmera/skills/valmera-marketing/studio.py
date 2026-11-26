@@ -415,7 +415,18 @@ def record(a):
     print(f"{len(sids)} sessions: {' '.join(sids)}", flush=True)
     if sids:
         stack_path = os.path.join(S.run_dir(run), "stack.json")
-        if not (os.path.exists(stack_path) and S.load_stack(run).get("state") == "up"):
+        if a.attached:
+            # Only the first session starts the batch's stack. A resumed finish-only run needs none.
+            # Both browser slots can reach this point together.
+            import fcntl
+            settings_file = os.environ.get("VALMERA_BATCH_SETTINGS")
+            if not settings_file and (not os.path.exists(stack_path) or S.load_stack(run).get("state") != "up"):
+                raise RuntimeError("the pre-existing batch stack is down")
+            with open((settings_file or a.spec) + ".lock", "a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                if not os.path.exists(stack_path) or S.load_stack(run).get("state") != "up":
+                    S.up(run, S.load_settings(settings_file))
+        elif not (os.path.exists(stack_path) and S.load_stack(run).get("state") == "up"):
             room = GT.production_room()
             if room:
                 settings["replay_room_usd"] = room
@@ -439,14 +450,15 @@ def record(a):
             if (S.spend(st) or 0) >= cap * 1.25 and "worker" in st["pids"]:
                 print(S.stop("worker", st["pids"]["worker"]), flush=True)
                 break
-        with open(os.path.join(st["dir"], "run.json"), "w") as fh:
-            json.dump(dict(sessions=sids, spend_usd=S.spend(st), finished_at=time.time()), fh, indent=1)
-        try:
-            GT.report_spend(st)
-        except Exception as exc:  # noqa: BLE001
-            print(f"spend report failed: {str(exc)[:200]}", flush=True)
-        if not a.keep_up:
-            S.down(run, False)
+        if not a.attached:
+            with open(os.path.join(st["dir"], "run.json"), "w") as fh:
+                json.dump(dict(sessions=sids, spend_usd=S.spend(st), finished_at=time.time()), fh, indent=1)
+            try:
+                GT.report_spend(st)
+            except Exception as exc:  # noqa: BLE001
+                print(f"spend report failed: {str(exc)[:200]}", flush=True)
+            if not a.keep_up:
+                S.down(run, False)
     for row in spec["sessions"]:
         try:
             print(json.dumps(collect_one(run, row["sid"]))[:600], flush=True)
@@ -592,6 +604,7 @@ def main():
     r.add_argument("--spec", required=True)
     r.add_argument("--run")
     r.add_argument("--parallel", type=int, default=2)
+    r.add_argument("--attached", action="store_true", help="use the stack owned by the film batch")
     r.add_argument("--keep-up", action="store_true")
     d = sub.add_parser("drive")
     d.add_argument("--run", required=True)

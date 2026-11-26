@@ -407,6 +407,9 @@ def find_ideas(form, cards, avoid=(), line=None, n=IDEAS_N, effort="high", deliv
                   "topic, find the strongest true stories inside it (a single moment, decision or turn, not a biography).\n\n" if line else
                   "# No subject given\nChoose the subjects yourself: founders, companies, inventions and moments in business or "
                   "technology history that a curious viewer half knows, told through one decisive moment.\n\n"))
+    if n > IDEAS_N:
+        content += ("Select a different principal subject or company for every film. When a theme is supplied, "
+                    "use different participants or companies within it. Include subject, its usual name, on each idea.")
     text, use = ask_web(system, content, effort=effort, max_tokens=24000, searches=14, fetches=10, what="find ideas",
                         max_tool_calls=IDEAS_SEARCHES)
     got = json_block(text)

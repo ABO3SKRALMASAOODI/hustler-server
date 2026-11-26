@@ -383,7 +383,13 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_sourc
                 env["OPENAI_API_KEY"] = line.split("=", 1)[1].strip().strip('"').strip("'")
     ctx.log("run footage.run " + " ".join(cmd[3:])[:300])
     try:
-        r = subprocess.run(cmd, cwd=brand.worker_dir(), env=env, capture_output=True, text=True, timeout=3600)
+        import warm_film_tools
+        if warm_film_tools.enabled:
+            timeout = int(env.get("CODEX_PROXY_FOOTAGE_TIMEOUT_SECONDS", 10800)) if env.get("CODEX_PROXY_LOCAL") == "1" else 3600
+            r = warm_film_tools.call("footage", cmd[3:], worker=brand.worker_dir(), env=env, timeout=timeout,
+                                     log=os.path.join(ctx.run_dir, "log.txt"))
+        else:
+            r = subprocess.run(cmd, cwd=brand.worker_dir(), env=env, capture_output=True, text=True, timeout=3600)
         ctx.log_raw(r.stdout[-4000:] + r.stderr[-2000:])
     except subprocess.SubprocessError as e:
         if os.environ.get('CODEX_PROXY_LOCAL')=='1':
@@ -821,14 +827,24 @@ def music_version(ctx, rd, sc):
                 open(hp, "w").write(MUSIC_USED)
                 cmd = cmd[:cmd.index(" -m music_film score ")] + f" '{hp}' '{aj}'"
             adapter = os.environ.get("SHELL_MUSIC_CMD")
-            if adapter:
+            import warm_film_tools
+            if adapter or warm_film_tools.enabled:
                 aj = os.path.join(ctx.supply, f"{tag}_args.json")
                 json.dump(dict(l1=sc.get("l1_audio") or sc["l1"], work=ctx.supply, film=rd["film"], out=out + ".part.mp4",
                                kind=SONG_KIND.get(ctx.workflow, "stories"), cache=os.path.join(ctx.state_root, "music_cache"), report=pending_report, preferred_cid=prior,
                                brief=brief, payoff=float(turn) if turn is not None else None, turn=float(story_turn) if story_turn is not None else None, turn_drop=turn_drop, used=used,
                                song=song, vocals=(ctx.args or {}).get("song_vocals")), open(aj, "w"), ensure_ascii=False)
-                sh(ctx, ["zsh", adapter, aj], label=f"wf-{tag}-{ctx.run_id}",
-                   heavy=os.environ.get("SHELL_MUSIC_REMOTE") != "1", timeout=1800)
+                if adapter:
+                    sh(ctx, ["zsh", adapter, aj], label=f"wf-{tag}-{ctx.run_id}",
+                       heavy=os.environ.get("SHELL_MUSIC_REMOTE") != "1", timeout=1800)
+                else:
+                    env = dict(os.environ, FFMPEG_BIN=brand.FF, SCENE_CEIL_DBTP="-2.0", SKIP_DB_INIT="1",
+                               TMPDIR=ctx.tmp, VALMERA_RUN=ctx.run_id, VALMERA_SKILL=ctx.workflow)
+                    result = warm_film_tools.call("music", [aj], worker=wk, env=env, timeout=1800,
+                                                  heavy=["zsh", HEAVY, f"wf-{tag}-{ctx.run_id}"],
+                                                  log=os.path.join(ctx.run_dir, "log.txt"))
+                    if result.returncode:
+                        raise RuntimeError(result.stderr[-600:])
             else:
                 sh(ctx, ["zsh", "-c", cmd], label=f"wf-{tag}-{ctx.run_id}", heavy=True, timeout=1800)
             rep = jload(pending_report) or {}

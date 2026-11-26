@@ -174,11 +174,13 @@ def ideas(ctx):
     if not able:
         raise RuntimeError(f"no buildable style outside the last three ({ctx.styles_last()})")
     avoid = [r.get("idea") for r in ledger_rows(ctx) if r.get("idea")]
-    got, use = writer.find_ideas(FORM, able, avoid=avoid, line=ctx.args.get("line"), delivered=DL.prompt_block(ctx.workflow))
+    avoid += ctx.args.get("batch_previous", [])
+    count = ctx.args.get("batch_candidates", writer.IDEAS_N)
+    got, use = writer.find_ideas(FORM, able, avoid=avoid, line=ctx.args.get("line"), n=count, delivered=DL.prompt_block(ctx.workflow))
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(4) as ex:
-        sp = list(ex.map(spine_probe, got[:6]))
-    for i, p in zip(got[:6], sp):
+        sp = list(ex.map(spine_probe, got[:count]))
+    for i, p in zip(got[:count], sp):
         i["supply"] = probe(i)
         i["spine_probe"] = p
         ctx.log(f"idea {i.get('title')!r}: pictures {i['supply'].get('covered')}, spine verified by its own sources {p['beats']}")

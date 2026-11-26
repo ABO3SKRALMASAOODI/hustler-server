@@ -559,3 +559,34 @@ def guard_ideas(wf, ideas_out, ask=None, log=print, p=None):
         raise AlreadyDelivered("every idea found repeats a delivered one exactly: " + json.dumps(reps, ensure_ascii=False)[:600])
     ideas_out["ideas"] = keep
     return ideas_out
+
+
+def deliver_collection(batch_rows, staged, final, batch_id, p=None):
+    """Publish one directory entry and record each film. A resume completes a torn ledger append."""
+    def commit():
+        if final.exists():
+            with (final / "shorts.json").open() as f:
+                if json.load(f).get("batch_id") == batch_id:
+                    return
+            raise FileExistsError(final)
+        os.rename(staged, final)
+
+    if not records(str(final)):
+        commit()
+        return
+    p = p or path()
+    with _locked(p):
+        history = rows(p=p)
+        known = {(r["wf"], r.get("run_id")) for r in history}
+        missing = [r for r in batch_rows if (r["wf"], r["run_id"]) not in known]
+        for r in missing:
+            old, sid = find(r["source_ids"], r["wf"], _rows=history)
+            if old:
+                raise AlreadyDelivered(f"{sid} already delivered to {old['folder']}", old, sid)
+            history.append(r)
+        commit()
+        with open(p, "a+") as out:
+            for row in missing:
+                out.write(json.dumps(row, ensure_ascii=False) + "\n")
+            out.flush()
+            os.fsync(out.fileno())

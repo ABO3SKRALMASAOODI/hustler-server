@@ -116,10 +116,11 @@ def allowed_styles(state_root, workflow):
 
 def ledger_add(state_root, workflow, row):
     p = ledger_path(state_root)
-    d = jload(p, {}) or {}
-    d.setdefault(workflow, []).append(row)
-    d[workflow] = d[workflow][-30:]
-    jsave(p, d)
+    with DL._locked(p):
+        d = jload(p, {}) or {}
+        rows = [r for r in d.get(workflow, []) if r.get("run_id") != row["run_id"]]
+        d[workflow] = (rows + [row])[-30:]
+        jsave(p, d)
 
 
 def used_windows(state_root, workflow, source):
@@ -200,7 +201,7 @@ def sweep(work_root, state_root):
     return gone
 
 
-def deliver(ctx, state, out_root, results):
+def deliver(ctx, state, out_root, results, engine=None):
     """One folder, complete, written once: <out_root>/<name>/{film.mp4, film.json}. Never overwritten."""
     script, chk = results["script"], results["check"]
     name = state.get("deliver_name") or f"{dt.date.today():%Y%m%d}-{ctx.workflow}-{script['style']['id']}-{slug(script.get('title'))}-{ctx.run_id[-6:]}"
@@ -222,7 +223,7 @@ def deliver(ctx, state, out_root, results):
                      final=chk["final_music"], clean=chk["final"])
         current = revision.get("inputs") == chain.music_inputs(ctx, active_rd, active_sc)
         if not current or any(not revision.get(k) or revision[k] != chain.file_sha(path) for k, path in files.items()):
-            chk = results["check"] = load_workflow(ctx.workflow).check(ctx, rd, sc)
+            chk = results["check"] = (engine or load_workflow(ctx.workflow)).check(ctx, rd, sc)
             jsave(os.path.join(ctx.run_dir, "check.json"), chk)
     # the shared delivered ledger (delivered.py): a source delivered before is refused before anything is copied
     # Only a folder inside the owner's delivery folders is a delivery; anywhere else the run is a test, never recorded.
@@ -270,7 +271,7 @@ def deliver(ctx, state, out_root, results):
     upload = None if music_in_final or chk.get("song") else ("film_clean.mp4" if scored else "film.mp4")
     if upload and wants_platform_song(ctx):
         pm, pspend = platform_song.choose_safely(ctx.workflow, script, (chk.get("checks") or {}).get("final_s"), upload,
-                                                 state_root=ctx.state_root, log=ctx.log, film_music=chk.get("music") if scored else None)
+                                                 state_root=ctx.args.get("shared_style_root") or ctx.state_root, log=ctx.log, film_music=chk.get("music") if scored else None)
         if pm:
             jsave(os.path.join(part, "platform_music.json"), pm)
             rec["platform_music"] = pm
@@ -286,6 +287,8 @@ def deliver(ctx, state, out_root, results):
     if ctx.workflow == "wf4":
         import wf4_sources
         wf4_sources.write(part, ctx.supply, results)
+        import chapter_shorts
+        rec["shorts"] = chapter_shorts.write(ctx, part, results)
     jsave(os.path.join(part, "film.json"), rec)
     if row:                                      # the rename and the ledger row together, under the ledger's lock
         DL.deliver_once(row, commit=lambda: os.rename(part, final_dir))
@@ -351,7 +354,7 @@ def delivered_row(ctx, script, results, folder):
 
 def run(a):
     state_root = a.state_root
-    work_root = os.path.join(state_root, "work")
+    work_root = getattr(a, "work_root", None) or os.path.join(state_root, "work")
     os.makedirs(work_root, exist_ok=True)
     before = du(work_root)
     if a.resume:
@@ -383,7 +386,7 @@ def run(a):
         ctx.log(f"sound set: {sounds}")
     if swept:
         ctx.log(f"swept stopped runs: {swept}")
-    wf = load_workflow(state["workflow"])
+    wf = getattr(a, "engine", None) or load_workflow(state["workflow"])
     hang = os.environ.get("SHELL_HANG_AFTER")         # the cleanup test's kill point
     results = {s: ctx.out(s) for s in state["done"]}
     defects = []
@@ -401,8 +404,9 @@ def run(a):
                     # of a delivered film skips it only as a test: one that can reach a delivery folder is judged like any idea
                     r = DL.guard_ideas(ctx.workflow, r, log=ctx.log)
             elif stage == "script":
+                styles_before = ctx.styles_last()
                 r = wf.script(ctx, results["ideas"])
-                r["styles_banned"] = ctx.styles_last()
+                r["styles_banned"] = styles_before
                 if r["style"]["id"] in r["styles_banned"]:
                     raise RuntimeError(f"style {r['style']['id']} repeats one of the last three")
             elif stage == "supply":
@@ -416,7 +420,7 @@ def run(a):
                 if not r["checks"].get("ok"):
                     defects.append(dict(stage="check", checks=r["checks"]))
             elif stage == "deliver":
-                r = deliver(ctx, state, state["out_root"], results)
+                r = deliver(ctx, state, state["out_root"], results, engine=wf)
             __import__("openai_budget").raise_if_stopped(lane="workflow")
             results[stage] = r
             jsave(os.path.join(run_dir, f"{stage}.json"), r)

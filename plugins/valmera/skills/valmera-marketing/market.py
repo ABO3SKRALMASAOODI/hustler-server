@@ -190,12 +190,23 @@ def main():
     if not test:                                     # the shell started here leaves the delivered ledger to this driver
         env[DL.DRIVER_ENV] = DL.driver_token("wf2")
     prepare_state()
+    rid = stopped_run(topic)
+    if rid:
+        return single(cli, env, rid)
+    from batch_films import run_driver
+    os.environ.update(env)
+    return run_driver("wf2", STATE_ROOT, topic, out_root, sources_md)
+
+
+def single(cli, env, rid):
+    """Complete a one-film run checkpointed by the previous driver."""
+    import delivered as DL
+    out_root, test, topic = cli["out_root"], cli["test"], cli["topic"]
     os.makedirs(out_root, exist_ok=True)
     run_py = [PY, os.path.join(HERE, "run.py"), "run"]
     outbox = os.path.join(STATE_ROOT, "outbox")         # the shell delivers here; the folder moves to out_root whole, once
     os.makedirs(outbox, exist_ok=True)
     t0 = time.time()
-    rid = stopped_run(topic)
     log = os.path.join(STATE_ROOT, f"market-{dt.datetime.now():%Y%m%d-%H%M%S}.log")
     res, last_err = {}, None
     for attempt in range(TRIES + 1):

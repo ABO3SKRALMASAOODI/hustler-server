@@ -1,6 +1,6 @@
 ---
 name: valmera-marketing
-description: Make a finished vertical marketing film that sells Valmera to video editors and creators (a technique or a before-and-after with the call to action inside the film) with one command and at most a few words (/valmera-marketing, or /valmera-marketing <a pain, a technique or a theme>). The run finds the editor's pain itself, records what Valmera really does with a clip and a typed sentence on a local copy of the product (never a customer's project), checks the export against the sentence, narrates with Phonon Easton over real footage cut at the references' pace, checks every picture against the words it sits under, lays sound design and chosen music, delivers one complete folder once and deletes its work. Use when the user asks for a Valmera marketing film, an editing tutorial or a before-and-after for editors. Does not publish.
+description: Make five finished vertical marketing films that sell Valmera to video editors and creators (a technique or a before-and-after with the call to action inside the film) with one command and at most a few words (/valmera-marketing, or /valmera-marketing <a pain, a technique or a theme>). The run finds the editor's pain itself, records what Valmera really does with a clip and a typed sentence on a local copy of the product (never a customer's project), checks the export against the sentence, narrates with Phonon Easton over real footage cut at the references' pace, checks every picture against the words it sits under, lays sound design and chosen music, delivers one complete folder once and deletes its work. Use when the user asks for a Valmera marketing film, an editing tutorial or a before-and-after for editors. Does not publish.
 ---
 
 # Valmera marketing films (workflow 2)
@@ -16,11 +16,9 @@ python3 /Users/masaoodi/Documents/Valmera/hustler-server/plugins/valmera/skills/
 The launcher starts the Mac's local Codex proxy and uses its ChatGPT subscription sign-in for model calls. The
 launcher and the local Studio replay use the proxy's local credentials. The Studio recording uses a synthetic account.
 
-Run it in the background; it takes 40 to 90 minutes (the recording 5-15, the footage 10-30, the render 10-30). Do not
-poll: wait for it to exit. Its last line is one JSON object: `delivered` (the folder), `title`, `style`, `typed` (the
-sentence Valmera was given), `pictures_fit`, `spend_usd`, `work_empty`. Exit 2 with `stopped`: run the same command with
-the same words; it continues where it stopped. `--out <folder>` delivers elsewhere (default
-`/Users/masaoodi/Documents/Valmera/Marketing Films/`). Never rate the film yourself.
+Run it in the background. One collection covers five different editing pains or techniques. One discovery pass uses the reference films and available source clips. The local stack stays up across the batch, and separate synthetic Studio accounts record each demonstration in the available agent slots. Each film keeps the export checks and follow-up requests of the individual recording path.
+
+The final JSON gives `delivered`, `films` and `cost`. The default destination is `/Users/masaoodi/Documents/Valmera/Marketing Films/`. Numbered MP4s, matching `clean/` copies, `records/`, `shorts.json`, `SOURCES.md` and the catalog-song instructions follow the podcast handoff. Rerunning the same words and output root resumes the batch. A separate Opus session rates the films. The workflow delivers once and never publishes.
 
 What the run does (`proof.py` on the workflow shell, `market.py` the launcher):
 
