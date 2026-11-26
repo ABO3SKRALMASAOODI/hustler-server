@@ -954,6 +954,9 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
                 edl[layer] = None if layer != "keep" else edl.get(layer)
         elif action in ("upsert", "remove") and layer in ITEM_LAYERS:
             item_id = op.get("id")
+            if not item_id and isinstance(op.get("value"), dict):
+                item_id = op["value"].get("id")
+                op["id"] = item_id
             if not isinstance(item_id, str) or not item_id:
                 raise ValueError("An item operation requires a stable id.")
             items = edl.get(layer) or []

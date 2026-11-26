@@ -67,16 +67,16 @@ def test_a_successful_probe_runs_the_request_on_claude(billing_off, monkeypatch)
     assert claude_lane.available()
 
 
-def test_a_refused_probe_or_no_claim_stays_blocked(billing_off, monkeypatch):
+def test_a_refused_probe_or_no_claim_still_attempts_the_customer_request(billing_off, monkeypatch):
     monkeypatch.setattr(claude_lane, "probe",
                         lambda: (False, "BadRequestError 400: credit balance"))
     db = _Db({"action": "probe", "may_switch_on": False})
-    assert agent_loop._claude_paid_lane(db, JOB, True, "plus_2026", {}) is None
+    assert agent_loop._claude_paid_lane(db, JOB, True, "plus_2026", {}) is not None
     assert db.after[0][1] is False
     monkeypatch.setattr(claude_lane, "probe",
                         lambda: pytest.fail("probed without a claim"))
     assert agent_loop._claude_paid_lane(_Db(None), JOB, True, "plus_2026",
-                                        {}) is None
+                                        {}) is not None
 
 
 def test_the_probe_never_leaks_the_key(monkeypatch):

@@ -145,10 +145,8 @@ class _Sdk:
 
 def test_a_billing_refusal_for_a_paying_user_fails_over_and_alerts(
         lane_up, monkeypatch):
-    """The loop's _switch_quota_lane moves a turn to the next lane exactly
-    when llm.note_quota_error says the wallet is empty. A paying user's
-    Claude refusal must be one, must flip the credit switch and must queue
-    the owner alarm, and the next lane must be the contracted OpenAI one."""
+    """Without a working recovery wallet the refusal reaches the outer lane loop."""
+    monkeypatch.setattr(llm, "provider_recovery_clients", lambda: ())
     refused, alarms = [], []
     monkeypatch.setattr(claude_trial, "provider_refused",
                         lambda kind, exc: refused.append(kind))
@@ -178,9 +176,9 @@ def test_a_billing_refusal_for_a_paying_user_fails_over_and_alerts(
     assert llm.note_quota_error(err.value, lanes[0]["model"],
                                 lanes[0]["base_url"]) is True
     assert alarms and alarms[0][0] == "llm_balance"   # the owner is alerted
-    # the lane is latched closed: the next turn starts on OpenAI directly
+    # A refused call leaves the route available to the next customer.
     assert agent_loop._claude_paid_lane(_Db(ON), JOB, True, "plus_2026",
-                                        {}) is None
+                                        {}) is not None
 
 
 def test_credit_parity_charges_the_contracted_rate():
@@ -245,3 +243,9 @@ def test_long_context_provider_surcharge_does_not_exhaust_paid_allowance():
     assert agent_tools.ToolContext.running_credits(ctx) == pytest.approx(expected)
     ctx.credit_price_aliases = {}
     assert agent_tools.ToolContext.running_credits(ctx) > expected * 4
+
+def test_existing_auth_refusal_does_not_block_a_subscribers_next_turn(lane_up, monkeypatch):
+    lane_up.update(on=False, reason="auth_error")
+    monkeypatch.setattr(agent_loop, "_probe_paid_lane", lambda *a: False)
+    route = agent_loop._claude_paid_lane(_Db(ON), JOB, True, "pro_2026", {})
+    assert route["lane"]["name"] == "claude_paid"

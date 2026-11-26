@@ -2549,9 +2549,12 @@ def _claude_paid_lane(worker_db, job, subscribed, plan, payload,
                 in flag["test_user_ids"]) or not flag["claude_lane"]:
             return None
         import claude_credit
-        if not claude_credit.paid_available(claude_trial.credit_status(worker_db)):
-            if not _probe_paid_lane(worker_db, job):
+        credit = claude_trial.credit_status(worker_db)
+        if not claude_credit.paid_available(credit):
+            if not _probe_paid_lane(worker_db, job) and credit.get("reason") not in claude_credit.REFUSALS:
                 return None
+            # Older workers may have recorded a refusal. This request still tries
+            # the live credential and its configured recovery providers.
         if not claude_lane.available():
             return None
         # 4 Nov: subscribers keep the funded Anthropic route, including

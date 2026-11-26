@@ -1087,3 +1087,29 @@ def test_cache_ttl_tracks_project_waits(measured, ttl):
     conn = MagicMock()
     conn.cursor.return_value.__enter__.return_value.fetchone.return_value = {"long_wait": measured}
     assert agent_loop._editing_cache_ttl(conn, 9) == ttl
+
+
+def test_batch_uses_stable_vector_id_supplied_inside_value():
+    edl = fx_edl()
+    op = {"action": "upsert", "layer": "vectors", "value": {
+        "id": "ln1", "kind": "line", "start": 3.2, "end": 4.6, "x": 0.5, "y": 0.06,
+        "width": 0.8, "height": 0.002, "color": "#FFFFFF", "opacity": 0.85}}
+    out, _ = batch(edl, [op])
+    again, _ = batch(out, [op])
+    assert [v["id"] for v in again["vectors"]] == ["ln1"]
+
+
+@pytest.mark.parametrize("has_picture", [False, True])
+def test_long_narration_establishes_renderable_program(monkeypatch, has_picture):
+    from schemas import canvas_edl, validate_edl, program_duration
+    ctx = ctx_with(canvas_edl(), [{"id": 1, "storage_key": "audio.mp3", "kind": "music",
+                                   "duration_s": 1539.334, "meta": {}}])
+    ctx.has_main_video = has_picture
+    ctx.duration = 1539.334 if has_picture else 0
+    monkeypatch.setattr(agent_tools, "_solid_card_asset", lambda *a: ("black.png", None))
+    reply = agent_tools.add_voiceover(ctx, "audio.mp3", duration_s=1539.3)
+    assert reply.startswith("EDL v"), reply
+    saved = validate_edl(ctx.latest_edl()["json"], ctx.duration).model_dump()
+    assert program_duration(saved) == 1539.3
+    assert saved["voiceover"][0]["duration_s"] == 1539.3
+    assert bool(saved["keep"]) == has_picture

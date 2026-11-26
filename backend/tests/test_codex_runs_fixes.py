@@ -114,12 +114,13 @@ def test_download_url_without_any_export_still_says_export_final(monkeypatch):
     assert "No final has been rendered yet" in str(result)
 
 
-def test_an_operation_id_rejection_states_the_rule():
-    """klRb0 s06 (3709): 's06-serif-label' (15 characters) was refused as
-    'Invalid edit operation ID.' with no rule."""
-    with pytest.raises(ValueError) as err:
-        direct_edits.command_identity({"operation_id": "s06-serif-label"})
-    assert "16-80" in str(err.value) and "15 characters" in str(err.value)
+def test_short_operation_id_preserves_retry_identity():
+    command = {"op": "apply_edit_batch", "operation_id": "fix-frame2",
+               "base_version": 9, "args": [{"action": "remove", "id": "vec1"}]}
+    identifier, fingerprint = direct_edits.command_identity(command)
+    assert identifier == "fix-frame2"
+    assert direct_edits.command_identity(dict(command)) == (identifier, fingerprint)
+    assert direct_edits.command_identity({**command, "args": []})[1] != fingerprint
 
 
 def test_too_many_jobs_names_the_jobs_holding_the_slots():

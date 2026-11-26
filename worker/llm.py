@@ -567,6 +567,22 @@ def paid_failover_client():
     return _paid_failover_client
 
 
+def provider_recovery_clients():
+    """Yield independent provider wallets in recovery order, building clients on demand."""
+    seen = set()
+    routes = ((frontier_available, "FRONTIER", frontier_client, config.FRONTIER_AGENT_MODEL),
+              (paid_failover_available, "PAID_FAILOVER", paid_failover_client, config.PAID_FAILOVER_MODEL),
+              (paid_available, "PAID", paid_client, config.PAID_AGENT_MODEL),
+              (lambda: bool(config.OPENAI_API_KEY), "OPENAI", client, config.EDITOR_MODEL))
+    for configured, prefix, get_client, model in routes:
+        if configured():
+            wallet = (getattr(config, prefix + "_BASE_URL").rstrip("/"),
+                      getattr(config, prefix + "_API_KEY"))
+            if wallet not in seen:
+                seen.add(wallet)
+                yield model, get_client()
+
+
 def paid_editor_lanes(plan=None):
     """New Advanced contracts use Sol; all grandfathered routes stay unchanged.
 

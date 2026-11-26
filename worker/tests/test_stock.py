@@ -247,3 +247,22 @@ def test_openverse_photos_carry_their_license_line(monkeypatch):
     assert seen.get("filter_dead") == "true"
     assert seen.get("unstable__authority") == "true"
     assert seen.get("page_size") >= 12
+
+
+def test_stock_acquires_same_pick_after_provider_timeout_and_oversize(monkeypatch, tmp_path):
+    files = _files((3840, 2160), (960, 540))
+    item = {"id": "pexels:video:31845593", "provider": "pexels", "kind": stock.KIND_VIDEO,
+            "_files": files}
+    seen = []
+    def download(url, path, **kwargs):
+        seen.append(url)
+        if len(seen) == 1:
+            raise stock.net_fetch.FetchError("HTTP 503")
+        if url == files[0]["link"] and kwargs["max_bytes"] < 187 * 1024 * 1024:
+            raise stock.net_fetch.FetchError("file is 187 MB, over the 90 MB limit")
+        path.write_bytes(b"clip")
+    monkeypatch.setattr(stock.net_fetch, "download", download)
+    path = tmp_path / "clip.mp4"
+    assert stock.download(item, path, 3840, 2160)["picked_width"] == 960
+    assert seen == [files[0]["link"], files[0]["link"], files[1]["link"]]
+    assert path.read_bytes() == b"clip"
