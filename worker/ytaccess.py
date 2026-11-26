@@ -80,7 +80,22 @@ def access_blocked(detail):
     """
     d = (detail or "").lower()
     return (bot_walled(d) or "http error 403" in d
-            or "403 forbidden" in d or "403: forbidden" in d)
+            or "403 forbidden" in d or "403: forbidden" in d
+            or sabr_only(d))
+
+
+def sabr_only(detail):
+    """YouTube served this player client a SABR-only session: every https
+    format is missing its URL, yt-dlp sees only storyboard images and
+    answers "Requested format is not available" (yt-dlp issue 12482). It is
+    per client, not per video (26 Nov 2026: web_embedded, mweb, web_safari
+    and tv all got it on public videos while yt-dlp's default client
+    selection, through the same proxy, delivered media), so another rung
+    of the ladder repairs it. url_media runs yt-dlp with --no-warnings and
+    sees only the final ERROR line, hence the format phrase."""
+    d = (detail or "").lower()
+    return ("sabr-only" in d or "only images are available" in d
+            or "requested format is not available" in d)
 
 
 def stale_cookies(detail):
@@ -399,7 +414,13 @@ def extraction_strategies(have_cookies=None):
            # separate delivery class and was byte-verified on the exact
            # production probe video; it is the availability fallback.
            {"name": "anonymous-mweb-progressive", "client": "mweb",
-            "cookies": False, "format": "progressive"}]
+            "cookies": False, "format": "progressive"},
+           # yt-dlp's own default client selection, anonymous. It tracks
+           # YouTube's changes with every yt-dlp release; on 26 Nov 2026 it
+           # was the only path that still delivered media while YouTube put
+           # every named client above (and the configured ones) on SABR-only.
+           {"name": "anonymous-default", "client": None,
+            "cookies": False, "format": "adaptive"}]
     seen = {"mweb", "web_embedded"}
     for raw in config.YTDLP_FALLBACK_CLIENTS:
         client = str(raw or "").strip()

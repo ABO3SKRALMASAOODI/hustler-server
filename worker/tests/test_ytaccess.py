@@ -413,3 +413,53 @@ def test_probe_retries_progressive_when_adaptive_cdn_returns_403(
 def test_probe_verdict_is_json_ready(monkeypatch):
     _fake_probe_run(monkeypatch, stdout="probe_ok id=x fmt=251\n")
     json.dumps(ytaccess.probe())
+
+
+SABR = ("WARNING: [youtube] x: Some web_embedded client https formats have "
+        "been skipped as they are missing a URL. YouTube may have enabled the "
+        "SABR-only streaming experiment for the current session. | WARNING: "
+        "Only images are available for download. | ERROR: [youtube] x: "
+        "Requested format is not available. Use --list-formats for a list")
+
+
+def test_sabr_only_is_an_access_failure_the_ladder_repairs():
+    # 26 Nov 2026: YouTube put the named clients on SABR-only; the probe and
+    # url_media stopped at the first rung instead of trying the next one.
+    assert ytaccess.access_blocked(SABR)
+    assert ytaccess.access_blocked(
+        "ERROR: [youtube] x: Requested format is not available. Use "
+        "--list-formats for a list of available formats")
+    assert not ytaccess.access_blocked("ERROR: [youtube] x: Private video")
+
+
+def test_anonymous_default_client_rung_follows_the_named_clients(monkeypatch):
+    monkeypatch.setattr(config, "YTDLP_FALLBACK_CLIENTS", [])
+    rows = ytaccess.extraction_strategies(have_cookies=False)
+    assert rows[3] == {"name": "anonymous-default", "client": None,
+                       "cookies": False, "format": "adaptive"}
+
+
+def test_probe_walks_past_sabr_only_clients_to_the_default_rung(monkeypatch):
+    monkeypatch.setattr(config, "YTDLP_FALLBACK_CLIENTS", [])
+    monkeypatch.setattr(ytaccess, "resolve_cookies", lambda: (None, "none"))
+    monkeypatch.setattr(ytaccess, "prepare_run_jar", lambda: None)
+
+    class R:
+        returncode = 0
+        stdout = "probe_ok id=x fmt=251\n"
+        stderr = ""
+
+    def run(cmd, **kw):
+        r = R()
+        if any(a.startswith("youtube:player_client=") for a in cmd):
+            r.returncode, r.stdout, r.stderr = 1, "", SABR
+        elif "--test" in cmd and "-o" in cmd:
+            path = cmd[cmd.index("-o") + 1].replace("%(ext)s", "m4a")
+            with open(path, "wb") as fh:
+                fh.write(b"real bytes")
+        return r
+
+    monkeypatch.setattr(ytaccess.subprocess, "run", run)
+    v = ytaccess.probe(url="https://www.youtube.com/watch?v=x")
+    assert v["ok"] and v["download_ok"]
+    assert v["strategy"] == "anonymous-default"
