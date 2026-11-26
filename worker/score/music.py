@@ -2173,6 +2173,9 @@ def mix_film(film, song_path, marks, out=None, kind="stories", vocals=None, sung
                 music = music * np.float32(10 ** ((i - VOICE_LUFS) / 20))
         mixd = prog.copy()
         mixd[:len(music)] += music[:len(mixd)]
+        if marks.get("unsounded_events"):
+            from . import programme_accents
+            rep["recovered_accent"] = programme_accents.add(mixd, film, marks["unsounded_events"])
         m4a = os.path.join(tmp, "song.m4a")
         rep["master"] = AU.master(None, mixd, m4a, tmp, total)
         rep["music"] = mrep

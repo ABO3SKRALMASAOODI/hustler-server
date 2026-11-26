@@ -217,6 +217,8 @@ def main(argv=None):
     rep["choice"] = choice
     part = os.path.join(dst, "film.part.mp4")
     mk = MF.arranged(marks, choice)                       # the chooser's entry point, and the story path's arc
+    from score.programme_accents import retained_events
+    mk["unsounded_events"] = retained_events(doc)
     mix = MU.mix_film(clean, song, mk, out=part, kind=kind, sung=choice.get("sung"), supplied=False)
     rep["mix"] = {k: v for k, v in mix.items() if k not in ("music",)}
     rep["mix"]["music"] = {k: v for k, v in (mix.get("music") or {}).items() if k in ("under_voice_db", "silent_from_s", "holes", "hits", "payoff_flow_s")}

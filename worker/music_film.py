@@ -682,6 +682,8 @@ def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None,
         marks["story_arc"] = {k: arc[k] for k in MU.ARC_PARTS if k in arc}
         if arc.get("close_s") is not None:
             marks["close_s"] = float(arc["close_s"])
+    if l1.get("picture_bound_sound") and l1.get("sound") == []:
+        marks["unsounded_events"] = [ev for ev in l1.get("composed_events", []) if ev.get("items")]
     whole = False                                              # the scene gives no voice apart: the film's own sound is read instead
     if not marks["words"]:
         try:
