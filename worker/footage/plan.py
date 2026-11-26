@@ -98,6 +98,37 @@ def plan(lines, named, about="", budget_s=90.0):
     for ln in obj.get("lines") or []:
         if isinstance(ln, dict) and isinstance(ln.get("i"), int):
             lns.append(dict(i=ln["i"], show=str(ln.get("show") or ""), subjects=[x for x in ln.get("subjects") or [] if x in names]))
+    # A beat can survive the writer but disappear from the researcher's response.
+    # Use its original picture address and visible action to search both moving-image
+    # providers while preserving the source-to-beat relationship.
+    indexed = {row["i"]:row for row in lns}
+    by_name = {row["name"]:row for row in subs}
+    for line in lines:
+        i = line["i"]
+        if (indexed.get(i) or {}).get("subjects") or not line.get("pictures"):
+            continue
+        subjects = []
+        for name in line["pictures"]:
+            if not isinstance(name, str) or not name.strip():
+                continue
+            target = by_name.get(name)
+            if target is None:
+                target = dict(name=name, kind="thing", must_show=line.get("visual") or name, searches=[])
+                subs.append(target)
+                by_name[name] = target
+            queries = [dict(where="archive", q=name)]
+            if line.get("visual"):
+                queries.append(dict(where="youtube", q=line["visual"][:120]))
+            queries.append(dict(where="youtube", q=name))
+            for query in queries:
+                if query not in target["searches"]:
+                    target["searches"].append(query)
+            subjects.append(name)
+        if subjects:
+            if i not in indexed:
+                indexed[i] = dict(i=i, show=line.get("visual") or "")
+                lns.append(indexed[i])
+            indexed[i]["subjects"] = subjects
     assigned = {row["i"]: row["subjects"] for row in lns}
     for subject in subs:
         claims = [dict(words=line["say"], depiction=line["visual"], **({"claim":line["claim"]} if line.get("claim") else {}), **({"single_action":True} if line.get("single_action") else {})) for line in lines

@@ -577,3 +577,13 @@ def test_atlas_revision_only_invalidates_segments_with_type(monkeypatch):
     for old, segment in zip(before, revised):
         a, b = segment["f"]
         assert (old != segment["sha"]) == (a < 90 and b > 60)
+
+
+def test_two_type_devices_share_one_factual_value_only_while_their_ink_overlaps():
+    from scene.text_layout import share_display_copy
+    figure = dict(k="word",v="card",role="big",t="$250,000",f=[0,12],z=2)
+    counter = dict(k="word",v="palette",role="big",t="$250,000",f=[3,6],z=8)
+    repeated = [dict(k="word",v="cap",role="cap",t="very",f=[0,5]) for _ in range(2)]
+    share_display_copy([figure,counter,*repeated])
+    assert figure["op"] == [1]*3 + [0]*3 + [1]*6
+    assert "op" not in counter and all("op" not in item for item in repeated)

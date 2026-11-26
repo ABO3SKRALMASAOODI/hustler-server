@@ -92,7 +92,32 @@ def speaker_seats(scene, metadata):
     return seats
 
 
+def share_display_copy(items):
+    """Give identical lettering one owner per frame across caption, display and palette layers."""
+    used = defaultdict(dict)
+    words = [it for it in items if it.get("k") == "word" and it.get("t") and not it.get("text_group")]
+    # The caption already belongs to its sentence. Retain it in that seat when a second
+    # type device happens to request exactly the same word or figure.
+    for it in sorted(words, key=lambda row: (row.get("role") != "cap", -row.get("z", 0))):
+        text = " ".join(it["t"].split()).casefold()
+        origin = it.get("v"), it.get("role")
+        lo, hi = it["f"]
+        alpha = it.get("op", 1)
+        changed = None
+        for f in range(max(lo, it.get("on",lo)), hi):
+            if A(alpha,f,lo) <= .01:
+                continue
+            owner = used[text].setdefault(f, origin)
+            if owner != origin and not (owner[1] == origin[1] == "cap"):
+                if changed is None:
+                    changed = [A(alpha,q,lo) for q in range(lo,hi)]
+                changed[f-lo] = 0
+        if changed is not None:
+            it["op"] = changed
+
+
 def resolve(scene, speaker_layout=None):
+    share_display_copy(scene["items"])
     width, height = scene["frame"]
     voices = scene["voices"]
     # Palette underlines are drawn on the measured glyphs before the final layout.

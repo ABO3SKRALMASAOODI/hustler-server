@@ -715,3 +715,14 @@ def test_example_search_and_rank_keep_the_parent_claim(monkeypatch):
     plan.rank(planned["subjects"], {0:[dict(title="Century of manufacturing",where="youtube")]})
     assert claim in look._listing(lines)
     assert len(calls) == 2 and all(claim in content for content in calls)
+
+
+def test_unanswered_beat_keeps_its_named_moving_picture_search_on_both_providers(monkeypatch):
+    monkeypatch.setattr(plan.ask,'ask',lambda *a,**k: ('{"subjects":[],"lines":[]}',0))
+    line = dict(i=4,say="The prototype takes off.",pictures=["Ingenuity"],
+                visual="Ingenuity first powered flight on Mars")
+    result,_ = plan.plan([line], [])
+    subject, = result["subjects"]
+    assert result["lines"] == [dict(i=4,show=line["visual"],subjects=["Ingenuity"])]
+    assert dict(where="youtube",q=line["visual"]) in subject["searches"]
+    assert dict(where="archive",q="Ingenuity") in subject["searches"]
