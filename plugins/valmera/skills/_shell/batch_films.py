@@ -90,6 +90,8 @@ def finished(folder):
 
 def make_film(wf, root, batch, index, idea, until_script=False):
     rid = film_id(batch, index)
+    if until_script and "script" in (shell.jload(batch / "work" / rid / "run.json") or {}).get("done", []):
+        return None
     # A coordinator can restart while a child still owns a recording or a render.
     with DL._locked(str(batch / "locks" / rid)):
         wait_for_editor(batch, rid)
@@ -194,8 +196,12 @@ def build_wave(wf, root, batch, target, slots, tried):
             films[index] = str(saved.parent)
     prior = shell.jload(batch / "results.json", {}) or {}
     # Give untried reserves the free slots first. A later run can revisit a stopped film with its checkpoints.
-    items.sort(key=lambda row: str(row[0]) in prior.get("errors", {}))
     errors.update(prior.get("errors", {}))
+    for i, _ in items:
+        checkpoint = shell.jload(batch / "work" / film_id(batch, i) / "run.json") or {}
+        if checkpoint.get("stopped") and i not in films:
+            errors[str(i)] = checkpoint["stopped"]["error"]
+    items.sort(key=lambda row: str(row[0]) in errors)
     todo = iter((i, item) for i, item in items if i not in films and i not in tried)
     config = dict(initializer=start_worker, initargs=(wf,))
     with (concurrent.futures.ProcessPoolExecutor(max_workers=slots, **config) as writers,
