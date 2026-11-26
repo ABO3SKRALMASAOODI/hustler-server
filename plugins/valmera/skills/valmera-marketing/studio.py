@@ -399,6 +399,23 @@ def drive(run, sid, browser="chrome"):
 
 # ----------------------------------------------------------------- a run: the stack, the sessions, what is kept
 
+def ensure_batch_stack(stack, run, settings_file, spec_file):
+    """Both Studio slots share one lazy startup. Finish-only resumes need no stack."""
+    import fcntl
+    directory = stack.run_dir(run)
+    os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, "batch-start.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if os.path.exists(os.path.join(directory, "stack.json")) and stack.load_stack(run).get("state") == "up":
+            return
+        if settings_file is None:
+            # A recording already queued by an older launcher has its settings under the spec's settings key.
+            settings_file = os.path.join(directory, "batch-settings.json")
+            with open(spec_file) as f, open(settings_file, "w") as out:
+                json.dump(json.load(f)["settings"], out)
+        stack.up(run, stack.load_settings(settings_file))
+
+
 def record(a):
     spec = json.load(open(a.spec))
     run = a.run or "studio-" + time.strftime("%m%d%H%M")
@@ -415,17 +432,8 @@ def record(a):
     print(f"{len(sids)} sessions: {' '.join(sids)}", flush=True)
     if sids:
         stack_path = os.path.join(S.run_dir(run), "stack.json")
-        if a.attached:
-            # Only the first session starts the batch's stack. A resumed finish-only run needs none.
-            # Both browser slots can reach this point together.
-            import fcntl
-            settings_file = os.environ.get("VALMERA_BATCH_SETTINGS")
-            if not settings_file and (not os.path.exists(stack_path) or S.load_stack(run).get("state") != "up"):
-                raise RuntimeError("the pre-existing batch stack is down")
-            with open((settings_file or a.spec) + ".lock", "a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                if not os.path.exists(stack_path) or S.load_stack(run).get("state") != "up":
-                    S.up(run, S.load_settings(settings_file))
+        if getattr(a, "attached", False):
+            ensure_batch_stack(S, run, os.environ.get("VALMERA_BATCH_SETTINGS"), a.spec)
         elif not (os.path.exists(stack_path) and S.load_stack(run).get("state") == "up"):
             room = GT.production_room()
             if room:
@@ -450,7 +458,7 @@ def record(a):
             if (S.spend(st) or 0) >= cap * 1.25 and "worker" in st["pids"]:
                 print(S.stop("worker", st["pids"]["worker"]), flush=True)
                 break
-        if not a.attached:
+        if not getattr(a, "attached", False):
             with open(os.path.join(st["dir"], "run.json"), "w") as fh:
                 json.dump(dict(sessions=sids, spend_usd=S.spend(st), finished_at=time.time()), fh, indent=1)
             try:
@@ -461,7 +469,12 @@ def record(a):
                 S.down(run, False)
     for row in spec["sessions"]:
         try:
-            print(json.dumps(collect_one(run, row["sid"]))[:600], flush=True)
+            kept = collect_one(run, row["sid"])
+            print(json.dumps(kept)[:600], flush=True)
+            if getattr(a, "attached", False) and os.path.isfile(os.path.join(kept["kept"], "record.json")):
+                session = os.path.join(S.run_dir(run), "sessions", row["sid"])
+                for name in ("renders", "shots", "ui", "exports"):
+                    shutil.rmtree(os.path.join(session, name), ignore_errors=True)
         except Exception as e:  # noqa: BLE001
             print(f"{row['sid']}: not kept: {e}", flush=True)
 

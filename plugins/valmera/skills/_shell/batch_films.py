@@ -338,6 +338,10 @@ def run_driver(wf, root, topic, out, sidecar):
         if not (batch / "started").exists():
             (batch / "started").write_text(str(time.time()))
         report = produce(wf, root, batch, topic, out, sidecar)
+        for child in (batch / "work").glob("*"):
+            link = Path(shell.chain.SLICE) / "work" / ("wf-" + child.name)
+            if link.is_symlink() and link.resolve() == (child / "supply").resolve():
+                link.unlink()
         pointer.unlink()
         shutil.rmtree(batch)
         print(json.dumps(report))
