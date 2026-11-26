@@ -251,10 +251,17 @@ styled = validate_edl(
                             "position": "top"}}}, 60).model_dump()
 check("style normalized to upper hex",
       styled["captions"]["style"]["color"] == "#FF0000")
+# 26 Nov: a colour name is a colour (repaired, not refused); only a value
+# that names no colour is refused.
+_named = validate_edl({"keep": [[0, 60]],
+                       "captions": {"mode": "from_transcript",
+                                    "style": {"color": "red"}}}, 60).model_dump()
+check("named colour repaired to hex",
+      _named["captions"]["style"]["color"] == "#FF0000")
 expect_reject("bad hex color",
               {"keep": [[0, 60]],
                "captions": {"mode": "from_transcript",
-                            "style": {"color": "red"}}}, 60)
+                            "style": {"color": "banana"}}}, 60)
 # Round 35: out-of-range grouping CLAMPS instead of rejecting — a taste
 # value to trim, not an impossible state (§ cap-removal policy).
 _mw = validate_edl({"keep": [[0, 60]],
@@ -873,8 +880,8 @@ r = remove_music(tctx, "mus1")
 check("remove_music removes the bed",
       tctx.written["music"] == [] and "removed music mus1" in r)
 r = remove_music(ToolCtx(json.loads(json.dumps(MUS_EDL))), "musX")
-check("remove_music unknown id lists existing",
-      r.startswith("REJECTED") and "mus1" in r)
+check("remove_music unknown id is a no-op that lists existing",
+      not r.startswith("REJECTED") and "already absent" in r and "mus1" in r)
 
 tctx = ToolCtx(json.loads(json.dumps(MUS_EDL)))
 tctx._asset = {"kind": "music", "storage_key": "music/1/a.mp3", "meta": {}}
@@ -1245,8 +1252,8 @@ zctx = ToolCtx({"keep": [[0.0, 20.0]],
                 "effects": {"zooms": [{"id": "zm1", "start": 2.0,
                                        "end": 4.0, "strength": 0.25}]}})
 r = agent_tools.remove_zoom(zctx, "zm9")
-check("remove_zoom unknown id lists existing",
-      r.startswith("REJECTED") and "zm1" in r)
+check("remove_zoom unknown id is a no-op that lists existing",
+      not r.startswith("REJECTED") and "zm1" in r)
 agent_tools.remove_zoom(zctx, "zm1")
 check("remove_zoom removes it", zctx.written["effects"]["zooms"] == [])
 tctx = ToolCtx({"keep": [[0.0, 20.0]]})
@@ -4783,8 +4790,10 @@ try:
     check("remove_sfx deletes it",
           agent_tools.remove_sfx(_sctx, id=_ids[0]).startswith("EDL v")
           and len(_sctx.latest_edl()["json"]["sfx"]) == 1)
-    check("remove_sfx on an unknown id is REJECTED, not a silent no-op",
-          agent_tools.remove_sfx(_sctx, id="nope").startswith("REJECTED"))
+    # #1690 (20 Nov): removing a sound already gone is the asked outcome.
+    _gone = agent_tools.remove_sfx(_sctx, id="nope")
+    check("remove_sfx on an unknown id says it is already absent",
+          not _gone.startswith("REJECTED") and "already absent" in _gone)
     check("add_sfx refuses a position past the program",
           agent_tools.add_sfx(_sctx, storage_key="sfx/1/pop.mp3",
                               at=999.0).startswith("REJECTED"))

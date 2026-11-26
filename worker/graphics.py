@@ -803,7 +803,8 @@ def _compile_vector_item(vec, out_dur, play_res):
                           or "#FFFFFF")
     paths = _vector_paths(vec, width, height, play_res)
     head = (rf"\an5\pos({ax},{ay})\shad0\bord{stroke:.2f}"
-            rf"\3c{stroke_c}\alpha&H{_ass_alpha(opacity):02X}&\p1")
+            rf"\3c{stroke_c}\alpha&H{_ass_alpha(opacity):02X}&"
+            + _fill_alpha_tag(vec, opacity) + r"\p1")
     components = []
     for n, (color, path) in enumerate(paths):
         text = "{" + head + rf"\1c{_inline_hl(color)}" + "}" + path \
@@ -878,6 +879,16 @@ def _motion_value(value, default, t, segment_end=False):
                 sample_t = max(0.0, t - 1e-6)
                 break
     return float(anim_value(value, sample_t))
+
+
+def _fill_alpha_tag(vec, opacity):
+    """\\1a for a vector whose fill is see-through (fill_opacity < 1): its
+    outline keeps ``opacity`` while the fill draws at opacity x fill_opacity.
+    Written after every \\alpha so a fade never re-solidifies the fill."""
+    fo = vec.get("fill_opacity") if isinstance(vec, dict) else None
+    if fo is None or float(fo) >= 1.0:
+        return ""
+    return rf"\1a&H{_ass_alpha(float(opacity) * max(0.0, float(fo))):02X}&"
 
 
 def _ass_alpha(opacity):
@@ -1028,8 +1039,8 @@ def _compile_vector_motion_item(vec, base_event, play_res):
         o0 = _motion_value(opacity_curve, base_opacity, t0)
         o1 = _motion_value(opacity_curve, base_opacity, t1,
                            segment_end=True)
-        start_tags = _motion_tags(s0, r0, o0)
-        end_tags = _motion_tags(s1, r1, o1)
+        start_tags = _motion_tags(s0, r0, o0) + _fill_alpha_tag(vec, o0)
+        end_tags = _motion_tags(s1, r1, o1) + _fill_alpha_tag(vec, o1)
         if end_tags != start_tags:
             start_tags += rf"\t(0,{max(1, round((t1-t0)*1000))},{end_tags})"
         dx, dy = ax0-measured["anchor_x"], ay0-measured["anchor_y"]

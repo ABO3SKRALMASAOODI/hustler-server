@@ -31,6 +31,39 @@ LAYERS = frozenset(("keep", "speed", "inserts", "frame", "captions",
     "export"))
 ITEM_LAYERS = frozenset(("inserts", "texts", "vectors", "music", "sfx", "voiceover", "overlays",
     "motion", "fx"))
+# Layers whose rows carry ids an item operation can name. speed spans have ids
+# (sp1, sp2) but stay a whole-list layer everywhere else: p6304 (26 Nov) had
+# "Unsupported operation upsert on speed" when the editor retimed sp1-sp3 to
+# reach the 55 s the customer asked for.
+ID_LAYERS = ITEM_LAYERS | {"speed"}
+
+
+def _item_op_id(edl, layer, op):
+    """The id an item upsert/remove acts on. An op written without its top-level
+    id carries it in its value; an upsert of a NEW row with no id at all gets
+    a fresh one (p6238, 24 Nov: "An item operation requires a stable id" was
+    refused twice and the turn ended partial). None only for a remove that
+    names nothing. The op is updated in place so later steps see the id."""
+    item_id = op.get("id")
+    value = op.get("value")
+    if (not isinstance(item_id, str) or not item_id) and isinstance(value, dict):
+        item_id = value.get("id")
+    if isinstance(item_id, (int, float)) and not isinstance(item_id, bool):
+        item_id = str(item_id)
+    if isinstance(item_id, str) and item_id.strip():
+        op["id"] = item_id.strip()
+        return op["id"]
+    if op.get("action") != "upsert":
+        return None
+    taken = {str(i.get("id")) for i in (edl.get(layer) or []) if isinstance(i, dict)}
+    stem = {"texts": "tx", "vectors": "vec", "music": "mu", "sfx": "sfx",
+            "voiceover": "vo", "overlays": "ov", "inserts": "ins",
+            "motion": "mg", "fx": "fx", "speed": "sp"}.get(layer, layer[:3])
+    n = len(taken) + 1
+    while f"{stem}{n}" in taken:
+        n += 1
+    op["id"] = f"{stem}{n}"
+    return op["id"]
 
 
 # Device cards (worker/devices/cards/<id>.json), read as plain JSON so this
@@ -824,6 +857,17 @@ def _fit_operation(op, before, notes):
     return op
 
 
+def _split_list_upsert(op):
+    if (isinstance(op, dict) and op.get("action") == "upsert"
+            and op.get("layer") in ITEM_LAYERS and not op.get("id")
+            and isinstance(op.get("value"), list)
+            and all(isinstance(row, dict) for row in op["value"])):
+        return [{"action": "upsert", "layer": op["layer"], "value": row,
+                 **({"id": row["id"]} if row.get("id") else {})}
+                for row in op["value"]]
+    return [op]
+
+
 def _remove_elsewhere(edl, layer, item_id):
     """A remove that named the wrong layer: the id is what it means. Named
     nowhere, the state it asked for already holds."""
@@ -948,6 +992,10 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
     near_ops = []
     operations = [_fit_operation(op, before, near_ops)
                   for op in copy.deepcopy(operations)]
+    # An item upsert written with a list of rows is one upsert per row (each
+    # by its own id, a new row given one), as the editor meant it.
+    operations = [row_op for op in operations
+                  for row_op in _split_list_upsert(op)]
     # Keys already in the EDL were placed by Valmera's own tools (erase
     # patches, subject mattes, fetched stock, library sounds) and validated
     # when written; many never appear in the project's assets table. Only
@@ -967,7 +1015,7 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
         # An explicitly named object is an item patch, never a replacement
         # for its entire list. Preserve its siblings and still validate the
         # resulting EDL atomically below.
-        if action == "set" and layer in ITEM_LAYERS and op.get("id") \
+        if action == "set" and layer in ID_LAYERS and op.get("id") \
                 and isinstance(op.get("value"), dict):
             action = op["action"] = "upsert"
         if layer == "patches" and action == "remove":
@@ -1015,7 +1063,7 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
             # upsert on a layer that is one object patches its fields, the
             # same word doing the same thing on every layer.
             edl[layer] = {**(edl.get(layer) or {}), **op["value"]}
-        elif action == "remove" and layer not in ITEM_LAYERS:
+        elif action == "remove" and layer not in ID_LAYERS:
             # A field of an object layer by id; with no id, the whole layer.
             current = edl.get(layer)
             if op.get("id") and isinstance(current, dict):
@@ -1023,10 +1071,13 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
                               if k != op["id"]}
             elif not op.get("id"):
                 edl[layer] = None if layer != "keep" else edl.get(layer)
-        elif action in ("upsert", "remove") and layer in ITEM_LAYERS:
-            item_id = op.get("id")
-            if not isinstance(item_id, str) or not item_id:
-                raise ValueError("An item operation requires a stable id.")
+        elif action in ("upsert", "remove") and layer in ID_LAYERS:
+            item_id = _item_op_id(edl, layer, op)
+            if item_id is None:
+                # A remove that names nothing removes nothing: the asked-for
+                # absence already holds (#1767's twin), never a refusal.
+                near_ops.append(f"{layer}: a remove named no id, nothing removed")
+                continue
             items = edl.get(layer) or []
             if not isinstance(items, list) or any(not isinstance(i, dict) for i in items):
                 raise ValueError(f"{layer} must be a list of objects.")

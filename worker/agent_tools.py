@@ -130,7 +130,7 @@ from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      custom_chain_error, patch_clip_key, patch_fingerprint,
                      EDLValidationError, Frame, PictureCard,
-                     HEX_COLOR,
+                     HEX_COLOR, coerce_hex,
                      canvas_edl, clip_anim, default_edl, describe_edl,
                      DEFAULT_CANVAS_FPS,
                      edl_signature, is_canvas_program, keep_boundaries,
@@ -18271,12 +18271,12 @@ def add_color_screen(ctx, at_output_s, duration_s=2.0, color="#000000",
                      color2=None, direction="vertical", motion=None):
     """Cut to a full-frame SOLID or GRADIENT colour screen for a moment, then
     return to the footage — no text, no image generation. Built locally."""
-    c1 = (color or "#000000").strip().upper()
+    c1 = coerce_hex(color or "#000000") or str(color)
     if not HEX_COLOR.match(c1):
         return "REJECTED: color must be #RRGGBB hex, e.g. #FFFFFF for white."
     c2 = None
     if color2:
-        c2 = str(color2).strip().upper()
+        c2 = coerce_hex(color2) or str(color2)
         if not HEX_COLOR.match(c2):
             return ("REJECTED: color2 must be #RRGGBB hex (the gradient's "
                     "second colour), or omit it for a flat fill.")
@@ -20165,6 +20165,8 @@ def set_screen_frame(ctx, inset=None, radius=None, shadow=None,
         if val is None:
             continue
         v = str(val).strip().upper()
+        if v not in ("", "NONE"):
+            v = coerce_hex(val) or v
         if v in ("", "NONE") and name == "background2":
             spec["background2"] = None      # explicit "make it flat again"
             continue
@@ -20230,7 +20232,7 @@ def add_aspect_shift(ctx, at_output_s, ratio, duration_s=0.8, zoom=True,
     except (TypeError, ValueError):
         return (f"REJECTED: duration_s must be a number of seconds "
                 f"({FRAME_SHIFT_MIN_S}-{FRAME_SHIFT_MAX_S}).")
-    col = str(color or "#000000").strip().upper()
+    col = coerce_hex(color or "#000000") or str(color)
     if not HEX_COLOR.match(col):
         return "REJECTED: color must be #RRGGBB hex (the bars' colour)."
     motif, motif_err = _motion_motif_value(ctx, motion_motif)
@@ -20541,7 +20543,7 @@ def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
     if tpl not in TEXT_TEMPLATES:
         return (f"REJECTED: template must be one of "
                 f"{', '.join(TEXT_TEMPLATES)}.")
-    bg = (bg_color or "#000000").strip().upper()
+    bg = coerce_hex(bg_color or "#000000") or str(bg_color)
     if not HEX_COLOR.match(bg):
         return "REJECTED: bg_color must be #RRGGBB hex, e.g. #000000."
     try:
