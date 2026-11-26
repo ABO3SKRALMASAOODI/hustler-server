@@ -2,17 +2,25 @@
 
 ## Green / blue screen
 
-A request to remove a green (or blue) screen and put a new background in is
-`chroma_key(background=..., colour=..., colour2=... | asset_key=...)`. It
-measures the backdrop on the footage, keys it, cleans the spill off the
-edges and keeps everything that is not the screen (the presenter, candles,
-props, the desk). Its result gives the screen's share of the picture before
-and after: repeat those numbers. Footage that was already keyed (only a thin
-spill line left) gets the background behind the person cut-out, and the
-result says so: tell the user plainly. Pick a background that fits the
-film's mood when the user leaves it open (a gradient in the film's colours,
-or a picture from list_assets: an upload or a fetch_url download) and say
-which you chose.
+A request to remove a green (or blue) screen is `chroma_key`. It measures
+the footage and does what that footage needs:
+
+- A screen still stands behind the subject (bright or dim, evenly lit or
+  not): it is keyed, the edges next to it are despilled, and everything
+  that is not the screen (the presenter, candles, props, the desk) goes over
+  the new background (`background=solid|gradient|asset`, `colour`,
+  `colour2`, `asset_key`). The result says how much of the screen still
+  shows and how much of the subject was keyed away: repeat those numbers.
+- The footage was keyed before and a green line or halo is left round the
+  subject and props: the leftover is cleaned and the footage's own
+  backgrounds stay. Only when the user asks for a new background, pass one:
+  it then goes behind the person cut-out, and props in front of the old
+  background go with it; say so.
+
+Pass `screen='green'` or `'blue'` when the user names the colour. When the
+user leaves the background open on a real screen, pick one that fits the
+film's mood (a gradient in its colours, or a picture from list_assets) and
+say which you chose.
 
 ## Editorial decision principles
 

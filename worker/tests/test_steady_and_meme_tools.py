@@ -94,8 +94,11 @@ def test_stabilize_video_says_when_the_camera_already_holds_still(tmp_path):
     src = _clip(str(tmp_path / "still.mp4"), "crop=340:340:30:30")
     ctx = _Ctx(str(tmp_path), src)
     out = steady_tools.stabilize_video(ctx)
-    assert out.startswith("EDL v")
-    assert "no measurable shake" in out
+    # review of 26 Nov: the pass used to be written anyway, adding render
+    # time and mirrored-edge wobble to footage that holds still (p6311)
+    assert out.startswith("NO CHANGE"), out
+    assert "no measurable camera shake" in out
+    assert ctx.written is None
 
 
 def test_find_meme_ranks_short_clips_and_hands_over_the_insert(monkeypatch):
@@ -116,6 +119,20 @@ def test_find_meme_ranks_short_clips_and_hands_over_the_insert(monkeypatch):
     assert seen == {"q": "surprised pikachu meme", "mode": "footage"}
     assert out.index("youtu.be/short") < out.index("youtu.be/long")
     assert "fetch_url" in out and "insert" in out
+
+
+def test_reaction_clips_are_not_ranked_down_in_a_meme_search():
+    # #935 review: rank_footage marks 'reaction' titles down, and the meme
+    # ranker kept that order within a length class.
+    hits = [{"title": "cat jumps meme", "duration_s": 9, "search_rank": 1},
+            {"title": "shocked reaction meme", "duration_s": 7,
+             "search_rank": 0},
+            {"title": "meme compilation", "duration_s": 900,
+             "search_rank": 2}]
+    ranked = song_find.rank_footage(hits, "shocked meme")
+    assert ranked[0]["title"] == "cat jumps meme"      # the footage rule
+    got = song_find.rank_memes(ranked)
+    assert [h["search_rank"] for h in got] == [0, 1, 2]
 
 
 def test_find_meme_is_off_with_the_footage_search(monkeypatch):

@@ -1063,10 +1063,20 @@ def delivery_resolution_dims(W, H, resolution):
 
 # Contrast-adaptive sharpening at the upscaled size (p6311: "sharpen,
 # denoise, improve the detail (upscale)" got a plain lanczos 2K whose frames
-# read soft). Measured on a 2x upscale of a 270->540 downscale against the
-# real 540 frame: Laplacian detail 10.6 -> 12.9 and PSNR 28.37 -> 28.52 dB at
-# 0.6, i.e. closer to the true picture, not merely crisper.
-UPSCALE_DETAIL = float(os.getenv("UPSCALE_DETAIL", "0.6"))
+# read soft). Measured at 0.6 (26 Nov) on three p6311 frames scaled
+# 540->270 and back, against the real 540 frames: Laplacian detail 9.7 ->
+# 12.0, 10.7 -> 12.9, 7.8 -> 10.3 and PSNR 28.05 -> 28.21, 28.33 -> 28.49,
+# 28.31 -> 28.43 dB against plain lanczos: closer to the true picture, not
+# merely crisper. A malformed UPSCALE_DETAIL falls back to 0.6.
+def _upscale_detail(raw):
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0.6
+    return v if v == v and v >= 0 else 0.6
+
+
+UPSCALE_DETAIL = _upscale_detail(os.getenv("UPSCALE_DETAIL", "0.6"))
 
 
 def upscale_filter(W2, H2):
@@ -8479,21 +8489,18 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         next_idx += 1
 
     # Chroma key (green / blue screen): its background picture is one more
-    # input, keyed on the source clock right after the patches. A background
-    # that cannot be fetched keys onto black rather than failing the render.
+    # input, keyed on the source clock right after the patches. A fetch that
+    # fails is tried again; a picture that still cannot be read keys onto the
+    # neutral gradient plate (never black, never a failed render) and the
+    # render log says why. A fringe clean needs no input.
     key_input = None
-    key_item = (edl.get("effects") or {}).get("key")
-    if key_item and not audio_only:
-        try:
-            args = chroma_key.input_args(
-                edl, workdir, info.get("width"), info.get("height"),
-                lambda k: _fetch(k, "overlay", next_idx))
-        except Exception as e:  # noqa: BLE001 - a backdrop never fails a render
-            print(f"[render] key background unavailable ({str(e)[:160]}) — "
-                  "keying onto black", flush=True)
-            key_item = dict(key_item, background={"kind": "solid",
-                                                  "colour": "#000000"})
-            args = []
+    if (edl.get("effects") or {}).get("key") and not audio_only:
+        args, key_item = chroma_key.input_args(
+            edl, workdir, info.get("width"), info.get("height"),
+            lambda k: _fetch(k, "overlay", next_idx))
+        if key_item.get("fallback"):
+            print(f"[render] key: {key_item['fallback']} — keyed onto the "
+                  "neutral gradient", flush=True)
         if args:
             extra_inputs += args
             key_input = (next_idx, key_item)

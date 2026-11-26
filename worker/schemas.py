@@ -1984,20 +1984,37 @@ class KeyBackground(BaseModel):
 
 
 class KeyItem(BaseModel):
-    """Chroma key of the main footage (a green or blue screen), applied to
-    the SOURCE picture before any trim, framing or grade, so every later
-    stage sees the composite exactly as it would a source shot on that
-    background. ``colour`` is the backdrop colour measured on the footage;
-    ``similarity`` / ``blend`` are ffmpeg chromakey's; ``despill`` (0-1)
-    takes the backdrop's colour cast off the subject's edges."""
+    """Chroma key of the main footage, applied to the SOURCE picture before
+    any trim, framing or grade, so every later stage sees it exactly as it
+    would a source shot that way.
+
+    ``mode="key"``: a green or blue screen is keyed out and ``background``
+    laid under everything that is not the screen. ``colour`` is the
+    backdrop colour measured on the footage; ``similarity`` / ``blend`` are
+    ffmpeg chromakey's; ``despill`` (0-1) takes the backdrop's colour cast
+    off a band of the foreground next to the screen.
+
+    ``mode="fringe"``: footage keyed before; the screen's leftover (a line
+    round the subject, a disc round a flame) is taken off: a faint tint is
+    despilled in place, a strong leftover (channel excess from half of
+    ``excess`` to ``excess``) is filled from the picture around it. The
+    footage's own background stays; ``background`` is unused."""
     model_config = {"extra": "forbid", "allow_inf_nan": False}
     id: str = Field(min_length=1, max_length=40)
-    colour: str
+    mode: Literal["key", "fringe"] = "key"
+    colour: Optional[str] = None
     similarity: float = Field(default=0.12, ge=0.01, le=0.6)
     blend: float = Field(default=0.06, ge=0.0, le=0.5)
     despill: float = Field(default=0.6, ge=0.0, le=1.0)
     spill: Literal["green", "blue"] = "green"
-    background: KeyBackground
+    excess: Optional[float] = Field(default=None, ge=1.0, le=128.0)
+    background: Optional[KeyBackground] = None
+
+    @model_validator(mode="after")
+    def _needs(self):
+        if self.mode == "key" and (not self.colour or self.background is None):
+            raise ValueError("a key needs the screen colour and a background")
+        return self
 
     _hex = field_validator("colour")(_key_hex)
 

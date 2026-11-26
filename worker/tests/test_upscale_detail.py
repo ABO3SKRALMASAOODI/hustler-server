@@ -34,8 +34,9 @@ def test_the_upscale_chain_ends_in_a_detail_pass():
 
 @pytest.mark.skipif(not HAVE_FFMPEG, reason="no ffmpeg")
 def test_the_detail_pass_adds_detail_without_ringing_away_from_the_truth():
-    # On real footage (p6311's frame, 270->540) it also lands closer to the
-    # truth: PSNR 28.37 -> 28.52 dB. On hard synthetic graphics it costs at
+    # On real footage (three p6311 frames, 540->270->540 at 0.6) it also
+    # lands closer to the truth: PSNR +0.12 to +0.16 dB over plain lanczos
+    # (renderer.UPSCALE_DETAIL). On hard synthetic graphics it costs at
     # most a tenth of a dB.
     truth_src = "testsrc2=s=512x512:r=1:d=1"
     truth = _gray(truth_src, "null", 512, lavfi=True)
@@ -67,3 +68,11 @@ def test_the_ask_numbers_carry_the_upscaled_export():
     assert "detail" in got["export"]["upscale"]
     plain = asks.measured({"keep": [[0, 10]]}, [], 10.0, None, index)
     assert plain["export"]["resolution"] == "hd"
+
+
+def test_a_malformed_detail_setting_never_breaks_the_renderer_import():
+    assert renderer._upscale_detail("abc") == 0.6
+    assert renderer._upscale_detail("nan") == 0.6
+    assert renderer._upscale_detail("-1") == 0.6
+    assert renderer._upscale_detail("0") == 0.0
+    assert renderer._upscale_detail("0.4") == 0.4

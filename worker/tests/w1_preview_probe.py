@@ -50,6 +50,9 @@ def _without_inert(dump):
         assert m.pop("duck_db") is None
     for m in d.get("motion") or []:
         assert m.pop("composite") is None and m.pop("anchor") is None
+    # 26 Nov (p6311): Effects.key, as in test_w0_seams._without_inert.
+    if isinstance(d.get("effects"), dict):
+        assert d["effects"].pop("key", None) is None
     tr = (d.get("effects") or {}).get("transition")
     if tr:
         assert tr.pop("per_junction") is None
