@@ -342,9 +342,15 @@ OPENAI_OUT_HAIKU_PURPOSES = tuple(p.strip() for p in os.getenv(
 #   * FAILS CLOSED: a missing key, an empty Anthropic balance or a spent
 #     budget ends the turn on the plan cards. It never falls back to the paid
 #     OpenAI wallet for a free user.
-# The key is read ONLY from ANTHROPIC_API_KEY and never logged or recorded
-# (db._capped_payload redacts it like every other provider key).
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+# The key is never logged or recorded (db._capped_payload redacts it like
+# every other provider key). config.ANTHROPIC_API_KEY is read LIVE (see
+# __getattr__ at the end of this file): the sealed provider_api_keys row
+# outranks this environment value. P0 #60 (24 Nov 2026): the Anthropic key was
+# rotated, the row carried the new key at 17:21:00 UTC, but every box process
+# kept the revoked key from its environment until its container was
+# recreated, so a subscriber's four requests ended on "I can't reach the
+# editing model" (17:14-17:23).
+_ANTHROPIC_ENV_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "").strip()
 # Chosen from the 25 Oct trial-lane fixtures (cost and quality per request);
 # app_kv.free_result.model overrides it without a deploy.
@@ -3179,12 +3185,16 @@ def require_core():
 
 
 def __getattr__(name):
-    """The two OpenAI keys every reader takes from this module, live: the
-    sealed row outranks the environment (provider_creds.py, 6 Nov 2026), and
-    a rotated key lands without a restart."""
+    """The provider keys every reader takes from this module, live (the two
+    OpenAI keys, and Anthropic's since P0 #60): the sealed row outranks the
+    environment (provider_creds.py, 6 Nov 2026), and a rotated key lands
+    without a restart."""
     if name == "OPENAI_API_KEY":
         import provider_creds
         return provider_creds.key("OPENAI_API_KEY") or _OPENAI_ENV_KEY
+    if name == "ANTHROPIC_API_KEY":
+        import provider_creds
+        return provider_creds.key("ANTHROPIC_API_KEY") or _ANTHROPIC_ENV_KEY
     if name == "VISION_API_KEY":
         explicit = os.getenv("VISION_API_KEY", "")
         if not explicit and VISION_BASE_URL == OPENAI_BASE_URL:

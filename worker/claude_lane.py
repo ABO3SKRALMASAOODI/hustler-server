@@ -34,8 +34,11 @@ Billing, credit and authentication refusals LATCH the lane closed for
 ``CLAUDE_TRIAL_OUTAGE_LATCH_S`` and alert the admin, and are re-raised with
 the provider's words so ``llm.is_quota_error`` recognises them.
 
-The key comes only from ``config.ANTHROPIC_API_KEY``. It is never logged,
-never returned and never placed in a recorded payload.
+The key comes only from ``config.ANTHROPIC_API_KEY`` (live: the sealed
+provider row outranks the environment). It is never logged, never returned
+and never placed in a recorded payload. An auth refusal first re-reads the
+row: a key rotated a moment ago gets the same request once more on the new
+key (P0 #60).
 """
 
 import json
@@ -68,6 +71,7 @@ _SYSTEM_NOTE = "[Valmera system note — operator instruction, not user text]\n"
 
 _lock = threading.Lock()
 _client = None
+_client_key = None
 _closed_until = 0.0
 _closed_reason = ""
 
@@ -123,16 +127,47 @@ def probe():
         return False, f"{type(exc).__name__} {_status(exc)}: {str(exc)[:200]}"
 
 
+def _key_fingerprint(key):
+    return hashlib.sha256(str(key or "").encode()).hexdigest()
+
+
 def _sdk():
-    global _client
+    """The client for the key in force NOW. The key is read live
+    (config.ANTHROPIC_API_KEY follows the sealed provider row), so a rotated
+    key builds a new client on the next call instead of waiting for a
+    container restart (P0 #60, 24 Nov 2026)."""
+    global _client, _client_key
+    key = config.ANTHROPIC_API_KEY
+    fingerprint = _key_fingerprint(key)
     with _lock:
-        if _client is None:
-            kw = {"api_key": config.ANTHROPIC_API_KEY, "max_retries": 0,
+        if _client is None or _client_key != fingerprint:
+            kw = {"api_key": key, "max_retries": 0,
                   "timeout": config.CLAUDE_TRIAL_TIMEOUT_S}
             if config.ANTHROPIC_BASE_URL:
                 kw["base_url"] = config.ANTHROPIC_BASE_URL
             _client = anthropic.Anthropic(**kw)
+            _client_key = fingerprint
         return _client
+
+
+def _rotated_key():
+    """An auth refusal may mean the key was rotated a moment ago: re-read the
+    sealed provider row now (provider_creds.invalidate: at most once per
+    retry window) and say whether a DIFFERENT key is in force. True means
+    the caller retries the same request once on the new key. Never raises."""
+    try:
+        import provider_creds
+        before = _key_fingerprint(config.ANTHROPIC_API_KEY)
+        creds = provider_creds.CREDENTIALS
+        if creds.invalidate() and creds._lock.acquire(timeout=5.0):
+            try:                      # synchronous: the retry needs it now
+                creds._refresh()
+            finally:
+                creds._lock.release()
+        after = _key_fingerprint(config.ANTHROPIC_API_KEY)
+        return bool(config.ANTHROPIC_API_KEY) and after != before
+    except Exception:  # noqa: BLE001 - a refusal stays a refusal
+        return False
 
 
 # ------------------------------------------------------------------ #
@@ -902,6 +937,7 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
     if timeout:
         client = client.with_options(timeout=float(timeout))
     attempt = 0
+    rekeyed = False
     while True:
         attempt += 1
         try:
@@ -909,6 +945,16 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
                 message = stream.get_final_message()
             break
         except Exception as exc:          # noqa: BLE001 - classified below
+            if is_auth_error(exc) and not rekeyed and _rotated_key():
+                # The key was rotated under this process: the same request
+                # on the new key, not a closed lane (P0 #60).
+                rekeyed = True
+                client = _sdk()
+                if timeout:
+                    client = client.with_options(timeout=float(timeout))
+                print("[claude] auth refusal on a rotated key: retrying on "
+                      "the key now in force", flush=True)
+                continue
             if is_billing_error(exc) or is_auth_error(exc):
                 kind = "billing" if is_billing_error(exc) else "auth"
                 _close(f"{kind}: {str(exc)[:200]}")
