@@ -369,6 +369,62 @@ def test_grain_clock_belongs_to_the_segment():
 # ------------------------------------------------------------------ T2: type
 
 @needs_hb
+def test_m26_marquee_keeps_its_display_size_and_small_neighbours():
+    from scene.compile import _type
+    v = {"font": "Anton-Regular.ttf", "px": 652.8, "track": -2}
+    marquee = word(0, 16, 37, "SUPER INTELLIGENCE", v="mq")
+    caption = word(1, 0, 60, "Thought")
+    doc = film([marquee, caption], 60, voices={"mq": v, "a": VOICE["a"]})
+    pages, _ = _type(doc, [])
+    m = doc["sprites"][marquee["spr"]]
+    assert (m["aw"], m["ah"], m["ss"]) == (4566, 579, 1)
+    assert (m["w"], m["h"]) == (4566, 579)
+    assert all(max(page.shape[:2]) <= 8192 for page in pages)
+    s = doc["sprites"][caption["spr"]]
+    assert s["ss"] == 2 and s["aw"] == s["w"] * 2
+
+
+@needs_hb
+@pytest.mark.parametrize(("text", "width"), [("Wide phrase", 1920), ("I", 1080)])
+def test_oversized_ink_and_effects_stay_registered(monkeypatch, text, width):
+    import cv2
+    from scene import type_atlas as TA
+
+    voice = {"font": "Anton-Regular.ttf", "px": 130, "glow": {"blur": .003}, "shadow": {"blur": .002}}
+    outline = TA.outline_sprite(text, voice, width, 2, 0, extra_pad=6)
+    ref, orig = TA.raster_sprite(outline)
+    # Exercise both a width-bound and a height-bound fit below native density.
+    monkeypatch.setattr(TA, "BIG_PAGE", 96)
+    raster, m = TA.raster_sprite(outline)
+    assert max(raster.shape[:2]) <= 96 and m["ss"] < 1
+    for key in ("x0", "y0", "cx", "cy", "dx", "adv", "px"):
+        assert m[key] == orig[key]
+    step = int(orig["ss"] / m["ss"])
+    h, w = raster.shape[:2]
+    assert (w, h) == (m["w"] * m["ss"], m["h"] * m["ss"])
+    padded = np.zeros((h * step, w * step, 4), dtype=np.uint8)
+    padded[:ref.shape[0], :ref.shape[1]] = ref
+    expected = cv2.resize(padded, (w, h), interpolation=cv2.INTER_AREA)
+    for channel in range(3):  # coverage, shadow and glow, including both ends of the phrase
+        ink = expected[..., channel] > 16
+        assert ink.any()
+        error = np.abs(raster[..., channel].astype(float) - expected[..., channel])
+        assert error[ink].mean() < 6
+    assert np.array_equal(raster[..., 3] >= 128, raster[..., 0] >= 128)
+
+
+def test_shelf_keeps_its_page_index_across_a_dedicated_page(monkeypatch):
+    from scene import type_atlas as TA
+    monkeypatch.setattr(TA, "PAGE", 64)
+    sprites = {k: (np.full((h, w, 4), value, np.uint8), {}) for k, h, w, value in
+               [("upper", 26, 16, 50), ("marquee", 20, 96, 120), ("lower", 12, 16, 255)]}
+    pages, meta = TA.pack(sprites)
+    for k, (arr, _) in sprites.items():
+        m = meta[k]
+        assert np.array_equal(pages[m["page"]][m["ay"]:m["ay"] + m["ah"], m["ax"]:m["ax"] + m["aw"]], arr)
+
+
+@needs_hb
 def test_coverage_is_exact_area_and_the_distance_field_is_true():
     import scene.type_atlas as TA
     sq = np.array([[2.5, 2.25, 6.5, 2.25], [6.5, 2.25, 6.5, 7.0], [6.5, 7.0, 2.5, 7.0], [2.5, 7.0, 2.5, 2.25]], float)
@@ -506,3 +562,13 @@ def test_tiny_type_is_truer_from_coverage_than_from_the_distance_field():
         errs["field"].append(float(np.abs(from_field - truth).mean()))
     assert max(errs["coverage"]) < 1e-3, errs
     assert min(errs["field"]) > 4 * max(errs["coverage"]), errs
+
+
+def test_two_type_devices_share_one_factual_value_only_while_their_ink_overlaps():
+    from scene.text_layout import share_display_copy
+    figure = dict(k="word",v="card",role="big",t="$250,000",f=[0,12],z=2)
+    counter = dict(k="word",v="palette",role="big",t="$250,000",f=[3,6],z=8)
+    repeated = [dict(k="word",v="cap",role="cap",t="very",f=[0,5]) for _ in range(2)]
+    share_display_copy([figure,counter,*repeated])
+    assert figure["op"] == [1]*3 + [0]*3 + [1]*6
+    assert "op" not in counter and all("op" not in item for item in repeated)

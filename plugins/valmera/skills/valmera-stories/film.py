@@ -839,6 +839,43 @@ def pin_voices(timeline, voices):
 
 # ----------------------------------------------------------------- captions that ink word by word; display words
 
+def written_addresses(clock, script):
+    """Collapse a spoken domain onto its written spelling on the caption clock only."""
+    import copy
+    replacements = {}
+    for i, segment in enumerate(script.get("segments", [])):
+        words = clock.seg_words(i)
+        for field in segment.get("show", []):
+            if not isinstance(field, dict) or not isinstance(field.get("word_i"), int):
+                continue
+            domain = str(field.get("text", "")).lower()
+            labels = domain.split(".")
+            if len(labels) < 2 or not all(label.isalnum() for label in labels):
+                continue
+            start = field["word_i"]
+            if not 0 <= start < len(words):
+                continue
+            spoken = ""
+            for end in range(start,len(words)):
+                token = norm_word(words[end]["w"])
+                spoken += "." if token == "dot" else token
+                if spoken == domain:
+                    replacements[id(words[start])] = (end-start+1, dict(words[start], w=domain, t1=words[end]["t1"]))
+                    break
+                if not domain.startswith(spoken) or len(spoken) > len(domain):
+                    break
+    if not replacements:
+        return clock
+    display = copy.copy(clock)
+    display.words = []
+    i = 0
+    while i < len(clock.words):
+        count, word = replacements.get(id(clock.words[i]),(1,clock.words[i]))
+        display.words.append(word)
+        i += count
+    return display
+
+
 def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z=0, max_chars=22, max_words=4, late=2, script=None, ink_lag_s=None,
                   omit=(), phrase_ends=(), accents=(), accent_ink=None, cue_starts=(), reveal_words=()):
     """Captions at one seat for the whole film (TASTE P1), the way the reference stories set them: a line is laid out
@@ -853,6 +890,8 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
     gone = {id(w) for w in omit or ()}
     if not hasattr(P, "cap_lags"):
         P.cap_lags = []
+    if script is not None:
+        clock = written_addresses(clock, script)
     ph = clock.phrases_of(script) if script is not None else None
     seat_left = SAFE[0] + .012
     seat_right = (RAIL_X if y > .55 else SAFE[2]) - .012

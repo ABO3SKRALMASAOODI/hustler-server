@@ -654,3 +654,21 @@ def test_empty_video_provider_still_searches_the_authored_depiction():
     assert request["name"] == "Headquarters"
     assert request["searches"] == ["factory opening ceremony", "the actual factory exterior", "Headquarters"]
     assert wf.photo_requests(windows, [], [], {}, []) == []
+
+def test_only_authored_viewer_copy_or_a_designed_illustration_reaches_type():
+    import wf1_display
+    claim = dict(first=1,last=18,facts=[dict(value="Internal sourcing note",chain={"stance":"concern"})])
+    assert not wf1_display.audience_page(claim)
+    assert wf1_display.audience_page(dict(claim, viewer_line="One tender per year"))
+    assert wf1_display.audience_page(dict(claim, sequence=[{"label":"Tender opens"}]))
+
+
+def test_a_research_card_cannot_displace_the_timed_speech():
+    import wf1_display
+    words = [dict(w=t,t0=i,t1=i+1) for i,t in enumerate(["One","real","win"])]
+    display = [dict(k="word",t="Personal estimate",f=[0,30])]
+    spans, omitted = wf1_display.caption_handoffs(display, words, [(0,30)], words, lambda t: round(t*10))
+    assert spans == [] and omitted == []
+    display.append(dict(k="word",t="One real WIN.",f=[0,30]))
+    spans, omitted = wf1_display.caption_handoffs(display, words, [(0,30)], words, lambda t: round(t*10))
+    assert spans == [(0,30)] and omitted == words

@@ -526,6 +526,28 @@ def spoken_alternatives(steps, words, first, last):
     return bound
 
 
+def caption_handoffs(items, words, holds, omissions, frame):
+    """Only yield a spoken word to copy actually laid out at that word's time."""
+    def token(text):
+        return text.strip(string.punctuation + "“”‘’…").casefold()
+
+    visible = [(item["f"], {token(t) for t in item["t"].split()})
+               for item in items if item.get("k") == "word" and item.get("t")]
+    spoken = [(word, frame((word["t0"] + word["t1"]) / 2)) for word in words]
+    printed = {id(word) for word, at in spoken
+               if any(a <= at < b and token(word["w"]) in copy for (a,b),copy in visible)}
+    covered = [span for span in holds if all(
+        id(word) in printed for word, at in spoken if span[0] <= at < span[1])]
+    return covered, [word for word in omissions if id(word) in printed]
+
+
+def audience_page(page):
+    """A research claim supplies the record. A designed illustration or authored viewer line supplies type."""
+    return bool(page.get("viewer_line") or any(page.get(k) for k in (
+        "sequence", "publisher_excerpt", "record_role", "analogy_step", "model_phase",
+        "principle_plate", "scope_cue", "episode_example", "demo_note", "estimate_landing")))
+
+
 def bind(direction, editorial, words):
     """Compile the writer's selected statements into complete display blocks. Addresses are spoken word IDs."""
     sources = editorial["sources"]
@@ -738,7 +760,7 @@ def bind(direction, editorial, words):
                 spoken = [w["w"].casefold().strip(string.punctuation) for w in words[first:last+1]]
                 offset = next((i for i in range(len(spoken)) if spoken[i:i+len(qualifier)] == qualifier), 0)
                 first += offset
-            pages.append(dict(first=first, last=last, facts=facts))
+            pages.append(dict(first=first, last=last, facts=facts, viewer_line=str(args.get("viewer_line") or "").strip()))
         else:
             asks.append(ask)
     # A qualification belongs on screen even when the Director uses a picture on that beat.

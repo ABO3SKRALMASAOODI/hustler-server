@@ -149,7 +149,8 @@ def script(ctx, ideas_out):
                "let the byline identify its author. Describe both the stakes and how the "
                "delivery shifts into the payoff in the music brief. Include speaking_turns:[{start,end,speaker}] on the same episode clock "
                "for quoting the interview itself. Distinguish the host from the guest using the identity and dialogue.")
-    system += (" Read the surrounding interview to resolve jargon, enumeration and the role of each example. "
+    system += (" Choose the last complete thought and its exact final word. Cut back before a trailing restart, dangling connective or hesitation beginning another thought; keep the natural breath without its next syllable. "
+               "Read the surrounding interview to resolve jargon, enumeration and the role of each example. "
                "Use it as evidence for meaning, cut only the chosen moment. If a list is announced anywhere, "
                "distinguish its actual members from examples of one. When the full list falls outside the cut, "
                "frame this short around the particular requirement it explains. Where its voice still announces "
@@ -852,7 +853,7 @@ def direction_of(ctx, script, pack):
     llm = _llm()
     from placement_check import file_digest
     import wf1_display
-    editorial = dict(writing=wf1_display.WRITING, material=wf1_display.editorial(ctx, script, pack))
+    editorial = dict(writing=wf1_display.WRITING + "\nWrite provenance, research limitations and claim classifications only to the record. For a fact that adds concrete information to this exact spoken beat, put one concise audience-facing sentence in args.viewer_line. When the speaker already says it, leave viewer_line empty. A title naming a person belongs only on their identified image.", material=wf1_display.editorial(ctx, script, pack))
     import wf1_experiment
     argument = (pack.get("coverage") or {}).get("publication_argument")
     if argument:
@@ -2421,7 +2422,7 @@ def check(ctx, rd, sc):
         style=b.get("style"), layout=b.get("layout"), cutaway_share=b.get("cutaway_share"), finishes=b.get("finishes"), alien=b.get("alien"),
         pictures=len(pics), clips=len([p for p in pics if p.get("kind") == "clip"]), photographs=len([p for p in pics if p.get("kind") == "photo"]),
         new_pictures_10s=round(len(pics) / secs * 10, 2), display_words=[x.get("text") for x in b.get("display") or []],
-        display_facts=b.get("display_facts", []), interview_accounts=b.get("interview_accounts", []), field_report=b.get("field_report"), thought_experiment=b.get("thought_experiment"), placement_check=b.get("placement_check"), rendered_check=b.get("rendered_check"), render_reviews=rd.get("picture_review"),
+        display_facts=b.get("display_facts", []), interview_accounts=b.get("interview_accounts", []), research_facts=b.get("research_facts", []), field_report=b.get("field_report"), thought_experiment=b.get("thought_experiment"), placement_check=b.get("placement_check"), rendered_check=b.get("rendered_check"), render_reviews=rd.get("picture_review"),
         delivered_check=b.get("delivered_check"), delivery_reviews=history,
         sources=[dict(f=p.get("f"), visible_f=p.get("visible_f"), kind=p.get("kind"), name=p.get("name"), source=p.get("source"), time_range=p.get("time_range"),
                       mode=p.get("mode"), window=p.get("window"), w=p.get("w"), h=p.get("h"), rung=p.get("rung"), how=p.get("how"),
