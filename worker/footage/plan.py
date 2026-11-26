@@ -98,11 +98,14 @@ def plan(lines, named, about="", budget_s=90.0):
     for ln in obj.get("lines") or []:
         if isinstance(ln, dict) and isinstance(ln.get("i"), int):
             lns.append(dict(i=ln["i"], show=str(ln.get("show") or ""), subjects=[x for x in ln.get("subjects") or [] if x in names]))
-    # A beat can survive the writer but disappear from the researcher's response.
-    # Use its original picture address and visible action to search both moving-image
-    # providers while preserving the source-to-beat relationship.
+    # A beat can survive the writer but disappear from the researcher's response. Its picture names are searched
+    # on both moving-image providers, as the subjects the writer named: a named row gives the subject its kind, what
+    # a frame must show and its own video searches (26 Nov: a restored person searched YouTube with the caller's
+    # instruction text and was judged as a 'thing', so another man's footage could pass as him). The line's visual
+    # stays what that line should show. A subject keeps at most five searches, as the planner's own do.
     indexed = {row["i"]:row for row in lns}
     by_name = {row["name"]:row for row in subs}
+    rows_by_name = {n["name"]: n for n in named or [] if isinstance(n, dict) and isinstance(n.get("name"), str)}
     for line in lines:
         i = line["i"]
         if (indexed.get(i) or {}).get("subjects") or not line.get("pictures"):
@@ -111,17 +114,18 @@ def plan(lines, named, about="", budget_s=90.0):
         for name in line["pictures"]:
             if not isinstance(name, str) or not name.strip():
                 continue
+            row = rows_by_name.get(name) or {}
             target = by_name.get(name)
             if target is None:
-                target = dict(name=name, kind="thing", must_show=line.get("visual") or name, searches=[])
+                target = dict(name=name, kind=str(row.get("is") or "thing").lower(),
+                              must_show=str(row.get("must_show") or name), searches=[])
                 subs.append(target)
                 by_name[name] = target
-            queries = [dict(where="archive", q=name)]
-            if line.get("visual"):
-                queries.append(dict(where="youtube", q=line["visual"][:120]))
-            queries.append(dict(where="youtube", q=name))
+            queries = [dict(where="youtube", q=str(q)[:120]) for q in row.get("video_searches") or []
+                       if isinstance(q, str) and q.strip() and not urlparse(q).scheme]
+            queries += [dict(where="archive", q=name[:120]), dict(where="youtube", q=name[:120])]
             for query in queries:
-                if query not in target["searches"]:
+                if len(target["searches"]) < 5 and query not in target["searches"]:
                     target["searches"].append(query)
             subjects.append(name)
         if subjects:

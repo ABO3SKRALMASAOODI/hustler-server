@@ -724,5 +724,38 @@ def test_unanswered_beat_keeps_its_named_moving_picture_search_on_both_providers
     result,_ = plan.plan([line], [])
     subject, = result["subjects"]
     assert result["lines"] == [dict(i=4,show=line["visual"],subjects=["Ingenuity"])]
-    assert dict(where="youtube",q=line["visual"]) in subject["searches"]
-    assert dict(where="archive",q="Ingenuity") in subject["searches"]
+    assert subject["searches"] == [dict(where="archive",q="Ingenuity"), dict(where="youtube",q="Ingenuity")]
+    assert subject["kind"] == "thing" and subject["must_show"] == "Ingenuity"
+
+
+def test_a_restored_beat_searches_its_named_person_as_that_person(monkeypatch):
+    """26 Nov: a repair line's visual is the caller's instruction. A restored person kept kind 'thing', had that
+    instruction as must_show and as a YouTube query, so the person check never ran and his voice was never sought."""
+    instruction = ("Find a picture for only this missing spoken interval. Surrounding narration: Lovell and Haise "
+                   "powered down the lunar module to save power.\nPreserve the exact mission.")
+    line = dict(i=7,say="They powered it down.",pictures=["Jim Lovell"],visual=instruction)
+    named = [{"name": "Jim Lovell", "is": "person", "must_show": "Jim Lovell himself on camera",
+              "video_searches": ["Jim Lovell interview Apollo 13", "Jim Lovell 1970 press conference"]}]
+    for reply in ('{"subjects":[],"lines":[]}',
+                  '{"subjects":[],"lines":[{"i":7,"show":"the crew","subjects":[]}]}'):
+        monkeypatch.setattr(plan.ask,'ask',lambda *a,_r=reply,**k: (_r,0))
+        result,_ = plan.plan([line], named)
+        subject, = result["subjects"]
+        assert subject["kind"] == "person" and subject["must_show"] == "Jim Lovell himself on camera"
+        assert all(instruction[:40] not in q["q"] for q in subject["searches"])
+        assert subject["searches"][:2] == [dict(where="youtube",q="Jim Lovell interview Apollo 13"),
+                                           dict(where="youtube",q="Jim Lovell 1970 press conference")]
+        assert dict(where="archive",q="Jim Lovell") in subject["searches"]
+        assert [ln["subjects"] for ln in result["lines"] if ln["i"] == 7] == [["Jim Lovell"]]
+
+
+def test_a_subject_named_on_many_dropped_beats_keeps_five_searches(monkeypatch):
+    monkeypatch.setattr(plan.ask,'ask',lambda *a,**k: ('{"subjects":[],"lines":[]}',0))
+    lines = [dict(i=k,say=f"Beat {k}.",pictures=["Databricks"],visual=f"Databricks scene {k}") for k in range(12)]
+    named = [{"name": "Databricks", "is": "company",
+              "video_searches": [f"Databricks keynote {y}" for y in (2021, 2022, 2023, 2024)]}]
+    result,_ = plan.plan(lines, named)
+    subject, = result["subjects"]
+    assert len(subject["searches"]) == 5 and subject["kind"] == "company"
+    assert dict(where="youtube",q="Databricks keynote 2021") == subject["searches"][0]
+    assert all(ln["subjects"] == ["Databricks"] for ln in result["lines"]) and len(result["lines"]) == 12
