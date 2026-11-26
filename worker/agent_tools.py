@@ -14701,9 +14701,30 @@ def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
         return (f"REJECTED: source_offset_s {off}s is at/past the end of "
                 f"'{_asset_name(asset)}' ({asset_dur:.2f}s). Pick an offset "
                 "inside the file; no external trim is needed.")
+    if duration is not None and duration < 0.05:
+        return "REJECTED: duration_s must be at least 0.05 seconds."
+    if prog == 0:
+        start = round(max(float(start_output_s), 0.0), 2)
+        excerpt = min(asset_dur - off, duration if duration is not None else asset_dur)
+        end = round(start + excerpt, 2)
+        # The original can arrive after the empty canvas was created.
+        picture = min(end, ctx.duration) if ctx.has_main_video else 0
+        if picture >= 0.2:
+            edl["keep"] = [[0.0, picture]]
+            edl.pop("canvas", None)
+        else:
+            picture = 0
+        if end > picture:
+            key, error = _solid_card_asset(ctx, "#000000")
+            if error:
+                return error
+            if not picture and not edl.get("canvas"):
+                from schemas import canvas_edl
+                edl["canvas"] = canvas_edl()["canvas"]
+            edl["inserts"] = [{"id": "ins1", "kind": "image", "asset_key": key,
+                               "at_output_s": picture, "duration_s": max(0.2, round(end - picture, 2))}]
+        prog = program_duration(edl)
     if duration is not None:
-        if duration < 0.05:
-            return "REJECTED: duration_s must be at least 0.05 seconds."
         duration = round(min(duration, asset_dur - off, prog - start), 2)
         if duration < 0.05:
             return ("REJECTED: that voiceover excerpt does not overlap the "

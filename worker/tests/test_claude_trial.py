@@ -157,10 +157,10 @@ def test_the_credit_switch_closes_new_turns_and_lets_a_running_one_finish(world)
     # a later slice of a request that already started finishes (budget only)
     d = claude_trial.resolve(_Db(), 5, False, project_id=9, continuing=True)
     assert d.kind == "active"
-    # a billing refusal cannot be finished on: plan cards
+    # A provider refusal still runs the request on the recovery route.
     world.credit = {"on": False, "reason": "billing_error"}
     d = claude_trial.resolve(_Db(), 5, False, project_id=9, continuing=True)
-    assert d.kind == "unavailable"
+    assert d.kind == "active"
 
 
 def test_an_unreadable_credit_switch_reads_as_off(monkeypatch):
@@ -333,23 +333,9 @@ def test_provider_refusal_alert_never_contains_the_key(monkeypatch):
     monkeypatch.setattr(claude_trial, "_metering_db", lambda: _SwitchDb())
     claude_trial.provider_refused(
         "auth", Exception("bad key sk-ant-api03-SECRETSECRET-xyz"))
-    # the refusal flips the automatic credit switch, without the key either;
-    # the switch queues the event's ONE alert, so no second mail from here
-    assert switched and switched[0][0] == "switch_off"
-    assert switched[0][1][0] == "auth_error"
-    assert "sk-ant-" not in switched[0][1][1]
-    assert queued == []
-
-    class _BrokenDb:
-        def run(self, fn, *args):
-            raise RuntimeError("database down")
-
-    # only when the switch cannot be written is this process's alert the
-    # signal, and it never carries the key
-    monkeypatch.setattr(claude_trial, "_metering_db", lambda: _BrokenDb())
-    claude_trial.provider_refused(
-        "auth", Exception("bad key sk-ant-api03-SECRETSECRET-xyz"))
-    assert queued and "sk-ant-" not in queued[0] and "[REDACTED]" in queued[0]
+    assert not switched
+    assert len(queued) == 1 and "sk-ant-" not in queued[0]
+    assert "provider_api_keys" in queued[0]
 
 
 class _Cur:

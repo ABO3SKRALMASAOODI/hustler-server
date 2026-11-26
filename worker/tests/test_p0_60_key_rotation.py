@@ -143,7 +143,7 @@ def test_auth_refusal_on_a_just_rotated_key_runs_the_request_on_the_new_key(lane
                              [{"role": "user", "content": "cut it faster"}])
     assert out is not None
     assert creds.refreshed == 1
-    assert lane.refused == []                         # the lane stays open
+    assert lane.refused == ["auth"]                   # alert on the first refusal
     assert claude_lane.available()
     assert _FakeAnthropic.built == ["old-key", "new-key"]
 

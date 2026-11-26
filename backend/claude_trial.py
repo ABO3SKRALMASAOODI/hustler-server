@@ -299,6 +299,11 @@ def start_scheduler(app):
 
         def job():
             try:
+                import anthropic_key_health
+                anthropic_key_health.tick()
+            except Exception as exc:
+                app.logger.error("Anthropic key monitor failed: %s", type(exc).__name__)
+            try:
                 import anthropic_wallet
                 anthropic_wallet.tick()
             except Exception as exc:

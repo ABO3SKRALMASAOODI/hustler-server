@@ -30,9 +30,8 @@ Translation rules (all deterministic, so the prompt cache holds):
 
 Errors: 429s propagate unchanged so the loop's budget-aware rate-limit waits
 run. Overloaded/5xx refusals (nothing was billed) are retried here, twice.
-Billing, credit and authentication refusals LATCH the lane closed for
-``CLAUDE_TRIAL_OUTAGE_LATCH_S`` and alert the admin, and are re-raised with
-the provider's words so ``llm.is_quota_error`` recognises them.
+Billing and auth refusals alert the owner, retry with the live credential,
+and carry the same call to a configured recovery provider.
 
 The key comes only from ``config.ANTHROPIC_API_KEY`` (live: the sealed
 provider row outranks the environment). It is never logged, never returned
@@ -150,24 +149,50 @@ def _sdk():
         return _client
 
 
-def _rotated_key():
-    """An auth refusal may mean the key was rotated a moment ago: re-read the
-    sealed provider row now (provider_creds.invalidate: at most once per
-    retry window) and say whether a DIFFERENT key is in force. True means
-    the caller retries the same request once on the new key. Never raises."""
+def _refresh_live_key():
+    """Re-read the sealed row before repeating a refused call."""
     try:
         import provider_creds
-        before = _key_fingerprint(config.ANTHROPIC_API_KEY)
         creds = provider_creds.CREDENTIALS
         if creds.invalidate() and creds._lock.acquire(timeout=5.0):
             try:                      # synchronous: the retry needs it now
                 creds._refresh()
             finally:
                 creds._lock.release()
-        after = _key_fingerprint(config.ANTHROPIC_API_KEY)
-        return bool(config.ANTHROPIC_API_KEY) and after != before
-    except Exception:  # noqa: BLE001 - a refusal stays a refusal
-        return False
+    except Exception:  # the cached credential still gets a retry
+        pass
+
+
+def _provider_fallback(messages, tools, max_tokens, tool_choice, timeout):
+    import claude_trial
+    import edit_rung
+    import llm
+
+    options = {}
+    if tools:
+        options["tools"] = tools
+        if tool_choice is not None:
+            options["tool_choice"] = tool_choice
+    if timeout:
+        options["timeout"] = timeout
+    last_error = None
+    for model, client in llm.provider_recovery_clients():
+        try:
+            result = llm.create_with_dialect(client, model, edit_rung._strip(messages),
+                                             max_tokens=max_tokens, **options)
+        except Exception as exc:
+            if llm.is_budget_stop(exc):
+                raise
+            last_error = exc
+            continue
+        if result.usage is not None:
+            result.usage.answered_model = model
+            if claude_trial.current() is not None:
+                claude_trial.meter(model, edit_rung.allowance_usd(result.usage),
+                                   kind="provider_fallback")
+        return result
+    raise ClaudeLaneUnavailable("No configured provider accepted the editing call "
+                                "(credit balance or key)") from last_error
 
 
 # ------------------------------------------------------------------ #
@@ -945,23 +970,17 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
                 message = stream.get_final_message()
             break
         except Exception as exc:          # noqa: BLE001 - classified below
-            if is_auth_error(exc) and not rekeyed and _rotated_key():
-                # The key was rotated under this process: the same request
-                # on the new key, not a closed lane (P0 #60).
-                rekeyed = True
-                client = _sdk()
-                if timeout:
-                    client = client.with_options(timeout=float(timeout))
-                print("[claude] auth refusal on a rotated key: retrying on "
-                      "the key now in force", flush=True)
-                continue
             if is_billing_error(exc) or is_auth_error(exc):
-                kind = "billing" if is_billing_error(exc) else "auth"
-                _close(f"{kind}: {str(exc)[:200]}")
-                claude_trial.provider_refused(kind, exc)
-                raise ClaudeLaneUnavailable(
-                    f"Anthropic refused the trial lane ({kind}; credit "
-                    f"balance or key): {str(exc)[:300]}") from exc
+                if not rekeyed:
+                    kind = "billing" if is_billing_error(exc) else "auth"
+                    claude_trial.provider_refused(kind, exc)
+                    _refresh_live_key()
+                    rekeyed = True
+                    client = _sdk()
+                    if timeout:
+                        client = client.with_options(timeout=float(timeout))
+                    continue
+                return _provider_fallback(messages, tools, max_tokens, tool_choice, timeout)
             if plan and _plan_refused(exc):
                 # Never a customer's problem: the same request, the old way.
                 global _plan_off
