@@ -502,6 +502,9 @@ def test_the_designed_card_off_a_device_line_is_colourful_and_driven(tmp_path):
     for s in sc["segments"]:
         s["phrases"] = [[0, 5], [5, 10], [10, 15], [15, 20], [20, 24]]
     pics, footage = _fit_supply(n_clips=1)
+    for lst in footage.values():                                         # static takes: a moving take would be reframed first
+        for c in lst:
+            c["motion"] = dict(p90=0.1, curve=[0.1] * 45)
     _files(tmp_path, footage, pics)
     fit = {footage[0][0]["path"]: [0], footage[1][0]["path"]: [1]}
     sup = dict(sid="t", words=_words(sc), narration=str(tmp_path / "none.wav"), ffmpeg="ffmpeg", pictures={}, sounds={},
@@ -990,7 +993,8 @@ def test_a_pictureless_line_holds_one_card_of_its_own_text_never_a_copy_or_the_b
 
 def test_a_line_short_of_pictures_replays_a_fitting_take_before_any_card_and_never_stacks_cards():
     sc = _fit_script(n=1, words=20)
-    c = dict(path="/x/r.mp4", seconds=3.0, subject="Alpha", w=1080, h=1920, motion=dict(p90=2.0, curve=[2.0] * 45))
+    # A static take: a moving one would be reframed before any card (test_an_exhausted_line_reframes_...).
+    c = dict(path="/x/r.mp4", seconds=3.0, subject="Alpha", w=1080, h=1920, motion=dict(p90=0.1, curve=[0.1] * 45))
     sp = R.Supply({}, {0: [c]}, fit={"/x/r.mp4": {0}}, cards={0: [dict(text="FIRST", role="key")]})
     sp.use_take("/x/r.mp4", 0)
     sp.take_clip(c, 0.0, 0.5, -int(13 * F.FPS))                         # shown once, thirteen seconds before this line
@@ -1028,6 +1032,9 @@ def test_a_card_on_a_device_line_keeps_the_palette_and_the_gate_runs_over_the_re
     sc["segments"][1]["show"] = [dict(text="$5 million", role="figure", word_i=3)]
     pics, footage = _fit_supply(n_clips=2)
     footage = {i: v for i, v in footage.items() if i < 5}
+    for lst in footage.values():                                         # static takes: a moving take would be reframed first
+        for c in lst:
+            c["motion"] = dict(p90=0.1, curve=[0.1] * 45)
     _files(tmp_path, footage, pics)
     fit = {c["path"]: [i] for i, lst in footage.items() for c in lst}
     fit[footage[1][1]["path"]] = [0]                                     # line 1 has one take of its own

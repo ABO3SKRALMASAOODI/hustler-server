@@ -73,15 +73,18 @@ def test_netflix_prize_display_on_the_spoken_clock(tmp_path, monkeypatch, quiet_
         ["Grand prize", "$1 million", "Netflix TechBlog"],
         ["Jason Calacanis", "probably $50 million", "worth of work", "All-In Podcast"],
     ]
-    assert len(b.get("display_facts", [])) == len(expected_pages)
-    for span, expected in zip(b["display_facts"], expected_pages):
-        for frame in range(*span["f"]):
-            visible = [w["t"].casefold() for w in drawn if w["f"][0] <= frame < w["f"][1]]
-            assert visible == [v.casefold() for v in expected]
+    # The writer authored no viewer line: the three researched pages stay in the record and the speech keeps the frame.
+    assert b.get("display_facts", []) == []
+    assert len(b["research_facts"]) == len(expected_pages)
+    assert not any(w["t"].casefold() in {"$1 million", "probably $50 million", "bennett and lanning · uc san diego"} for w in drawn)
     assert all(a["dev"] not in ("counter","typewriter","staircase","arc") for a in l1.get("devices",[]))
-    assert [s["source"]["url"] for f in b["display_facts"] for s in f["facts"]] == [PAPER,UCSD,NETFLIX,INTERVIEW]
-    caps = [i["t"] for i in l1["items"] if i.get("role")=="cap"]
-    assert caps == [i["t"] for i in wf.wf1_film.build(script,pack,"window",{})[0]["items"] if i.get("role")=="cap"]
+    assert [s["source"]["url"] for f in b["research_facts"] for s in f["facts"]] == [PAPER,UCSD,NETFLIX,INTERVIEW]
+    # Every spoken word stays readable: a caption hands off only to a display word carrying the same timed words.
+    plain = [(i["t"],i["f"]) for i in wf.wf1_film.build(script,pack,"window",{})[0]["items"] if i.get("role")=="cap"]
+    directed = [(i["t"],i["f"]) for i in l1["items"] if i.get("role")=="cap"]
+    for text,(lo,hi) in (c for c in plain if c not in directed):
+        assert any(i.get("k")=="word" and i.get("role")!="cap" and text.casefold() in i["t"].casefold()
+                   and i["f"][0] < hi and lo < i["f"][1] for i in l1["items"]), text
     assert all(v in str(messages[0]) for v in (PAPER,NETFLIX,UCSD,INTERVIEW,"Jason Calacanis","September 2009"))
 
 
@@ -218,13 +221,10 @@ def test_retained_multi_fact_estimate_pages_keep_the_qualifications(tmp_path, mo
              dict(base, qualifier="10% chance", value="7 billion people", relation="die in the scenario")]
     monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *args: ([], []))
     scene, beats = wf.wf1_film.build(script, pack, "prints", dict(display_facts=[dict(first=0, last=15, facts=facts)]))
-    start, end = beats["display_facts"][0]["f"]
-    rows = [it for it in scene["items"] if it.get("fact_type")]
-    assert all(it["f"] != [start, end] for it in rows)
-    for frame, fact in ((start, facts[0]), (end-1, facts[1])):
-        copy = " ".join(it["t"] for it in rows if it["f"][0] <= frame < it["f"][1])
-        assert all(part in copy for part in (fact["qualifier"], fact["value"], fact["attribution"], source["publisher"]))
-        assert not any(it.get("role") == "cap" and it["f"][0] <= frame < it["f"][1] for it in scene["items"])
+    # Qualified estimates keep every qualification in the record; the timed speech captions keep the screen.
+    assert beats["display_facts"] == [] and beats["research_facts"][0]["facts"] == facts
+    assert not any(it.get("fact_type") for it in scene["items"])
+    assert any(it.get("role") == "cap" for it in scene["items"])
 
 
 def test_comparison_evidence_keeps_the_scope_and_researches_only_the_demo(tmp_path, monkeypatch):
@@ -312,11 +312,12 @@ def test_spoken_verdict_keeps_the_speaker_captions_and_byline(tmp_path, quiet_en
     direction.update(turn_seg=1, coverage_final=True, display=[dict(seg=1,text="Excel killer",role="payoff")])
     monkeypatch.setattr(wf1_coverage,"speaker_moves",lambda *args: ([],[]))
     scene, beats = wf.wf1_film.build(script,pack,"prints",direction)
-    credit, = [i for i in scene["items"] if i.get("t") == "The host · Opinion"]
-    a,b = credit["f"]
-    assert any(i["k"]=="shot" and i["f"][0]<b and a<i["f"][1] for i in scene["items"])
-    assert any(i.get("role")=="cap" and i["f"][0]<b and a<i["f"][1] for i in scene["items"])
-    assert not any(row["text"] == "Excel killer" for row in beats["display"])
+    # No automatic byline: the live speaker and their captions carry the verdict.
+    assert not any("Opinion" in str(i.get("t","")) for i in scene["items"])
+    assert any(i["k"]=="shot" for i in scene["items"]) and any(i.get("role")=="cap" for i in scene["items"])
+    # The claim stays in the record, so no reading interval displaces the director's payoff word.
+    assert beats["research_facts"][0]["facts"][0]["chain"]["stance"] == "characterization"
+    assert any(row["text"] == "Excel killer" for row in beats["display"])
 
 
 def test_public_listing_phrase_ownership_and_interview_diagram():
@@ -520,7 +521,8 @@ def test_m21_heard_estimate_and_earlier_demo_share_the_scene(tmp_path, quiet_eng
     offsets = [round(row["y"]-y,5) for row,y in zip(block,before)]
     assert offsets[0] > 0 and len(set(offsets)) == 1
     pages = beats["display_facts"]
-    assert [p["facts"][0]["value"] for p in pages] == [claim["report"],"No meeting record"]
+    assert [p["facts"][0]["value"] for p in pages] == ["No meeting record"]
+    assert claim["report"] in [p["facts"][0]["value"] for p in beats["research_facts"]]
     assert pages[-1]["sequence"][-1]["label"] == callback["question"]
     assert pages[-1]["facts"][0]["callback_source"]["excerpt"] == [15.,30.]
     # Accented captions crossing from the face to the evidence retain one fitted size.

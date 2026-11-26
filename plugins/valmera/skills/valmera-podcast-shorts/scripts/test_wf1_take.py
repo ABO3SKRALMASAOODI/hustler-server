@@ -415,7 +415,10 @@ def test_adjacent_survey_rows_reuse_clean_panel_then_show_live_speaker(tmp_path,
         assert row["source_evidence"]["time_s"]==102
         assert any(it.get("src") and it["f"]==row["f"] for it in scene["items"])
     assert any(it.get("presenter_insert") and it["crop"]==tile for it in scene["items"])
-    assert [p["facts"][0]["value"] for p in beats["display_facts"]] == ["Possibly lower"]
+    # Research claims and their estimate labels stay in the record; the survey panel and live speaker keep the frame.
+    assert beats["display_facts"] == []
+    assert "Possibly lower" in [p["facts"][0]["value"] for p in beats["research_facts"]]
+    assert not any(it.get("t") == "Possibly lower" for it in scene["items"])
     assert source.shared_presenter_region(pack["coverage"]["source_reading"]) == tile
     repaired, report = film.build(script, pack, "window", dict(coverage_final=True,
         reframe=[dict(window=rows[1]["source_slot"], path=path)]))
@@ -482,11 +485,9 @@ def test_source_strip_has_a_reading_seat_and_close_follows_the_reaction(tmp_path
     fragment, = [i for i in scene["items"] if i.get("document_excerpt")]
     assert fragment["crop"] == rec["document"]["detail"]
     assert fragment["w"] * 360 >= 290 and fragment["h"] * 640 > 97
-    assert fragment["source_ink"][0][3] <= .50
-    assert beats["display_facts"][0]["facts"] == [fact]
-    rows = [i for i in scene["items"] if i.get("fact_type")]
-    assert " ".join(i["t"] for i in rows if i["v"] == "quote_body") == fact["statement"]
-    assert "May 7, 2010" in " ".join(i["t"] for i in rows if i["v"] == "quote_credit")
+    # The cited statement is research: it stays in the record and the document itself carries the evidence.
+    assert beats["display_facts"] == [] and beats["research_facts"][0]["facts"] == [fact]
+    assert not any(i.get("v") == "quote_body" for i in scene["items"])
     assert any(i.get("role") == "cap" and i["f"][0] < 87 and i["f"][1] > 18 for i in scene["items"])
     wide = [i for i in scene["items"] if i.get("source_frame")]
     reaction = round(words[15]["start"] * 30) + film.LEAD_F
@@ -498,7 +499,8 @@ def test_source_strip_has_a_reading_seat_and_close_follows_the_reaction(tmp_path
     end_page = dict(first=17, last=17, facts=[fact])
     scene, _ = film.build(script, pack, "prints", dict(turn_seg=1, display_facts=[end_page]))
     closing_word = round(words[17]["start"] * 30) + film.LEAD_F
-    assert any(i.get("speaker_panel") and i["crop"] != [0,0,1,1] and i["f"][0] <= closing_word < i["f"][1]
+    # A research page on the closing word stays in the record: the live speaker holds the close.
+    assert any(i["k"] == "shot" and str(i.get("pic","")).startswith("own:") and i["f"][0] <= closing_word < i["f"][1]
                for i in scene["items"])
 
 

@@ -544,7 +544,7 @@ def caption_handoffs(items, words, holds, omissions, frame):
 def audience_page(page):
     """A research claim supplies the record. A designed illustration or authored viewer line supplies type."""
     return bool(page.get("viewer_line") or any(page.get(k) for k in (
-        "sequence", "publisher_excerpt", "record_role", "analogy_step", "model_phase",
+        "sequence", "publisher_excerpt", "record_role", "analogy", "analogy_step", "model_phase", "gloss",
         "principle_plate", "scope_cue", "episode_example", "demo_note", "estimate_landing")))
 
 
