@@ -3759,7 +3759,7 @@ def _within_keep(new_keep, prev_keep):
 
 def _write_keep(ctx, new_keep, desc, snap_to_words=None,
                 check_regression=False, place_all=False, never_grow=False,
-                repetition_repair=False):
+                repetition_repair=False, in_sentence=False):
     """Shared tail for every keep-modifying write: audio-safe cut edges
     (snap_to_words None/True; True first snaps outward to word edges),
     insert re-snap + program-item re-anchoring (the shared remap above,
@@ -3767,7 +3767,10 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     for full replacements, mechanical regression warnings) appended to a
     still SUCCESSFUL result. snap_to_words=False writes the exact times.
     place_all (keep_segments, which restates every edge): every cut edge of
-    the list is placed, not only those the previous keep lacked."""
+    the list is placed, not only those the previous keep lacked.
+    in_sentence: the cut is a trim inside a sentence on purpose, so its
+    edges are not moved to sentence ends (word, sound and shot placement
+    still run)."""
     words = ctx.index.get("words", [])
     silences = ctx.index.get("silences", [])
     prev = ctx.latest_edl()
@@ -3780,7 +3783,7 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     if not new_keep:
         return "REJECTED: nothing would survive that keep list."
     sentence_line = ""
-    if words and not repetition_repair and _sentence_snap_on(ctx, snap_to_words):
+    if words and not (repetition_repair or in_sentence) and _sentence_snap_on(ctx, snap_to_words):
         # TRIAL_QUALITY_BUILD: the Claude lanes' editor never starts or ends
         # a piece mid-sentence (sentence_snap; new edges only)
         import sentence_snap
@@ -3803,8 +3806,11 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     # including shot hygiene. Warnings may explain a rough edge, not move it.
     shot_notes = []
     if snap_to_words is not False:
+        # keep_segments (place_all) restates every edge: each is placed,
+        # old ones included, exactly as the acoustic pass above does
         new_keep, shot_notes = _snap_keep_to_shots(
-            new_keep, ctx.index, words, prev_keep=prev_keep)
+            new_keep, ctx.index, words,
+            prev_keep=None if place_all else prev_keep)
     if never_grow:
         clipped = _within_keep(new_keep, prev_keep)
         if clipped:
@@ -4477,8 +4483,18 @@ def cut_range(ctx, start, end, snap_to_words=None):
                       repetition_repair=repetition_repair)
     if snap is not False and str(res).startswith("NO CHANGE"):
         # The range is in the edit, yet the edge placement passes closed the
-        # cut up again (#1841): place it at the asked times instead. The
-        # write boundary still keeps every edge off a spoken word.
+        # cut up again (#1841). First keep the word, consonant and sound
+        # placement and leave the sentence ends alone (a short trim inside a
+        # sentence); only when that still closes it, place it at the asked
+        # times (the write boundary keeps every edge off a spoken word).
+        placed = _write_keep(ctx, new, desc, snap_to_words=snap,
+                             repetition_repair=repetition_repair,
+                             in_sentence=True)
+        if str(placed).startswith("EDL v"):
+            return (placed + "\nPLACED INSIDE THE SENTENCE: moving the edges "
+                    "to sentence ends closed this cut up again, so it was "
+                    "placed on the words around the asked times "
+                    f"({s:g}-{e:g}s).")
         exact = _write_keep(ctx, new, desc, snap_to_words=False,
                             repetition_repair=repetition_repair)
         if str(exact).startswith("EDL v"):

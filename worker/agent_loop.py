@@ -3039,6 +3039,15 @@ def _upload_carrying_first_cut(edl, duration, keep_frame=True):
     if isinstance(edl.get("captions"), dict):
         fresh["captions"] = copy.deepcopy(edl["captions"])
         carried.append("caption style")
+        if not keep_frame:
+            # The first cut placed its captions for its own 9:16 frame (chest height, a track measured on
+            # that crop). On the upload's own frame they sit at the bottom, off the slides it keeps visible.
+            caps = fresh["captions"]
+            caps.pop("placement_track", None)
+            if isinstance(caps.get("style"), dict):
+                caps["style"].pop("anchor_y", None)
+                caps["style"]["position"] = "bottom"
+            carried[-1] = "caption style (placed at the bottom of the upload's own frame)"
     if edl.get("master"):
         fresh["master"] = copy.deepcopy(edl["master"])
     try:
@@ -4371,6 +4380,8 @@ def _request_media_keys(worker_db, ctx):
         if meta.get("role") in ("edit_reference", "shorts_reference") \
                 or meta.get("staged") in (True, "true"):
             continue
+        if read_tools.product_design_plate(row):
+            continue  # the First cut's own plates are not photos the customer gave (#1838)
         if row.get("storage_key"):
             keys.append(row["storage_key"])
     return keys or None

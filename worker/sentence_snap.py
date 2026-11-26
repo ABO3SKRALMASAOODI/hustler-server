@@ -35,6 +35,8 @@ CLAUSE_COST = 1.6       # a clause gap counts this many times its distance
 MAX_SHIFT_S = 4.0       # an edge never moves further than this
 MIN_PIECE_S = 0.4       # a snapped piece never gets shorter than this
 SAME_EDGE_S = 0.03      # an edge the previous keep already had
+INNER_MAX_S = 3.0       # the longest removed stretch read as a trim inside one sentence (a repeated word,
+                        # a stutter, a false start); a longer cut spans sentences and its edges snap
 
 
 def _wt(w):
@@ -153,15 +155,15 @@ def snap_keep(keep, words, duration=None, prev_keep=None, sentences=None):
     dur = float(duration) if duration else None
     keep.sort()
     # A removed stretch with no sentence or clause boundary in it (a repeated
-    # word, a stutter, a false start: "de de", "con con") is a trim INSIDE
-    # one sentence: the sentence reads on across it, so neither of its edges
+    # word, a stutter, a false start: "de de", "con con"; at most
+    # INNER_MAX_S) is a trim INSIDE one sentence: the sentence reads on across it, so neither of its edges
     # is a piece starting or ending mid-sentence. Snapping both to the
     # nearest boundary moved them to the same gap and closed the cut, so the
     # requested trim silently vanished (#1841). Those edges stay.
     inner = set()
     for i in range(len(keep) - 1):
         a, b = keep[i][1], keep[i + 1][0]
-        if b - a >= 0.05 and not _had(a, prev_edges) \
+        if 0.05 <= b - a <= INNER_MAX_S and not _had(a, prev_edges) \
                 and not _had(b, prev_edges) \
                 and not any(ga < b and gb > a for ga, gb, _k in bounds):
             inner.update(((i, "end"), (i + 1, "start")))
