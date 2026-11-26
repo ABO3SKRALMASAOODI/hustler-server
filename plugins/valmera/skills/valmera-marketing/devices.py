@@ -921,7 +921,8 @@ STUDIO_IN_F = 16               # the Studio arriving: 6 frames whole (the clip i
 WORD_F = 5                     # a typed word every 5 frames: a fast typist, every word still seen
 READ_F = 12                    # the whole sentence held before Send
 SENT_F = 14                    # Send, the sentence in its bubble
-PUSH_F = 12                    # the result growing out of the Studio to full frame
+PUSH_F = 18                    # the result: seated under the sent sentence (SEAT_F), then growing out of the Studio to full frame
+SEAT_F = 6                     # the sentence and its result read together before the result takes the frame (26 Nov)
 SITE_S = 3.4                   # the website: its name and a page to recognise, with the landing
 SITE_OVER_S = 2.0              # the website lands under the speaker's last line (his payoff is said over valmera.io), and the
                                # programme ends 1.4 s after his last word: no dead air before the brand's card
@@ -946,10 +947,18 @@ def showcase_marks(hook, window, n_words, lead_f=3, site_s=SITE_S, over_s=SITE_O
                 export_voice=[f_p, f_v], site=[f_s, f_end], dur_f=max(f_end, f_v), lead_f=lead_f)
 
 
-def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42), land_f=None):
+PROOF_W = 0.84                 # the export card's width once the proof is complete: its titles read at phone size
+PROOF_PUSH_F = 14
+
+
+def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42), land_f=None, proof_f=None):
     """The hook: the clip as uploaded and Valmera's export of it side by side at the same instant (the export's own
     edit list maps every frame), each under its label; the export is the larger, in front. `land_f`: the frame the
-    export's picture lands on, given a hit there (the tutorial's opening beat, proof.lay_hook)."""
+    export's picture lands on, given a hit there (the tutorial's opening beat, proof.lay_hook). `proof_f`: the frame
+    the export's proof is complete (proof.proof_landing: the checklist's last item); from there the export card
+    pushes in to PROOF_W of the frame, so the split ends on a proof a phone can read (26 Nov: the checklist read at
+    25 px in a 0.55-wide card). No sound on frame 0-2: the split is already whole on frame 0 (26 Nov: a whoosh on f2
+    over nothing that moved)."""
     L = Layer(l1, lib, "sp")
     P, R = L.P, L.R
     up_key, ex_key = P.video("dv_up", upload), P.video("dv_ex", export)
@@ -966,17 +975,33 @@ def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42
     n = f1 - f0
     land = [r4(v) for v in MF.settle(8, 0.94)] + [1.0] * max(n - 8, 0)     # frame 0 already reads: both cards whole, both labels set
     P.synced("up", [f0, f1], tlb, export_at, up_key, up_box, z=2, radius=0.008, shadow=dict(a=0.40, blur=0.03, dx=0, dy=0.012))
-    P.card("ex", [f0, f1], ex_key, ex_box, t0=export_at, z=3, radius=0.012, shadow=dict(a=0.5, blur=0.035, dx=0, dy=0.014), s=land)
+    push = None
+    if proof_f is not None and f0 + 6 <= f0 + int(proof_f) <= f1 - PROOF_PUSH_F - 6:
+        p0 = f0 + int(proof_f) + 2
+        ease = MF.ease_io(PROOF_PUSH_F)
+        u = [0.0] * (p0 - f0) + list(ease) + [1.0] * max(f1 - p0 - PROOF_PUSH_F, 0)
+        u = u[:n]
+        k = PROOF_W / ew
+        cx, cy = (ex_box[0] + ex_box[2]) / 2, (ex_box[1] + ex_box[3]) / 2
+        land = [r4(a * (1 + (k - 1) * q)) for a, q in zip(land, u)]
+        push = dict(f=[p0, p0 + PROOF_PUSH_F], x=[r4(cx + (0.5 - cx) * q) for q in u], y=[r4(cy + (0.5 - cy) * q) for q in u],
+                    fade=[r4(1.0 - min(1.0, q * 2.5)) for q in u])
+    P.card("ex", [f0, f1], ex_key, ex_box, t0=export_at, z=3, radius=0.012, shadow=dict(a=0.5, blur=0.035, dx=0, dy=0.014), s=land,
+           **(dict(x=push["x"], y=push["y"]) if push else {}))
     R.voices[L.k("dv_l")]["px"] = 44
     lab_cap = R.cap(L.k("dv_l")) / H
-    L.text("lab_up", [f0, f1], SPLIT_LABELS[0], L.k("dv_l"), up_box[0] + 0.01, up_box[1] - 0.014, DIM, 1.0)
+    labs = [L.text("lab_up", [f0, f1], SPLIT_LABELS[0], L.k("dv_l"), up_box[0] + 0.01, up_box[1] - 0.014, DIM, 1.0)]
     R.voices[L.k("dv_u")]["px"] = R.fit_px(L.k("dv_u"), SPLIT_LABELS[1], (ex_box[2] - ex_box[0]) * W, 46)
-    L.text("lab_ex", [f0, f1], SPLIT_LABELS[1], L.k("dv_u"), ex_box[0], ex_box[1] - 0.014, INK, 1.0)
-    L.hit("whoosh_soft_1", f0 + 2, "whoosh")
+    labs.append(L.text("lab_ex", [f0, f1], SPLIT_LABELS[1], L.k("dv_u"), ex_box[0], ex_box[1] - 0.014, INK, 1.0))
+    if push:                                   # the labels step back as the proof fills the frame
+        for it in labs:
+            if isinstance(it, dict):
+                it["op"] = push["fade"]
     if land_f is not None and f0 + 4 <= land_f < f1 - 2:
         L.hit("impact_1", land_f, "impact")
     rec = L.lay([f0, f1])
     rec.update(device="split", land_f=land_f, frames=[f0, f1], upload_box=up_box, export_box=ex_box, export_at=r4(export_at),
+               proof_push=push["f"] if push else None, proof_w=PROOF_W if push else r4(ew),
                upload_at=r4(src_at(tlb, export_at)), labels=list(SPLIT_LABELS), label_cap=r4(lab_cap))
     return rec
 
@@ -998,6 +1023,14 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
     comp = float(ui.get("composer_y") or 0.942)     # the typed line's height on the screen (fraction of its height)
     seat = lambda s, at: r4(at - (comp - 0.5) * ch * s)  # noqa: E731   the card's centre that keeps the composer at `at`
     box = [0.0, r4(-ch / 2 + 0.5), 1.0, r4(ch / 2 + 0.5)]
+    # Sent: the sentence's bubble (proof.sent_bubble, measured on the sent photograph) is framed under the watermark and
+    # settles up into place from below, so it never passes under the mark (26 Nov: the old fixed 0.30 rise carried the
+    # bubble from above the frame down through the mark at f178-180); the result then grows from a seat below it.
+    bub = ui.get("bubble")
+    sent_y = sent_b = None
+    if bub and 0.0 <= float(bub[0]) < float(bub[1]) <= 1.0:
+        sent_y = TOP_Y + 0.03 - (float(bub[0]) - 0.5) * ch * 1.15
+        sent_b = sent_y + (float(bub[1]) - 0.5) * ch * 1.15
     P.page("ground", [f0, f_p + PUSH_F], "#0A0A0C", "#0A0A0C")     # the base picture under the screen (the screen covers it)
     shots = list(ui["typing"])
     words = typed.split()
@@ -1016,6 +1049,10 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
             q = (f - f_t) / max(f_send - f_t, 1)
             s = 1.0 + 0.15 * (0.5 - 0.5 * math.cos(math.pi * q))     # to 1.15: the sentence at ~51 px, its lines still whole
             ys.append(seat(s, 0.74))
+        elif sent_y is not None:                    # sent: the bubble settles up into its place under the mark
+            q = MF.ease_io(8)[min(f - f_send, 7)]
+            s = 1.15
+            ys.append(r4(sent_y + 0.04 * (1.0 - q)))
         else:                                       # sent: the frame rises to the bubble
             q = MF.ease_io(8)[min(f - f_send, 7)]
             s = 1.15
@@ -1055,13 +1092,22 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
     # the result grows out of the Studio: the export, a card on its own voice, to full frame
     ex_key = P.video("dv_ex", export)
     sb = [0.35, 0.35, 0.65, 0.65]
-    xs, ys2, zs = MF.pull(sb, PUSH_F, out=False)
+    if sent_b is not None and BOTTOM_Y - (sent_b + 0.075) >= 0.2:
+        # below the bubble, the export's own shape: the sentence stays readable while its result grows
+        top = sent_b + 0.075
+        hh = BOTTOM_Y - top
+        ww = min(hh * H * float(export["w"]) / float(export["h"]) / W, 0.9)
+        sb = [r4(0.5 - ww / 2), r4(top), r4(0.5 + ww / 2), r4(top + ww * W * float(export["h"]) / float(export["w"]) / H)]
+    xs, ys2, zs = MF.pull(sb, PUSH_F - SEAT_F, out=False)
+    xs = [r4((sb[0] + sb[2]) / 2)] * SEAT_F + xs
+    ys2 = [r4((sb[1] + sb[3]) / 2)] * SEAT_F + ys2
+    zs = [r4(v) for v in MF.settle(SEAT_F, 0.9)] + zs
     P.card("result", [f_p, f_p + PUSH_F], ex_key, sb, t0=float(marks.get("export_t0") or 0.0), z=4, radius=0.01, x=xs, y=ys2, s=zs)
     if later:                                   # on its own dark pill: the screen behind it is busy with the product's own text
         R.voices[L.k("dv_l")]["px"] = 44
         lab = LATER_LABEL.format(later)
         cap_l, w_l = R.cap(L.k("dv_l")) / H, R.width(L.k("dv_l"), lab) / W
-        y_l = TOP_Y + 0.06
+        y_l = TOP_Y + 0.06 if sent_b is None else sb[1] - 0.02     # between the bubble and the growing result
         P.block("later.pill", [f_p - 6, f_p + PUSH_F - 2], [0.06, r4(y_l - cap_l - 0.016), r4(0.10 + w_l), r4(y_l + 0.016)], "#07080B", z=5,
                 op=0.88, radius=0.012)
         it = L.text("later", [f_p - 6, f_p + PUSH_F - 2], lab, L.k("dv_l"), 0.08, y_l, CYAN, 1.0, rise=True)
@@ -1070,9 +1116,10 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
     # the key run starts with the first word and ends as the last lands (its peak placed so its head is on f_t)
     L.hit("typing_2", f_t + int(round(float((P.lib.get("typing_2") or {}).get("peak_s") or 0.0) * FPS)), "typing")
     L.hit("click_1", f_send + 1, "click")
-    L.hit("whoosh_soft_1", f_p + PUSH_F // 2, "whoosh")
+    L.hit("whoosh_soft_1", f_p + SEAT_F + (PUSH_F - SEAT_F) // 2, "whoosh")     # the reveal: the result taking the frame
     rec = L.lay([f0, f_p + PUSH_F])
-    rec.update(device="studio", frames=[f0, f_p + PUSH_F], board=bool(board), typing=[f_t, f_send], send_f=f_send, push=[f_p, f_p + PUSH_F], shots=len(keys) + 1,
+    rec.update(device="studio", frames=[f0, f_p + PUSH_F], board=bool(board), result_seat=[r4(v) for v in sb],
+               bubble=[r4(sent_y), r4(sent_b)] if sent_b is not None else None, typing=[f_t, f_send], send_f=f_send, push=[f_p, f_p + PUSH_F], shots=len(keys) + 1,
                typed=typed, typed_px=round(32.0 * W / iw * 1.15, 1) if iw <= 800 else round(16.0 * 3 * W / iw * 1.15, 1),
                screen=dict(w=int(iw), h=int(ih), view=ui.get("view")), later=later)
     return rec
@@ -1136,7 +1183,7 @@ def site(l1, *, f0, f1, page, export, lib, src0=0.0, url="valmera.io", action_me
 
 
 def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="wf2", focus=(0.5, 0.42), lead_f=3, later=None,
-             site_s=SITE_S):
+             site_s=SITE_S, proof_at=None):
     """The whole programme of a film with no narrator (owner, 17 Nov: "an extremely powerful edit ... then the CTA";
     "show the website directly"): split, studio, export, site (see above). `hook` / `window`: export seconds of the
     split and of the export's own stretch; `ui`: the recording's Studio photographs; `page`: its photograph of the
@@ -1149,7 +1196,9 @@ def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="
     f_p, f_x = mk["push"]
     f_e = mk["export"][1]                       # the picture gives way to the website here; the voice runs on to e1
     l1["items"].append(dict(id="export", k="shot", f=[f_x, f_e], pic="dv_ex", src=[r4(e0 + (f_x - f_p) / FPS), r4(e0 + (f_e - f_p) / FPS)]))
-    rec_s = split(l1, f0=0, f1=mk["split"][1], upload=upload, export=export, edl_b=edl_b, export_at=float(hook[0]), lib=lib, focus=focus)
+    proof_f = int(round((float(proof_at) - float(hook[0])) * FPS)) if proof_at is not None else None
+    rec_s = split(l1, f0=0, f1=mk["split"][1], upload=upload, export=export, edl_b=edl_b, export_at=float(hook[0]), lib=lib, focus=focus,
+                  proof_f=proof_f)
     rec_u = studio_screen(l1, marks=dict(mk, export_t0=e0), ui=ui, typed=typed, export=export, lib=lib, later=later, upload=upload,
                           upload_t0=rec_s["upload_at"] + mk["split"][1] / FPS)
     rec_c = site(l1, f0=f_e, f1=mk["dur_f"], page=page, export=export, lib=lib, src0=e0 + (f_e - f_p) / FPS)

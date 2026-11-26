@@ -1606,11 +1606,35 @@ def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach
     return [0.0, round(end, 3)]
 
 
+PROOF_HOLD_S = 1.2              # the completed proof (every title of a stack on screen) holds the split's last 1.2 s
+
+
+def proof_landing(pics, body):
+    """Export second at which the most of the export's pictures and titles are on screen together (a checklist's last
+    item, a stack's last card), or None when no two of them ever overlap. Read from the edit list: `pics` (start,
+    seconds)."""
+    pics = [(float(a), float(d)) for a, d in pics if a < body - 0.2 and d > 0]
+    best, at = 1, None
+    for a, _ in sorted(pics):
+        n = sum(1 for b, e in pics if b <= a + 0.05 < b + e)
+        if n > best:
+            best, at = n, a
+    return round(at, 3) if at is not None else None
+
+
 def showcase_hook(ex, body, pics, span=None):
-    """[start, end] export seconds of the split hook: the export's most visible change, its longest picture or title
-    (read from its edit list, `pics` (start, seconds)), entered a breath before it lands, SPLIT_S long; without one, the
-    stretch of the same length at two fifths of the body. Snapped to the quietest point near each end (between words)."""
+    """[start, end] export seconds of the split hook. When the export builds a proof out of several titles or pictures
+    (a checklist of three questions, a stack), the split shows it completed: the window ends PROOF_HOLD_S after its
+    last item lands (26 Nov, the checklist film: the split entered on the first item and ended before the third, so the
+    opening never showed the checklist it sells). Otherwise the export's longest picture or title, entered a breath
+    before it lands, SPLIT_S long; without one, the stretch of the same length at two fifths of the body. Snapped to
+    the quietest point near each end (between words)."""
     span = float(span or D.SPLIT_S)
+    landed = proof_landing(pics, body)
+    if landed is not None and landed + PROOF_HOLD_S <= body - 0.2:
+        t0 = quiet_snap(ex["file"], max(landed + PROOF_HOLD_S - span, 0.0), span=0.2)
+        t0 = min(max(t0, 0.0), landed, max(body - span - 0.1, 0.0))
+        return [round(t0, 3), round(t0 + span, 3)]
     fit = [(a, d) for a, d in pics if a + min(d, span) <= body - 0.2]
     if fit:
         a, d = max(fit, key=lambda p: (p[1], p[0]))
@@ -1636,6 +1660,7 @@ def ui_shots(rec):
     with Image.open(os.path.join(d, typing[0])) as im:
         w, h = im.size
     out = dict(dir=d, w=w, h=h, typing=typing, sent=sent, view=u.get("view"), player=player_rect(os.path.join(d, typing[0]), rec["upload"]))
+    out["bubble"] = sent_bubble(os.path.join(d, sent), out["player"])
     board = next((f for f in ("board_01.png", "board_00.png") if f in files), None)
     if board:
         with Image.open(os.path.join(d, board)) as im:
@@ -1666,6 +1691,34 @@ def showcase_ui(rec):
         if i + 1 < len(asks):
             sequence.append(sent)
     return dict(ui, typing=sequence, sent=sent)
+
+
+def sent_bubble(png, player=None, composer_y=0.942):
+    """[top, bottom] of the sent sentence's bubble on the sent photograph, as fractions of its height: the first run of
+    rows below the Studio's player (and its controls) where a filled panel spans most of the width, measured against
+    the screen's own ground. None when no such panel is found. The Studio frames it under the watermark with it
+    (devices.studio_screen)."""
+    import numpy as np
+    from PIL import Image
+    try:
+        with Image.open(png) as im:
+            g = np.asarray(im.convert("L"), np.float32)
+    except (OSError, ValueError):
+        return None
+    h, w = g.shape
+    ground = float(np.median(g[:, : max(w // 40, 2)]))        # the screen's own ground, at its left margin
+    filled = (np.abs(g[:, w // 10: w - w // 10] - ground) > 4.0).mean(1)
+    lo = int(((player or [0.0, 0.0])[1] + 0.035) * h) if player else int(0.04 * h)
+    hi = int((composer_y - 0.06) * h)
+    run, start = int(0.015 * h), None
+    for y in range(max(lo, 0), max(hi, 0)):
+        if filled[y] >= 0.45:
+            start = y if start is None else start
+        elif start is not None:
+            if y - start >= run:
+                return [round(start / h, 4), round(y / h, 4)]
+            start = None
+    return None
 
 
 def player_rect(png, upload):
@@ -1838,7 +1891,8 @@ def showcase_supply(ctx, script, sup_dir, pk):
     pack = dict(sid=ctx.sid, words=words, narration=voice, ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[], footage=[],
                 voices=[], work=os.path.join(sup_dir, "finish"), fit=[],
                 product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
-                             upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None))
+                             upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None,
+                             proof_at=proof_landing(pics, body)))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
                 format="showcase", studio_ui=bool(ui), site=bool(ui and ui.get("site")))
     jsave(pk, dict(pack=pack, record=rec_))
@@ -3466,7 +3520,7 @@ def showcase_score(ctx, script, pack):
         raise RuntimeError("the showcase needs the recording's Studio photographs (studio.py, phone view): record it again")
     page = ui.get("site") or dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
     l1, beats = D.showcase(upload=upload, export=body, edl_b=edl, typed=typed_line(script["receipts"]), window=prod["window"], hook=prod["hook"],
-                           ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"))
+                           ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"), proof_at=prod.get("proof_at"))
     out = os.path.join(ctx.supply, "l1.json")
     jsave(out, l1)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")

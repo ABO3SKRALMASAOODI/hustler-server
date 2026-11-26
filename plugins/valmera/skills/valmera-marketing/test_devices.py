@@ -304,8 +304,8 @@ def test_the_showcase_is_split_then_the_real_studio_then_the_edit_then_the_websi
     # every frame has one base picture; every sound lands on something that moves
     for f in range(l1["dur_f"]):
         assert sum(1 for it in l1["items"] if it["k"] == "shot" and it["f"][0] <= f < it["f"][1]) == 1, f
-    events = {"split": 2, "studio": mk["studio"][0] + 1, "typing": mk["typing"][0] + round(LIB["typing_2"]["peak_s"] * FPS), "send": mk["send"] + 1,
-              "push": mk["push"][0] + D.PUSH_F // 2, "site": mk["site"][0] + 1, "url": mk["site"][0] + 5}
+    events = {"studio": mk["studio"][0] + 1, "typing": mk["typing"][0] + round(LIB["typing_2"]["peak_s"] * FPS), "send": mk["send"] + 1,
+              "push": mk["push"][0] + D.SEAT_F + (D.PUSH_F - D.SEAT_F) // 2, "site": mk["site"][0] + 1, "url": mk["site"][0] + 5}
     assert sorted(s["event_f"] for s in l1["sound"]) == sorted(events.values())
 
 
@@ -427,3 +427,61 @@ def test_checked_keyboard_and_rendered_sound_follow_the_final_picture_clock():
     report = P.W3.rendered_sounds(l1, 30)
     assert [(row["t"], row["kind"]) for row in report["placed"]] == [(30.467, "ct")]
     assert report["placed"][0]["rendered"][0]["file"] == "click_2.flac"
+
+
+# 26 Nov 2026, Marketing film 01 (checklist): the opening never showed the completed checklist, a whoosh played on f2 over
+# a split already whole on f0, the sent prompt passed under the watermark at f178-180 and the result inset covered it at
+# f197. The checklist's three titles below are the real export's landings (records/01.json, export_check.visible) and the
+# bubble's place on the sent photograph is measured from the delivered frames (y 0.29-0.40 after the old 0.30 rise).
+CHECKLIST = [(7.933, 19.0), (8.633, 18.3), (10.766, 16.2)]
+
+
+def test_the_split_opens_on_the_completed_proof_and_pushes_in_until_it_reads(monkeypatch):
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: round(t, 3))
+    hook = P.showcase_hook(dict(file="/x/e.mp4"), 27.0, CHECKLIST)
+    landed = P.proof_landing(CHECKLIST, 27.0)
+    assert landed == 10.766 and hook[0] <= landed and hook[1] - landed >= P.PROOF_HOLD_S - 1e-6    # all three questions in the split
+    assert P.showcase_hook(dict(file="/x/e.mp4"), 24.2, [(6.31, 2.2), (13.9, 2.6)]) == [13.6, 16.4]  # no stack: as before
+    l1, beats = D.showcase(upload=UPLOAD, export=EXPORT, edl_b=EDL_B, typed=TYPED, window=[0.0, 18.58], hook=hook, ui=UI, page=UI["site"],
+                           lib=LIB, lead_f=3, later="8 MIN", proof_at=landed)
+    split = beats["devices"][0]
+    ex = next(it for it in l1["items"] if it["id"] == "sp.ex")
+    assert split["proof_push"] and ex["s"][-1] * ex["w"] >= D.PROOF_W - 1e-3 and abs(ex["x"][-1] - 0.5) < 1e-3
+    proof_f = int(round((landed - hook[0]) * FPS))
+    assert all(v == 1.0 for v in ex["s"][8:proof_f])            # the comparison holds until the proof is complete
+    assert not [s for s in l1["sound"] if s["event_f"] < 6]             # nothing sounds over a split already whole on f0
+    for lab in (it for it in l1["items"] if it["id"] in ("sp.lab_up", "sp.lab_ex")):
+        assert lab["op"][-1] == 0.0
+
+
+def test_the_sent_prompt_stays_under_the_mark_and_clear_of_the_growing_result():
+    ui = dict(UI, bubble=[0.406, 0.485])
+    l1, beats = D.showcase(upload=UPLOAD, export=EXPORT, edl_b=EDL_B, typed=TYPED, window=[0.0, 18.58], hook=[13.65, 16.45], ui=ui,
+                           page=UI["site"], lib=LIB, lead_f=3, later="8 MIN")
+    mk = beats["marks"]
+    sent = next(it for it in l1["items"] if it["id"] == "st.ui_sent")
+    res = next(it for it in l1["items"] if it["id"] == "st.result")
+    ch = 1080 / 780 * 1688 / 1920
+    for f in range(sent["f"][0], sent["f"][1]):
+        y, s = sent["y"][f - sent["f"][0]], sent["s"][f - sent["f"][0]]
+        top, bot = y + (0.406 - 0.5) * ch * s, y + (0.485 - 0.5) * ch * s
+        assert top > D.MARK[3] + 0.02, (f, top)                         # never under the watermark
+        if res["f"][0] <= f < res["f"][0] + D.SEAT_F + 3:      # seated under the sentence, then the reveal takes the frame
+            i = f - res["f"][0]
+            sb = beats["devices"][1]["result_seat"]
+            h = (sb[3] - sb[1]) * res["s"][i]
+            assert res["y"][i] - h / 2 > bot, (f, res["y"][i] - h / 2, bot)   # the result grows below the sentence
+    pill = next(it for it in l1["items"] if it["id"] == "st.later.pill")
+    assert pill["y"] - pill["h"] / 2 > bot and pill["y"] + pill["h"] / 2 < beats["devices"][1]["result_seat"][1]
+
+
+def test_the_sent_bubble_is_measured_on_the_photograph(tmp_path):
+    from PIL import Image, ImageDraw
+    im = Image.new("RGB", (780, 1688), (10, 10, 12))
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 99, 779, 538], fill=(60, 60, 60))                  # the player
+    d.rounded_rectangle([90, 685, 760, 818], 18, fill=(46, 20, 22))     # the sentence's bubble
+    d.rectangle([0, 1540, 779, 1660], fill=(30, 30, 34))                # the composer
+    im.save(tmp_path / "sent.png")
+    b = P.sent_bubble(str(tmp_path / "sent.png"), [0.0588, 0.3187])
+    assert b and abs(b[0] - 685 / 1688) < 0.01 and abs(b[1] - 819 / 1688) < 0.01

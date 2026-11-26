@@ -345,6 +345,21 @@ def safe_name(value, length):
     return " ".join(name.split())[:length].strip(". ") or "Film"
 
 
+def story_lines(path):
+    """{setup, turn, payoff} (or the arc's own labels) from a film's STORY.md, the lines its delivery wrote from the
+    saved script and recording; {} when it has none."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    out = {}
+    for line in text.splitlines():
+        head, sep, body = line.partition("** — ")
+        if sep and head.startswith("- **"):
+            out[head[4:].strip().lower()] = body.strip()
+    return out
+
+
 def copy_master(src, dst):
     try:
         os.link(src, dst)
@@ -390,6 +405,9 @@ def handoff(wf, batch, folders, out, sidecar, topic):
             song = dict(rec["platform_music"], upload=item["clean"])
             item["platform_music"] = song
             songs.append(dict(song, n=n))
+        arc = story_lines(folder / "STORY.md")
+        if arc:                     # the opening, turn and payoff in the collection's own summary (26 Nov: none there)
+            item["arc"] = arc
         for extra in ("STORY.md", "film_song.mp4"):
             if (folder / extra).is_file():
                 copy_master(folder / extra, part / "records" / f"{n:02d}-{extra}")
@@ -403,7 +421,8 @@ def handoff(wf, batch, folders, out, sidecar, topic):
     if songs:
         shell.jsave(str(part / "platform_music.json"), dict(contract=1, how=songs[0].get("how"), shorts=songs))
     (part / "SOURCES.md").write_text("\n\n".join(sources))
-    (part / "README.md").write_text(f"# {name}\n\n" + "\n".join(x["file"] for x in listing) + "\n")
+    (part / "README.md").write_text(f"# {name}\n\n" + "\n".join(
+        x["file"] + "".join(f"\n  - **{k.capitalize()}** — {v}" for k, v in (x.get("arc") or {}).items()) for x in listing) + "\n")
     DL.deliver_collection(rows, part, final, batch.name)
     shutil.rmtree(part, ignore_errors=True)
     return dict(delivered=str(final), films=len(listing), topic=topic, cost=shell.jload(final / "shorts.json")["cost"])

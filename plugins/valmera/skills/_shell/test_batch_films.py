@@ -215,3 +215,28 @@ def test_resume_recovers_only_complete_sources_with_original_provenance(tmp_path
                         json.dumps(dict(streams=[dict(codec_type="video")], format=dict(duration="30.1"))).encode())
     rows = list(chain.resumed_sources(tmp_path, set()))
     assert [row["url"] for row in rows] == ["source-a"]
+
+
+def test_the_collection_carries_each_films_opening_turn_and_payoff(tmp_path, monkeypatch):
+    """26 Nov, Marketing 5 Shorts: every film had its STORY.md, but the collection's shorts.json and README held no arc."""
+    out = tmp_path / "Marketing Films"
+    monkeypatch.setenv("VALMERA_DELIVERY_ROOTS", str(out))
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "started").write_text(str(time.time()))
+    (run / "plan.json").write_text('{"ideas":[{}]}')
+    film = run / "0"
+    film.mkdir()
+    rec = dict(workflow="wf2", run_id="r0", checks=dict(ok=True), style=dict(id="pinboard"),
+               script=dict(title="Build the checklist as he speaks", idea_full=dict(pain="p")), no_repeat=dict(checked=1))
+    (film / "film.json").write_text(json.dumps(rec))
+    (film / "film.mp4").write_bytes(b"\x00\x01")
+    (film / "SOURCES.md").write_text("Credits")
+    (film / "STORY.md").write_text("- **Setup** — Three questions pass by.\n- **Turn** — Make a vertical short and build a checklist.\n"
+                                   "- **Payoff** — CAN IT SCALE?, WILL IT CLICK? and CAN IT BE PROTECTED? stay on screen.\n")
+    from pathlib import Path
+    final = Path(batch.handoff("wf2", run, [film], out, lambda folder: None, None)["delivered"])
+    arc = json.loads((final / "shorts.json").read_text())["shorts"][0]["arc"]
+    assert list(arc) == ["setup", "turn", "payoff"] and arc["payoff"].startswith("CAN IT SCALE?")
+    readme = (final / "README.md").read_text()
+    assert "**Turn** — Make a vertical short and build a checklist." in readme
