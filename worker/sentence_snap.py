@@ -85,6 +85,16 @@ def boundaries(words, sentences=None):
     return out
 
 
+def film_ends(bounds):
+    """The boundaries a FILM may open or close on: sentence ends and the
+    open spans before the first word and after the last. A clause gap is a
+    clean place to cut between two pieces, but a film that stops after
+    'Y, bueno,' ends on a dangling fragment (p6307: the condense's last cut
+    snapped to that comma and the story review called the ending
+    unresolved)."""
+    return [x for x in bounds if x[2] != "clause"]
+
+
 def is_clean(t, bounds):
     """Is a cut at t in silence or on a sentence / clause boundary?"""
     for a, b, _k in bounds:
@@ -156,14 +166,16 @@ def snap_keep(keep, words, duration=None, prev_keep=None, sentences=None):
                 and not any(ga < b and gb > a for ga, gb, _k in bounds):
             inner.update(((i, "end"), (i + 1, "start")))
     out, notes = [], []
+    ends = film_ends(bounds)
+    last = len(keep) - 1
     for i, (s, e) in enumerate(keep):
         ns, ne = s, e
         ks = ke = None
         if s > 0.05 and not _had(s, prev_edges) and (i, "start") not in inner:
-            ns, ks = snap_point(s, "start", bounds, dur)
+            ns, ks = snap_point(s, "start", ends if i == 0 else bounds, dur)
         if (dur is None or e < dur - 0.05) and not _had(e, prev_edges) \
                 and (i, "end") not in inner:
-            ne, ke = snap_point(e, "end", bounds, dur)
+            ne, ke = snap_point(e, "end", ends if i == last else bounds, dur)
         if ne - ns < MIN_PIECE_S:
             ns, ne, ks, ke = s, e, None, None
         out.append([ns, ne, ks, ke, s, e])

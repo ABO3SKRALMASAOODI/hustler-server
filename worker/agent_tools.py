@@ -4425,6 +4425,25 @@ def _blind_grid_note(ctx, keep):
         "look_at(times=[...]) and rewrite the keep list around what you saw.")
 
 
+def _spoken_repetition_note(spoken):
+    """The render's note on phrases the speaker says more than once that
+    survive the cut. p6307: "Elimina repeticiones" was asked, and the note
+    said these "should not be cut automatically" without naming a place, so
+    the condense kept them. It informs: what repeats, where, and how to take
+    a repeat out."""
+    where = "; ".join(
+        f"'{r['phrase']}' at source " + ", ".join(
+            f"{o['source_s']:g}s" for o in r["occurrences"]
+            if o.get("source_s") is not None)
+        for r in spoken[:4])
+    return (f" SPOKEN-REPETITION NOTE: {len(spoken)} phrase(s) the speaker "
+            f"says more than once survive at distinct source moments ({where}"
+            + (" ..." if len(spoken) > 4 else "") + "). Not an edit "
+            "duplicate: they stay unless the request asks to remove "
+            "repetitions; then cut_range the weaker saying (get_words for "
+            "its exact span).")
+
+
 def cut_range(ctx, start, end, snap_to_words=None):
     try:
         s, e = ctx.clamp(start), ctx.clamp(end)
@@ -25705,10 +25724,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                     repetition_repairs.append(
                         "edit duplication: same source phrase appears twice")
                 if spoken:
-                    note += (f" SPOKEN-REPETITION NOTE: {len(spoken)} phrase(s) "
-                             "repeat at distinct source moments; this is not "
-                             "an edit-duplication defect and should not be cut "
-                             "automatically.")
+                    note += _spoken_repetition_note(spoken)
             except Exception:
                 pass
             # An edit can be visually clean and sonically balanced while its

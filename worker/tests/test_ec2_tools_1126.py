@@ -266,3 +266,59 @@ def test_a_long_condense_of_the_upload_keeps_the_uploads_own_frame():
     # a short or vertical film of the upload still keeps the first cut's shape
     agent_loop._typed_start_from_upload(ctx(), dict(base, frame="first_cut"), {"id": 2})
     assert writes[-1]["frame"]["ratio"] == "9:16"
+
+
+# ── #1824 (covered on the base by 9fd6b1bd): a grade-only ask keeps the first cut ──
+
+def test_a_grade_only_ask_on_the_first_cut_runs_on_that_cut():
+    from types import SimpleNamespace as NS
+    import agent_loop
+    from score import asks
+    # the ledger model is told a look/sound-only ask is about the film they see
+    assert "p6303" in asks.LEDGER_SCHEMA["properties"]["start"]["description"]
+    assert "only change how that film looks or sounds" in asks.LEDGER_SYSTEM
+    first = {"keep": [[3.0, 8.0]], "frame": {"mode": "crop", "ratio": "9:16"},
+             "texts": [{"id": "t1"}], "music": [{"id": "m1"}]}
+    writes = []
+    c = NS(request_edit_origin={"made_by": "automatic_first_cut", "customer_requests_since": 0},
+           has_main_video=True, versions_written=[], duration=40.0,
+           latest_edl=lambda: {"version": 3, "json": first},
+           write_edl=lambda *a: writes.append(a) or "EDL v3 -> v4")
+    led = asks.settle({"lang": "en", "start": "current", "frame": "first_cut", "asks": []}, first)
+    assert agent_loop._typed_start_from_upload(c, led, {"id": 1}) == "" and writes == []
+
+
+# ── p6307: the condense ends on a whole sentence and its repeats are named ──
+
+END_WORDS = [_w("que", 1033.805, 1034.125), _w("5º", 1034.125, 1034.525),
+             _w("y", 1034.525, 1034.765), _w("3º.", 1034.765, 1035.165),
+             _w("Y,", 1035.165, 1035.325), _w("bueno,", 1035.325, 1035.645),
+             _w("ya", 1035.645, 1035.725), _w("para", 1035.725, 1036.205),
+             _w("terminar", 1036.205, 1036.845), _w("1º,", 1036.845, 1037.405),
+             _w("porque", 1037.405, 1037.565), _w("parte", 1039.885, 1040.045),
+             _w("de", 1040.045, 1040.205)]
+
+
+def test_the_films_last_piece_ends_on_a_sentence_not_a_comma():
+    """The last cut of the p6307 condense (1035.5-1040.5) left the film
+    ending '...5º y 3º. Y, bueno,': the comma counted as clean."""
+    prev = [[990.0, 1040.26]]
+    keep, notes = sentence_snap.snap_keep([[990.0, 1035.645]], END_WORDS,
+                                          1042.25, prev_keep=prev)
+    assert len(keep) == 1 and abs(keep[0][1] - 1035.165) <= 0.006
+    assert notes[0][3] == "sentence"
+    # between two pieces a clause gap stays a clean cut point
+    keep, notes = sentence_snap.snap_keep(
+        [[990.0, 1035.645], [1036.2, 1040.26]], END_WORDS, 1042.25,
+        prev_keep=prev)
+    assert keep[0][1] == 1035.645
+
+
+def test_the_spoken_repetition_note_names_where_the_repeats_are():
+    note = agent_tools._spoken_repetition_note([
+        {"phrase": "de de", "kind": "spoken_repetition",
+         "occurrences": [{"program_s": 40.1, "source_s": 69.72},
+                         {"program_s": 300.0, "source_s": 539.63}]}])
+    assert "'de de' at source 69.72s, 539.63s" in note
+    assert "unless the request asks to remove repetitions" in note
+    assert "should not be cut" not in note
