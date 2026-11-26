@@ -90,6 +90,8 @@ MAX_REDIRECTS = 4
 # from the read timeout because a slow-but-alive server is a different thing
 # from an unreachable address and should not get the same budget.
 CONNECT_TIMEOUT_S = float(os.getenv("NET_CONNECT_TIMEOUT_S", "5"))
+# A body read that fails this close to the deadline failed on it.
+_DEADLINE_SLACK_S = 0.25
 
 
 class FetchError(Exception):
@@ -102,6 +104,16 @@ class PolicyError(FetchError):
     failure as "try another route" while a policy refusal stays fatal: they
     are both FetchError to anyone who does not care, and only one of them is
     safe to fall back from."""
+
+
+class TooLarge(FetchError):
+    """The body is over the caller's max_bytes (declared or counted)."""
+
+
+class TimeLimit(FetchError):
+    """The call's one deadline passed (headers or body). A caller with a
+    lighter alternative (a smaller rendition) moves on to it; repeating the
+    same transfer would spend the same time again."""
 
 
 class _DeadlineAdapter(requests.adapters.HTTPAdapter):
@@ -188,7 +200,7 @@ class _DeadlineAdapter(requests.adapters.HTTPAdapter):
     def send(self, request, **kw):
         left = self._deadline - time.monotonic()
         if left <= 0:
-            raise FetchError("download exceeded its time limit")
+            raise TimeLimit("download exceeded its time limit")
         kw["timeout"] = urllib3.Timeout(
             connect=min(CONNECT_TIMEOUT_S, left),
             read=min(self._read_timeout, left))
@@ -365,7 +377,7 @@ def _open(url, allowed_hosts, timeout_s, user_agent, headers=None,
     for _ in range(MAX_REDIRECTS + 1):
         if time.monotonic() >= deadline:
             _shut(session)
-            raise FetchError(f"download exceeded {timeout_s:.0f}s")
+            raise TimeLimit(f"download exceeded {timeout_s:.0f}s")
         host = check_url(current, allowed_hosts)
         hdrs = {"User-Agent": user_agent}
         hdrs.update(headers or {})
@@ -378,10 +390,13 @@ def _open(url, allowed_hosts, timeout_s, user_agent, headers=None,
         except requests.RequestException as e:
             # A socket the watchdog tore down surfaces here as a generic
             # connection error; report it as what it actually was.
-            aborted = _aborted(session)
+            # A read timeout is the deadline too: _DeadlineAdapter sets the
+            # read timeout to the time left, never more.
+            aborted = _aborted(session) or isinstance(
+                e, requests.exceptions.ReadTimeout)
             _shut(session)
             if aborted:
-                raise FetchError(f"download exceeded {timeout_s:.0f}s")
+                raise TimeLimit(f"download exceeded {timeout_s:.0f}s")
             raise FetchError(f"could not reach {host} ({type(e).__name__})")
         try:
             _assert_peer_public(resp, host)
@@ -488,9 +503,10 @@ def download(url, out_path, *, allowed_hosts=None, max_bytes, timeout_s,
     """GET url to out_path with address, size and wall-clock limits."""
     seen = 0
     t0 = time.monotonic()
+    deadline = t0 + timeout_s
     # ONE deadline for the whole call — redirects, headers and body together.
     resp, final_url = _open(url, allowed_hosts, timeout_s, user_agent,
-                            deadline=t0 + timeout_s)
+                            deadline=deadline)
 
     if resp.status_code != 200:
         code = resp.status_code
@@ -505,28 +521,45 @@ def download(url, out_path, *, allowed_hosts=None, max_bytes, timeout_s,
         declared = 0
     if declared and declared > max_bytes:
         _close(resp)
-        raise FetchError(f"file is {declared >> 20} MB, over the "
-                         f"{max_bytes >> 20} MB limit")
+        raise TooLarge(f"file is {declared >> 20} MB, over the "
+                       f"{max_bytes >> 20} MB limit")
     try:
         with open(out_path, "wb") as f:
             for chunk in resp.iter_content(1 << 16):
                 seen += len(chunk)
                 if seen > max_bytes:
-                    raise FetchError(
+                    raise TooLarge(
                         f"download exceeded {max_bytes >> 20} MB")
                 if time.monotonic() - t0 > timeout_s:
-                    raise FetchError(
+                    raise TimeLimit(
                         f"download exceeded {timeout_s:.0f}s")
                 f.write(chunk)
     except FetchError:
         # Leave no half-written file behind for a caller to mistake for a
         # successful download.
-        if os.path.exists(out_path):
-            os.remove(out_path)
+        _discard(out_path)
         raise
+    except requests.RequestException as e:
+        # The body broke off: the deadline watchdog tore the socket down, a
+        # read timed out (its timeout is the time left), or the peer reset
+        # or cut the transfer short. Same contract as every other failure
+        # here: a FetchError and no half-written file.
+        _discard(out_path)
+        if _aborted(getattr(resp, "_valmera_session", None)) \
+                or time.monotonic() >= deadline - _DEADLINE_SLACK_S:
+            raise TimeLimit(f"download exceeded {timeout_s:.0f}s") from e
+        raise FetchError(f"transfer from {urlparse(final_url).hostname} "
+                         f"was interrupted ({type(e).__name__})") from e
     finally:
         _close(resp)
     return seen, final_url
+
+
+def _discard(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
 
 
 def get_json(url, *, allowed_hosts=None, timeout_s, params=None,

@@ -732,12 +732,18 @@ def _pool_alerts(pool, pool_cap):
 
 
 def provider_refused(kind, exc):
-    """The backend mails the first refusal through its durable owner outbox."""
+    """Anthropic refused the key in force for billing or auth AFTER the live
+    key was re-read (a rotation the retry absorbed never reaches here). One
+    mail per incident through the durable owner outbox: the dedupe key names
+    the refused key's fingerprint, so a false alarm or an earlier incident the
+    same day never hides a new key's failure."""
+    import claude_lane
     now = datetime.now(timezone.utc)
+    key = claude_lane._key_fingerprint(config.ANTHROPIC_API_KEY)[:16]
     subject = f"Anthropic refused the key at {now:%Y-%m-%d %H:%M UTC}"
     action = ("Rotate it in the console and in provider_api_keys." if kind == "auth"
               else "Check credit and billing in the Anthropic console.")
-    _alert(f"anthropic_{kind}_{now:%Y%m%d}", f"provider_{kind}", subject,
+    _alert(f"anthropic_{kind}_{key}_{now:%Y%m%d}", f"provider_{kind}", subject,
            f"<p>{subject}. {action}</p>")
 
 
@@ -816,9 +822,6 @@ def resolve(worker_db, user_id, subscribed, project_id=None,
     import claude_lane
     if not claude_lane.configured():
         return Decision(Decision.UNAVAILABLE, reason="no_anthropic_key")
-    if not claude_lane.available():
-        return Decision(Decision.UNAVAILABLE,
-                        reason="provider_closed: " + claude_lane.closed_reason())
     credit = credit_status(worker_db)
     if not credit.get("on"):
         import claude_credit

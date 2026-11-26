@@ -43,8 +43,6 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import requests
-
 import config
 import net_fetch
 
@@ -518,31 +516,47 @@ def resolve(item, want_w, want_h):
     return f["link"], int(MAX_VIDEO_BYTES * scale)
 
 
-def _too_big(exc):
-    text = str(exc)
-    return "MB limit" in text or ("download exceeded " in text and text.endswith(" MB"))
+# A smaller rendition stands in only while it stays sharp in the frame: its
+# short side at least this share of the frame's short side, and never a
+# stricter floor than the 720 lines every frame accepted before. A 640x360
+# file cover-cropped into 1080x1920 is a 5x upscale; the agent's next
+# candidate is a better shot than that.
+FALLBACK_SHORT_SIDE_SHARE = 0.6
+FALLBACK_SHORT_SIDE_FLOOR = 720
 
 
-def _smaller_renditions(files, picked_w, picked_h):
-    """Usable renditions smaller than the pick, largest first."""
+def _gives_way(exc):
+    """Over the byte cap or out of time: the same transfer would fail the
+    same way, a smaller rendition of the same shot may not."""
+    return isinstance(exc, (net_fetch.TooLarge, net_fetch.TimeLimit))
+
+
+def _smaller_renditions(files, picked_w, picked_h, want_w=0, want_h=0):
+    """Usable renditions smaller than the pick, largest first, down to the
+    frame's sharpness floor."""
+    frame = min(want_w or 0, want_h or 0)
+    floor = min(FALLBACK_SHORT_SIDE_FLOOR, FALLBACK_SHORT_SIDE_SHARE * frame) \
+        if frame > 0 else FALLBACK_SHORT_SIDE_FLOOR
     usable = [f for f in files
               if f.get("link") and (f.get("width") or 0) > 0
               and str(f.get("file_type", "video/mp4")).startswith("video")
-              and (f.get("height") or 0) > 0
+              and min(f.get("width") or 0, f.get("height") or 0) >= floor
               and (f.get("width") or 0) * (f.get("height") or 0)
               < (picked_w or 0) * (picked_h or 0)]
     return sorted(usable, key=lambda f: -(f["width"] * f["height"]))
 
 
 def _fetch_rendition(url, path, cap):
+    """One rendition at the frame's byte budget. A transfer that broke off (a
+    reset, an unreachable edge, a 5xx) is fetched once more: only this GET is
+    repeated, before assets or edit versions are written."""
     try:
         return net_fetch.download(url, path, max_bytes=cap, timeout_s=DOWNLOAD_TIMEOUT_S)
     except net_fetch.PolicyError:
         raise
-    except (net_fetch.FetchError, requests.RequestException) as exc:
-        if _too_big(exc):
+    except net_fetch.FetchError as exc:
+        if _gives_way(exc):
             raise
-        # Only this GET is repeated, before assets or edit versions are written.
         return net_fetch.download(url, path, max_bytes=cap, timeout_s=DOWNLOAD_TIMEOUT_S)
 
 
@@ -562,33 +576,32 @@ def download(item, out_path, want_w, want_h):
         from export_context import rendition_size
         want_w, want_h = rendition_size() or (want_w, want_h)
     url, cap = resolve(item, want_w, want_h)
-    smaller = _smaller_renditions(item.get("_files") or [],
-                                  item.get("picked_width"), item.get("picked_height"))
-    # Prefer a smaller transfer of this same shot when the CDN has alternatives.
-    first_cap = min(cap, MAX_VIDEO_BYTES) if smaller else cap
     try:
-        _fetch_rendition(url, out_path, first_cap)
+        # The pick first, at the budget its delivery size earns (4K: 4x).
+        _fetch_rendition(url, out_path, cap)
     except net_fetch.FetchError as exc:
         # The smallest rendition that COVERS a 9:16 frame is 4K for a
         # landscape clip, often over the byte cap: the owner's Zuckerberg run
-        # (14 Oct, project 3639) lost two picks at 234 and 157 MB. A smaller
-        # rendition (a slight upscale under a cover crop) beats no shot.
-        if item.get("kind") != KIND_VIDEO or not _too_big(exc):
+        # (14 Oct, project 3639) lost two picks at 234 and 157 MB. A slow
+        # CDN runs a big file out of time the same way. A smaller rendition
+        # (a slight upscale under a cover crop) beats no shot.
+        if item.get("kind") != KIND_VIDEO or not _gives_way(exc):
             raise
-        for f in smaller:
+        for f in _smaller_renditions(item.get("_files") or [],
+                                     item.get("picked_width"),
+                                     item.get("picked_height"),
+                                     want_w, want_h):
             try:
-                _fetch_rendition(f["link"], out_path, first_cap)
+                _fetch_rendition(f["link"], out_path, cap)
             except net_fetch.FetchError as again:
-                if _too_big(again):
+                if _gives_way(again):
                     continue
                 raise
             item["picked_width"], item["picked_height"] = f.get("width"), f.get("height")
             url = f["link"]
             break
         else:
-            if first_cap == cap:
-                raise
-            _fetch_rendition(url, out_path, cap)
+            raise
     if item.get("kind") == KIND_PHOTO:
         # Wave 4 (4C, JRE defect 29): a "photo" link can serve a web page
         # (a login wall, a landing page); judge the bytes, never the name

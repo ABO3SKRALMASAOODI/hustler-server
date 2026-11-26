@@ -30,8 +30,9 @@ Translation rules (all deterministic, so the prompt cache holds):
 
 Errors: 429s propagate unchanged so the loop's budget-aware rate-limit waits
 run. Overloaded/5xx refusals (nothing was billed) are retried here, twice.
-Billing and auth refusals alert the owner, retry with the live credential,
-and carry the same call to a configured recovery provider.
+Billing and auth refusals retry once on the live credential; a second
+refusal alerts the owner and carries the same call to a configured recovery
+provider. Nothing latches: the next call asks Anthropic again.
 
 The key comes only from ``config.ANTHROPIC_API_KEY`` (live: the sealed
 provider row outranks the environment). It is never logged, never returned
@@ -71,8 +72,6 @@ _SYSTEM_NOTE = "[Valmera system note — operator instruction, not user text]\n"
 _lock = threading.Lock()
 _client = None
 _client_key = None
-_closed_until = 0.0
-_closed_reason = ""
 
 
 def is_claude_model(model):
@@ -85,25 +84,17 @@ def configured():
 
 
 def available():
-    """Configured and not latched closed by a billing/auth refusal."""
-    return configured() and time.monotonic() >= _closed_until
-
-
-def closed_reason():
-    return _closed_reason if time.monotonic() < _closed_until else ""
-
-
-def _close(reason, seconds=None):
-    global _closed_until, _closed_reason
-    _closed_until = time.monotonic() + float(
-        config.CLAUDE_TRIAL_OUTAGE_LATCH_S if seconds is None else seconds)
-    _closed_reason = str(reason)[:300]
+    """Configured. A billing or auth refusal never closes the lane: the call
+    that met it re-reads the key and then finishes on a recovery provider
+    (create, score.call.stream), so the next call asks Anthropic again (#1796:
+    a 10-minute latch set by one refused lookup blocked every trial, paid lane
+    and recovery in the process)."""
+    return configured()
 
 
 def reopen():
-    """Tests/operators: clear the outage latch."""
-    global _closed_until, _closed_reason
-    _closed_until, _closed_reason = 0.0, ""
+    """Nothing to reopen since the latch was removed; kept for callers that
+    still clear it after a successful credit probe."""
 
 
 PROBE_MODEL = os.getenv("CLAUDE_CREDIT_PROBE_MODEL", "claude-haiku-5-5")
@@ -173,12 +164,15 @@ def _provider_fallback(messages, tools, max_tokens, tool_choice, timeout):
         options["tools"] = tools
         if tool_choice is not None:
             options["tool_choice"] = tool_choice
-    if timeout:
-        options["timeout"] = timeout
+    # One request per provider, bounded like the Claude call it replaces: the
+    # recovery clients carry the SDK's 5 retries, which hid a slow or 429ing
+    # provider for minutes before the next one was asked.
+    options["timeout"] = float(timeout or config.CLAUDE_TRIAL_TIMEOUT_S)
     last_error = None
     for model, client in llm.provider_recovery_clients():
         try:
-            result = llm.create_with_dialect(client, model, edit_rung._strip(messages),
+            result = llm.create_with_dialect(llm.without_sdk_retries(client), model,
+                                             edit_rung._strip(messages),
                                              max_tokens=max_tokens, **options)
         except Exception as exc:
             if llm.is_budget_stop(exc):
@@ -191,6 +185,8 @@ def _provider_fallback(messages, tools, max_tokens, tool_choice, timeout):
                 claude_trial.meter(model, edit_rung.allowance_usd(result.usage),
                                    kind="provider_fallback")
         return result
+    if last_error is not None and llm.is_rate_limit_error(last_error):
+        raise last_error        # the loop's budget-aware wait, then this call again
     raise ClaudeLaneUnavailable("No configured provider accepted the editing call "
                                 "(credit balance or key)") from last_error
 
@@ -915,10 +911,6 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
         raise ClaudeLaneUnavailable(
             "Claude lane is not configured (no ANTHROPIC_API_KEY): no credit "
             "balance can be reached")
-    if not available():
-        raise ClaudeLaneUnavailable(
-            "Claude lane is closed after a provider refusal (credit balance "
-            "or key): " + closed_reason())
     import claude_trial            # metering + hard per-account ceiling
     claude_trial.guard_call()
     plan = tool_plan if plan_usable(tool_plan, model) else None
@@ -972,14 +964,16 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
         except Exception as exc:          # noqa: BLE001 - classified below
             if is_billing_error(exc) or is_auth_error(exc):
                 if not rekeyed:
-                    kind = "billing" if is_billing_error(exc) else "auth"
-                    claude_trial.provider_refused(kind, exc)
+                    # A key rotated a moment ago (P0 #60): the same request on
+                    # the key now in force, and no alert when it answers.
                     _refresh_live_key()
                     rekeyed = True
                     client = _sdk()
                     if timeout:
                         client = client.with_options(timeout=float(timeout))
                     continue
+                claude_trial.provider_refused(
+                    "billing" if is_billing_error(exc) else "auth", exc)
                 return _provider_fallback(messages, tools, max_tokens, tool_choice, timeout)
             if plan and _plan_refused(exc):
                 # Never a customer's problem: the same request, the old way.

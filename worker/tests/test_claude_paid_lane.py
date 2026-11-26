@@ -91,10 +91,6 @@ def test_no_claude_lane_without_credit_key_or_plan(lane_up, monkeypatch):
     assert agent_loop._claude_paid_lane(_Db(ON), JOB, True, "pro_2026",
                                         {}) is None
     lane_up["on"] = True
-    claude_lane._close("billing: credit balance is too low")
-    assert agent_loop._claude_paid_lane(_Db(ON), JOB, True, "pro_2026",
-                                        {}) is None
-    claude_lane.reopen()
     monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "")
     assert agent_loop._claude_paid_lane(_Db(ON), JOB, True, "pro_2026",
                                         {}) is None

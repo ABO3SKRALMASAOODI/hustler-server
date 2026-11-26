@@ -359,20 +359,20 @@ def test_a_stock_clip_over_the_cap_uses_the_next_smaller_rendition(monkeypatch, 
     def download(url, out_path, max_bytes, timeout_s):
         tried.append(url)
         if url.endswith("3840") or url.endswith("2560"):
-            raise net_fetch.FetchError("file is 234 MB, over the 90 MB limit")
+            raise net_fetch.TooLarge("file is 234 MB, over the 90 MB limit")
     monkeypatch.setattr(net_fetch, "download", download)
     stock.download(item, str(tmp_path / "s.mp4"), 1080, 1920)
     assert tried == ["https://v/3840", "https://v/2560", "https://v/1920"]
     assert (item["picked_width"], item["picked_height"]) == (1920, 1080)
     assert item["source_url"] == "https://v/1920"
-    # When every higher rendition is too large, the smallest available file is tried.
+    # every sharp rendition too large: the over-cap error reaches the agent, which takes its next
+    # candidate; a 640x360 file is never stretched 5x into a 1080x1920 frame
     tried.clear()
     monkeypatch.setattr(net_fetch, "download", lambda url, *a, **k: (
-        tried.append(url), (_ for _ in ()).throw(net_fetch.FetchError("file is 99 MB, over the 90 MB limit")))[1])
-    with pytest.raises(net_fetch.FetchError):
+        tried.append(url), (_ for _ in ()).throw(net_fetch.TooLarge("file is 99 MB, over the 90 MB limit")))[1])
+    with pytest.raises(net_fetch.TooLarge):
         stock.download({"kind": stock.KIND_VIDEO, "_files": files}, str(tmp_path / "t.mp4"), 1080, 1920)
-    assert tried[:5] == ["https://v/3840", "https://v/2560", "https://v/1920",
-                         "https://v/1280", "https://v/640"]
+    assert tried == ["https://v/3840", "https://v/2560", "https://v/1920", "https://v/1280"]
 
 
 # ── the render review quotes the corrected words ────────────────────────────
