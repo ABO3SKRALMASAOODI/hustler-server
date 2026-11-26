@@ -403,29 +403,26 @@ def test_the_shim_is_a_drop_in_client_and_meters_each_call(lane):
     assert len(lane.paid) == 1
 
 
-def test_billing_refusal_closes_the_lane_and_alerts(lane):
-    sdk = _FakeSdk([_StatusError(400, "Your credit balance is too low to "
-                                      "access the Anthropic API.")])
+@pytest.mark.parametrize(("status", "kind"), [(401, "auth"), (402, "billing")])
+def test_refused_request_refreshes_then_finishes_on_frontier(lane, monkeypatch, status, kind):
+    refused = _StatusError(status, "provider refusal")
+    sdk = _FakeSdk([refused, refused])
     lane.use(sdk)
-    with pytest.raises(claude_lane.ClaudeLaneUnavailable) as err:
-        claude_lane.create("claude-haiku-5-5",
-                           [{"role": "user", "content": "x"}])
-    assert lane.refused == ["billing"]
-    assert not claude_lane.available()
-    assert llm.is_quota_error(err.value)        # the loop treats it as a wallet
-    # closed: the next call does not even reach Anthropic
-    with pytest.raises(claude_lane.ClaudeLaneUnavailable):
-        claude_lane.create("claude-haiku-5-5",
-                           [{"role": "user", "content": "x"}])
-    assert len(sdk.bodies) == 1
-
-
-def test_auth_refusal_also_fails_closed(lane):
-    lane.use(_FakeSdk([_StatusError(401, "invalid x-api-key")]))
-    with pytest.raises(claude_lane.ClaudeLaneUnavailable):
-        claude_lane.create("claude-haiku-5-5",
-                           [{"role": "user", "content": "x"}])
-    assert lane.refused == ["auth"]
+    monkeypatch.setattr(llm, "frontier_available", lambda: True)
+    client = object()
+    monkeypatch.setattr(llm, "frontier_client", lambda: client)
+    requests = []
+    def complete(client_obj, model, messages, **kwargs):
+        requests.append((client_obj, model, messages, kwargs["tools"]))
+        return SimpleNamespace(usage=SimpleNamespace(), choices=["finished"])
+    monkeypatch.setattr(llm, "create_with_dialect", complete)
+    messages = [{"role": "user", "content": "cut the pauses"}]
+    result = claude_lane.create("claude-haiku-5-5", messages, tools=TOOLS)
+    assert result.choices == ["finished"]
+    assert requests == [(client, config.FRONTIER_AGENT_MODEL, messages, TOOLS)]
+    assert len(sdk.bodies) == 2 and lane.refused == [kind]
+    assert claude_lane.available()
+    assert result.usage.answered_model == config.FRONTIER_AGENT_MODEL
 
 
 def test_overloaded_is_retried_but_rate_limits_reach_the_loop(lane):
