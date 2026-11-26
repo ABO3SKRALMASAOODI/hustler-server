@@ -9540,6 +9540,42 @@ def _job_cached_source(storage_key, workdir):
     return _lease_cached_source(local, workdir, storage_key)
 
 
+def _pending_original_aliases(edl_json, original, src_asset, src_local,
+                              exists=None):
+    """{original key: local proxy} while a preview renders from the proxy
+    because the original's bytes are not in storage yet.
+
+    Tickets #1851-#1853/#1857 (p6329, 26 Nov): a slow link sent the upload
+    proxy-first, and the Director's First cut drew 59 cutaway windows whose
+    asset_key is the project's own original. The main source had already
+    switched to the proxy, but every window fetched the original's key, which
+    was still uploading: HeadObject 404 on the approval render, the proof and
+    the user's preview. The proxy is the same footage on the same clock, so a
+    window names the same pictures on it; once the original lands this is
+    empty and the windows read it as before.
+    """
+    if not original or not src_asset or not src_local:
+        return {}
+    key = original.get("storage_key")
+    if not key or src_asset.get("storage_key") == key:
+        return {}
+    if not os.path.exists(src_local):      # a streamed proxy: nothing local
+        return {}
+    try:
+        named = key in json.dumps(edl_json or {})
+    except (TypeError, ValueError):
+        named = False
+    if not named:
+        return {}
+    pending = (original.get("meta") or {}).get("upload_state") == "pending"
+    if not pending:
+        try:
+            pending = not (exists or storage.exists)(key)
+        except Exception:
+            pending = False
+    return {key: src_local} if pending else {}
+
+
 def _stream_cloudflare_source(asset):
     """Use sparse R2 ranged reads for long sources on Cloudflare.
 
@@ -10195,7 +10231,7 @@ def _concat_check_pieces_exact(pieces, out_path, workdir, durations):
 def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
                              patch_locals, out_path, raw_ranges,
                              verify_times, progress_cb=None, raw_pages=None, proof_segments=None,
-                             budget_s=None):
+                             budget_s=None, asset_locals=None):
     """Render only affected output windows into one short proof reel.
 
     budget_s: a smaller output budget than 25 s a page, for a proof that only
@@ -10292,7 +10328,7 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
             progress_cb=progress_cb, want_wm=False,
             patch_locals=patch_locals, cap_ass_override=(cap_path or ""),
             cap_burn_offset=(a if cap_path else None), suppress_outro=True,
-            render_fragment=True,
+            render_fragment=True, asset_locals=asset_locals,
             program_edges=(a <= 0.001, b >= duration - 0.001))
         expected = b - a
         if abs(pdur - expected) > max(0.2, expected * 0.03):
@@ -11025,6 +11061,12 @@ def _run_render_job(worker_db, job):
             for key in worker_db.run(dbx.project_asset_keys_by_sha,
                                      project_id, src_sha):
                 asset_locals[key] = src_local
+        elif variant == "preview" and not is_canvas:
+            asset_locals.update(_pending_original_aliases(
+                edl_row["json"], original, src_asset, src_local))
+            if asset_locals:
+                print(f"[render {job_id}] the original is still uploading: "
+                      "windows that name it read the proxy", flush=True)
         if proof_only:
             out_dur, requested_ranges, changed_ranges, mapped_verify_times = \
                 _render_changed_sections(
@@ -11035,7 +11077,8 @@ def _run_render_job(worker_db, job):
                     progress_cb=_prog,
                     raw_pages=job["payload"].get("check_pages") or [],
                     proof_segments=proof_segments,
-                    budget_s=job["payload"].get("proof_budget_s"))
+                    budget_s=job["payload"].get("proof_budget_s"),
+                    asset_locals=asset_locals)
         # Lane D (12 Nov): a Director film whose scene plan was kept may be
         # drawn by the engine (engine_branch). Read once, here: an engine
         # film is never stitched, and today's renderer stays its fallback.
