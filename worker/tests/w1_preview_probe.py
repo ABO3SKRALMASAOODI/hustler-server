@@ -53,6 +53,10 @@ def _without_inert(dump):
     tr = (d.get("effects") or {}).get("transition")
     if tr:
         assert tr.pop("per_junction") is None
+    # 26 Nov 2026 (#1792): InsertItem.placeholder marks add_voiceover's
+    # stand-in card under narration. Inert (None) on every stored EDL.
+    for i in d.get("inserts") or []:
+        assert i.pop("placeholder") is None
     # Lane K round six (14 Nov 2026): CaptionStyle.anchor_x, the line's own
     # edge for a dictated item the Director's lowering builds word by word.
     # Inert on every stored EDL: None, and never offered to the agent.

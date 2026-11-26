@@ -1110,6 +1110,177 @@ def test_long_narration_establishes_renderable_program(monkeypatch, has_picture)
     reply = agent_tools.add_voiceover(ctx, "audio.mp3", duration_s=1539.3)
     assert reply.startswith("EDL v"), reply
     saved = validate_edl(ctx.latest_edl()["json"], ctx.duration).model_dump()
-    assert program_duration(saved) == 1539.3
+    # The whole main video is the program when it exists; else the card is.
+    assert program_duration(saved) == (1539.33 if has_picture else 1539.3)
     assert saved["voiceover"][0]["duration_s"] == 1539.3
     assert bool(saved["keep"]) == has_picture
+
+
+NARRATION = [{"id": 1, "storage_key": "narration.mp3", "kind": "music",
+              "duration_s": 1539.334, "meta": {"filename": "narration.mp3"}}]
+
+
+def _index_arrives(edl, duration):
+    """indexer._finish_setup on a project whose latest EDL is ``edl``, with
+    a main video of ``duration``: the version it writes."""
+    import indexer
+    written = []
+
+    def run(fn, *args):
+        name = getattr(fn, "__name__", "")
+        if name == "latest_edl":
+            return {"version": 2, "json": edl}
+        if name == "insert_edl":
+            written.append(args[1])
+            return 3
+        return None
+    indexer._finish_setup(SimpleNamespace(run=run), 1, None,
+                          {"duration": duration}, {})
+    assert written, "the canvas was not migrated"
+    return written[0]
+
+
+@pytest.mark.parametrize("original_s", [1539.33, 1200.0])
+def test_1792_narration_on_empty_canvas_survives_the_original_arriving(
+        monkeypatch, original_s):
+    """p6213: the narration was laid while the original was still uploading.
+    When it was indexed, the black card stayed in front of the footage and the
+    narration was dropped (3078.63 s program, voiceover [])."""
+    from schemas import canvas_edl, validate_edl, program_duration
+    ctx = ctx_with(canvas_edl(), NARRATION)
+    ctx.has_main_video, ctx.duration = False, 0.0
+    monkeypatch.setattr(agent_tools, "_solid_card_asset", lambda *a: ("black.png", None))
+    reply = agent_tools.add_voiceover(ctx, "narration.mp3", duration_s=1539.3)
+    assert "black card ins1 0-1539.3s" in reply and "takes the card's place" in reply
+    migrated = _index_arrives(ctx.latest_edl()["json"], original_s)
+    saved = validate_edl(migrated, original_s).model_dump()
+    assert saved["keep"] == [[0.0, original_s]]
+    assert [v["asset_key"] for v in saved["voiceover"]] == ["narration.mp3"]
+    assert saved["voiceover"][0]["duration_s"] == 1539.3
+    if original_s >= 1539.3:
+        # the footage takes the card's place: no black in front of it
+        assert saved["inserts"] == []
+        assert program_duration(saved) == original_s
+    else:
+        # footage shorter than the narration: the card covers the rest only
+        assert [(i["at_output_s"], i["duration_s"]) for i in saved["inserts"]] \
+            == [(original_s, 339.3)]
+        assert program_duration(saved) == 1539.3
+
+
+def test_canvas_program_keeps_every_layer_when_the_main_video_arrives():
+    from schemas import canvas_edl, validate_edl, program_duration
+    edl = canvas_edl()
+    edl["inserts"] = [
+        {"id": "ins1", "kind": "image", "asset_key": "a.png", "at_output_s": 0.0, "duration_s": 3.0},
+        {"id": "ins2", "kind": "image", "asset_key": "b.png", "at_output_s": 3.0, "duration_s": 3.0}]
+    edl["texts"] = [{"id": "tx1", "text": "Hello", "start": 1.0, "end": 5.0}]
+    edl["music"] = [{"id": "mus1", "storage_key": "song.mp3", "start": 0.0, "end": 6.0, "gain_db": -6.0}]
+    edl["voiceover"] = [{"id": "vo1", "asset_key": "vo.mp3", "start_output_s": 0.5,
+                         "gain_db": 0.0, "duck_others": True}]
+    before = validate_edl(edl, None).model_dump()
+    saved = validate_edl(_index_arrives(before, 60.0), 60.0).model_dump()
+    # the canvas's scenes stay in order in front of the footage
+    assert [(i["id"], i["at_output_s"]) for i in saved["inserts"]] == [("ins1", 0.0), ("ins2", 0.0)]
+    assert program_duration(saved) == 66.0
+    for layer in ("texts", "music", "voiceover"):
+        assert [i["id"] for i in saved[layer]] == [i["id"] for i in before[layer]], layer
+    assert saved["texts"][0]["start"] == 1.0
+
+
+def test_narration_on_an_empty_canvas_keeps_the_whole_main_video(monkeypatch):
+    from schemas import canvas_edl, validate_edl
+    ctx = ctx_with(canvas_edl("9:16"), [{**NARRATION[0], "duration_s": 30.0}])
+    ctx.has_main_video, ctx.duration = True, 600.0
+    monkeypatch.setattr(agent_tools, "_solid_card_asset", lambda *a: ("black.png", None))
+    reply = agent_tools.add_voiceover(ctx, "narration.mp3")
+    assert "main video (0-600s) is now the program" in reply
+    saved = validate_edl(ctx.latest_edl()["json"], 600.0).model_dump()
+    assert saved["keep"] == [[0.0, 600.0]] and saved["inserts"] == []
+    assert saved["voiceover"][0]["asset_key"] == "narration.mp3"
+
+
+def test_narration_past_a_short_program_extends_it_with_a_stand_in(monkeypatch):
+    """duration_s=1539.3 over a 3 s card saved a 3 s voiceover (99.8% cut)."""
+    from schemas import canvas_edl, validate_edl, program_duration
+    edl = canvas_edl()
+    edl["inserts"] = [{"id": "ins1", "kind": "image", "asset_key": "a.png",
+                       "at_output_s": 0.0, "duration_s": 3.0}]
+    ctx = ctx_with(edl, NARRATION)
+    ctx.has_main_video, ctx.duration = False, 0.0
+    monkeypatch.setattr(agent_tools, "_solid_card_asset", lambda *a: ("black.png", None))
+    reply = agent_tools.add_voiceover(ctx, "narration.mp3", duration_s=1539.3)
+    assert "The program ended at 3s: black card ins2 3-1539.3s" in reply
+    saved = validate_edl(ctx.latest_edl()["json"], None).model_dump()
+    assert saved["voiceover"][0]["duration_s"] == 1539.3
+    assert program_duration(saved) == 1539.3
+    assert saved["inserts"][-1]["placeholder"] is True
+    # then the main video arrives: the scene stays, the footage takes the card's place
+    after = validate_edl(_index_arrives(saved, 1600.0), 1600.0).model_dump()
+    assert [(i["id"], i["at_output_s"]) for i in after["inserts"]] == [("ins1", 0.0)]
+    assert after["voiceover"][0]["duration_s"] == 1539.3
+
+
+def test_narration_past_a_main_video_end_extends_it_after_the_footage(monkeypatch):
+    from schemas import validate_edl, program_duration
+    ctx = ctx_with(default_edl(60.0), [{**NARRATION[0], "duration_s": 90.0}])
+    ctx.has_main_video = True
+    monkeypatch.setattr(agent_tools, "_solid_card_asset", lambda *a: ("black.png", None))
+    reply = agent_tools.add_voiceover(ctx, "narration.mp3", duration_s=90.0)
+    assert "The program ended at 60s: black card ins1 60-90s" in reply
+    saved = validate_edl(ctx.latest_edl()["json"], 60.0).model_dump()
+    assert program_duration(saved) == 90.0
+    assert saved["voiceover"][0]["duration_s"] == 90.0
+
+
+def test_narration_without_duration_says_what_the_program_end_cuts():
+    ctx = ctx_with(default_edl(60.0), [{**NARRATION[0], "duration_s": 75.0}])
+    ctx.has_main_video = True
+    reply = agent_tools.add_voiceover(ctx, "narration.mp3")
+    assert reply.startswith("EDL v")
+    assert "runs 15s past the program's end (60s)" in reply
+    assert ctx.latest_edl()["json"]["inserts"] == []
+
+
+VECTOR = {"kind": "line", "start": 3.2, "end": 4.6, "x": 0.5, "y": 0.06,
+          "width": 0.8, "height": 0.002, "color": "#FFFFFF", "opacity": 0.85}
+
+
+def test_1767_new_item_with_no_id_is_added_and_named():
+    edl = fx_edl()
+    op = {"action": "upsert", "layer": "vectors", "value": dict(VECTOR)}
+    out, notes = batch(edl, [op])
+    [item] = out["vectors"]
+    assert item["id"].startswith("vec-")
+    assert any(item["id"] in n for n in notes)
+    # a retried batch names the same item: it is patched, not doubled
+    again, _ = batch(out, [op])
+    assert [v["id"] for v in again["vectors"]] == [item["id"]]
+
+
+@pytest.mark.parametrize("op", [
+    {"action": "upsert", "layer": "vectors", "value": {**VECTOR, "id": 7}},
+    {"action": "upsert", "layer": "vectors", "id": 7, "value": dict(VECTOR)},
+    {"action": "set", "layer": "vectors", "value": [{**VECTOR, "id": 7}]},
+])
+def test_numeric_item_id_names_the_same_item(op):
+    out, _ = batch(fx_edl(), [op])
+    assert [v["id"] for v in out["vectors"]] == ["7"]
+
+
+@pytest.mark.parametrize("value", ["ln1", ["ln1"], 1.0])
+def test_remove_by_id_written_as_the_value(value):
+    edl = fx_edl()
+    edl["vectors"] = [{**VECTOR, "id": "ln1"}, {**VECTOR, "id": "ln2"}]
+    if value == 1.0:
+        edl["vectors"][0]["id"] = "1"
+    out, _ = batch(edl, [{"action": "remove", "layer": "vectors", "value": value}])
+    assert [v["id"] for v in out["vectors"]] == ["ln2"]
+
+
+def test_set_with_one_named_object_patches_it_and_keeps_its_siblings():
+    edl = fx_edl()
+    edl["vectors"] = [{**VECTOR, "id": "ln1"}, {**VECTOR, "id": "ln2"}]
+    out, _ = batch(edl, [{"action": "set", "layer": "vectors",
+                          "value": {**VECTOR, "id": "ln3"}}])
+    assert [v["id"] for v in out["vectors"]] == ["ln1", "ln2", "ln3"]

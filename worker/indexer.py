@@ -46,7 +46,7 @@ import visual_index
 from schemas import (VideoIndex, VideoInfo, clamp_word_times,
                      default_edl, edl_accepts_tray_autoplace,
                      is_canvas_program, keep_boundaries,
-                     validate_edl)
+                     main_video_edl_from_canvas, validate_edl)
 
 
 PROGRESS_EVERY_S = 5.0
@@ -1918,10 +1918,22 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
     elif is_canvas_program(_latest["json"]):
         # The user built a canvas program (images/clips, no main video) FIRST,
         # then uploaded a main video. Migrate to a main-video program that keeps
-        # the whole video so it actually renders — carry any placed inserts over
-        # (render_edl validates + snaps them onto the new keep boundaries).
-        migrated = default_edl(info["duration"])
-        migrated["inserts"] = _latest["json"].get("inserts") or []
+        # the whole video so it actually renders, with everything the canvas
+        # carried: its scenes in front of the footage, and its narration,
+        # music, sound, text and graphics where they were. A stand-in card
+        # under narration gives its place to the footage (p6213: the card
+        # stayed in front of the footage and the narration was dropped).
+        migrated = main_video_edl_from_canvas(_latest["json"], info["duration"])
+        try:
+            validate_edl(migrated, info["duration"])
+        except Exception as e:
+            # A layer that does not fit the footage must not leave the
+            # project unwritable: keep the scenes and the whole video.
+            print(f"[index] project {project_id}: canvas layers did not fit "
+                  f"the main video ({str(e)[:160]}); kept its scenes only",
+                  flush=True)
+            migrated = main_video_edl_from_canvas(
+                _latest["json"], info["duration"], layers=False)
         worker_db.run(dbx.insert_edl, project_id, migrated, "agent")
     else:
         # The uploads flow appends now — it never replaces the main video —

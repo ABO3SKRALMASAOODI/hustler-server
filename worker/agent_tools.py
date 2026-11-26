@@ -134,6 +134,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      canvas_edl, clip_anim, default_edl, describe_edl,
                      DEFAULT_CANVAS_FPS,
                      edl_signature, is_canvas_program, keep_boundaries,
+                     main_video_edl_from_canvas,
                      output_duration, program_duration, validate_edl,
                      subject_matte_geom, MIN_SPAN_S,
                      GAIN_MIN_DB, GAIN_MAX_DB,
@@ -14703,27 +14704,42 @@ def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
                 "inside the file; no external trim is needed.")
     if duration is not None and duration < 0.05:
         return "REJECTED: duration_s must be at least 0.05 seconds."
-    if prog == 0:
+    excerpt = round(min(asset_dur - off,
+                        duration if duration is not None else asset_dur), 2)
+    built = []
+    empty = prog == 0
+    if empty:
+        # Nothing plays yet, so the narration lays the program down.
         start = round(max(float(start_output_s), 0.0), 2)
-        excerpt = min(asset_dur - off, duration if duration is not None else asset_dur)
-        end = round(start + excerpt, 2)
-        # The original can arrive after the empty canvas was created.
-        picture = min(end, ctx.duration) if ctx.has_main_video else 0
-        if picture >= 0.2:
-            edl["keep"] = [[0.0, picture]]
-            edl.pop("canvas", None)
-        else:
-            picture = 0
-        if end > picture:
-            key, error = _solid_card_asset(ctx, "#000000")
-            if error:
-                return error
-            if not picture and not edl.get("canvas"):
-                from schemas import canvas_edl
-                edl["canvas"] = canvas_edl()["canvas"]
-            edl["inserts"] = [{"id": "ins1", "kind": "image", "asset_key": key,
-                               "at_output_s": picture, "duration_s": max(0.2, round(end - picture, 2))}]
+        if ctx.has_main_video and ctx.duration > 0:
+            # The main video arrived after the empty canvas was made: the
+            # program is the whole video, as the indexer makes it.
+            edl = main_video_edl_from_canvas(edl, ctx.duration)
+            prog = program_duration(edl)
+            built.append(f"The edit was still an empty canvas: the main "
+                         f"video (0-{prog:g}s) is now the program.")
+    over = round(start + excerpt - prog, 2)
+    if over > 0 and (over >= 0.2 or prog == 0) and (duration is not None or empty):
+        # duration_s asks for exactly that much narration, and an empty
+        # program has no end to stop it: a black card carries the picture
+        # under whatever runs past the program's end.
+        card, error = _narration_bed(ctx, edl, prog, over)
+        if error:
+            return error
+        where = ("The program had no picture" if prog == 0
+                 else f"The program ended at {prog:g}s")
+        stand_in = ("upload the main video and it takes the card's place, or "
+                    "replace the card with picture" if not edl.get("keep")
+                    else "replace the card with picture")
+        built.append(f"{where}: black card {card['id']} {prog:g}-"
+                     f"{round(prog + card['duration_s'], 2):g}s now runs "
+                     f"under the narration. It is a stand-in: {stand_in}.")
         prog = program_duration(edl)
+    elif over >= 0.05 and duration is None:
+        built.append(f"The narration runs {over:g}s past the program's end "
+                     f"({prog:g}s), so its last {over:g}s are not heard. Pass "
+                     f"duration_s={excerpt:g} to lay a black card under the "
+                     f"rest, or place picture after {prog:g}s.")
     if duration is not None:
         duration = round(min(duration, asset_dur - off, prog - start), 2)
         if duration < 0.05:
@@ -14755,7 +14771,31 @@ def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
                 f"music belongs in music items, not voiceover.")
     if extract_note and not str(res).startswith("REJECTED"):
         res += "\n" + extract_note
+    if built and str(res).startswith("EDL v"):
+        res += "".join("\n" + line for line in built)
     return res
+
+
+def _narration_bed(ctx, edl, prog, seconds):
+    """Append a black placeholder card of ``seconds`` at the program's end,
+    in place on ``edl``: the picture under narration that has none."""
+    key, error = _solid_card_asset(ctx, "#000000")
+    if error:
+        return None, error
+    inserts = [dict(i) for i in edl.get("inserts") or []]
+    if edl.get("keep"):
+        at = keep_boundaries(edl["keep"], edl.get("speed") or [])[-1]
+    else:
+        if not edl.get("canvas"):
+            edl["canvas"] = canvas_edl(getattr(ctx, "canvas_ratio", None)
+                                       or "16:9")["canvas"]
+        at = max([prog] + [float(i.get("at_output_s") or 0.0)
+                           for i in inserts])
+    card = {"id": _next_item_id(inserts, "ins"), "kind": "image",
+            "asset_key": key, "at_output_s": round(at, 2),
+            "duration_s": round(max(0.2, seconds), 2), "placeholder": True}
+    edl["inserts"] = inserts + [card]
+    return card, None
 
 
 DUCK_NOTE = "-12dB while it speaks"
@@ -33895,7 +33935,10 @@ TOOLS = {
                       "to start a narration/song excerpt at the right moment; "
                       "never create an externally trimmed workaround). "
                       "duration_s ends the excerpt after exactly that many "
-                      "seconds. To reuse dialogue from the MAIN source over "
+                      "seconds; where nothing is placed yet or the excerpt "
+                      "runs past the program's end, a black stand-in card "
+                      "(named in the result) carries the picture under it. "
+                      "To reuse dialogue from the MAIN source over "
                       "an inserted/second scene, pass asset_key='main', its "
                       "SOURCE start as source_offset_s, the sentence length "
                       "as duration_s, and the destination scene's OUTPUT "

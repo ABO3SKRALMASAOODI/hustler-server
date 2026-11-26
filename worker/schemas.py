@@ -6,6 +6,7 @@ filtergraphs. A TypeScript mirror of the EDL type lives in the frontend repo
 at src/types/edl.ts — keep the two in sync.
 """
 
+import copy
 import hashlib
 import importlib
 import importlib.util
@@ -1121,6 +1122,12 @@ class InsertItem(BaseModel):
     # composed frame precedes it (and what the studio shows). None (every
     # EDL before it) renders byte-identically.
     hold: Optional[Dict[str, Any]] = None
+    # placeholder: a stand-in picture, not a choice. add_voiceover lays a
+    # black card under narration that has no picture to play over (an empty
+    # program, or narration past the program's end); when the main video
+    # arrives on a canvas program, the footage takes the card's place
+    # (main_video_edl_from_canvas). None keeps every earlier signature.
+    placeholder: Optional[bool] = None
 
     @field_validator("hold")
     @classmethod
@@ -3040,6 +3047,47 @@ class EDL(BaseModel):
 
 def default_edl(duration):
     return EDL(keep=[[0.0, _r(duration)]]).model_dump()
+
+
+# Layers that address the MAIN video's own clock or sound. A canvas program
+# has no main video, so it carries none of them (validate_edl refuses them).
+_MAIN_SOURCE_LAYERS = ("speed", "volume", "split_keep_boundaries",
+                       "source_clean", "patches", "stem_mix", "noise_clean")
+
+
+def main_video_edl_from_canvas(edl_dict, duration, layers=True):
+    """The program a canvas program becomes when its main video arrives: the
+    whole video, with every layer the canvas carried (voiceover, music, sound,
+    text, graphics, captions, effects) still on it at the same program times.
+
+    The canvas's own scenes stay in order in front of the footage. A
+    placeholder insert (a stand-in card under narration) gives its place to
+    the footage; where the footage ends before the placeholders' time did, one
+    placeholder card covers the rest, so nothing laid over it is cut. Scenes
+    after the first placeholder follow the footage."""
+    src = copy.deepcopy(dict(edl_dict or {}))
+    end = _r(duration)
+    out = src if layers else {}
+    for key in _MAIN_SOURCE_LAYERS + ("canvas",):
+        out.pop(key, None)
+    out["keep"] = [[0.0, end]]
+    inserts = [dict(i) for i in src.get("inserts") or [] if isinstance(i, dict)]
+    inserts.sort(key=lambda i: float(i.get("at_output_s") or 0.0))
+    beds = [i for i in inserts if i.get("placeholder")]
+    first = inserts.index(beds[0]) if beds else len(inserts)
+    before = [i for i in inserts[:first] if not i.get("placeholder")]
+    after = [i for i in inserts[first:] if not i.get("placeholder")]
+    for ins in before:
+        ins["at_output_s"] = 0.0
+    tail = []
+    held = sum(float(b.get("duration_s") or 0.0) for b in beds)
+    if held - end >= 0.2:
+        tail = [{**beds[0], "at_output_s": end,
+                 "duration_s": _r(held - end)}]
+    for ins in after:
+        ins["at_output_s"] = end
+    out["inserts"] = before + tail + after
+    return out
 
 
 def canvas_edl(ratio="16:9", fps=DEFAULT_CANVAS_FPS, bg_color="#000000"):

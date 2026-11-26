@@ -5,6 +5,7 @@ contract prevents an implicit remap from moving captions/music twice.
 """
 import copy
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -749,8 +750,44 @@ def _fit_operation(op, before, notes):
                            **({"fps": value["fps"]} if "fps" in value else {})}
     if layer in ITEM_LAYERS and op.get("action") == "set" and not op.get("id"):
         if isinstance(value, dict):
-            op["value"] = [value] if value else []
+            named = _item_id(value.get("id"))
+            if named:
+                # One named object is an item patch wherever its id is
+                # written: wrapped as the whole layer it deleted every
+                # sibling, which the same op with id beside value never did.
+                op.update(action="upsert", id=named)
+            else:
+                op["value"] = [value] if value else []
     return op
+
+
+# The id prefix each item layer's own tools write (tx1, vec2, ins3, ...).
+_ID_PREFIX = {"inserts": "ins", "texts": "tx", "vectors": "vec",
+              "music": "mus", "sfx": "sfx", "voiceover": "vo",
+              "overlays": "ov", "motion": "mg", "fx": "fx"}
+
+
+def _item_id(value):
+    """An item id as the EDL stores it, a string; a number names the same
+    item (7 and "7"). None when the value names nothing."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else str(value)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _new_item_id(layer, value):
+    """The id of a new item an upsert sent without one. It is read from the
+    item's own content, so a retried batch names the same item again and
+    patches it instead of adding a second copy."""
+    digest = hashlib.sha1(json.dumps([layer, value], sort_keys=True,
+                                     default=str).encode()).hexdigest()
+    return f"{_ID_PREFIX.get(layer, layer)}-{digest[:6]}"
 
 
 def _remove_elsewhere(edl, layer, item_id):
@@ -953,16 +990,37 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
             elif not op.get("id"):
                 edl[layer] = None if layer != "keep" else edl.get(layer)
         elif action in ("upsert", "remove") and layer in ITEM_LAYERS:
-            item_id = op.get("id")
-            if not item_id and isinstance(op.get("value"), dict):
-                item_id = op["value"].get("id")
-                op["id"] = item_id
-            if not isinstance(item_id, str) or not item_id:
-                raise ValueError("An item operation requires a stable id.")
             items = edl.get(layer) or []
             if not isinstance(items, list) or any(not isinstance(i, dict) for i in items):
                 raise ValueError(f"{layer} must be a list of objects.")
             edl[layer] = items
+            value = op.get("value")
+            item_id = _item_id(op.get("id"))
+            if item_id is None and isinstance(value, dict):
+                item_id = _item_id(value.get("id"))
+            if item_id is None and action == "remove":
+                # The id(s) written as the value: "vec1", ["tx1", "tx2"].
+                listed = op.get("id") if isinstance(op.get("id"), list) else value
+                named = [_item_id(v.get("id") if isinstance(v, dict) else v)
+                         for v in (listed if isinstance(listed, list) else [listed])]
+                if named and all(named):
+                    for name in named:
+                        at = next((i for i, item in enumerate(items)
+                                   if item.get("id") == name), None)
+                        if at is None:
+                            near_ops.append(_remove_elsewhere(edl, layer, name))
+                        else:
+                            items.pop(at)
+                    continue
+            if item_id is None and action == "upsert" and isinstance(value, dict) \
+                    and (layer != "fx" or value.get("type")):
+                # A new item sent without an id is still a new item.
+                item_id = _new_item_id(layer, value)
+                near_ops.append(f"{layer}: the new item had no id; it is "
+                                f"{item_id} (use that id to change it).")
+            if item_id is None:
+                raise ValueError("An item operation requires a stable id.")
+            op["id"] = item_id
             at = next((i for i, item in enumerate(items) if item.get("id") == item_id), None)
             if action == "remove":
                 if at is None:
@@ -1022,6 +1080,9 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
         items = edl.get(layer) or []
         if not isinstance(items, list) or any(not isinstance(i, dict) for i in items):
             raise ValueError(f"{layer} must be a list of objects.")
+        for item in items:
+            if isinstance(item.get("id"), (int, float)) and _item_id(item["id"]):
+                item["id"] = _item_id(item["id"])   # 7 names the item "7"
         ids = [i.get("id") for i in items if i.get("id")]
         if not all(isinstance(i, str) for i in ids):
             raise ValueError(f"{layer} ids must be strings.")
