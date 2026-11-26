@@ -817,7 +817,18 @@ def test_worker_skills_plugin_and_core_prompt_carry_the_same_rules():
     mcp = _read(_ROOT, "backend", "routes", "mcp.py")
     assert "strongest line or statistic" in mcp and "generic question" in mcp
     assert "a word a later graphic slams" in mcp
-    for phrase in ("keep 0.8-1.5 s of the natural tail after the last word", "a payoff number ~2 s on screen while the picture still moves", "export_final refuses a last picture that is held, frozen, still or slowed before the branded end card", "the closing shot stays real-time moving footage"): assert phrase in mcp, phrase
+    # Its ending states the craft and what export_final does (#1737, 23 Nov
+    # 2026): the payoff lands on moving source, a speed ramp into the card is
+    # read on its rendered frames (a moving retimed tail exports,
+    # backend/tests/test_tail_gate.py), and it carries the same
+    # never-a-freeze rule as every prompt checked above.
+    for phrase in ("let the payoff land on moving source",
+                   "keep 0.8-1.5 s of the natural tail after the last word",
+                   "a payoff number ~2 s on screen while the picture still moves",
+                   "never a freeze as the last picture before the branded end card",
+                   "check the movement in the rendered ending when a speed "
+                   "ramp runs into the branded end card"):
+        assert phrase in mcp, phrase
     assert "tier='hook'" in mcp and "list_build" in mcp
     assert "hold the payoff 1.0-1.5 s" not in mcp
     assert "earn its place" in worker["review"]
