@@ -2791,7 +2791,7 @@ def render(ctx, script, sc):
         import caption_pixels
         with open(scene) as stream:
             final_scene = json.load(stream)
-        plan = compile_scene(final_scene, ctx.supply, segment=False)
+        plan = compile_scene(final_scene, ctx.supply, tier="master", segment=False)
         j["caption_pixels"] = caption_pixels.repair(out, plan.doc, pack["ffmpeg"])
         from shell import jsave
         jsave(out + ".log.json", j)

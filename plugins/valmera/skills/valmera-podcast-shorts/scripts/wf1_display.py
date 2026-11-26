@@ -526,6 +526,21 @@ def spoken_alternatives(steps, words, first, last):
     return bound
 
 
+def caption_handoffs(items, words, holds, omissions, frame):
+    """Only yield a spoken word to copy actually laid out at that word's time."""
+    def token(text):
+        return text.strip(string.punctuation + "“”‘’…").casefold()
+
+    visible = [(item["f"], {token(t) for t in item["t"].split()})
+               for item in items if item.get("k") == "word" and item.get("t")]
+    spoken = [(word, frame((word["t0"] + word["t1"]) / 2)) for word in words]
+    printed = {id(word) for word, at in spoken
+               if any(a <= at < b and token(word["w"]) in copy for (a,b),copy in visible)}
+    covered = [span for span in holds if all(
+        id(word) in printed for word, at in spoken if span[0] <= at < span[1])]
+    return covered, [word for word in omissions if id(word) in printed]
+
+
 def audience_page(page):
     """A research claim supplies the record. A designed illustration or authored viewer line supplies type."""
     return bool(page.get("viewer_line") or any(page.get(k) for k in (

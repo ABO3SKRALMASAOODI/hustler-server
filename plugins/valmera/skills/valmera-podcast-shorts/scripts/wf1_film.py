@@ -3211,8 +3211,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     if marks and omit:
         original_ids = {id(w) for w in omit}
         omit = [caption_clock.words[i] for i,w in enumerate(clock.words) if id(w) in original_ids]
+    caption_holds, omit = wf1_display.caption_handoffs(
+        P.items, caption_clock.words, reading_spans, omit, Clock.f)
     lines = F.caption_build(P, caption_clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
-                            hold=reading_spans, omit=omit, phrase_ends=sorted(ends),
+                            hold=caption_holds, omit=omit, phrase_ends=sorted(ends),
                             accents=d.get("caption_accents") or (), accent_ink=pal["accent"], cue_starts=cue_starts, reveal_words=reveal_words)
     for i,off in gaps:
         onset = Clock.f(caption_clock.words[i]["t0"])-1
