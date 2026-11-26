@@ -258,7 +258,9 @@ class Read:
                 if temp:
                     kw["temperature"] = temp
                 x = tts.synth(ln["text"], **kw)
-                sf.write(f, np.asarray(x, np.float32), tts.sample_rate, subtype="FLOAT")
+                partial = f.with_suffix(".part")
+                sf.write(partial, np.asarray(x, np.float32), tts.sample_rate, format="WAV", subtype="FLOAT")
+                partial.replace(f)
                 cond[f.name] = {"duration_delta": dd, "temperature": temp or 0.3}
                 n += 1
                 self.generated_takes += 1

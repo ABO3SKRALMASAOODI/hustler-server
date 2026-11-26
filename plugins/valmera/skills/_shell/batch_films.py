@@ -115,7 +115,7 @@ def edit_film(wf, root, batch, index, idea, until_script):
     from contextlib import redirect_stdout, redirect_stderr
     from types import SimpleNamespace
     rid = film_id(batch, index)
-    os.environ.update(CODEX_PROXY_PROOF=rid, VALMERA_RUN=rid)
+    os.environ.update(CODEX_PROXY_PROOF=rid, VALMERA_RUN=rid, VALMERA_FILM_BATCH=batch.name)
     directory = batch / "work" / rid
     out = batch / "masters" / rid
     ready = next(out.glob("*/film.json"), None)

@@ -518,6 +518,22 @@ def narrate_script(ctx, sc, out, previous=None):
     import shutil
     band = writer.FORMS[FORM]["band"]
     ns = writer.narration_script(sc, band)
+    if os.path.basename(out) == "narration" and not os.path.isfile(os.path.join(out, "words.json")):
+        # A stopped timing read already has usable Easton takes. Resume the identical script at its real path.
+        from pathlib import Path
+        wanted = {k: v for k, v in ns.items() if k != "title"}
+        donors = []
+        for folder in [Path(out), *Path(out).parent.glob("narration_t*")]:
+            source = folder / "narration_script.json"
+            if source.is_file() and (folder / "_takes").is_dir():
+                try:
+                    saved = json.loads(source.read_text())
+                except (OSError, ValueError):
+                    continue
+                if {k: v for k, v in saved.items() if k != "title"} == wanted:
+                    donors.append((len(list((folder / "_takes").glob("*.wav"))), folder))
+        if donors:
+            out = str(max(donors, key=lambda entry: entry[0])[1])
     sp = os.path.join(out, "narration_script.json")
     if os.path.exists(sp):     # (a given narration carries no script)
         try:

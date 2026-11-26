@@ -169,3 +169,17 @@ def test_restarted_coordinator_waits_for_the_existing_render(tmp_path, monkeypat
     monkeypatch.setattr(batch.time, "sleep", complete)
     batch.wait_for_editor(tmp_path, rid)
     assert len(waits) == 1
+
+
+def test_running_media_keeps_progress_and_cancels_an_idle_process(tmp_path):
+    import os
+    import sys
+    import subprocess
+    import pytest
+    import warm_film_tools as warm
+    command = [sys.executable, "-c", "import time,pathlib; p=pathlib.Path('take'); "
+               "p.touch(); time.sleep(.35); p.touch(); time.sleep(.35); p.touch(); time.sleep(.35)"]
+    options = dict(cwd=tmp_path, env=dict(os.environ), progress_root=tmp_path, timeout=.55)
+    assert warm.run_media(command, **options).returncode == 0
+    with pytest.raises(subprocess.TimeoutExpired):
+        warm.run_media([sys.executable, "-c", "import time; time.sleep(15)"], **options)
