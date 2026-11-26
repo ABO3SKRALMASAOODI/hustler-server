@@ -924,6 +924,76 @@ def test_an_exchange_stopped_between_its_renames_is_finished(tmp_path):
     wf1_storage.settle_exchange(new, dest)                                 # nothing part way: nothing moves
 
 
+def test_a_finish_that_cannot_move_into_place_puts_the_original_back(tmp_path, monkeypatch):
+    """Stopped after the first rename while the second keeps failing (EBUSY on a
+    network share): the original returns to dest, the finished folder waits at new."""
+    import errno
+    import wf1_storage
+
+    new, dest = _pair(tmp_path)
+    aside = wf1_storage.exchange_aside(dest)
+    os.rename(dest, aside)
+    rename = os.rename
+
+    def busy(src, dst):
+        if Path(src) == new and Path(dst) == dest:
+            raise OSError(errno.EBUSY, "busy", str(src))
+        rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", busy)
+    for _ in range(2):                                                     # every later run settles, none aborts
+        wf1_storage.settle_exchange(new, dest)
+        assert (dest / "film.mp4").read_bytes() == b"original" and (new / "film.mp4").read_bytes() == b"finished"
+        assert not aside.exists()
+
+
+def test_refit_redoes_an_exchange_whose_finished_folder_could_not_move_into_place(tmp_path, monkeypatch):
+    """The process died while undoing a failed second rename; the next run puts the
+    original back and finishes the music again instead of aborting the podcast."""
+    import errno
+    import wf1_staged_music as finish
+    import wf1_storage
+
+    folder = tmp_path / "films" / "accepted"
+    folder.mkdir(parents=True)
+    prior = dict(cid="same", source_sha256="source", clean_export="film_clean.mp4",
+                 does=dict(encoded_balance={"lag_ms": 0}))
+    finish.write_json(folder / "film.json", dict(run_id="work", music=prior, rules={"music_picked": True}))
+    finish.write_json(tmp_path / "music_used.json", ["same"])
+    (folder / "film_clean.mp4").write_bytes(b"clean")
+    (folder / "film.mp4").write_bytes(b"first score")
+    staged = finish.staged_folder(folder)
+    staged.mkdir()
+    (staged / "film.mp4").write_bytes(b"half moved")
+    os.rename(folder, wf1_storage.exchange_aside(folder))                 # left with no films/accepted
+    run = SimpleNamespace(state={}, p=tmp_path.joinpath, log=lambda msg: None, refit_staged_music={"work"})
+    accepted = dict(id="m36", ok=True, folder=folder)
+    attempts = []
+
+    def remux(clean, output, receipt, used, scratch):
+        attempts.append(output)
+        output.write_bytes(b"second score")
+        return dict(prior, staged_mix_version=2)
+
+    rename, refused = os.rename, []
+
+    def busy_once(src, dst):
+        if Path(src) == staged and Path(dst) == folder and not refused:
+            refused.append(src)
+            raise OSError(errno.EBUSY, "busy", str(src))
+        rename(src, dst)
+
+    monkeypatch.setattr(finish, "score_copy", remux)
+    monkeypatch.setattr(wf1_storage, "exchange_call", lambda: None)
+    monkeypatch.setattr(os, "rename", busy_once)
+    finish.recover_all(run, [accepted])
+    assert refused and len(attempts) == 1
+    assert (folder / "film.mp4").read_bytes() == b"second score"
+    assert (folder / "film_clean.mp4").read_bytes() == b"clean"
+    assert json.loads((folder / "film.json").read_text())["music"]["staged_mix_version"] == 2
+    assert [p.name for p in folder.parent.iterdir()] == ["accepted"]
+
+
 @pytest.mark.parametrize("stop_at", [".accepted.music-finish", ".accepted.exchanging"])
 def test_refit_resumes_an_exchange_the_process_stopped_between_renames(tmp_path, monkeypatch, stop_at):
     """A filesystem without one-step exchange: the process dies between renames; the next parent run finishes the swap."""

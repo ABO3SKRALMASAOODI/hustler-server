@@ -101,7 +101,10 @@ def exchange_aside(dest: Path) -> Path:
 def settle_exchange(new: Path, dest: Path) -> None:
     """Finish an exchange_dirs() of `new` and `dest` that stopped between its
     renames, so `dest` holds the finished folder and `new` the one it
-    replaced. Nothing to do when no exchange was left part way."""
+    replaced. When the finished folder cannot be moved to `dest` (the rename
+    that stopped the exchange fails again), the original goes back to `dest`
+    and the finished folder stays at `new`, as before the exchange began, so
+    the caller redoes it. Nothing to do when no exchange was left part way."""
     aside = exchange_aside(dest)
     if not os.path.lexists(aside):
         return
@@ -109,7 +112,11 @@ def settle_exchange(new: Path, dest: Path) -> None:
         if not os.path.lexists(new):
             os.rename(aside, dest)  # only the original remains: it stays in place
             return
-        os.rename(new, dest)        # stopped after the first rename
+        try:
+            os.rename(new, dest)    # stopped after the first rename
+        except OSError:
+            os.rename(aside, dest)  # never leave no folder at dest
+            return
     os.rename(aside, new)           # stopped after the second rename
 
 
