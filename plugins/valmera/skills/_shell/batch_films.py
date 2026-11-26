@@ -89,6 +89,27 @@ def finished(folder):
 
 
 def make_film(wf, root, batch, index, idea, until_script=False):
+    rid = film_id(batch, index)
+    # A coordinator can restart while a child still owns a recording or a render.
+    with DL._locked(str(batch / "locks" / rid)):
+        wait_for_editor(batch, rid)
+        return edit_film(wf, root, batch, index, idea, until_script)
+
+
+def wait_for_editor(batch, rid):
+    for work in ("work", "recuts"):
+        state_path = batch / work / rid / "run.json"
+        while True:
+            state = shell.jload(state_path) or {}
+            pid = state.get("pid")
+            if pid == os.getpid() or not shell.alive(pid):
+                break
+            if next((batch / "masters" / rid).glob("*/film.json"), None):
+                return
+            time.sleep(5)
+
+
+def edit_film(wf, root, batch, index, idea, until_script):
     from contextlib import redirect_stdout, redirect_stderr
     from types import SimpleNamespace
     rid = film_id(batch, index)

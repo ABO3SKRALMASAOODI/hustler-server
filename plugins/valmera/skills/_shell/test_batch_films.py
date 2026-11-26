@@ -150,3 +150,20 @@ def test_replacements_continue_from_finished_films_across_research_rounds(tmp_pa
                         dict(ideas=[idea(len(previous))], spend=[]))
     assert len(batch.build("wf3", tmp_path, tmp_path, 3, 2)) == 3
     assert waves == [0, 1, 2]
+
+
+def test_restarted_coordinator_waits_for_the_existing_render(tmp_path, monkeypatch):
+    rid = "batch-child"
+    work = tmp_path / "work" / rid
+    work.mkdir(parents=True)
+    state = work / "run.json"
+    state.write_text(json.dumps({"pid": 1234}))
+    monkeypatch.setattr(batch.shell, "alive", lambda pid: pid == 1234)
+    waits = []
+    def complete(seconds):
+        assert not waits
+        waits.append(seconds)
+        state.unlink()
+    monkeypatch.setattr(batch.time, "sleep", complete)
+    batch.wait_for_editor(tmp_path, rid)
+    assert len(waits) == 1
