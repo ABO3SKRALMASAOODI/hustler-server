@@ -479,13 +479,16 @@ def test_the_verdict_is_counted_from_the_pairs():
     v = taste.read_look("Here you go:\n" + six(2, ["b01.big", "made.up", "cap"]) + "\nthanks", 6, known)
     assert v == {"pairs": 6, "upload": 2, "remove": ["b01.big", "cap"], "why": ["type on the face"] * 2}
     assert taste.verdict_of(v) == "cut"
-    assert taste.verdict_of(taste.read_look(six(4, ["b01.big"]), 6, known)) == "floor"
+    assert taste.verdict_of(taste.read_look(six(4, ["b01.big"]), 6, known)) == "cut"             # no floor: what is named is repaired
     assert taste.verdict_of(taste.read_look(six(3, []), 6, known)) == "cut"
     assert taste.verdict_of(taste.read_look(six(0), 6, known)) == "film"
     assert taste.read_look("not json", 6, known) is None and taste.verdict_of(None) == "film"
     same = json.dumps({"pairs": [{"n": i + 1, "post": "same", "why": "nothing added", "remove": []} for i in range(6)]})
     assert taste.verdict_of(taste.read_look(same, 6, known)) == "film"           # a frame nothing was added to counts for neither
     assert '"same"' in taste.LOOK_SYSTEM
+    faulted = json.dumps({"pairs": [{"n": 1, "post": "upload", "why": "dark on dark", "remove": ["b01.big"], "fault": {"b01.big": "unreadable", "b02.chip": "covers", "x": "covers"}}]})
+    v = taste.read_look(faulted, 6, known)
+    assert v["remove"] == ["b01.big", "b02.chip"] and v["faults"] == {"b01.big": "unreadable", "b02.chip": "covers"}
 
 
 def test_the_look_sets_the_upload_above_the_film_and_asks_once(tmp_path, monkeypatch):
@@ -505,7 +508,7 @@ def test_the_look_sets_the_upload_above_the_film_and_asks_once(tmp_path, monkeyp
         return call.Result(json.dumps({"pairs": [{"n": i + 1, "post": "upload", "why": "covers him", "remove": ["b01.big"]} for i in range(6)]}), None, "end_turn", 0.5, 2.0, 0.031)
     monkeypatch.setattr(call, "stream", stream)
     v, usd = taste.look(str(tmp_path), c, str(tmp_path / "film.mp4"), 1e12, "claude-opus-5-5")
-    assert usd == 0.031 and taste.verdict_of(v) == "floor" and v["remove"] == ["b01.big"]
+    assert usd == 0.031 and taste.verdict_of(v) == "cut" and v["remove"] == ["b01.big"]
     assert seen["kw"]["purpose"] == "director_last_look" and seen["content"][0]["type"] == "image"
     assert "b01.big: display type, reading CLAIM" in seen["content"][1]["text"] and "cap: the caption" in seen["content"][1]["text"]
     with Image.open(tmp_path / "look.jpg") as im:
@@ -602,29 +605,43 @@ def test_a_film_that_wins_every_pair_stands_as_rendered(tmp_path, monkeypatch):
     assert ctx.director_state is None and not os.path.exists(work)                 # the folder goes
 
 
-def test_what_the_look_names_is_removed_and_the_film_is_written_again(tmp_path, monkeypatch):
+def test_type_the_look_names_is_repaired_and_the_film_is_written_again(tmp_path, monkeypatch):
+    """#1151, #1820: the look's named type was cut and the film lost its devices. It is mended now: the same words
+    go out with the contrasting edge, and their sound stays."""
     import time
     film_, ctx, db, scope, written, seen, work = _film_state(tmp_path, monkeypatch, _verdict(2, ["b01.big"]))
     applied = film_.last_look(ctx, db, {"id": 2, "user_id": 3, "project_id": 1}, time.monotonic(), {"usd": 0.0}, scope)
     assert applied and "captions" in applied
     edl, desc = written[0]
-    assert "after the last look" in desc and not edl["sfx"]                        # its sound went with it
-    assert all("LINE 0" not in t["text"] for t in edl["texts"]) and any("LINE 1" in t["text"] for t in edl["texts"])
+    assert "after the last look" in desc and edl["sfx"]                              # its sound stays with it
+    line0 = [t for t in edl["texts"] if "LINE 0" in t["text"]]
+    assert line0 and all(t["outline_width"] > 0 and t["color"] == "#FFFFFF" and t.get("box") for t in line0)      # edged and on the dark panel, light ink
+    assert any("LINE 1" in t["text"] for t in edl["texts"])
     kind, detail = db.events[0]
-    assert kind == "director_taste" and detail["decision"] == "cut" and detail["removed"] == ["b01.big"] and detail["for_upload"] == 2
+    assert kind == "director_taste" and detail["decision"] == "cut" and detail["removed"] == [] and detail["mended"] == ["b01.big"]
+    assert detail["for_upload"] == 2
     assert ctx.director_version == 3 and ctx.director_first == {"edl": {"keep": [[0, 20]], "first": True}, "version": 2}
     assert film_.restore_first(ctx) and written[-1][0] == {"keep": [[0, 20]], "first": True} and ctx.director_first is None
 
 
-def test_four_of_six_for_the_upload_delivers_the_plain_floor_film_and_files_it(tmp_path, monkeypatch):
+def test_what_nothing_explains_is_still_taken_out(tmp_path, monkeypatch):
+    import time
+    v = dict(_verdict(2, ["b01.big"]), faults={"b01.big": "unearned"})
+    film_, ctx, db, scope, written, seen, work = _film_state(tmp_path, monkeypatch, v)
+    assert film_.last_look(ctx, db, {"id": 2, "user_id": 3, "project_id": 1}, time.monotonic(), {"usd": 0.0}, scope)
+    edl, _ = written[0]
+    assert all("LINE 0" not in t["text"] for t in edl["texts"]) and not edl["sfx"]
+    assert db.events[0][1]["removed"] == ["b01.big"] and db.events[0][1]["mended"] == []
+
+
+def test_four_of_six_for_the_upload_naming_nothing_leaves_the_film_as_rendered(tmp_path, monkeypatch):
+    """#1817, #1818: four of six frames for the upload with nothing named sent the film back to the upload-level
+    chain (p6275, a square upload the look read as zoomed). The film stands, with its devices."""
     import time
     film_, ctx, db, scope, written, seen, work = _film_state(tmp_path, monkeypatch, _verdict(4, []))
-    applied = film_.last_look(ctx, db, {"id": 2, "user_id": 3, "project_id": 1}, time.monotonic(), {"usd": 0.0}, scope)
-    edl, _ = written[0]
-    assert applied and not edl["texts"] and not edl["sfx"] and not edl["fx"] and edl["captions"]
-    assert edl["effects"]["grade_custom"]["contrast"] == 1.1                       # the trims, the captions and the grade stay
-    assert db.events[0][0] == "director_taste" and db.events[0][1]["decision"] == "floor"
-    assert ctx.first_cut_phases["director"]["look"]["decision"] == "floor"
+    assert film_.last_look(ctx, db, {"id": 2, "user_id": 3, "project_id": 1}, time.monotonic(), {"usd": 0.0}, scope) is None
+    assert not written and not db.events and getattr(ctx, "director_fell_why", None) is None
+    assert ctx.first_cut_phases["director"]["look"]["decision"] == "film"
 
 
 @pytest.mark.parametrize("fault", ["late", "raises", "unreadable", "no_preview", "off"])

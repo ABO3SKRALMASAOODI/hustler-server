@@ -545,7 +545,7 @@ def own_bed(idx, per, music=False):
     bins = (per.get("audio") or {}).get("rms_db") or []
     if music:
         from . import bed as bedlib
-        return bedlib.own_track(bins, len(words), dur)
+        return bedlib.own_track(bins, len(words), dur, (per.get("audio") or {}).get("music"))
     if bins and len(words) / max(dur, 1e-3) < 1.0:
         top = sorted(bins)[int(len(bins) * 0.9)]
         return sum(1 for b in bins if b >= top - 20.0) >= 0.5 * len(bins) and top > -45.0

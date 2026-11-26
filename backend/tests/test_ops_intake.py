@@ -321,6 +321,8 @@ def test_a_film_that_lost_frames_to_its_upload_is_a_quality_ticket_never_a_page(
     assert a["cause_key"] == b["cause_key"] and len({a["cause_key"], c["cause_key"], d["cause_key"]}) == 3
     assert "lost 2 of 6 frames to its upload: 2 devices removed" in a["title"]
     assert "the plain floor film was delivered" in c["title"]
+    e = dict(row("cut"), detail=json.dumps({"decision": "cut", "pairs": 6, "for_upload": 2, "removed": [], "mended": ["cap", "b04.big"], "cls": "M"}))
+    assert intake._event_failure(e)["title"].endswith("0 devices removed, 2 repaired")      # the look's type is repaired, never removed
 
 
 def test_scan_files_jobs_requests_and_replies_once(no_storm_readers):

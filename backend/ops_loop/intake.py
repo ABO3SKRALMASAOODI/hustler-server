@@ -611,7 +611,8 @@ def _event_failure(r):
                     cause_key=cause_key("director-taste", decision, str(d.get("cls") or "")),
                     title=_short(f"The Director's film lost {d.get('for_upload')} of {d.get('pairs')} frames to its upload: "
                                  + ("the plain floor film was delivered" if decision == "floor"
-                                    else f"{len(d.get('removed') or [])} devices removed")),
+                                    else f"{len(d.get('removed') or [])} devices removed"
+                                    + (f", {len(d.get('mended') or [])} repaired" if d.get("mended") else ""))),
                     detail=_short(json.dumps(d, default=str), 600))
     return None
 

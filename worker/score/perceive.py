@@ -149,7 +149,76 @@ def audio_facts(src, has_audio, work=None):
             onsets.append(round(float(t), 2))
     dyn = float(np.percentile(db, 95) - np.percentile(db, 10))
     return dict(step=0.5, rms_db=bins, onsets=sorted(onsets), mean_db=round(float(db.mean()), 1), range_db=round(dyn, 1),
-                note=f"mean {db.mean():.0f} dB, range {dyn:.0f} dB, {len(onsets)} onsets")
+                music=music_measure(x), note=f"mean {db.mean():.0f} dB, range {dyn:.0f} dB, {len(onsets)} onsets")
+
+
+MUSIC_SR = 16000
+MUSIC_BEAT = 0.22        # the beat's self-similarity a song reaches: 63 of 64 library tracks at or over it, or tonal
+MUSIC_TONAL = 0.20       # share of sounding frames holding three or more sustained notes
+MUSIC_JOINT = 1.4        # or both part-way there: beat/MUSIC_BEAT + tonal/MUSIC_TONAL (a phone-recorded or lo-fi song)
+MUSIC_WINDOW_S = 60.0    # the upload is read in up to three windows (start, middle, end): music that starts late counts
+
+
+def music_measure(x, sr=MUSIC_SR, max_s=None):
+    """Is the upload's own sound music, anywhere in it? The measure of its most musical window (start, middle, end;
+    max_s, when given, reads only that much from the start). Returns {"beat", "tonal"} or None."""
+    x = np.asarray(x, np.float32)
+    if max_s is not None:
+        return _music_window(x[: int(max_s * sr)], sr)
+    w = int(MUSIC_WINDOW_S * sr)
+    starts = [0] if len(x) <= w else sorted({0, (len(x) - w) // 2, len(x) - w})
+    got = [m for a in starts if (m := _music_window(x[a: a + w], sr))]
+    if not got:
+        return None
+    return {"beat": max(m["beat"] for m in got), "tonal": max(m["tonal"] for m in got)}
+
+
+def _music_window(x, sr=MUSIC_SR):
+    """Is the upload's own sound music? Two signal measures, no model: `beat`, the strongest self-similarity of its
+    loudness rises between 0.3 and 1.2 s apart (a pulse); `tonal`, the share of sounding frames holding three or more
+    spectral peaks that last a quarter second (sustained notes). Machinery, wind, a crowd, game sound effects and a
+    room measure low on both (p6275 0.14 / 0.09, p6309 0.07 / 0.00); songs measure high on one (library 0.27-0.56
+    beat). Returns {"beat", "tonal"} or None when there is too little sound to read."""
+    try:
+        x = np.asarray(x, np.float32)
+        n, hop = 2048, 1024
+        if len(x) < n * 8:
+            return None
+        fr = np.lib.stride_tricks.sliding_window_view(x, n)[::hop] * np.hanning(n).astype(np.float32)
+        spec = np.abs(np.fft.rfft(fr, axis=1)) ** 2 + 1e-12
+        f = np.fft.rfftfreq(n, 1 / sr)
+        band = (f >= 100) & (f <= 4000)
+        sb = spec[:, band]
+        level = 10 * np.log10(sb.mean(axis=1))
+        sounding = level > level.max() - 40
+        lv = 10 * np.log10(sb)
+        pad = np.pad(lv, ((0, 0), (12, 12)), mode="edge")
+        med = np.median(np.lib.stride_tricks.sliding_window_view(pad, 25, axis=1), axis=2)
+        peak = (lv - med > 12) & (lv >= np.roll(lv, 1, 1)) & (lv >= np.roll(lv, -1, 1))
+        near = peak | np.roll(peak, 1, 1) | np.roll(peak, -1, 1)
+        held = peak[:-3] & near[1:-2] & near[2:-1] & near[3:]
+        live = sounding[:-3]
+        tonal = float(np.mean(held.sum(axis=1)[live] >= 3)) if live.any() else 0.0
+        rise = np.maximum(np.diff(level), 0)
+        rise = rise - rise.mean()
+        ac = np.correlate(rise, rise, "full")[len(rise) - 1:]
+        ac = ac / (ac[0] + 1e-12)
+        lag = np.arange(len(ac)) * hop / sr
+        sel = (lag >= 0.3) & (lag <= 1.2)
+        beat = float(ac[sel].max()) if sel.any() else 0.0
+        return {"beat": round(beat, 3), "tonal": round(tonal, 3)}
+    except (ValueError, MemoryError):
+        return None
+
+
+def is_music(m):
+    """The measure above says music, or cannot say (None: the caller keeps its own reading). A song recorded on a
+    phone, live in a crowd or lo-fi can sit under both bars and still be part-way to both: that is music too. p6275's
+    game sound (0.14 beat, 0.09 tonal) is 1.09 of the joint bar's 1.4."""
+    if not isinstance(m, dict):
+        return None
+    beat, tonal = float(m.get("beat") or 0), float(m.get("tonal") or 0)
+    return bool(beat >= MUSIC_BEAT or tonal >= MUSIC_TONAL or beat / MUSIC_BEAT + tonal / MUSIC_TONAL >= MUSIC_JOINT)
 
 
 def iou(a, b):

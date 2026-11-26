@@ -2179,6 +2179,10 @@ class TextItem(BaseModel):
     color: Optional[str] = None             # #RRGGBB
     accent_color: Optional[str] = None
     outline_width: Optional[float] = Field(default=None, ge=0, le=12)
+    # #RRGGBB of the outline, and of the backing panel when box is set. None
+    # keeps the renderer's near-black edge (and every historical signature):
+    # dark or coloured ink keeps its colour inside a light edge.
+    outline_color: Optional[str] = None
     shadow: Optional[float] = Field(default=None, ge=0, le=12)
     font: Optional[Literal["Inter Display Black", "Inter Display ExtraBold",
                            "Inter Display Bold", "Anton", "Bebas Neue",
