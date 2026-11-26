@@ -1209,6 +1209,10 @@ def lower(l1, work):
             edl["music"] = music
             edl["fx"] = edl["fx"] + bed_fx
             rep["bed"] = {"cid": music[0]["storage_key"].split(":", 1)[-1], "gain_db": music[0]["gain_db"], "drop": bool(bed_fx)}
+            under = bed.source_volume(work, src_dur)
+            if under:                 # the upload's own sound is ambience, not music: it plays under the chosen track
+                edl["volume"] = under
+                rep["bed"]["source_under_db"] = under[0]["gain_db"]
     except Exception as e:  # noqa: BLE001 - a film is never lost to its music
         rep["bed_error"] = f"{type(e).__name__}: {str(e)[:160]}"
     if look:

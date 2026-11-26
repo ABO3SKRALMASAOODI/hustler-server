@@ -177,7 +177,7 @@ def supply(ctx):
     dur = ctx.dur_f / ctx.fps
     np_ = len(picture_changes(ctx))
     np10 = np_ / max(dur, 1e-3) * 10
-    own = bedlib.own_track((ctx.perc.get("audio") or {}).get("rms_db"), len(ctx.words), ctx.src_dur)
+    own = bedlib.own_track((ctx.perc.get("audio") or {}).get("rms_db"), len(ctx.words), ctx.src_dur, (ctx.perc.get("audio") or {}).get("music"))
     return {"dur_s": round(dur, 2), "np": np_, "np10": round(np10, 2), "cls": klass(np10, dur), "bed": bool(has_bed(ctx) or bedlib.planned(ctx)), "own_bed": bool(own)}
 
 

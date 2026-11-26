@@ -53,13 +53,19 @@ def on():
     return os.environ.get("VALMERA_BED", "1") != "0"
 
 
-def own_track(bins, n_words, dur):
-    """Does the upload carry a track of its own that a bed would fight: a song, a game's sound, a crowd, steady
-    under most of it, nobody talking over it, and loud enough to be the programme? The governor's has_bed counts the
-    hum of a quiet room as a bed too (top over -45 dB); a product held in a silent kitchen at -47 dB was told it
-    had its own music and went out dry (p5582, 13 Nov). bins: perception's level every half second, dB."""
+def own_track(bins, n_words, dur, music=None):
+    """Does the upload carry a song of its own that a bed would fight: steady under most of it, nobody talking over
+    it, loud enough to be the programme, and music by its signal? The governor's has_bed counts the hum of a quiet room
+    as a bed too (top over -45 dB); a product held in a silent kitchen at -47 dB was told it had its own music and went
+    out dry (p5582, 13 Nov). Loudness alone also read game sound, machinery and wind as the film's music, and those
+    films went out with no music at all (#901 shooter gameplay, p6275, p6304: bed null): with perception's music
+    measure (perceive.music_measure) a track that is not music is the film's ambience, under a chosen bed.
+    bins: perception's level every half second, dB. music: perception's {"beat", "tonal"}, or None (older index)."""
     bins = [float(b) for b in bins or []]
     if not bins or n_words / max(float(dur or 0), 1e-3) >= 1.0:
+        return False
+    from .perceive import is_music
+    if is_music(music) is False:
         return False
     top = sorted(bins)[int(len(bins) * 0.9)]
     return sum(1 for b in bins if b >= top - 20.0) >= 0.5 * len(bins) and top > OWN_TRACK_DB
@@ -110,7 +116,7 @@ def prechoose(work, scout, per, index, deadline=None, model=None, fetch=None, us
             return None
         import music_choose
         dur = float((per or {}).get("dur") or 0.0)
-        if own_track(((per or {}).get("audio") or {}).get("rms_db"), len((index or {}).get("words") or []), dur):
+        if own_track(((per or {}).get("audio") or {}).get("rms_db"), len((index or {}).get("words") or []), dur, ((per or {}).get("audio") or {}).get("music")):
             _write(work, {"on": False, "why": "the upload carries its own track: it is the film's music"})
             return None
         share = _spoken_share(index, dur)
@@ -328,6 +334,7 @@ def settle(work, comp, index, score_lines, about=""):
         lufs = _section_lufs(track, a, a + f["duration_s"])
         want = LEAD_LUFS if lead else VOICE_LUFS - UNDER_VOICE.get(f["kind"], 9.0)
         gain = round(max(-40.0, min(want - (lufs if lufs is not None else -14.0), 6.0)), 1)
+        doc["source_under_db"] = ambience_under(work, f["duration_s"]) if lead else None
         doc.update({"settled": True, "kind": f["kind"], "lead": lead, "gain_db": gain, "section_lufs": None if lufs is None else round(lufs, 1),
                     "offset_s": round(a, 2), "loop": bool(sec.get("loop")), "turn_s": None if turn_s is None else round(turn_s, 2),
                     "dur_s": f["duration_s"], "align": sec.get("align"), "section_why": sec.get("why"), "film": f})
@@ -337,6 +344,41 @@ def settle(work, comp, index, score_lines, about=""):
     except Exception as e:  # noqa: BLE001 - the film goes out without a bed, and says why
         _write(work, {"on": False, "why": f"{type(e).__name__}: {str(e)[:200]}", "cid": doc.get("cid")})
         return None
+
+
+AMBIENCE_UNDER_DB = 10.0    # an upload's own sound that is not music sits this far under the bed that leads the film
+AMBIENCE_FLOOR_DB = -24.0   # and is never taken further down than this: the cane, the engine, the game stay heard
+
+
+def ambience_under(work, dur_s=None):
+    """The source's gain (dB, <= 0) under a bed that leads a wordless film, or None. A steady loud sound that measures
+    as not music (perceive.music_measure: machinery, wind, a crowd, game sound) is the film's ambience: with a chosen
+    track leading, it plays under it, not over it (the renderer leaves a room's own sound at its recorded level: a
+    -13 dB harvester would bury a -19 LUFS song). Read from the work folder's perception; never raises."""
+    try:
+        from .perceive import is_music
+        with open(os.path.join(work, "perception.json"), encoding="utf-8") as fh:
+            per = json.load(fh)
+        audio = per.get("audio") or {}
+        bins = [float(b) for b in audio.get("rms_db") or []]
+        if not bins or is_music(audio.get("music")) is not False:
+            return None
+        top = sorted(bins)[int(len(bins) * 0.9)]
+        want = LEAD_LUFS - AMBIENCE_UNDER_DB
+        if top <= want:
+            return None
+        return round(max(AMBIENCE_FLOOR_DB, want - top), 1)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def source_volume(work, src_dur):
+    """The EDL's source volume item that sets the upload's own ambience under the chosen bed, or []."""
+    doc = chosen(work)
+    g = (doc or {}).get("source_under_db")
+    if not doc or g is None or not src_dur:
+        return []
+    return [{"start": 0.0, "end": round(float(src_dur), 2), "gain_db": float(g)}]
 
 
 ARRANGE_S = 14.0            # what the film's write waits for the track to be cut to it; past it the plain bed plays
