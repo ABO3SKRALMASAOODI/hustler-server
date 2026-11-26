@@ -198,7 +198,7 @@ def _change_ranges(prev, new):
                 add_cut(w[0] + (r0 - off), w[0] + (r1 - off))
 
     # ── program-anchored spans: texts, vectors, overlays, music ───────────
-    for field, prefix in (("texts", "tx"), ("overlays", "ov"),
+    for field, prefix in (("texts", "tx"), ("direction", "dir"), ("overlays", "ov"),
                           ("vectors", "vec"), ("music", "mu")):
         p, n = _by_id(prev.get(field), prefix), _by_id(new.get(field), prefix)
         if p == n:

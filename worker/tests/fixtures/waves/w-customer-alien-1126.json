@@ -1,0 +1,7 @@
+{
+  "wave": "customer-alien-1126",
+  "doc": "Customer alien rounds 1-2 (23 + 26 Nov 2026): the craft tools plan_piece, direct, score and dress, a direction department (tools_ext/craft_tools.py). A request the ask ledger reads as an edited piece has its plan made and applied with them before the editor's first step; the editor refines with them. Not in the core catalog: no core growth.",
+  "verbs": ["plan_piece", "direct", "score", "dress"],
+  "departments": ["direction"],
+  "core_growth_bytes": 0
+}

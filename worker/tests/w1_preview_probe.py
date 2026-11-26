@@ -45,6 +45,8 @@ def _without_inert(dump):
     # EDIT-CORE A3 (16 Nov 2026): noise_clean is inert (None) on every
     # stored EDL, as in test_w0_seams._without_inert.
     assert d.pop("noise_clean", None) is None
+    # customer-alien (23 Nov 2026): EDL.direction is inert ([]) on every stored EDL.
+    assert d.pop("direction", []) == []
     for m in d.get("music") or []:
         assert m.pop("provenance") is None and m.pop("automation") is None
         assert m.pop("duck_db") is None

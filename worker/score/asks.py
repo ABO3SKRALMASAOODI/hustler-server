@@ -416,9 +416,11 @@ def _call(ctx, name, schema, system, content, max_tokens=4000, model=None):
 # ------------------------------------------------------------------ the ledger
 
 LEDGER_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["lang", "start", "asks"],
+    "type": "object", "additionalProperties": False, "required": ["lang", "start", "piece", "asks"],
     "properties": {
         "lang": {"type": "string", "description": "ISO code of the language the customer typed in."},
+        "piece": {"type": "string", "enum": ["made", "plain"],
+                  "description": "made when the request wants an edited piece made or remade with craft (a reel, short, promo, montage, highlights, make it better, add effects, make it fire, cinematic or professional, a new style); plain when it is a precise operation or a question."},
         "start": {"type": "string", "enum": ["current", "upload"],
                   "description": "upload when the current film is an automatic first cut the product made by itself and the customer's words are about their uploaded video, not that cut (they ask to keep the upload's length, format or narration, or to work on a part of it the first cut left out); current otherwise, and always when the customer has built on the current film."},
         "asks": {"type": "array", "maxItems": 24, "items": {
@@ -460,6 +462,8 @@ kind:
 span: whole when the ask runs through the entire film or a long stretch of it (on every photo, b-roll throughout, every transition, a look for the whole video, inserts every few seconds); part when it is about one moment, one item or a short stretch.
 
 cut, for a film ask: new when they want a new cut made from the upload (a short, a reel, highlights, a shorter or reordered film); keep when the upload's length and order stay and the work goes over it (keep my full narration and add pictures, keep the song and the photo order and add movement). none for the other kinds.
+
+piece: made when the customer wants the video made into a piece with craft, whatever words they use: a reel, a short, a promo, a montage, highlights, "make it better", "add effects", "make it fire", cinematic, professional, a new style or vibe. The piece then gets a story, directed moments, display words and a score. plain when they ask for a precise operation (cut the silences, add captions, slow this part, change a title, add this song, remove a sound) or ask a question: that gets exactly that operation, done well.
 
 start: the current film may be an automatic first cut the product made by itself (its origin says made_by automatic_first_cut): a short piece of the upload, often reframed. When the customer has not built on it (customer_requests_since 0) and their words are about their video rather than that cut (a part of the upload the cut left out, the transcript or story as a whole, their full narration or length, the upload's own format), start is upload. start is current when they talk about the cut they saw, or have edited it since.
 
@@ -540,6 +544,7 @@ def settle(value, edl, usage=None):
             a[k] = str(a.get(k) or "")[:400]
         asks.append(a)
     return {"lang": str(value.get("lang") or "en")[:8], "asks": asks, "route": route(asks),
+            "piece": "made" if value.get("piece") == "made" and asks else "plain",
             "start": value.get("start") if value.get("start") in ("current", "upload") else "current",
             "usage": usage or {}, "checks": [], "repairs": 0}
 

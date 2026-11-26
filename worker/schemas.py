@@ -2965,6 +2965,17 @@ class SourceClean(BaseModel):
     cursor: Optional[CursorPass] = None
 
 
+class DirectedMoment(BaseModel):
+    id: str
+    device: str
+    controls: Optional[dict] = None
+    role: Optional[str] = None
+    start: float = Field(ge=0, allow_inf_nan=False)
+    end: float = Field(gt=0, allow_inf_nan=False)
+    text: Optional[str] = None
+    color: Optional[str] = None
+
+
 class EDL(BaseModel):
     # keep is empty ONLY for a canvas program (image/clip-only, no main video);
     # otherwise it is the non-empty cut list of the one main video.
@@ -2987,6 +2998,7 @@ class EDL(BaseModel):
     vectors: List[VectorItem] = Field(default_factory=list)
     # Browser-rendered motion design (worker/motion_engine.py): premium
     # animated typography, callouts, counters, cards and authored HTML.
+    direction: List[DirectedMoment] = Field(default_factory=list)
     motion: List[MotionItem] = Field(default_factory=list)
     speed: List[SpeedSpan] = Field(default_factory=list)
     master: Optional[Master] = None

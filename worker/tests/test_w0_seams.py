@@ -67,6 +67,9 @@ def _without_inert(dump):
     # footage's sound cleaned of background noise). Inert on every stored
     # EDL: None until the editor cleans the noise.
     assert d.pop("noise_clean", None) is None
+    # customer-alien (23 Nov 2026): EDL.direction, the palette devices the craft
+    # tools direct onto story beats. Inert on every stored EDL: [].
+    assert d.pop("direction", []) == []
     for m in d.get("music") or []:
         assert m.pop("provenance") is None and m.pop("automation") is None
         assert m.pop("duck_db") is None

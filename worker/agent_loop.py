@@ -2076,6 +2076,10 @@ def run_agent_job(worker_db, job):
     # "the picture follows" claim there would be a lie). ToolContext ships
     # with direct sight off; the loop that can honour it turns it on.
     ctx.direct_sight = True
+    # The editing model reads the movie itself. Keep signal measurements in
+    # its render receipt and leave subjective story and mix decisions to it.
+    ctx.second_opinions_off = True
+    ctx.audio_model_review = False
     ctx.user_message = user_message.get("content") or ""
     ctx.verification_request = _customer_verification_request(
         worker_db, session_id, user_message, continuation_state)
@@ -2890,6 +2894,9 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
           f"{json.dumps(ledger.get('routed'), default=str)[:240]}", flush=True)
     if reset_note:
         done_by = reset_note + ("\n" + done_by if done_by else "")
+    planned = _plan_piece_first(ctx, worker_db, job, session_id, ledger, request)
+    if planned:
+        done_by = (done_by + "\n" + planned) if done_by else planned
     kept = _typed_keep_whole(ctx, ledger, job, request)
     if kept:
         done_by = (done_by + "\n" + kept) if done_by else kept
@@ -2898,6 +2905,45 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     if supplied:
         done_by = (done_by or "") + supplied
     return asks.editor_note(ledger, done_by)
+
+
+def _plan_piece_first(ctx, worker_db, job, session_id, ledger, request):
+    """A request the ledger's model read as an edited piece is planned before the editor's first
+    step: story, cut, directed beats, display words and score, applied through the craft tools
+    (worker/customer_craft.py). Offered as optional tools they were never called (gate-1123).
+    A plain operation is untouched. Never raises."""
+    if (ledger or {}).get("piece") != "made" or (ledger.get("routed") or {}).get("version"):
+        return ""
+    import customer_craft
+    # The editor refines with the same tools the plan was applied with: their schemas join this
+    # turn's stable list (and survive slices); a plain request never pays for them.
+    loaded = getattr(ctx, "_loaded_tool_names", None)
+    if isinstance(loaded, set):
+        loaded.update(customer_craft.TOOLS)
+    else:
+        ctx._loaded_tool_names = set(customer_craft.TOOLS)
+    metrics = getattr(ctx, "editing_metrics", None)
+
+    def record(name, args, result):
+        if isinstance(metrics, dict):
+            metrics.setdefault("craft_calls", {})[name] = metrics.get("craft_calls", {}).get(name, 0) + 1
+        try:
+            _activity(worker_db, session_id, name, args, result,
+                      edl_version=ctx.latest_edl()["version"])
+        except Exception as exc:  # noqa: BLE001 - the step happened; only its row is missing
+            print(f"[plan] job {job.get('id')}: activity row for {name} not written: {exc}", flush=True)
+    t0 = time.monotonic()
+    try:
+        note = customer_craft.plan_first(ctx, ledger, request, record=record)
+    except dbx.JobLeaseLost:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the editor plans the piece itself
+        print(f"[plan] job {job.get('id')}: plan step failed: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
+        return ("\n\nPIECE PLAN: the plan step failed before applying anything. Make the piece yourself: "
+                "plan_piece, direct, dress and score, then render and look.")
+    print(f"[plan] job {job.get('id')}: piece planned in {time.monotonic() - t0:.1f}s -> "
+          f"{json.dumps((metrics or {}).get('craft_calls') if isinstance(metrics, dict) else None)}", flush=True)
+    return note
 
 
 def _typed_keep_whole(ctx, ledger, job, request):

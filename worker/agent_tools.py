@@ -25559,10 +25559,6 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                          "repeat the exact call that just failed, and never "
                          "give up while a genuinely different approach "
                          "remains.")
-            # The in-house editor gets an independent second opinion. MCP is
-            # different: its outside editing model already receives these
-            # exact frames as image content, so paying a Valmera-funded model
-            # to inspect them again would duplicate the caller's own vision.
             critic_report = _preview_critic_report(ctx, result, plan)
             if critic_report is not None:
                 ctx.last_visual_critic = critic_report
@@ -26716,10 +26712,7 @@ def _queue_check_frames(ctx, result, plan=None):
     so the editor reviews its own render with its own eyes. Returns True
     when at least one picture was queued; False falls back to the separate
     vision reviewer (blind agent model, missing sheets, storage hiccup)."""
-    can_see = getattr(ctx, "sight_out", False) or \
-        (getattr(ctx, "direct_sight", False)
-         and llm.agent_sees(ctx.agent_model))
-    if not can_see:
+    if not _can_receive_images(ctx):
         return False
     queued = 0
     vkey = result.get("verify_sheet_key")
@@ -26786,6 +26779,20 @@ def _queue_check_frames(ctx, result, plan=None):
             queued += 1
         except Exception as e:
             print(f"[render] result sheet fetch failed: {e}", flush=True)
+    if not queued and result.get("render_asset_id"):
+        # A legacy preview or an interrupted sheet upload still has its movie.
+        # Use that exact asset, including when the render is a proof fragment.
+        try:
+            asset = ctx.db.run(dbx.get_asset, result["render_asset_id"])
+            if asset and asset.get("project_id") == ctx.project_id:
+                before = len(ctx.pending_images)
+                duration = float(asset.get("duration_s") or result.get("duration_s") or 0)
+                if duration:
+                    look_at_asset(ctx, asset["storage_key"],
+                                  times=[duration * part for part in (0.08, 0.35, 0.65, 0.92)])
+                    queued += len(ctx.pending_images) - before
+        except Exception as exc:
+            print(f"[render] movie frame extraction failed: {exc}", flush=True)
     return queued > 0
 
 
@@ -27105,13 +27112,8 @@ def _visual_change_summary(previous, current):
 
 
 def _preview_critic_report(ctx, result, plan=None):
-    """Run paid second-opinion vision only for Valmera's in-house editor.
-
-    MCP sets ``sight_out`` and receives the rendered sheets as image content
-    in its own tool response. Its outside model is already the editor and the
-    visual reviewer, so a second Valmera-funded call is pure duplication.
-    """
-    if getattr(ctx, "sight_out", False):
+    """Legacy vision transport for a model which cannot itself receive pixels."""
+    if _can_receive_images(ctx):
         return None
     try:
         edl = ctx.latest_edl()["json"]
@@ -27187,7 +27189,7 @@ def _preview_critic_report(ctx, result, plan=None):
 
 def _preview_fallback_check(ctx, result, plan, delivered, critic_report):
     """Never route MCP pixels through a Valmera-funded fallback model."""
-    if getattr(ctx, "sight_out", False):
+    if _can_receive_images(ctx):
         return None
     if delivered or critic_report is not None:
         return None
