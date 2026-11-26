@@ -109,6 +109,9 @@ def call(tool, args, *, worker, env, log, timeout, heavy=()):
 def execute(request):
     if request["tool"] == "footage":
         from footage import run
+        if os.environ.get("VALMERA_BATCH_HEARING_LOCK"):
+            import batch_hearing
+            batch_hearing.install(run.hear)
         sys.argv = ["footage.run", *request["args"]]
         run.main()
     else:

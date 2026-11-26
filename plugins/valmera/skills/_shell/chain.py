@@ -404,6 +404,31 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_sourc
     return json.load(open(rec))
 
 
+def resumed_sources(scratch, known):
+    """Recover intact whole-source downloads by their recorded URL and measured duration."""
+    from pathlib import Path
+    for meta in Path(scratch).glob("footage-*/src/*/meta.info.json"):
+        try:
+            info = json.loads(meta.read_text())
+            url = info["webpage_url"]
+            seconds = float(info["duration"])
+            if not url or url in known or seconds <= 0:
+                continue
+            movie = next((p for p in meta.parent.glob("whole.*") if p.suffix in {".mp4", ".webm", ".mkv", ".mov"}
+                          and p.name.count(".") == 1), None)
+            if movie is None:
+                continue
+            raw = subprocess.check_output([brand.FP, "-v", "error", "-show_entries", "stream=codec_type:format=duration",
+                                           "-of", "json", str(movie)], stderr=subprocess.DEVNULL, timeout=20)
+            probe = json.loads(raw)
+            if (any(s["codec_type"] == "video" for s in probe["streams"])
+                    and abs(float(probe["format"]["duration"]) - seconds) <= max(1.0, seconds * .002)):
+                known.add(url)
+                yield dict(url=url, path=str(movie))
+        except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+            continue
+
+
 def footage_env(ctx, verify=None, keep_sources=False):
     """The footage engine's environment for chain.footage's opt-in kwargs: FOOTAGE_VERIFY=0 when verify is False;
     FOOTAGE_KEEP_SOURCES (<supply>/sources) and FOOTAGE_LOCAL_SOURCES (that folder's manifest rows whose files exist)
@@ -421,6 +446,8 @@ def footage_env(ctx, verify=None, keep_sources=False):
             rows = [dict(url=r["url"], path=r["path"]) for r in got if isinstance(r, dict) and r.get("url") and r.get("path") and os.path.isfile(r["path"])]
         except (OSError, ValueError, TypeError, KeyError):
             rows = []
+        if os.environ.get("VALMERA_FILM_BATCH") and getattr(ctx, "workflow", None) == "wf3":
+            rows.extend(resumed_sources(ctx.tmp, {r["url"] for r in rows}))
         env["FOOTAGE_LOCAL_SOURCES"] = json.dumps(rows)
     return env
 

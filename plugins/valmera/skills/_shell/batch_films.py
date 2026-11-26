@@ -94,15 +94,17 @@ def make_film(wf, root, batch, index, idea, until_script=False):
         return None
     # A coordinator can restart while a child still owns a recording or a render.
     with DL._locked(str(batch / "locks" / rid)):
-        wait_for_editor(batch, rid)
+        wait_for_editor(batch, rid, until_script)
         return edit_film(wf, root, batch, index, idea, until_script)
 
 
-def wait_for_editor(batch, rid):
+def wait_for_editor(batch, rid, until_script=False):
     for work in ("work", "recuts"):
         state_path = batch / work / rid / "run.json"
         while True:
             state = shell.jload(state_path) or {}
+            if until_script and "script" in state.get("done", []):
+                return
             pid = state.get("pid")
             if pid == os.getpid() or not shell.alive(pid):
                 break
@@ -116,6 +118,8 @@ def edit_film(wf, root, batch, index, idea, until_script):
     from types import SimpleNamespace
     rid = film_id(batch, index)
     os.environ.update(CODEX_PROXY_PROOF=rid, VALMERA_RUN=rid, VALMERA_FILM_BATCH=batch.name)
+    if wf == "wf3":
+        os.environ["VALMERA_BATCH_HEARING_LOCK"] = str(batch / "hearing.lock")
     directory = batch / "work" / rid
     out = batch / "masters" / rid
     ready = next(out.glob("*/film.json"), None)

@@ -183,3 +183,35 @@ def test_running_media_keeps_progress_and_cancels_an_idle_process(tmp_path):
     assert warm.run_media(command, **options).returncode == 0
     with pytest.raises(subprocess.TimeoutExpired):
         warm.run_media([sys.executable, "-c", "import time; time.sleep(15)"], **options)
+
+
+def test_batch_hearing_falls_back_to_the_requested_worker_listener(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import batch_hearing as h
+    monkeypatch.setattr(h, "PYTHON", tmp_path / "python")
+    monkeypatch.setattr(h, "MODEL", tmp_path)
+    h.PYTHON.touch()
+    (tmp_path / "config.json").touch()
+    monkeypatch.setenv("VALMERA_BATCH_HEARING_LOCK", str(tmp_path / "hearing.lock"))
+    monkeypatch.delenv("FOOTAGE_HEAR_PROVIDER", raising=False)
+    def unavailable(*args):
+        raise RuntimeError("GPU unavailable")
+    monkeypatch.setattr(h, "read_local", unavailable)
+    listener = SimpleNamespace(transcribe=lambda path, dur, workers: (path, dur, workers))
+    h.install(listener)
+    h.install(listener)
+    assert listener.transcribe("source", 5, 2) == ("source", 5, 2)
+
+
+def test_resume_recovers_only_complete_sources_with_original_provenance(tmp_path, monkeypatch):
+    import chain
+    root = tmp_path / "footage-test/src"
+    for url, n in (("source-a", 1), ("source-a", 2), ("truncated", 3)):
+        folder = root / str(n)
+        folder.mkdir(parents=True)
+        (folder / "whole.mp4").write_bytes(b"x")
+        (folder / "meta.info.json").write_text(json.dumps(dict(webpage_url=url, duration=20 if n == 3 else 30)))
+    monkeypatch.setattr(chain.subprocess, "check_output", lambda *a, **kw:
+                        json.dumps(dict(streams=[dict(codec_type="video")], format=dict(duration="30.1"))).encode())
+    rows = list(chain.resumed_sources(tmp_path, set()))
+    assert [row["url"] for row in rows] == ["source-a"]
