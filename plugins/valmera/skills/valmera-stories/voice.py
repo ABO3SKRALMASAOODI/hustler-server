@@ -220,6 +220,21 @@ def cadence_bonus(cad, stops_kept):
     return round(b, 2)
 
 
+def whole_take(f):
+    """A checkpointed take a resumed read may reuse: a RIFF/WAVE file whose declared
+    size is its byte length. A partial one is removed, so the read makes it again."""
+    try:
+        size = f.stat().st_size
+        with open(f, "rb") as stream:
+            head = stream.read(12)
+    except FileNotFoundError:
+        return False
+    if len(head) == 12 and head[:4] == b"RIFF" and head[8:12] == b"WAVE" and int.from_bytes(head[4:8], "little") == size - 8:
+        return True
+    f.unlink()
+    return False
+
+
 class Read:
     def __init__(self, N, LN, PF, prosody):
         self.N, self.LN, self.PF, self.prosody = N, LN, PF, prosody
@@ -249,7 +264,7 @@ class Read:
             i = int(ln["id"][1:])
             for k in range(int(ln.get("takes") or base)):
                 f = out / f"{ln['id']}_t{k}.wav"
-                if f.exists():
+                if whole_take(f):
                     continue
                 dd = LN.retake_dd(k, base)
                 tts.set_conditions({"duration_delta": dd} if dd else {})
@@ -262,6 +277,9 @@ class Read:
                 sf.write(partial, np.asarray(x, np.float32), tts.sample_rate, format="WAV", subtype="FLOAT")
                 partial.replace(f)
                 cond[f.name] = {"duration_delta": dd, "temperature": temp or 0.3}
+                # Checkpointed with the take, so a resumed read keeps every take's conditions.
+                cp.with_suffix(".part").write_text(json.dumps(cond))
+                cp.with_suffix(".part").replace(cp)
                 n += 1
                 self.generated_takes += 1
         tts.set_conditions({})
