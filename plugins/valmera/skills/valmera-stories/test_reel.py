@@ -232,7 +232,7 @@ def test_a_clip_that_fits_only_line_2_never_lands_on_another_line():
             assert line in fit[r[4]["path"]]                   # nothing on screen that does not fit its line
 
 
-def test_an_exhausted_line_gets_a_designed_card_then_a_reframe_never_another_photo():
+def test_an_exhausted_line_reframes_its_moving_take_before_a_figure_page():
     sc = _fit_script(n=2, words=24)
     sc["segments"][1]["show"] = [dict(text="$5 million", role="figure", word_i=3)]
     clock = F.Clock(_words(sc), sc)
@@ -244,7 +244,8 @@ def test_an_exhausted_line_gets_a_designed_card_then_a_reframe_never_another_pho
     tl = R.cut_fit(sc, clock, sp, F.Clock.f(clock.dur) + 15, stress=[])
     a1 = F.Clock.f(clock.segs[1][0])
     on1 = [r for r in tl if r[0] >= a1 - 1]
-    assert [r[2] for r in on1][:1] == ["clip"] and "designed" in [r[2] for r in on1]
+    assert on1 and all(r[2] == "clip" for r in on1)
+    assert any(r[4].get("again") for r in on1)
     assert all(r[4].get("tier") in ("line", "cutin", "reframe", "designed") for r in on1)      # a cut-in of its own take before the cards
     assert all(r[2] != "photo" for r in on1)
     assert sp.reframed.get(1, 0) <= int(R.REFRAME_MAX_S * F.FPS) and sp.shortfall.get(1, 0) > 0
