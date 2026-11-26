@@ -826,6 +826,42 @@ def _ramp_insert(ctx, ins_id, low_f, hold, curve, allow_duplicates):
     return res
 
 
+def _duration_kept_ramp(ramps, a, b, low, curve, fps_src, fps_out, prefix,
+                        allow_duplicates):
+    """Slow motion that keeps the window's length (#1656, p5968: "slow
+    motion and speed effects without changing the duration"): ease into
+    ``low``, then catch up faster than 1x, solved so the window plays in
+    exactly its source length. (spans, report) like ramps.plan."""
+    L = b - a
+
+    def build(high):
+        keys = [(0.0, 1.0), (0.08, low), (0.32, low), (0.44, high),
+                (0.94, high), (1.0, 1.0)]
+        return ramps.plan(a, b, ramps.curve_fn(keys, curve), fps_src=fps_src,
+                          fps_out=fps_out, prefix=prefix,
+                          allow_duplicates=allow_duplicates)
+
+    def out_len(spans):
+        return sum((float(x["end"]) - float(x["start"])) / float(x["factor"])
+                   for x in spans) + (L - sum(float(x["end"]) - float(x["start"])
+                                              for x in spans))
+    lo_h, hi_h = 1.0, 4.0
+    best = build(hi_h)
+    if out_len(best[0]) > L + 1e-3:
+        best[1]["duration_note"] = "the catch-up reached 4x; the window runs longer"
+        return best
+    for _ in range(24):
+        mid = (lo_h + hi_h) / 2.0
+        got = build(mid)
+        if out_len(got[0]) > L:
+            lo_h = mid
+        else:
+            hi_h, best = mid, got
+        if hi_h - lo_h < 0.005:
+            break
+    return best
+
+
 def _ramp_window(tl, s, e):
     """Where a program window [s, e] can ramp: ("shot", s', e') inside the one
     kept shot it overlaps most, ("insert", id) when it sits on a spliced
@@ -862,7 +898,8 @@ def _ramp_window(tl, s, e):
 
 def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
                    curve="ease_in_out", allow_duplicates=False, id=None,
-                   insert=None, allow_speech=False, ease_out=True):
+                   insert=None, allow_speech=False, ease_out=True,
+                   keep_duration=False):
     """An eased speed swing over a program window as contiguous spans (or
     over a whole b-roll insert as constant-rate pieces)."""
     import ramps
@@ -933,10 +970,15 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
                  else ramps.curve_fn([(0.0, 1.0), (min(
                      0.5, 1.2 / max(1.2, e - s)), low_f), (1.0, low_f)],
                      curve))
-        spans, rep = ramps.plan(a, b, shape,
-                                fps_src=fps_src, fps_out=fps_out,
-                                prefix=prefix + "_",
-                                allow_duplicates=bool(allow_duplicates))
+        if keep_duration:
+            spans, rep = _duration_kept_ramp(
+                ramps, a, b, low_f, curve, fps_src, fps_out, prefix + "_",
+                bool(allow_duplicates))
+        else:
+            spans, rep = ramps.plan(a, b, shape,
+                                    fps_src=fps_src, fps_out=fps_out,
+                                    prefix=prefix + "_",
+                                    allow_duplicates=bool(allow_duplicates))
     except ValueError as err:
         return f"REJECTED: {err}"
     if not spans:
@@ -1125,7 +1167,8 @@ TOOL_SPECS = {
         "as constant-rate pieces. The low is held where the source still "
         "shows a fresh frame each output frame (a 60p clip in a 30p program "
         "reaches 0.5x) unless allow_duplicates. Refused over speech "
-        "unless allow_speech.",
+        "unless allow_speech. keep_duration: slow motion then a catch-up, "
+        "the window keeps its length.",
         {"start": {"type": "number"}, "end": {"type": "number"},
          "low": {"type": "number", "minimum": 0.25, "maximum": 0.95},
          "hold": {"type": "number", "minimum": 0, "maximum": 0.8},
@@ -1133,6 +1176,7 @@ TOOL_SPECS = {
                                                    "ease_out", "linear"))},
          "allow_duplicates": {"type": "boolean"},
          "allow_speech": {"type": "boolean"},
+         "keep_duration": {"type": "boolean"},
          "id": {"type": "string"}, "insert": {"type": "string"}}),
     "animate_still": (
         animate_still,

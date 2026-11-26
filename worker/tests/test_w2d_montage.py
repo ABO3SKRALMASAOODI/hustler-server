@@ -500,3 +500,14 @@ def test_ramp_window_across_a_cut_stays_in_the_shot_it_covers_most():
     assert kind == "shot" and a == pytest.approx(10.0) and b < 15.0 + 1e-6
     kind, a, b = MT._ramp_window(tl, 30.0, 33.0)
     assert kind == "shot" and b <= 18.0 + 1e-6 and a >= 15.0 - 1e-6
+
+
+def test_keep_duration_ramp_slows_then_catches_up_to_the_same_length():
+    # #1656 (p5968): slow motion that keeps the film's duration.
+    import ramps
+    spans, rep = MT._duration_kept_ramp(ramps, 2.0, 8.0, 0.5, "ease_in_out",
+                                        60.0, 30.0, "rp_", False)
+    played = sum((s["end"] - s["start"]) / s["factor"] for s in spans)
+    covered = sum(s["end"] - s["start"] for s in spans)
+    assert abs(played + (6.0 - covered) - 6.0) < 0.05
+    assert min(s["factor"] for s in spans) < 0.75 < 1.2 < max(s["factor"] for s in spans)
