@@ -49,6 +49,7 @@ def patch_script(script,edits):
 def propose(ctx,script,catalogue,coverage=None):
     import cinema as C
     from wf4 import story
+    import archive_repair as repair
     root=Path(ctx.supply)/'archive-script';root.mkdir(exist_ok=True)
     existing=root/'proposal.json'
     if existing.exists():return C.read(existing)
@@ -81,25 +82,35 @@ def propose(ctx,script,catalogue,coverage=None):
     review=Path(ctx.run_dir)/'editorial-review.json'
     critique=C.read(review) if review.exists() else None
     if critique:critique=critique.get('diagnosis',critique)
+    usable={r['id']:r for r in catalogue if r['usable']}
+    draft=[dict(index=i,say=s['say'],facts=s.get('facts',[])) for i,s in enumerate(old_script['segments'])]
     notes=None
+    def captured_write(attempt, system, content, **options):
+        path=root/f'response-{attempt}.json'
+        saved=C.read(path) if path.exists() else {}
+        if saved.get('usage',{}).get('stop')=='completed':
+            return saved['text'],saved['usage']
+        text,use=story.writer.ask(system,content,**options)
+        C.save(path,dict(text=text,usage=use))
+        return text,use
+
     for attempt in range(3):
         checkpoint=root/f'attempt-{attempt}.json'
         if checkpoint.exists():
             saved=C.read(checkpoint);proposal={k:saved[k] for k in ('script','why')};use=saved['usage']
         elif attempt:
-            text,use=story.writer.ask('Repair ONLY the stated audit issues in this documentary. Preserve every unaffected sentence, visual choice, chapter and their order. '
+            text,use=captured_write(attempt,'Repair ONLY the stated audit issues in this documentary. Preserve every unaffected sentence, visual choice, chapter and their order. '
                 'Return JSON {segments:[{index:zero-based segment index,changes:{only fields needing replacement}}], '
                 'chapters:[{id,changes:{only fields needing replacement}}],why:string}. '
                 'If spoken words change, keep the visual_beats word_start anchors valid for the revised wording. '
                 'Use only supplied facts and literal catalogue IDs. Do not rewrite the whole screenplay.',
                 json.dumps(dict(script=proposal['script'],issues=notes,facts=dossier['facts'],archive=material)),
                 effort='high',max_tokens=16000,what='WF4 precise screenplay repair')
-            C.save(root/f'response-{attempt}.json',dict(text=text,usage=use))
             if use.get('stop')!='completed':raise ValueError('screenplay repair response incomplete; preserved for diagnosis')
             edits=story.writer.json_block(text)
-            proposal=dict(script=patch_script(proposal['script'],edits),why=edits['why'])
+            proposal=dict(script=repair.apply_edits(proposal['script'],edits,usable,draft),why=edits['why'])
         else:
-            text,use=story.writer.ask('Write the final documentary script from the inspected archive and verified facts. '
+            text,use=captured_write(attempt,'Write the final documentary script from the inspected archive and verified facts. '
                 'The old script is a research draft, not a structure to preserve. Its long repeated explanations and multiple endings must go. '
                 'Tell it as a story, not an explainer: '+story.STORY_SHAPE+' '
                 'The idea names its protagonist, dramatic question and stakes; keep them at the centre. Never add filler or turn the film into an archive inventory. '
@@ -130,18 +141,11 @@ def propose(ctx,script,catalogue,coverage=None):
                 json.dumps(dict(idea={k:script.get('idea_full',{}).get(k) for k in ('title','protagonist','question','stakes','hook','turn','payoff','arc')},
                                 old_script=old_script,facts=dossier['facts'],archive=material,editorial_review=critique,repair_notes=notes)) + story.production_brief(ctx.args.get('line')),
                 effort='high',max_tokens=36000,what='WF4 archive-conformed screenplay')
-            C.save(root/f'response-{attempt}.json',dict(text=text,usage=use))
             if use.get('stop')!='completed':raise ValueError('archive screenplay response incomplete; preserved for diagnosis')
             proposal=story.writer.json_block(text)
-        sc=proposal['script'];check=story.check_script(sc,dossier)
-        ids={r['id'] for r in catalogue if r['usable']};issues=list(check['problems'])
-        for i,segment in enumerate(sc['segments']):
-            beats=segment.get('visual_beats',[]);starts=[b.get('word_start') for b in beats]
-            if not starts or starts[0]!=0 or any(not isinstance(n,int) for n in starts) or starts!=sorted(set(starts)) or starts[-1]>=len(segment['say'].split()):
-                issues.append(f'segment {i} has invalid visual word anchors')
-            for beat in beats:
-                if not beat.get('archive_ids') or any(k not in ids for k in beat['archive_ids']):issues.append(f'segment {i} needs real usable catalogue IDs')
-        C.save(root/f'attempt-{attempt}.json',dict(proposal,usage=use,check=check,issues=issues))
+        sc=proposal['script'];check,issues=repair.check(sc,dossier,usable)
+        if not checkpoint.exists():
+            C.save(checkpoint,dict(proposal,usage=use,check=check,issues=issues))
         if issues:notes=issues;continue
         if (root/f'audit-{attempt}.json').exists():audit=C.read(root/f'audit-{attempt}.json')
         else:
@@ -149,13 +153,24 @@ def propose(ctx,script,catalogue,coverage=None):
                 'Every factual claim, identity, chronology, causal statement, quantity and source-context label must be supported. '
                 'Check that visual choices do not represent the wrong event, crew, hardware or repair state. A contextual image need not prove an invisible cause, '
                 'but it must not contradict the words. A fix states the supported fact plainly or moves context to the picture label; '
-                'it never asks the narration to add a disclaimer or a \'this was not X\' clarification. No quality score. Return JSON {faithful:bool,issues:[specific fixes],why:string}.',
+                'it never asks the narration to add a disclaimer or a \'this was not X\' clarification. No quality score. Return JSON {faithful:bool,issues:[{segments:[zero-based indices],chapters:[ids],fix:specific correction}],why:string}.',
                 json.dumps(dict(script=sc,facts=dossier['facts'],archive=material)),effort='high',max_tokens=4000,what='WF4 conformed screenplay fact audit')
             audit=story.writer.json_block(text);C.save(root/f'audit-{attempt}.json',dict(audit,usage=audit_use))
-        if audit.get('faithful') is not True:notes=audit['issues'];continue
+        if audit.get('faithful') is not True:
+            # Older runs saved a whole-list replacement after this audit. Replay
+            # its actual edits onto the audited base, even if its derived attempt failed.
+            response=root/f'response-{attempt+1}.json'
+            edits=None
+            if response.exists():
+                captured=C.read(response)
+                if captured['usage'].get('stop')=='completed':
+                    edits=story.writer.json_block(captured['text'])
+            result=repair.recover(root,sc,edits,audit['issues'],dossier,catalogue,draft)
+            C.save(existing,result);return result
         result=dict(script=sc,dossier=dossier,check=check,audit=audit,why=proposal['why'])
         C.save(existing,result);return result
-    raise ValueError('archive-conformed script did not pass factual and coverage-identifier checks')
+    result=repair.recover(root,sc,None,notes,dossier,catalogue,draft,previously_audited=False)
+    C.save(existing,result);return result
 
 
 def apply(ctx,script,ft,proposal,catalogue):
