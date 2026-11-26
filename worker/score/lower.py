@@ -42,6 +42,7 @@ ACCENT = {"neg": "negative", "threshold": "threshold", "mono": "mono", "posteris
 # and a burn on a rect is a soft glow still under the type, fading on the engine's own curve.
 BURN_PEAK, BURN_DECAY_F, GLOW_GAIN = 0.35, 6, 0.55
 EDGE_OUTLINE = 2.2         # libass outline at the caption's play resolution, for a word marked `edge`
+LIGHT_INK = "#FFFFFF"      # an edged title's ink: the renderer's title outline is dark, so the word inside it is light
 
 
 def r2(x):
@@ -940,9 +941,21 @@ def text_item(l1, it, a, b, rep):
           "uppercase": False, "shadow": 1.0 if (v.get("shadow") or {}).get("a") else 0.0, "outline_width": 0.0, "entrance": "none", "exit": "none"}
     if face[1]:
         tx["italic"] = True
-    if it.get("edge") and edge_style(tx["color"])["outline_color"] == "#111111":      # today's titles draw a dark outline only
+    if it.get("edge"):
+        # Today's titles draw a dark outline only (graphics: \3c&H101010&). A word marked `edge` reads on neither
+        # polarity, so dark ink went out with no edge at all and vanished into what it stood on (p6304: dark
+        # '03 LOAD' on dark straw; p6311: black type on a red dress). Such a word goes out light, inside the dark
+        # edge the renderer draws: it reads on any picture, and keeps its words, seat, size and timing.
+        if edge_style(tx["color"])["outline_color"] != "#111111":
+            tx["color"] = LIGHT_INK
+            rep["texts_edged_light"] = rep.get("texts_edged_light", 0) + 1
         tx["outline_width"], tx["shadow"] = EDGE_OUTLINE, 1.0
         rep["texts_edged"] = rep.get("texts_edged", 0) + 1
+    if it.get("boxed"):
+        # The last look read this line as unreadable on its picture (compiler.mend_type): it stands on the
+        # renderer's dark panel, light ink inside it, whatever is behind it.
+        tx["box"], tx["color"] = True, LIGHT_INK
+        rep["texts_boxed"] = rep.get("texts_boxed", 0) + 1
     track = float(v.get("track", 0)) * px / 100.0
     if track:
         tx["tracking"] = round(min(max(track / max(W / 1280, H / 720), -3.0), 12.0), 2)

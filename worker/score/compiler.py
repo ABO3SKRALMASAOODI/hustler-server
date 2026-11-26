@@ -331,7 +331,7 @@ def parse_font_spec(spec):
 
 # ---------------------------------------------------------------- parse
 
-KNOWN = {"treat", "film", "dna", "bind", "pics", "b", "item", "tool", "def", "fix", "drop", "cut"}
+KNOWN = {"treat", "film", "dna", "bind", "pics", "b", "item", "tool", "def", "fix", "drop", "cut", "mend"}
 
 
 def parse_score(text):
@@ -515,6 +515,7 @@ class Ctx:
         self.stress = {}           # word id -> measured stress of the voice
         self.system = {}           # the film's one design system, from the treat line
         self.cuts = {}             # ids the last look named, id -> why
+        self.mends = {}            # type the last look named and the film keeps, repaired: id -> fault
         self.calm = False
         self.cap_y = None          # the film's one caption seat
         self.seats = None          # the film's display seats
@@ -730,6 +731,8 @@ def read_film(ctx, lines):
             ctx.find(f"line {l['_line']}: def is refused on a customer's Score")
         elif l["k"] == "cut" and l.get("id"):
             ctx.cuts[str(l["id"])] = str(l.get("why") or "the last look")
+        elif l["k"] == "mend" and l.get("id"):
+            ctx.mends[str(l["id"])] = str(l.get("fault") or "unreadable")
     ctx.film = film
     try:
         ctx.fps = int(round(float(film.get("fps", 30)))) or 30
@@ -2926,6 +2929,88 @@ def final_type_clearance(ctx, l1):
             _shift_item(it, dy)
         moved.append({"id": key, "dy": round(dy, 4)})
     return {"moved": moved, "unresolved": unresolved}
+
+
+def _mended(ctx, it):
+    """The fault the last look named for this type item, or None. `cap` names the captions."""
+    if it.get("k") != "word":
+        return None
+    if it.get("role") == "cap":
+        return ctx.mends.get("cap")
+    iid = str(it.get("id") or "")
+    for key in (iid, str(it.get("_g") or "")):
+        for gid, fault in ctx.mends.items():
+            if gid != "cap" and key and (key == gid or key.startswith(gid + ".")):
+                return fault
+    return None
+
+
+def mend_type(ctx, l1):
+    """Type the last look named is repaired, never taken off the film (owner, 16 Nov: a fix makes the product reach
+    the outcome). Before, the look's named type was cut and the film lost its devices (p6311: the captions and a
+    title; p6304: a counter and a title), or the whole film went back to the upload.
+
+    Every named word carries the contrasting edge, which the lowering draws as light ink inside the renderer's dark
+    outline: it reads on any picture (dark '03 LOAD' on dark straw, black type on a red dress, white captions on a
+    white bauble). Display type the look could not read stands on the renderer's dark panel as well. A display block the look says covers what the frame is about moves, as one unit, to the nearest
+    height clear of where it stood, the heads, the printed words, the other type, the watermark and the platform's
+    buttons; its words, size and timing stay. Captions keep their seat."""
+    import copy
+    from . import taste
+    final = copy.copy(ctx)
+    final.shots = [it for it in l1["items"] if it.get("k") == "shot"]
+    final.items = [it for it in l1["items"] if it.get("k") != "shot"]
+    authored = {it["id"]: it for it in ctx.items}
+    edged, boxed, moved, unresolved = [], [], [], []
+    units = {}
+    for it in final.items:
+        fault = _mended(ctx, it)
+        if fault is None:
+            continue
+        if not it.get("edge"):
+            it["edge"] = True
+            edged.append(it["id"])
+        if fault == "unreadable" and it.get("role") != "cap" and not it.get("boxed"):
+            it["boxed"] = True              # display type the look could not read: it stands on the dark panel
+            boxed.append(it["id"])
+        if fault == "covers" and it.get("role") != "cap":
+            original = authored.get(it["id"], {})
+            key = original.get("_type_layout") or original.get("_g") or it.get("chunk") or it["id"]
+            units.setdefault(key, []).append(it)
+
+    def bounds(members):
+        boxes = [r for it in members if (r := type_rect(final, it)) is not None]
+        if not boxes:
+            return None
+        return [min(r[0] for r in boxes), min(r[1] for r in boxes), max(r[2] for r in boxes), max(r[3] for r in boxes)]
+
+    others = [it for it in final.items if it.get("k") == "word" and _mended(ctx, it) != "covers"]
+    step = max(1, round(ctx.fps / 4))
+    for key, members in units.items():
+        r = bounds(members)
+        if r is None:
+            continue
+        a, z = min(it["f"][0] for it in members), max(it["f"][1] for it in members)
+        obstacles = [_grow(r, TRAFFIC_GAP)]          # where it stood covers what the frame is about
+        for f in sorted(set(range(a, z, step)) | {z - 1}):
+            s = shot_at(final, f)
+            if s:
+                obstacles += taste._heads_near(final, s, f) + marks_of(final, s, f)
+        obstacles += [q for o in others if o["f"][0] < z and a < o["f"][1] and (q := type_rect(final, o)) is not None]
+        obstacles.append(list(KEEPOUT))
+        if ctx.H > ctx.W:
+            obstacles.append(list(taste.BUTTONS))
+        top, bottom = (taste.SAFE[1], taste.SAFE[3]) if ctx.H > ctx.W else (.03, .96)
+        tries = sorted({q[3] + TRAFFIC_GAP - r[1] for q in obstacles} | {q[1] - TRAFFIC_GAP - r[3] for q in obstacles}, key=abs)
+        dy = next((d for d in tries if abs(d) > 1e-6 and r[1] + d >= top and r[3] + d <= bottom
+                   and not any(rects_touch([r[0], r[1] + d, r[2], r[3] + d], q) for q in obstacles)), None)
+        if dy is None:
+            unresolved.append(key)          # it stays where it was, edged: still on the film
+            continue
+        for it in members:
+            _shift_item(it, dy)
+        moved.append({"id": key, "dy": round(dy, 4)})
+    return {"edged": edged, "boxed": boxed, "moved": moved, "unresolved": unresolved}
 
 
 def under_plate(ctx, f):
@@ -6831,6 +6916,8 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
         ctx.find(
             f"type {key}: final crop intersects a face or source text and no clear seat fits; "
             "redesign its picture/type composition while preserving every word and its readable size")
+    if ctx.mends:
+        m["mended_type"] = mend_type(ctx, l1)
     m["final_type_contrast"] = final_type_contrast(ctx, l1)
     from . import picture_cuts
     m["selected_source_blanks"] = picture_cuts.selected_blanks(l1, ctx.index)

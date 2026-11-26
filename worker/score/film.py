@@ -16,13 +16,14 @@ renderer (score.lower); the write runs the usual checks through ToolContext.appl
     last_look(...) -> None, or the new `applied` list when the film was written again
 
 After the film's preview lands, one model call sets six of its frames under the same six of the upload
-(score.taste.look). What it names is removed and the film is rendered once more; when most frames lose
-to the upload, the customer gets the plain floor film. Either files a quality ticket (client event
-director_taste). A late, failed or unreadable look changes nothing: the film stands as rendered.
+(score.taste.look). Type it names as unreadable or covering the subject is repaired (the contrasting edge, a
+clear seat: compiler.mend_type) and stays; what nothing explains is taken out; the film is rendered once more.
+It files a quality ticket (client event director_taste). A look that names nothing, or whose cuts would leave
+the upload again, leaves the film as rendered: the look never sends the film back to the chain and there is no
+floor film (26 Nov, #1151 #1817 #1818 #1820). A late, failed or unreadable look changes nothing.
 
 Never below today's first cut (13 Nov, lane K): a film that compiles to the upload again but for its colour is not
-written (`bare`), and a film the last look leaves bare, or most of whose frames lose for no device it can name, is
-taken back; in both cases the chain runs in the same job. `taste.against` is the same critic for a project that already holds a first film:
+written (`bare`), and the chain runs in the same job. `taste.against` is the same critic for a project that already holds a first film:
 the new film replaces it only when the critic does not find it worse.
 """
 import json
@@ -309,40 +310,33 @@ def last_look(ctx, worker_db, job, started, spend, trial_scope, proof=None):
                               "report": [r for r in fb.get("report") or [] if isinstance(r, dict) and any(k.startswith("footage") for k in r)][:3]}
         if what == "film" and full is None:
             return None
-        # What the look named goes, at the floor too: every frame it judged is then the upload's own or better, and
-        # what stood on the others stays. Only when nothing it can name explains a floor, or what is left is the
-        # upload again, is the film taken back: the start state is written, first_cut finds the film is not on
-        # screen and runs today's chain in the same job. The plain floor film is no longer anyone's first film
-        # (rated under the cut it replaced, 13 Nov).
-        comp2 = None
-        if v["remove"] and what != "film":
-            text = taste.cut_text(st["text"], v["remove"])
+        # What the look named is repaired, never a reason to lose the film (26 Nov, #1151 #1817 #1818 #1820): type
+        # it found unreadable or covering the subject keeps its words and gets the contrasting edge or a clear seat
+        # (compiler.mend_type); what nothing explains goes. A verdict that names nothing leaves the film as rendered:
+        # it is never taken back for the upload-level chain, and there is no plain floor film.
+        comp2, text = None, st["text"]
+        mends, cuts = taste.split_named(comp, v) if what != "film" else ({}, [])
+        if mends or cuts:
+            text = taste.mend_text(taste.cut_text(st["text"], cuts), mends) if cuts else taste.mend_text(st["text"], mends)
             comp2 = compiler.compile_score(text, work_dir=work)
-            if comp2.json() == comp.json():            # it named only what the customer asked for, or the caption
+            if cuts and bare(comp2):            # what the cuts leave is the upload again: the named type is mended, the rest stands
+                rec["cuts_kept"] = cuts
+                cuts = []
+                text = taste.mend_text(st["text"], mends)
+                comp2 = compiler.compile_score(text, work_dir=work) if mends else None
+            if comp2 is not None and comp2.json() == comp.json():            # it named only what the customer asked for
                 comp2 = None
         elif full is not None:
             comp2 = compiler.compile_score(st["text"], work_dir=work)
             if comp2.json() == comp.json():
                 comp2 = None
-        if comp2 is None and what != "floor":
+        if comp2 is None:
             rec["decision"] = "film"
             return None
-        if full is not None and comp2 is not None:
+        if full is not None:
             rec["decision"] = what = "full" if what == "film" else what
-        if comp2 is None or bare(comp2):
-            start = st.get("start_edl")
-            back = ctx.apply_score(start, "the First cut starts again from the upload") if start is not None else ""
-            if str(back).startswith("EDL v"):
-                ctx.director_version = None
-                ctx.director_fell_why = f"the last look: {v['upload']} of {v['pairs']} frames for the upload, " + ("nothing it could name" if comp2 is None else "nothing left but the upload")
-                rec["decision"] = "chain"
-                _event(worker_db, job, "director_taste", {"job_id": job.get("id"), "decision": "chain", "pairs": v["pairs"], "for_upload": v["upload"],
-                                                         "removed": v["remove"][:24], "why": v["why"][:6]})
-                return None
-            text = taste.floor_text(st["text"])       # the start state could not be written: the plain film, as before
-            comp2 = compiler.compile_score(text, work_dir=work)
+        rec["mended"], rec["cut"] = dict(mends), list(cuts)
         from . import placement_check, supply
-        text = text if v["remove"] and what != "film" else st["text"]
         comp2, text, rec["placement_check"] = placement_check.check(
             work, comp2, text, time.monotonic()+supply.CHECK_S)
         st["text"], st["comp"] = text, comp2
@@ -356,12 +350,12 @@ def last_look(ctx, worker_db, job, started, spend, trial_scope, proof=None):
             return None
         ctx.director_first = {"edl": st["edl"], "version": getattr(ctx, "director_version", None)}
         ctx.director_version = (ctx.versions_written or [None])[-1]
-        if v["remove"] and what != "film":          # what `upgrade` builds on is the film as the look left it
-            st["text"], st["comp"] = text, comp2
+        st["text"], st["comp"] = text, comp2         # what `upgrade` builds on is the film as the look left it
         t = comp2.meter.get("taste") or {}
-        rec.update(edl_version=ctx.director_version, counts=rep.get("counts"), removed=v["remove"][:24])
+        rec.update(edl_version=ctx.director_version, counts=rep.get("counts"), removed=list(cuts)[:24])
         _event(worker_db, job, "director_taste", {
-            "job_id": job.get("id"), "decision": what, "pairs": v["pairs"], "for_upload": v["upload"], "removed": v["remove"][:24],
+            "job_id": job.get("id"), "decision": what, "pairs": v["pairs"], "for_upload": v["upload"], "removed": list(cuts)[:24],
+            "mended": sorted(mends)[:24],
             "why": v["why"][:6], "cls": (t.get("supply") or {}).get("cls"), "edl_version": ctx.director_version})
         out = _applied(rep, comp2.l1, st["bin_doc"])
         return out

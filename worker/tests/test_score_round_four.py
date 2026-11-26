@@ -277,15 +277,15 @@ def _looked(monkeypatch, tmp_path, verdict, text):
 TITLED = lambda idx: film(beats_over(idx, 3, lambda k, a, z: {"pic": "main", "do": [{"g": "big", "t": "THE CLAIM", "for": "turn", "at": "b01.in", "d": 40}]} if k == 0 else {"pic": "main"}))
 
 
-def test_a_film_most_of_whose_frames_lose_to_the_upload_is_taken_back_for_the_chain(monkeypatch, tmp_path):
+def test_a_film_most_of_whose_frames_lose_to_the_upload_keeps_its_type_repaired_never_the_chain(monkeypatch, tmp_path):
+    """#1818: five of six frames for the upload sent the film back to the upload-level chain. Its title is repaired
+    (edged) and the film is written again; nothing goes back to the upload."""
     ctx, db, wrote, out = _looked(monkeypatch, tmp_path, {"pairs": 6, "upload": 5, "remove": ["b01.big"], "why": ["type on the face"]}, TITLED(selfie(20.0)))
-    assert out is None and wrote == [({"keep": [[0.0, 20.0]]}, "the First cut starts again from the upload")]
-    assert ctx.director_version is None and ctx.director_fell_why == "the last look: 5 of 6 frames for the upload, nothing left but the upload"
-    assert ctx.first_cut_phases["director"]["look"]["decision"] == "chain"
-    assert [k for k, _ in db.events] == ["director_taste"] and db.events[0][1]["decision"] == "chain"
-    # first_cut then finds the film is not on screen and calls fell, which files it as the look's doing
-    F.fell(ctx, db, {"id": 9, "user_id": 1, "project_id": 2}, "render", "no preview", start_edl={"keep": [[0.0, 20.0]]})
-    assert db.events[-1][0] == "director_fell_back" and db.events[-1][1]["stage"] == "look" and len(wrote) == 1
+    assert out is not None and len(wrote) == 1 and wrote[0][1] == "the Director's First cut, after the last look"
+    assert any("THE CLAIM" in t["text"] and t["outline_width"] > 0 for t in wrote[0][0]["texts"])
+    assert getattr(ctx, "director_fell_why", None) is None and ctx.director_version is not None
+    assert ctx.first_cut_phases["director"]["look"]["decision"] == "cut" and ctx.first_cut_phases["director"]["look"]["mended"] == {"b01.big": "unreadable"}
+    assert [k for k, _ in db.events] == ["director_taste"] and db.events[0][1]["mended"] == ["b01.big"]
 
 
 def test_a_film_the_look_only_trims_is_written_again_as_before(monkeypatch, tmp_path):
@@ -329,4 +329,4 @@ def test_at_the_floor_what_the_look_named_goes_and_a_film_that_still_stands_is_d
     ctx, db, wrote, out = _looked(monkeypatch, tmp_path, {"pairs": 6, "upload": 4, "remove": ["b02.s1"], "why": ["loosely like the words"] * 4}, text)
     assert out is not None and wrote[0][1] == "the Director's First cut, after the last look"          # the other picture still stands
     ctx, db, wrote, out = _looked(monkeypatch, tmp_path / "b", {"pairs": 6, "upload": 4, "remove": [], "why": ["the frame is cropped"] * 4}, text)
-    assert out is None and ctx.director_fell_why.endswith("nothing it could name") and wrote[0][1] == "the First cut starts again from the upload"
+    assert out is None and not wrote and getattr(ctx, "director_fell_why", None) is None          # #1817: the film stands, never the chain

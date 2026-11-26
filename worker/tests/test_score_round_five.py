@@ -259,7 +259,7 @@ def test_one_named_device_on_one_frame_does_not_buy_a_second_render():
     assert taste.verdict_of({"pairs": 6, "upload": 1, "remove": ["b04.chip"], "why": ["x"]}) == "film"
     assert taste.verdict_of({"pairs": 6, "upload": 0, "remove": ["b04.chip"], "why": []}) == "film"
     assert taste.verdict_of({"pairs": 6, "upload": 2, "remove": ["b04.chip"], "why": ["x", "y"]}) == "cut"
-    assert taste.verdict_of({"pairs": 6, "upload": 4, "remove": [], "why": ["x"] * 4}) == "floor"
+    assert taste.verdict_of({"pairs": 6, "upload": 4, "remove": [], "why": ["x"] * 4}) == "cut"      # no floor film, ever
     assert taste.verdict_of(None) == "film"
 
 
