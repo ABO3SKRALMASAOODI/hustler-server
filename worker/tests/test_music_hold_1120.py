@@ -248,6 +248,10 @@ def test_the_choice_reads_the_briefs_mood_first():
 
 @pytest.mark.skipif(shutil.which(FF) is None, reason="needs ffmpeg")
 def test_track_holds_a_real_song_under_a_voice(tmp_path):
+    """The podcast bed as mix() lays it since 26 Nov: one continuous bed (track() with no word-by-word ride, whose
+    dips under each phrase were the pumping the owner heard), then seated on the programme's voiced level
+    (seat_programme_bed). The owner's bar on the bed a listener hears: music from the start to the end, the voice on
+    top, no pumping, no dips."""
     from rhythm import dsp
     from test_w2c_rhythm import synth
     y, _truth = synth(bpm=120.0, bars=40, intro_bars=10)                      # a quiet intro, then the full song: a climb
@@ -273,15 +277,25 @@ def test_track_holds_a_real_song_under_a_voice(tmp_path):
     plan = MU.arrange(song, dict(marks, arc=True), profile=held_p)
     assert plan["ok"]
     stereo = np.stack([voice, voice], 1)
-    music, rep = MU.track(path, song, plan, marks, voice=stereo, profile=held_p)
-    plain, rep0 = MU.track(path, song, plan, marks, voice=stereo, profile=dict(held_p, hold=False))
-    assert "hold" in rep and "hold" not in rep0 and rep["broadband_gain_db"] == 0.0
-    vk = MU._k_frames(stereo, 480)
+    music, _rep = MU.track(path, song, plan, marks, voice=stereo, profile=held_p)
+    seat = MU.seat_programme_bed(music, stereo, marks, plan)        # as mix() seats it, before the sounds and the master
+    assert seat["swing_before_db"] > 4.0                            # the song's quiet intro and its climb were there to fix
 
-    def over(m):
-        mk = MU._k_frames(m, 480)
-        rows = MU.word_gaps(vk, mk, words)
-        return sum(1 for r in rows if r[3] < 0 and r[1] > float(np.median([x[1] for x in rows])) - 10.0), rows
-    held_over, rows = over(music)
-    assert held_over == 0
-    assert 3.5 <= float(np.median([r[3] for r in rows])) <= 8.0
+    # music from the start to the end, with no dip and no pumping: every half second of the programme within 3 dB
+    hop = MU.SR // 2
+    n_b = int(plan["end_hit_s"] * MU.SR) // hop
+    blocks = 10 * np.log10(np.mean(np.square(music[:n_b * hop].astype(np.float64)).reshape(n_b, -1), axis=1) + 1e-12)
+    assert float(np.ptp(blocks)) < 3.0
+    assert seat["swing_after_db"] < 1.0
+
+    # the voice on top: every word at the speaker's level clears the bed by 6 dB and the median word by 7.5 (the seat's
+    # depth); a word 7.6 dB quieter than the speaker is never buried, it sits on the bed at worst
+    vk, mk = MU._k_frames(stereo, 480), MU._k_frames(music, 480)
+    rows = MU.word_gaps(vk, mk, words)
+    speaker = float(np.median([r[1] for r in rows]))
+    level = np.array([r[3] for r in rows if r[1] >= speaker - 3.0])
+    quiet = np.array([r[3] for r in rows if r[1] < speaker - 3.0])
+    assert len(level) > 50 and len(quiet) > 10
+    assert level.min() >= 6.0
+    assert 7.5 <= float(np.median([r[3] for r in rows])) <= 13.0
+    assert quiet.min() > -1.0 and float(np.median(quiet)) >= 2.5

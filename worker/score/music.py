@@ -1187,6 +1187,20 @@ def _pmean_db(x, w):
     return 10 * np.log10(np.convolve(10 ** (np.asarray(x, np.float64) / 10), np.ones(w) / w, mode="same") + 1e-12)
 
 
+def _box_mean(x, n):
+    """The mean over n samples, centred as scipy.ndimage.uniform_filter1d(x, n, mode="nearest") centres it (an even
+    window reaches one sample further back), edges held at their end values."""
+    x = np.asarray(x, np.float64)
+    return np.convolve(np.pad(x, (n // 2, n - 1 - n // 2), mode="edge"), np.ones(n) / n, mode="valid")
+
+
+def _gauss_smooth(x, sigma):
+    """scipy.ndimage.gaussian_filter1d(x, sigma) with its defaults (kernel out to 4 sigma, edges mirrored)."""
+    r = int(4.0 * sigma + 0.5)
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+    return np.convolve(np.pad(np.asarray(x, np.float64), r, mode="symmetric"), k / k.sum(), mode="valid")
+
+
 def _spread_min(x, h):
     """Each frame takes the lowest value within h frames either side (a dip covers the window it is read on)."""
     out = np.array(x, np.float64)
@@ -1741,7 +1755,6 @@ def seat_programme_bed(music, voice, marks, plan):
     programme's voiced level, independent of the instantaneous level of a syllable.
     Leave the final ring and intentional silence outside the programme alone.
     """
-    from scipy.ndimage import uniform_filter1d, gaussian_filter1d
     hop = SR // 20
     stop = min(len(music), len(voice), round(plan["end_hit_s"] * SR))
     count = stop // hop
@@ -1750,7 +1763,7 @@ def seat_programme_bed(music, voice, marks, plan):
     def levels(pcm, width=10):
         blocks = pcm[:count * hop].reshape(count, -1)
         energy = np.mean(np.square(blocks, dtype=np.float64), axis=1)
-        return 10 * np.log10(np.maximum(uniform_filter1d(energy, width, mode="nearest"), 1e-12))
+        return 10 * np.log10(np.maximum(_box_mean(energy, width), 1e-12))
     bed, speech = levels(music), levels(voice)
     live = bed > -65.
     if not live.any():
@@ -1763,7 +1776,7 @@ def seat_programme_bed(music, voice, marks, plan):
     # Retain the larger-scale musical arc within a six-decibel window.
     centre = np.median(bed[live])
     desired = target + np.clip((bed - centre) * .13, -2., 2.)
-    gain = gaussian_filter1d(np.clip(desired - levels(music, width=3), -25., 36.), 1.2)
+    gain = _gauss_smooth(np.clip(desired - levels(music, width=3), -25., 36.), 1.2)
     # No gain from a silent bar leaks into the attack of the following phrase.
     gain = np.interp(np.arange(count), np.flatnonzero(live), gain[live])
     amp = 10 ** (np.interp(np.arange(len(music)), (np.arange(count) + .5) * hop, gain) / 20)
