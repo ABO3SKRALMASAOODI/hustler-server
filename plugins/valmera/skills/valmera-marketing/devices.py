@@ -1183,12 +1183,12 @@ def site(l1, *, f0, f1, page, export, lib, src0=0.0, url="valmera.io", action_me
 
 
 def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="wf2", focus=(0.5, 0.42), lead_f=3, later=None,
-             site_s=SITE_S, proof_at=None):
+             site_s=SITE_S, proof_at=None, over_s=SITE_OVER_S):
     """The whole programme of a film with no narrator (owner, 17 Nov: "an extremely powerful edit ... then the CTA";
     "show the website directly"): split, studio, export, site (see above). `hook` / `window`: export seconds of the
     split and of the export's own stretch; `ui`: the recording's Studio photographs; `page`: its photograph of the
     site. Returns (l1, beats)."""
-    mk = showcase_marks(hook, window, len(typed.split()), lead_f=lead_f, site_s=site_s)
+    mk = showcase_marks(hook, window, len(typed.split()), lead_f=lead_f, site_s=site_s, over_s=over_s)
     e0, e1 = float(window[0]), float(window[1])
     l1 = dict(l1=1, sid=sid, seed=1117, fps=FPS, frame=[W, H], dur_f=mk["dur_f"], spine=[], voices={}, assets={}, items=[], sound=[],
               film=dict(grain=0.0, vignette=0.0, over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0)))

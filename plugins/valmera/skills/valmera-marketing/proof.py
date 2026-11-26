@@ -1588,6 +1588,22 @@ def pauses(path, lo, hi, min_s=0.15, below_db=28.0):
     return out
 
 
+SENTENCE_PAUSE_S = 0.3          # a pause this long between two words ends a sentence, not a breath inside one
+
+
+def site_handover(ex, win, over_s):
+    """Seconds before the export's stretch ends at which the website takes the picture: SITE_OVER_S, moved into the
+    nearest pause between words within 0.6 s of it, so the picture never gives way inside a word (27 Nov, film 03: the
+    site cut in on "look at the"). The voice runs on to the stretch's end either way."""
+    t = float(win[1]) - over_s
+    near = [p for p in pauses(ex["file"], max(float(win[0]), t - 1.5), min(float(win[1]), t + 1.5), min_s=0.1)
+            if p[1] >= t - 0.6 and p[0] <= t + 0.6]
+    if not near:
+        return over_s
+    a, b = min(near, key=lambda p: abs((p[0] + p[1]) / 2 - t))
+    return round(min(max(float(win[1]) - (a + min(0.1, (b - a) / 2)), 1.0), over_s + 0.6), 3)
+
+
 def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach=4.0, asked=()):
     """[start, end] export seconds: from the export's first frame (the product's own opening, growing out of the Studio)
     to the end of a spoken thought between lo and hi seconds: the longest pause the speaker
@@ -1611,16 +1627,31 @@ def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach
         # longest pause after the last one and, when that is longer than a showcase holds, opens in the longest pause
         # before the first one, both between words and never inside a picture
         last, first = asked[-1][1], asked[0][0]
-        ps = [p for p in pauses(ex["file"], last, min(last + reach, body - 0.2) + 0.5) if not inside(p[0]) and last < p[0] <= body - 0.2]
-        if ps:
+        found = [p for p in pauses(ex["file"], last, min(last + reach, body - 0.2) + 0.5) if not inside(p[0]) and last < p[0]]
+        # the export's own close: when the Studio's edit ends within reach of the last asked moment, in the silence after
+        # its last sentence, the stretch ends there (27 Nov, film 03: the longest pause after the diagram was a breath
+        # inside "at the same time | for anybody to realize it", and the export ends 0.15 s after that sentence)
+        closing = [p for p in found if p[1] >= body - 0.25]
+        ps = [p for p in found if p[0] <= body - 0.2]
+        if closing:
+            a, b = closing[-1]
+            end = min(a + min(0.25, (b - a) / 2), body - 0.05)
+        elif ps:
             a, b = max(ps, key=lambda p: (p[1] - p[0], -p[0]))
             end = a + min(0.25, (b - a) / 2)
         else:
             end = min(quiet_snap(ex["file"], min(last + 0.6, body - 0.2), span=0.25), body - 0.1)
         if end > hi + reach:
             ps = [p for p in pauses(ex["file"], max(first - 6.0, 0.0), first) if not inside(p[1]) and p[1] <= first - 0.1]
+            # the earliest sentence-length pause that keeps the stretch within a showcase's hold, so the asked moment
+            # arrives with the line that sets it up (film 03: "we would both look at the same page", not a hesitation
+            # between "And" and "if"); else, as before, the longest one
+            held = [p for p in ps if p[1] >= end - hi and p[1] - p[0] >= SENTENCE_PAUSE_S]
             near = [p for p in ps if p[1] >= end - hi - reach] or ps
-            if near:
+            if held:
+                a, b = held[0]
+                start = b - min(0.25, (b - a) / 2)
+            elif near:
                 a, b = max(near, key=lambda p: (p[1] - p[0], p[1]))
                 start = b - min(0.25, (b - a) / 2)
             else:
@@ -1650,7 +1681,7 @@ def proof_span(pics, body, visible=()):
     (`pics` (start, seconds)), where the most pictures and titles are on screen together (a stack's last card) until the
     first of them ends; and the export check's own receipt (`visible`: [{seconds}], what it saw on the export pixels),
     the last two seconds of its latest moment (the turn: a sentence asking for a cassette and then a PC builds to the
-    PC), else of its most concentrated row, the asked element seen whole. The receipt is the measured one and
+    PC), the asked element seen whole; a row seen across the whole export is its frame, not a moment. The receipt is the measured one and
     wins its end (26 Nov: a Studio checklist drawn as ONE title showed no stack in the edit list; another cut away from
     the list 0.2 s after the check's last sight of it, so nothing may be held past that second)."""
     pics = [(float(a), float(d)) for a, d in pics if a < body - 0.2 and d > 0]
@@ -1659,19 +1690,17 @@ def proof_span(pics, body, visible=()):
         cover = [b + e for b, e in pics if b <= a + 0.05 < b + e]
         if len(cover) > best:
             best, span = len(cover), (a, min(cover))
-    rows, moments = [], []
+    moments = []
     for row in visible or ():
         every = sorted(float(t) for t in (row.get("seconds") or []) if isinstance(t, (int, float)) and t >= 0)
         secs = [t for t in every if t < body - 0.2]
-        if len(secs) >= 3:
-            rows.append((secs[-1] - secs[0], secs[-2], secs[-1]))
-            if every[-1] - every[0] <= SHOWCASE_S[1]:
-                moments.append((secs[-1], secs[-2]))
+        # a row seen from the export's start to its end is the vertical frame itself, not a proof (27 Nov, film 03: that
+        # row put the split at 22.5-25.3 s, after the diagram); an element seen twice is one (film 03's diagram: 15.5
+        # and 22.266 s)
+        if len(secs) >= 2 and every[-1] - every[0] <= SHOWCASE_S[1]:
+            moments.append((secs[-1], secs[-2]))
     if moments:            # the last asked moment is the turn the sentence builds to (27 Nov, film 02: cassette, then PC)
         b, a = max(moments)
-        span = (max(span[0], a) if span and span[0] <= b else a, b)
-    elif rows:
-        _, a, b = min(rows)
         span = (max(span[0], a) if span and span[0] <= b else a, b)
     return (round(span[0], 3), round(span[1], 3)) if span else None
 
@@ -1925,7 +1954,8 @@ def showcase_supply(ctx, script, sup_dir, pk):
     hook = [float(x) for x in d.get("hook_window") or showcase_hook(ex, body, pics, visible=visible)]
     ui = showcase_ui(rec)
     typed = typed_line(script["receipts"])
-    mk = D.showcase_marks(hook, win, len(typed.split()), lead_f=F.LEAD_F)
+    over = site_handover(ex, win, D.SITE_OVER_S)
+    mk = D.showcase_marks(hook, win, len(typed.split()), lead_f=F.LEAD_F, over_s=over)
     voice = os.path.join(sup_dir, "voice.wav")
     lead = F.LEAD_F / F.FPS
     parts = []
@@ -1953,7 +1983,7 @@ def showcase_supply(ctx, script, sup_dir, pk):
     jsave(words, dict(voice="the recording", duration=round((mk["dur_f"] - mk["lead_f"]) / F.FPS, 3), words=[]))
     pack = dict(sid=ctx.sid, words=words, narration=voice, ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[], footage=[],
                 voices=[], work=os.path.join(sup_dir, "finish"), fit=[],
-                product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
+                product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, over_s=over, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
                              upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None,
                              proof_at=proof_push_at(proof_span(pics, body, visible), hook)))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
@@ -3583,7 +3613,8 @@ def showcase_score(ctx, script, pack):
         raise RuntimeError("the showcase needs the recording's Studio photographs (studio.py, phone view): record it again")
     page = ui.get("site") or dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
     l1, beats = D.showcase(upload=upload, export=body, edl_b=edl, typed=typed_line(script["receipts"]), window=prod["window"], hook=prod["hook"],
-                           ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"), proof_at=prod.get("proof_at"))
+                           ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"), proof_at=prod.get("proof_at"),
+                           over_s=float(prod.get("over_s") or D.SITE_OVER_S))
     out = os.path.join(ctx.supply, "l1.json")
     jsave(out, l1)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")

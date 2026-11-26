@@ -538,3 +538,45 @@ def test_the_showcase_holds_the_turn_the_sentence_asks_for_and_opens_on_it(monke
     # the checklist film keeps its stretch: its only moment is inside the old window
     visible01 = [dict(seconds=[0.5, 5.533, 11.64, 27.15, 30.566]), dict(seconds=[7.933, 8.5, 10.766, 11.64, 12.966])]
     assert P.asked_spans(visible01, 27.0) == [(7.933, 12.966)]
+
+
+# 27 Nov 2026, Marketing film 03 (show both sides of the same page): the sentence asked for a diagram of the two page
+# views; the Studio export (25.933 s, no card) showed it at 15.5-22.266 s (records/03.json, export_check.visible) while
+# Cuban says "if you were inside of Google ... it would show one page. If you were outside of Google, it would show
+# another." The delivered film played the export 0-14.45 s and gave the picture to the site at 12.43 s, on "look at
+# the" (programme f568), so the diagram never came full frame. Pauses: measured on the source window the export plays
+# 1:1 (0cn3VBjfN8g 4572.69 s + 0-25.9 s, aligned on the delivered clean film, r = 0.89); pictures: the receipt's seconds.
+FILM03_VISIBLE = [dict(asked="Make a vertical short", seconds=[0.233, 16.21, 25.433]),
+                  dict(asked="use a diagram to show the two page views", seconds=[15.5, 22.266])]
+FILM03_PAUSES = [(1.28, 1.76), (1.96, 2.14), (5.44, 5.62), (8.66, 8.98), (10.84, 11.26), (13.3, 13.82), (14.2, 14.86),
+                 (18.46, 18.98), (19.96, 20.34), (23.98, 24.4), (25.72, 25.9)]
+FILM03_PICS = [(15.45, 6.87)]
+FILM03_WORDS = {"look": (11.98, 12.26), "at the": (12.26, 12.52), "another.": (21.98, 22.22), "time": (23.56, 23.94),
+                "for": (23.94, 24.48), "it.": (25.44, 25.76)}
+
+
+def test_the_showcase_completes_the_comparison_the_diagram_illustrates_before_the_site(monkeypatch):
+    monkeypatch.setattr(P, "pauses", lambda path, lo, hi, **k: [p for p in FILM03_PAUSES if lo <= p[0] <= hi])
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: round(t, 3))
+    ex, body = dict(file="/x/e.mp4"), 25.933
+    old = P.showcase_window(ex, body - P.endcard_s(), FILM03_PICS)          # the delivered code: a card trimmed that was not there
+    assert old[1] - D.SITE_OVER_S < FILM03_PICS[0][0]                        # the site took the picture before the diagram
+    assert FILM03_WORDS["look"][0] <= old[1] - D.SITE_OVER_S <= FILM03_WORDS["at the"][1]    # ... on "look at the"
+    asked = P.asked_spans(FILM03_VISIBLE, body)
+    assert asked == [(15.5, 22.266)]
+    win = P.showcase_window(ex, body, FILM03_PICS, asked=asked)
+    assert win[0] <= 15.5 and FILM03_WORDS["it."][1] <= win[1] <= body      # the diagram whole, the last sentence finished
+    assert 10.84 <= win[0] <= 11.26                                          # opens on "And we would both look at the same page"
+    assert win[1] - win[0] <= P.SHOWCASE_S[1]
+    over = P.site_handover(ex, win, D.SITE_OVER_S)
+    site = win[1] - over
+    assert site > 22.266 and site > FILM03_WORDS["another."][1]              # the comparison is said and seen before the site
+    assert 23.98 <= site <= 24.4                                             # and the site arrives between "time" and "for"
+    mk = D.showcase_marks([22.533, 25.333], win, 13, over_s=over)
+    assert (mk["export"][1] - mk["export"][0]) / D.FPS >= site - win[0] - 0.05
+    # film 02's stretch is unchanged by the export's own close (its export runs on 4.6 s past the PC)
+    monkeypatch.setattr(P, "pauses", lambda path, lo, hi, **k: [p for p in FILM02_PAUSES if lo <= p[0] <= hi])
+    assert P.showcase_window(ex, 41.2, FILM02_PICS, asked=P.asked_spans(FILM02_VISIBLE, 41.2)) == [11.56, 37.74]
+    # the opening split ends on the diagram whole, not on the vertical frame's row (main put it at 22.5-25.3 s)
+    hook = P.showcase_hook(ex, body, FILM03_PICS, visible=FILM03_VISIBLE)
+    assert 15.5 <= hook[0] and hook[1] <= 22.266 - P.PROOF_LEAD_S + 1e-6
