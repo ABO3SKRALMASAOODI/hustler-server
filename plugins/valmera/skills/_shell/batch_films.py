@@ -312,7 +312,9 @@ def build(wf, root, batch, target, slots):
             raise RuntimeError(f"Discovery returned only previously tried subjects or unavailable sources; see {batch}/plan.json")
 
 
-def cost(batch, tags, films, calls_path=None):
+def cost(batch, tags, films, calls_path=None, started=None):
+    if started is None:
+        started = float((batch / "started").read_text())
     path = Path(calls_path or Path(shell.V) / "tools/codex-proxy/calls.jsonl")
     calls, requests, models = 0, 0, set()
     if path.exists():
@@ -322,11 +324,11 @@ def cost(batch, tags, films, calls_path=None):
                     row = json.loads(line)
                 except ValueError:
                     continue
-                if row.get("run") in tags:
+                if row.get("run") in tags and row.get("ts", started) >= started:
                     requests += 1
                     calls += int(row.get("codex_calls") or 0)
                     models.add(row.get("model") or "unknown")
-    seconds = round(time.time() - float((batch / "started").read_text()), 1)
+    seconds = round(time.time() - started, 1)
     return dict(wall_seconds=seconds, seconds_per_film=round(seconds / films, 1),
                 proxy_calls=calls if models else None, proxy_calls_per_film=round(calls / films, 2) if models else None,
                 proxy_requests=requests if models else None, models=sorted(models))

@@ -1,14 +1,17 @@
 """Cut verified chapter moments on the final word clock, before the film scratch is removed."""
+import datetime as dt
 import json
+import os
 from pathlib import Path
 import sys
 import subprocess
 import tempfile
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "_shell"))
 import brand
 from delivered import _shell_llm
-from batch_films import safe_name
+from batch_films import cost, safe_name
 
 HEADER = """[Script Info]
 ScriptType: v4.00+
@@ -123,12 +126,23 @@ def write(ctx, part, results):
     clock = film.Clock(pack["words"], script)
     cache = run / "chapter-shorts"
     cache.mkdir(exist_ok=True)
+    if not (cache / "started").exists():
+        (cache / "started").write_text(str(time.time()))
+    tag = ctx.run_id + "-chapter-shorts"
+    parent = os.environ.get("CODEX_PROXY_PROOF")
     import chain
     fingerprint = chain.file_sha(rd["film"])
     plan_file = cache / "plan.json"
     plan = jload(plan_file) or {}
     if plan.get("master_sha256") != fingerprint:
-        picks, use = moments(script, clock.words)
+        os.environ["CODEX_PROXY_PROOF"] = tag
+        try:
+            picks, use = moments(script, clock.words)
+        finally:
+            if parent is None:
+                os.environ.pop("CODEX_PROXY_PROOF", None)
+            else:
+                os.environ["CODEX_PROXY_PROOF"] = parent
         plan = dict(master_sha256=fingerprint, moments=picks, spend=use)
         jsave(str(plan_file), plan)
     dest = Path(part) / "Shorts"
@@ -148,5 +162,10 @@ def write(ctx, part, results):
         music = next((m.get("choice") for m in rd["music"]["chapters"] if m["chapter"] == pick["chapter"]), None)
         listing.append(dict(n=n, file=filename, title=pick["title"], chapter=pick["chapter"], music=music,
                             source_window=[pick["start"], pick["end"]], facts=pick["facts"], **jload(receipt)))
-    jsave(str(dest / "shorts.json"), dict(contract=1, published=False, shorts=listing, master_sha256=fingerprint))
-    return dict(folder="Shorts", count=len(listing), manifest="Shorts/shorts.json")
+    metrics = cost(cache, {tag}, len(listing)) if listing else None
+    state = jload(run / "run.json")
+    started = dt.datetime.fromisoformat(state["started"].replace("Z", "+00:00")).timestamp()
+    whole_run = cost(cache, {ctx.run_id, tag, parent} - {None, ""}, len(listing) + 1, started=started)
+    jsave(str(dest / "shorts.json"), dict(contract=1, published=False, shorts=listing, master_sha256=fingerprint,
+                                         cost=metrics, cost_including_long_film=whole_run))
+    return dict(folder="Shorts", count=len(listing), manifest="Shorts/shorts.json", cost_including_long_film=whole_run)
