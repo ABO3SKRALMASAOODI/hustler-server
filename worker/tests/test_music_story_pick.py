@@ -87,6 +87,7 @@ def test_the_story_pick_stands_unless_the_engine_cannot_arrange_it(lib, monkeypa
     ch, _p, tried = MF.choose(_film(), _marks(), "/nonexistent", call=model)
     assert [r["cid"] for r in tried] == ["first", "second"] and tried[0]["carries"] >= MF.NO_ARRANGEMENT
     assert ch["cid"] == "second" and "kept pick 2" in ch["why"]
+    assert "Piano." in ch["why"] and "the strings" not in ch["why"]
 
     # a merely imperfect arrangement of the story's pick (one intro bar it must play) keeps the film, and no later pick
     # is fetched or arranged once none could overcome it

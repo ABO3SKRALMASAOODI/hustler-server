@@ -2306,13 +2306,34 @@ def story_partners(l1):
     return partners
 
 
+def composed_accents(l1):
+    """Sound a landed visual gesture when none of the requested partners survived composition."""
+    cues = list(l1.get("story_cues") or [])
+    bindings = story_partners(l1)
+    if any(bindings):
+        return cues, bindings
+    # These events carry item IDs that the compositor verified are visible on the hit frame.
+    events = sorted((e for e in l1.get("composed_events", []) if e.get("items")),
+                    key=lambda e: -float(e.get("strength", 0.)))
+    for event in events:
+        if event.get("strength",0.) < DEVICE_MIN:
+            continue
+        if event.get("kind") in DEVICE_QUIET:
+            continue
+        sound = "tick" if event.get("kind") == "type" else "air"
+        cues.append(dict(f=event["f"],role="picture",sound=sound,why=event["dev"]))
+        bindings.append(dict(event,device=event["dev"],kind="display" if sound=="tick" else "device"))
+        break
+    return cues, bindings
+
+
 def story_accents(cues, events, voice, fps, bindings=None):
     from scipy.signal import resample_poly
     from . import sound_signal
     placed, sounds = [], []
     for i, cue in enumerate(cues):
         sid = STORY_SOUNDS.get(cue.get("sound"))
-        if len(sounds) == 2 or sid not in library() or cue.get("role") not in ("hook", "figure", "turn", "payoff", "contrast"):
+        if len(sounds) == 2 or sid not in library() or cue.get("role") not in ("hook", "figure", "turn", "payoff", "contrast", "picture"):
             continue
         if bindings is None:
             partners = [e for e in events if abs(e["f"] - cue["f"]) <= max(2, round(.12 * fps))
@@ -2341,6 +2362,7 @@ def story_accents(cues, events, voice, fps, bindings=None):
         peak = 10 * math.log10(np.convolve(power, np.ones(window)/window, mode="valid").max())
         db = round(min(0., ref - 10.7 - peak), 1)
         sounds.append(_item("accent" + str(len(sounds)), sid, f, fps, db, partner, cue["role"], "single"))
+        sounds[-1]["tier"] = "tick" if cue["sound"] == "tick" else "accent"
         why = cue["why"]
         if bindings is not None:
             sounds[-1]["picture_event"] = partner
@@ -2422,7 +2444,8 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
         lv = 20 * math.log10(float(np.sqrt((seg ** 2).mean())) + 1e-9) + 3.0 - 0.691 + shift
         return max(min(lv + NO_VOICE_LIFT, VOICE_LUFS + 6), VOICE_LUFS - 10)
     if "story_cues" in l1 and l1.get("picture_bound_sound"):
-        return story_accents(l1["story_cues"], [], voice, fps, story_partners(l1))
+        cues, bindings = composed_accents(l1)
+        return story_accents(cues, [], voice, fps, bindings)
     events = l1_events(l1, _kshots(perc, index))
     screen = SCR.on(supply)
     if screen:                               # how each picture arrives: its travel, speed, slam, a photograph, a page

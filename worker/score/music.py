@@ -118,8 +118,8 @@ ARC_DEFAULT = {"setup": "mid", "build": "mid", "payoff": "high", "close": "mid"}
 def profile_for(kind):
     """The PROFILE for a kind of film (stories | marketing | podcast | longform)."""
     out = dict(PROFILE, under_voice_db=UNDER_VOICE.get(kind, PROFILE["under_voice_db"]))
-    if kind in ("stories", "marketing"):
-        out.update(rest_cost_per_s=48., phrase_lift_db=6.)
+    if kind in ("stories", "marketing", "podcast", "longform"):
+        out.update(rest_cost_per_s=48., phrase_lift_db=6., continuous_bed=True)
     if kind == 'podcast':
         out.update(HOLD)
         # Dialogue carries the cut. Keep the beat arrangement and ride phrases
@@ -1045,7 +1045,7 @@ def flow(nf, hop_s, marks, plan, P, base, open_gain):
                 notes["lifts"].append({"t": round(p0, 2), "len_s": round(L, 2), "db": round(amt * float(w.max()), 1)})
     slow += lift
     fast = np.zeros(nf)
-    if P.get("phrase_ride_s") and not marks.get("joints"):
+    if P.get("continuous_bed") or P.get("phrase_ride_s") and not marks.get("joints"):
         return slow, fast, notes
     d = plan.get("drop_at")
     e = plan["end_hit_s"]
@@ -1922,6 +1922,45 @@ def card_phrase(path, start, tempo, frames, bar_s=None, ffmpeg=None):
     return out
 
 
+def seat_programme_bed(music, voice, marks, plan):
+    """Fit the audible musical phrase after arrangement, before effects and mastering.
+
+    Measure half-second energy on the arranged stereo stem. The reference is the
+    programme's voiced level, independent of the instantaneous level of a syllable.
+    Leave the final ring and intentional silence outside the programme alone.
+    """
+    from scipy.ndimage import uniform_filter1d, gaussian_filter1d
+    hop = SR // 20
+    stop = min(len(music), len(voice), round(plan["end_hit_s"] * SR))
+    count = stop // hop
+    if count < 10:
+        return {}
+    def levels(pcm):
+        blocks = pcm[:count * hop].reshape(count, -1)
+        energy = np.mean(np.square(blocks, dtype=np.float64), axis=1)
+        return 10 * np.log10(np.maximum(uniform_filter1d(energy, 10, mode="nearest"), 1e-12))
+    bed, speech = levels(music), levels(voice)
+    live = bed > -65.
+    if not live.any():
+        return {}
+    voiced = np.zeros(count, bool)
+    for a, b in marks.get("words") or ():
+        voiced[max(0, int(a * SR / hop)):max(0, math.ceil(b * SR / hop))] = True
+    voiced &= speech > -45.
+    target = float(np.median(speech[voiced]) - 7.5) if voiced.any() else -23.
+    # Retain the larger-scale musical arc within a six-decibel window.
+    centre = np.median(bed[live])
+    desired = target + np.clip((bed - centre) * .25, -3., 3.)
+    gain = gaussian_filter1d(np.clip(desired - bed, -15., 14.), 1.6)
+    # No gain from a silent bar leaks into the attack of the following phrase.
+    gain = np.interp(np.arange(count), np.flatnonzero(live), gain[live])
+    amp = 10 ** (np.interp(np.arange(len(music)), (np.arange(count) + .5) * hop, gain) / 20)
+    music *= amp.reshape((-1,) + (1,) * (music.ndim-1))
+    return dict(target_dbfs=round(target, 2), voiced_blocks=int(voiced.sum()),
+                swing_before_db=round(float(np.ptp(np.percentile(bed[live], [10,90]))), 2),
+                swing_after_db=round(float(np.ptp(np.percentile(levels(music)[live], [10,90]))), 2))
+
+
 def podcast_bed(music, voice, marks, song, plan, song_path, report):
     """Set the opening against the programme voice and locate the continuation on the final song edit."""
     if any(start < 1 for start,end in marks.get("words", [])):
@@ -2002,6 +2041,7 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
                 speech = sorted(set(marks["words"]) | set(voice_spans(lv)))
                 duck_spoken_words(music, lv, speech, prof["under_voice_db"])
             rep["card_bed"] = card_continuation(marks, song, plan, song_path)
+        rep["programme_bed"] = seat_programme_bed(music, lv, marks, plan)
         # with the bed known, each placed sound is made to be there over the voice and the song together
         if kind == 'podcast':
             from . import audibility
@@ -2126,7 +2166,8 @@ def mix_film(film, song_path, marks, out=None, kind="stories", vocals=None, sung
                 podcast_bed(music,prog,marks,song,plan,song_path,rep)
             elif kind in ("stories", "marketing"):
                 rep["card_bed"] = card_continuation(marks, song, plan, song_path)
-        if not marks["words"]:                              # nobody speaks: the music is set against the film's own level, not a voice's
+            rep["programme_bed"] = seat_programme_bed(music, prog, marks, plan)
+        if not marks["words"] and not prof.get("continuous_bed"):  # nobody speaks: the music is set against the film's own level, not a voice's
             i, _tp, _ = AU.loudness_of(prog, tmp) if float(np.abs(prog).max()) > 1e-5 else (None, None, None)
             if i is not None and i > -70:
                 music = music * np.float32(10 ** ((i - VOICE_LUFS) / 20))
