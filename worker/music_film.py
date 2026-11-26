@@ -153,7 +153,7 @@ def story_rank(film, pool, call, used=(), top=STORY_TOP):
     why = str(v.get("why") or "")[:500]
     fresh = [i for i in got if rows[i]["cid"] not in used] + [i for i in got if rows[i]["cid"] in used]
     if fresh[0] != got[0]:
-        why = f"{why} (that track already plays under an earlier film of this run, so the model's next pick goes first)"
+        why = f"{rows[fresh[0]].get('title')} is the highest ranked available track. {rows[fresh[0]].get('about') or ''}".strip()
     return [rows[i] for i in fresh[:top]], why
 
 
@@ -491,7 +491,7 @@ def _choose_from(film, marks, cache, pool, pool_name, used=(), call=None, n=AUDI
     ch = {"cid": t["cid"], "title": t.get("title"), "author": t.get("author"), "license": t.get("license"), "credit": t.get("credit"),
           "license_url": t.get("license_url"), "source_url": t.get("source_url"), "page_url": t.get("page_url"), "storage_key": t.get("storage_key"),
           "source_sha256": t.get("source_sha256"), "bpm": t.get("bpm"), "tags": t.get("tags"), "kind": music_choose.kind_of(film.get("kind")),
-          "why": why if rank == 0 else f"{why} (the engine kept pick {rank + 1}: the first could not carry this film)", "chosen_by": by,
+          "why": why if rank == 0 else f"The audition kept pick {rank + 1}, {t.get('title')}. {t.get('about') or sec.get('why') or 'Its measured arrangement best fits the film among the available picks.'}", "chosen_by": by,
           "auditioned": len(tried), "sung": sung_of(t), "removable": True, "pool": pool_name, "carries": row.get("carries"),
           "entry": {"start_s": sec.get("start_s"), "end_s": sec.get("end_s"), "point": sec.get("entry"), "why": sec.get("why"), "align": sec.get("align")}}
     if arc:
@@ -626,7 +626,12 @@ def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None,
             marks["close_s"] = float(arc["close_s"])
     whole = False                                              # the scene gives no voice apart: the film's own sound is read instead
     if not marks["words"]:
-        marks["words"] = MU.voice_spans_of(l1, work)
+        try:
+            marks["words"] = MU.voice_spans_of(l1, work)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            if not film or not os.path.isfile(film):
+                raise
+            marks["words"] = []
         if not marks["words"] and film and os.path.exists(str(film)):
             whole = True
             marks["words"] = [(a, b) for a, b in MU.voice_spans(MU._decode(film, MU.SR, 2)[:int(marks["dur_s"] * MU.SR)]) if a < marks["dur_s"]]
@@ -661,12 +666,20 @@ def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None,
     else:
         rep["choice"] = {"file": os.path.basename(str(song)), "supplied": True}
     sung = choice.get("sung") if choice else None
+    if not whole:
+        try:
+            rep["mix"] = MU.mix(l1, work, song, film=film, out=out, vocals=vocals, turn_s=turn_s,
+                                payoff_s=payoff_s, kind=kind, index=index, supplied=choice is None, sung=sung,
+                                turn_drop=turn_drop, arc=bool((choice or {}).get("arc")), story_arc=arc,
+                                **({"open_s":entry_s(choice)} if entry_s(choice) is not None else {}))
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            if not film or not os.path.isfile(film):
+                raise
+            rep["scene_mix_error"] = str(exc)[:300]
+        whole = bool(film and os.path.isfile(film) and not (rep.get("mix", {}).get("plan") or {}).get("ok"))
     if whole:
         rep["mix"] = MU.mix_film(film, song, arranged(marks, choice), out=out, kind=kind,
                                  vocals=vocals, sung=sung, supplied=choice is None)
-    else:
-        rep["mix"] = MU.mix(l1, work, song, film=film, out=out, vocals=vocals, turn_s=turn_s, payoff_s=payoff_s, kind=kind, index=index, supplied=choice is None, sung=sung,
-                            turn_drop=turn_drop, arc=bool((choice or {}).get("arc")), story_arc=arc, **({"open_s": entry_s(choice)} if entry_s(choice) is not None else {}))
     rep["ok"] = bool((rep["mix"].get("plan") or {}).get("ok") and (not out or rep["mix"].get("out")))
     rep["spend_usd"] = spend(call)
     return rep
