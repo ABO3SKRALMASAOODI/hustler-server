@@ -3169,7 +3169,15 @@ def _asks_check(ctx, draft, allow_repair=True):
     # film is the editor's answer to the note: its reply stands and the same note is not sent again.
     mark = [row.get("version"), preview_digest]
     if ledger.get("repair_mark") == mark:
-        return None
+        # The editor answered the check without changing the film. p5993
+        # (22 Nov) answered "2 seconds each" with a question and left 0.2 s
+        # clips; #1725 (p6125) named the same miss reply after reply and never
+        # acted. One follow-up per film state says so plainly; a pass that
+        # still changes nothing is its answer and the reply stands.
+        if ledger.get("pushed_mark") == mark:
+            return None
+        ledger["pushed_mark"] = mark
+        return asks.unmoved_note(ledger, verdict)
     ledger["repair_mark"] = mark
     ledger["repairs"] = int(ledger.get("repairs") or 0) + 1
     # The check informs the editor's next step; the editor's saved work stands (owner, 16 Nov 2026:
