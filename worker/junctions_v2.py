@@ -90,6 +90,14 @@ def _seq_key(item, name):
     return f"w1d_jn:{item.get('id')}:{name}"
 
 
+def fxgraph_batch(ctx):
+    """This render's junction batch (fxgraph.batch_junctions), or None:
+    a window compiled outside a batching render is drawn on its own."""
+    b = getattr(ctx.plan, "junction_batch", None)
+    return b if isinstance(b, dict) and b.get("parts") is ctx.parts \
+        else None
+
+
 def junction_h(plan, item):
     """Frames each side of the cut the style wants (d/2)."""
     return max(1, int(round(float(item.get("duration_s") or 0.4)
@@ -376,9 +384,77 @@ class _Junction:
     def _dissolve(self, ctx, item, h, N):
         vals = {j: wipe_masks.ease_in_out_sine(wipe_masks.progress(j, N))
                 for j in range(N)}
+        batch = fxgraph_batch(ctx)
+        if batch is not None:
+            # drawn with every other dissolve of this render by
+            # flush_junctions: the same frames through ONE mix
+            u = ctx.uid("jdb")
+            batch.setdefault("dissolve", []).append(
+                (ctx.a_label, ctx.b_label, vals, int(N), u))
+            return self._settle(ctx, u, N), None
         m = self._strength(ctx, vals, N)
         return self._settle(ctx, self._over(ctx, ctx.a_label, ctx.b_label,
                                             m), N), None
+
+    def flush_junctions(self, parts, plan, batch):
+        """Every batched dissolve of one render through ONE mix (p6311,
+        ticket 1844).
+
+        A dissolve window is a per-frame mix of its two sides through a
+        per-frame strength, and each window's own mix (its strength plane,
+        alpha and overlay) kept its frame pools for the life of the graph:
+        135 dissolves held over a gigabyte and the executor's OOM killer took
+        them all. Here the windows' outgoing sides, incoming sides and 2 x 2
+        strengths are each joined in window order, scaled and mixed once, and
+        every window is cut back out by frame count, so frame j of a window
+        meets exactly the frames and strength it met alone. Memory no longer
+        grows with the number of dissolves."""
+        rows = batch.get("dissolve") or []
+        if not rows:
+            return
+        fps3 = float(plan.fps3)
+        W, H = int(plan.W), int(plan.H)
+        u = f"jdx{len(rows)}"
+        restamp = (f"settb=AVTB,setpts='round(N/{fps3:.3f}/TB)'")
+        masks, sides = [], ([], [])
+        for k, (a, b, vals, N, _out) in enumerate(rows):
+            # each side exactly its window's N frames, so the joined
+            # streams stay in step window after window
+            for x, lab, side in ((0, a, "a"), (1, b, "b")):
+                parts.append(f"[{lab}]tpad=stop_mode=clone:stop={N},"
+                             f"trim=end_frame={N},setpts=PTS-STARTPTS"
+                             f"[{u}{side}{k}]")
+                sides[x].append(f"[{u}{side}{k}]")
+            terms = wipe_masks.piecewise_terms(vals)
+            passes = [terms[i:i + wipe_masks.MAX_TERMS] for i in
+                      range(0, len(terms), wipe_masks.MAX_TERMS)] or [[]]
+            geq = [f"geq=lum='{'+'.join(passes[0]) or '0'}'"]
+            geq += [f"geq=lum='lum(X,Y)+{'+'.join(p)}'" for p in passes[1:]]
+            parts.append(f"color=c=black:s=2x2:r={fps3:.3f},"
+                         f"trim=end_frame={N},format=gray,{','.join(geq)},"
+                         f"{wipe_masks.pts(fps3)}[{u}m{k}]")
+            masks.append(f"[{u}m{k}]")
+        n = len(rows)
+        join = f"concat=n={n}:v=1:a=0," if n > 1 else ""
+        parts.append("".join(sides[0]) + f"{join}{restamp}[{u}A]")
+        parts.append("".join(sides[1]) + f"{join}{restamp}[{u}B]")
+        parts.append("".join(masks) + f"{join}scale={W}:{H}:flags=neighbor,"
+                     f"{restamp}[{u}M]")
+        parts.append(f"[{u}B]format=yuva420p[{u}t]")
+        parts.append(f"[{u}M]format=gray[{u}g]")
+        parts.append(f"[{u}t][{u}g]alphamerge[{u}tm]")
+        parts.append(f"[{u}A][{u}tm]overlay=eof_action=pass:"
+                     f"format=yuv420,{restamp}[{u}o]")
+        if n == 1:
+            parts.append(f"[{u}o]null[{rows[0][4]}]")
+            return
+        parts.append(f"[{u}o]split={n}" + "".join(f"[{u}s{k}]"
+                                                  for k in range(n)))
+        at = 0
+        for k, (_a, _b, _v, N, out) in enumerate(rows):
+            parts.append(f"[{u}s{k}]trim=start_frame={at}:end_frame="
+                         f"{at + N},setpts=PTS-STARTPTS[{out}]")
+            at += N
 
     def _masked(self, ctx, item, h, N):
         style = item["style"]

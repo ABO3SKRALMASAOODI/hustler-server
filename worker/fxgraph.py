@@ -419,6 +419,9 @@ class FxPlan:
         # substitute, params, est_ms}; devices.resolve_detail): a compiler
         # draws a substitute rung from ``ctx.device(item)``.
         self.devices = {}
+        # Windows collected while the renderer draws many junctions through
+        # shared chains (batch_junctions / flush_junctions).
+        self.junction_batch = None
         # CPU-ms the render's devices may still add (devices.render_budget_ms,
         # spent in program order); None: no cap (cost model unreadable).
         self.budget_ms = None
@@ -980,6 +983,32 @@ def apply_junction(parts, a_label, b_label, junction, plan):
         parts.append(f"[{a_label}]nullsink")
         parts.append(f"[{b_label}]nullsink")
     return out
+
+
+def batch_junctions(parts, plan):
+    """From here until ``flush_junctions(parts, plan)``, compilers that can
+    draw many windows through one chain (junctions_v2's dissolve) collect
+    them instead of drawing each alone; the labels they return are defined
+    by the flush. Each graph build has its own batch (keyed by ``parts``)."""
+    if plan is not None:
+        plan.junction_batch = {"parts": parts}
+
+
+def flush_junctions(parts, plan):
+    """Draw every window collected since ``batch_junctions``."""
+    batch = getattr(plan, "junction_batch", None) if plan is not None \
+        else None
+    if plan is not None:
+        plan.junction_batch = None
+    if not isinstance(batch, dict) or batch.get("parts") is not parts:
+        return
+    seen = set()
+    for comp in list(plan._compilers.values()):
+        fn = getattr(comp, "flush_junctions", None)
+        if fn is None or id(comp) in seen:
+            continue
+        seen.add(id(comp))
+        fn(parts, plan, batch)
 
 
 def junction_overlay(parts, vlabel, windows, plan):
