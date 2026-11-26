@@ -30,19 +30,48 @@ BIN = f"{V}/audit/subscriber-reliability-20260908/bin-arm"
 FF, FP = os.environ.get("SHELL_FFMPEG", BIN + "/ffmpeg"), os.environ.get("SHELL_FFPROBE", BIN + "/ffprobe")
 
 
+ENGINE_FILES = ("renderer.py", "scene/run.py", "footage/run.py", "music_film.py")
+
+
+def _engines(w):
+    return all(os.path.exists(os.path.join(w, n)) for n in ENGINE_FILES)
+
+
+def _current(w):
+    """True when the worker is on the workflow line the skills are built against (claude/cr-worker-1120, the
+    factory's worker): its scene engine has the shared source-credit runs that wf1_film imports. Main's own worker
+    trails that line, and a film built on it stopped with an ImportError (26 Nov)."""
+    try:
+        with open(os.path.join(w, "scene", "text_layout.py")) as f:
+            return "def shared_source_credits" in f.read()
+    except OSError:
+        return False
+
+
 def worker_dir():
     """The worker these films are made with: one that holds this week's engines (the scene engine, the footage
-    engine, the film's music). The checkout beside this plugin when it has them; else the synced main checkout
-    (.valmera/sync_skill.sh keeps worktrees/skill-main at main). The installed copy under hustler-server sits beside
-    an older worker without the engines, and the Codex cache has no worker beside it: both reach the synced one."""
+    engine, the film's music). In order: VALMERA_WORKER (the factory sets its own); the checkout beside this plugin
+    when it is on the workflow line; worktrees/skill-worker, which .valmera/sync_skill.sh keeps at the workflow
+    worker branch, so a film started by hand (the installed copy under hustler-server, or Codex's cache, which has
+    no worker beside it) gets the same engines as the factory's; then the checkout beside this plugin with the
+    engine files (CI); last the synced main checkout, worktrees/skill-main."""
     if os.environ.get("VALMERA_WORKER"):
         return os.environ["VALMERA_WORKER"]
+    beside = []
     d = HERE
     for _ in range(6):
         d = os.path.dirname(d)
         w = os.path.join(d, "worker")
-        if all(os.path.exists(os.path.join(w, n)) for n in ("renderer.py", "scene/run.py", "footage/run.py", "music_film.py")):
+        if _engines(w):
+            beside.append(w)
+    for w in beside:
+        if _current(w):
             return w
+    synced = f"{V}/worktrees/skill-worker/worker"
+    if _engines(synced):
+        return synced
+    if beside:
+        return beside[0]
     return f"{V}/worktrees/skill-main/worker"
 
 
