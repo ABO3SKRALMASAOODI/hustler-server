@@ -645,3 +645,14 @@ def test_cli_preserves_explicit_zero_source_hearing(tmp_path,monkeypatch):
     assert seen[0]['hear_s']==0
 
 
+
+
+def test_unanswered_beat_keeps_its_named_moving_picture_search_on_both_providers(monkeypatch):
+    monkeypatch.setattr(plan.ask,'ask',lambda *a,**k: ('{"subjects":[],"lines":[]}',0))
+    line = dict(i=4,say="The prototype takes off.",pictures=["Ingenuity"],
+                visual="Ingenuity first powered flight on Mars")
+    result,_ = plan.plan([line], [])
+    subject, = result["subjects"]
+    assert result["lines"] == [dict(i=4,show=line["visual"],subjects=["Ingenuity"])]
+    assert dict(where="youtube",q=line["visual"]) in subject["searches"]
+    assert dict(where="archive",q="Ingenuity") in subject["searches"]

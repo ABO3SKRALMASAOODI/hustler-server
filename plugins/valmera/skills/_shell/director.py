@@ -56,6 +56,10 @@ PRINCIPLES = """How the best vertical edits keep a stranger watching (principles
 - A fixed figure lands whole on its word. Count between two sourced endpoints when the passage describes that change.
   Keep the unit, relation and any qualification together with the figure.
 - Every turn changes something you can see: the surface, the polarity, the pace, or a type card.
+- Cover each thought with its actual subject. When a search yields one photograph, move from its
+  establishing frame into a meaningful detail, then return to the moving speaker at a phrase boundary.
+  Use the speaker's other verified footage where it depicts this beat. Give a still or type page only
+  the time its information takes to read. Avoid prolonged windows on a held screen-share.
 - Lists burst: one picture or one hit per item, fast, for as long as the list is said (about a second), then it lands.
 - The pace alternates fast against hold: some 3 s windows carry one cut, others six to ten. Use a brief dip or held image to separate two thoughts when the pause,
   change of subject or new picture gives it a purpose. Carry an unbroken spoken turn on the moving picture.

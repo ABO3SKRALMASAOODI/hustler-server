@@ -2228,6 +2228,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         P.shot([f0, f1], key, F.cover_crop(pw_, ph_, W / H, (0.5, 0.45), (0.5, 0.40)), **kw)
 
     def window(f0, f1, kind, name, rec, key, source_ink=()):
+        end = f1
+        if kind == "clip":
+            f1 = min(end, max(f0 + 1, rec.get("action_end", end)))
         n = f1 - f0
         mono = is_mono(f0)
         evidence = bool(source_ink or rec.get("action_box") or rec.get("attribution") or rec.get("reframe") or rec.get("full_source") or archive_event(rec)) or rec.get("provider") == "primary-document"
@@ -2286,13 +2289,11 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 x0,y0,x1,y1 = fit_panel(crop,(rec["w"],rec["h"]),(W,H),[.02,.15,.98,.55])
                 kw.update(crop=crop,source_ink=[[x0,y0,x1,y1]],grade=dict(gamma=gamma),
                           look=None,op=[1.]*n)
-        action_end = min(f1,max(f0+1,rec.get("action_end",f1)))
-        kw["op"] = kw["op"][:action_end-f0]
-        P.card([f0, action_end], key, [x0, y0, x1, y1], **kw)
-        if action_end < f1:
-            lo, hi = rec["src"]
-            held = max(lo,hi-1/(rec.get("fps") or FPS))
-            P.card([action_end,f1], key, [x0,y0,x1,y1], **dict(kw,src=[held,hi],op=1.))
+        if kind == "photo" and n > FPS:
+            kw["s"] = [r4(.94 + .06 * smooth(j / (n - 1))) for j in range(n)]
+        P.card([f0, f1], key, [x0, y0, x1, y1], **kw)
+        if f1 < end:
+            take_shot(f1, end)
         note(f0, f1, kind, name, rec, "window")
         P.pictures[-1]["source_crop"] = kw["crop"]
         if projection:
