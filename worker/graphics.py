@@ -52,6 +52,7 @@ PANEL_ALPHA = "&H20&"
 # event, so entrance claims it first and an exit that also wants to move
 # falls back to a fade (same rule captions' LINE_ANIMS live by).
 MOVE_ANIMS = ("slide_up", "rise", "drop")
+_HEX6 = re.compile(r"#[0-9A-Fa-f]{6}")
 
 # ── Complex-script (shaping-sensitive) text ──────────────────────────────
 # Letter-spacing and complex text shaping are MUTUALLY EXCLUSIVE in libass:
@@ -599,7 +600,11 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
     head += rf"\fs{px}"
     if sp:
         head += rf"\fsp{sp}"
-    head += rf"\1c{text_c}\3c&H101010&"
+    # The edge's colour: near-black unless the item names its own (a light
+    # edge keeps dark or coloured ink readable without changing the ink).
+    edge_hex = str(tx.get("outline_color") or "")
+    edge_c = _inline_hl(edge_hex) if _HEX6.fullmatch(edge_hex) else "&H101010&"
+    head += rf"\1c{text_c}\3c{edge_c}"
     outline = tx.get("outline_width")
     shadow = tx.get("shadow")
     edge_scale = px / tpl["base_size"] if tx.get("font_size") is not None else f
@@ -609,7 +614,8 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
         head += r"\i1"
     if box:
         bx, by = max(2, round(0.22 * px)), max(2, round(0.13 * px))
-        fill = accent if box_kind == "accent" else PANEL_FILL + rf"\3a{PANEL_ALPHA}"
+        panel = edge_c if edge_c != "&H101010&" else PANEL_FILL
+        fill = accent if box_kind == "accent" else panel + rf"\3a{PANEL_ALPHA}"
         head += rf"\3c{fill}\xbord{bx}\ybord{by}\shad0"
     head += _entrance_extra(entrance, px)
     if not exit_move:

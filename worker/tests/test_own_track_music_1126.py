@@ -113,3 +113,49 @@ def test_a_wordless_upload_of_machinery_gets_a_chosen_bed_with_its_sound_under_i
     assert edl["music"] and edl["music"][0]["storage_key"] == "bed:t-one"
     assert edl["volume"] == [{"start": 0.0, "end": 20.0, "gain_db": got["source_under_db"]}] and rep["bed"]["source_under_db"] == got["source_under_db"]
     schemas.validate_edl(edl, 20.0)
+
+
+def test_the_duck_leaves_the_spoken_words_at_their_recorded_level(tmp_path):
+    """A few lines over a skate, a game or a machine: the whole source went 10-24 dB down under the leading bed, the
+    words with it (the dialogue leveller measures with the automation left out, so it never brought them back). Now
+    only the stretches where nobody speaks are ducked, easing in and out beside the words."""
+    idx = {"words": [{"w": "look", "t0": 5.0, "t1": 5.4}, {"w": "at", "t0": 5.5, "t1": 5.7}, {"w": "this", "t0": 5.8, "t1": 6.2},
+                     {"w": "go", "t0": 14.0, "t1": 14.3}]}
+    spans = bed.speech_spans(idx)
+    assert spans == [[4.8, 6.4], [13.8, 14.5]]
+    bed._write(str(tmp_path), {"on": True, "cid": "mk-1", "settled": True, "source_under_db": -20.0, "source_speech": spans})
+    vol = bed.source_volume(str(tmp_path), 20.0)
+    for a, b in spans:                                                   # no item touches a spoken stretch
+        assert not any(v["start"] < b and a < v["end"] for v in vol), (a, b, vol)
+    assert min(v["gain_db"] for v in vol) == -20.0 and any(v["gain_db"] == -10.0 for v in vol)    # full depth, and shoulders
+    assert vol[0]["start"] == 0.0 and vol[-1]["end"] == 20.0
+    bed._write(str(tmp_path), {"on": True, "cid": "mk-1", "settled": True, "source_under_db": -20.0, "source_speech": [[0.0, 20.0]]})
+    assert bed.source_volume(str(tmp_path), 20.0) == []                  # talk throughout: the source is never ducked
+
+
+def test_music_that_starts_late_and_a_lo_fi_song_still_read_as_music():
+    """Only the first 180 s were read, and a song had to clear one bar alone: a long upload whose song starts late,
+    or a phone-recorded song part-way to both bars, read as ambience and was ducked under a chosen bed."""
+    late = np.concatenate([_machinery(70.0), _song(40.0), _machinery(70.0)])
+    assert perceive.is_music(perceive.music_measure(_machinery(180.0))) is False
+    assert perceive.is_music(perceive.music_measure(late)) is True
+    assert perceive.is_music({"beat": 0.16, "tonal": 0.14}) is True              # part-way to both
+    assert perceive.is_music({"beat": 0.14, "tonal": 0.09}) is False             # p6275's game sound, measured
+    assert perceive.is_music({"beat": 0.07, "tonal": 0.0}) is False              # p6309
+
+
+def test_a_cached_preparation_from_before_the_music_measure_is_rebuilt(monkeypatch, tmp_path):
+    """Every upload indexed before this carries a perception with no `music`. The cache's identity hashes perceive's
+    own source, so a cache made by older measurement code is never restored: the film measures again, with music."""
+    from score import preparation
+    preparation._code_key.cache_clear()
+    now = preparation._code_key()
+    older = tmp_path / "perceive_old.py"
+    older.write_text(open(perceive.__file__, encoding="utf-8").read().replace("music=music_measure(x), ", ""))
+    monkeypatch.setattr(perceive, "__file__", str(older))
+    preparation._code_key.cache_clear()
+    try:
+        assert preparation._code_key() != now
+    finally:
+        monkeypatch.undo()
+        preparation._code_key.cache_clear()

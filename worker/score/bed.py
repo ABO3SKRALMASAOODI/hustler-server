@@ -335,6 +335,7 @@ def settle(work, comp, index, score_lines, about=""):
         want = LEAD_LUFS if lead else VOICE_LUFS - UNDER_VOICE.get(f["kind"], 9.0)
         gain = round(max(-40.0, min(want - (lufs if lufs is not None else -14.0), 6.0)), 1)
         doc["source_under_db"] = ambience_under(work, f["duration_s"]) if lead else None
+        doc["source_speech"] = speech_spans(index) if doc["source_under_db"] is not None else None
         doc.update({"settled": True, "kind": f["kind"], "lead": lead, "gain_db": gain, "section_lufs": None if lufs is None else round(lufs, 1),
                     "offset_s": round(a, 2), "loop": bool(sec.get("loop")), "turn_s": None if turn_s is None else round(turn_s, 2),
                     "dur_s": f["duration_s"], "align": sec.get("align"), "section_why": sec.get("why"), "film": f})
@@ -372,13 +373,56 @@ def ambience_under(work, dur_s=None):
         return None
 
 
+SPEECH_PAD_S = 0.2          # a spoken word keeps the upload at its recorded level this long either side of it
+SHOULDER_S = 0.3            # the duck eases in and out over this, at half depth, beside the words
+MIN_QUIET_S = 0.8           # a pause between words shorter than this is not ducked: the voice runs on
+
+
+def speech_spans(index):
+    """The upload's spoken stretches, source seconds, padded and merged: where its own sound is never ducked."""
+    out = []
+    for w in sorted(((index or {}).get("words") or []), key=lambda w: float(w.get("t0") or 0)):
+        try:
+            a, b = float(w["t0"]) - SPEECH_PAD_S, float(w["t1"]) + SPEECH_PAD_S
+        except (KeyError, TypeError, ValueError):
+            continue
+        if out and a <= out[-1][1] + MIN_QUIET_S:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([max(0.0, a), b])
+    return [[round(a, 2), round(b, 2)] for a, b in out]
+
+
 def source_volume(work, src_dur):
-    """The EDL's source volume item that sets the upload's own ambience under the chosen bed, or []."""
+    """The EDL's source volume items that set the upload's own ambience under the chosen bed, or []. Only where
+    nobody speaks: a few lines over a skate, a game or a machine keep their recorded level (the dialogue leveller
+    measures with this automation left out, so a ducked word would stay buried), and the duck eases in and out
+    beside them at half depth instead of stepping."""
     doc = chosen(work)
     g = (doc or {}).get("source_under_db")
     if not doc or g is None or not src_dur:
         return []
-    return [{"start": 0.0, "end": round(float(src_dur), 2), "gain_db": float(g)}]
+    end, g = round(float(src_dur), 2), float(g)
+    quiet, at = [], 0.0
+    for a, b in (doc.get("source_speech") or []):
+        if a - at >= MIN_QUIET_S:
+            quiet.append((at, min(a, end)))
+        at = max(at, b)
+    if end - at >= MIN_QUIET_S:
+        quiet.append((at, end))
+    out = []
+    for a, b in quiet:
+        lo = a + (SHOULDER_S if a > 0 else 0.0)
+        hi = b - (SHOULDER_S if b < end else 0.0)
+        if hi - lo < 0.1:
+            out.append({"start": round(a, 2), "end": round(b, 2), "gain_db": round(g / 2, 1)})
+            continue
+        if lo > a:
+            out.append({"start": round(a, 2), "end": round(lo, 2), "gain_db": round(g / 2, 1)})
+        out.append({"start": round(lo, 2), "end": round(hi, 2), "gain_db": g})
+        if hi < b:
+            out.append({"start": round(hi, 2), "end": round(b, 2), "gain_db": round(g / 2, 1)})
+    return [v for v in out if v["end"] > v["start"]]
 
 
 ARRANGE_S = 14.0            # what the film's write waits for the track to be cut to it; past it the plain bed plays

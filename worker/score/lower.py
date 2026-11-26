@@ -42,7 +42,6 @@ ACCENT = {"neg": "negative", "threshold": "threshold", "mono": "mono", "posteris
 # and a burn on a rect is a soft glow still under the type, fading on the engine's own curve.
 BURN_PEAK, BURN_DECAY_F, GLOW_GAIN = 0.35, 6, 0.55
 EDGE_OUTLINE = 2.2         # libass outline at the caption's play resolution, for a word marked `edge`
-LIGHT_INK = "#FFFFFF"      # an edged title's ink: the renderer's title outline is dark, so the word inside it is light
 
 
 def r2(x):
@@ -785,7 +784,11 @@ def lower_captions(l1, rep, src_dur=0.0):
                     "id": f"tx.cap.{cid}"[:60], "text": text.replace("\n", " "), "start": r2(a / fps), "end": r2(b / fps), "template": "title", "font": tfont,
                     "font_size": round(min(max(libass_px(v, px) / min(l1["frame"][0], H), 0.012), 0.3), 4), "text_align": "center", "max_width": 0.72,
                     "color": first[0].get("ink") or "#FFFFFF", "uppercase": False, "shadow": 1.0, "outline_width": 0.0, "entrance": "none", "exit": "none",
-                    "x": 0.5, "y": round(min(max(y, 0.02), 0.98), 4)})
+                    "x": 0.5, "y": round(min(max(y, 0.02), 0.98), 4),
+                    # an edged chunk keeps its edge as a text item too (the last look's `cap` mend, white on white)
+                    **(edge_style(first[0].get("ink") or "#FFFFFF") if any(p.get("edge") for ps in parts.values() for p in ps) else {})})
+                if any(p.get("edge") for ps in parts.values() for p in ps):
+                    rep["captions_edged"] = rep.get("captions_edged", 0) + 1
                 rep["captions_as_text"] = rep.get("captions_as_text", 0) + 1
             continue
         # A chunk can outlive a cut, and its ink was solved shot by shot. One item per run of one ink, so
@@ -942,19 +945,17 @@ def text_item(l1, it, a, b, rep):
     if face[1]:
         tx["italic"] = True
     if it.get("edge"):
-        # Today's titles draw a dark outline only (graphics: \3c&H101010&). A word marked `edge` reads on neither
-        # polarity, so dark ink went out with no edge at all and vanished into what it stood on (p6304: dark
-        # '03 LOAD' on dark straw; p6311: black type on a red dress). Such a word goes out light, inside the dark
-        # edge the renderer draws: it reads on any picture, and keeps its words, seat, size and timing.
-        if edge_style(tx["color"])["outline_color"] != "#111111":
-            tx["color"] = LIGHT_INK
-            rep["texts_edged_light"] = rep.get("texts_edged_light", 0) + 1
-        tx["outline_width"], tx["shadow"] = EDGE_OUTLINE, 1.0
+        # A word marked `edge` reads on neither polarity. The renderer drew a dark outline only, so dark ink went out
+        # with no edge and vanished into what it stood on (p6304: dark '03 LOAD' on dark straw; p6311: black type on
+        # a red dress). The edge now takes the colour that contrasts the ink (a light one round dark or coloured
+        # type), so the word reads on any picture and keeps its ink, words, seat, size and timing.
+        tx.update(edge_style(tx["color"]))
         rep["texts_edged"] = rep.get("texts_edged", 0) + 1
     if it.get("boxed"):
-        # The last look read this line as unreadable on its picture (compiler.mend_type): it stands on the
-        # renderer's dark panel, light ink inside it, whatever is behind it.
-        tx["box"], tx["color"] = True, LIGHT_INK
+        # The last look read this line as unreadable on its picture (compiler.mend_type): it stands on a panel in
+        # the colour that contrasts its own ink (the renderer's panel is the item's edge colour), whatever is behind.
+        tx["box"] = True
+        tx["outline_color"] = tx.get("outline_color") or edge_style(tx["color"])["outline_color"]
         rep["texts_boxed"] = rep.get("texts_boxed", 0) + 1
     track = float(v.get("track", 0)) * px / 100.0
     if track:
@@ -1211,8 +1212,8 @@ def lower(l1, work):
             rep["bed"] = {"cid": music[0]["storage_key"].split(":", 1)[-1], "gain_db": music[0]["gain_db"], "drop": bool(bed_fx)}
             under = bed.source_volume(work, src_dur)
             if under:                 # the upload's own sound is ambience, not music: it plays under the chosen track
-                edl["volume"] = under
-                rep["bed"]["source_under_db"] = under[0]["gain_db"]
+                edl["volume"] = list(edl.get("volume") or []) + under
+                rep["bed"]["source_under_db"] = min(v["gain_db"] for v in under)
     except Exception as e:  # noqa: BLE001 - a film is never lost to its music
         rep["bed_error"] = f"{type(e).__name__}: {str(e)[:160]}"
     if look:

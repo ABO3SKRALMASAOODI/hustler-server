@@ -2950,9 +2950,10 @@ def mend_type(ctx, l1):
     the outcome). Before, the look's named type was cut and the film lost its devices (p6311: the captions and a
     title; p6304: a counter and a title), or the whole film went back to the upload.
 
-    Every named word carries the contrasting edge, which the lowering draws as light ink inside the renderer's dark
-    outline: it reads on any picture (dark '03 LOAD' on dark straw, black type on a red dress, white captions on a
-    white bauble). Display type the look could not read stands on the renderer's dark panel as well. A display block the look says covers what the frame is about moves, as one unit, to the nearest
+    Every named word carries the contrasting edge, an outline in the colour that contrasts its own ink (light round
+    dark or coloured type, dark round light type): it reads on any picture and keeps its ink (dark '03 LOAD' on dark
+    straw, black type on a red dress, white captions on a white bauble). Display type the look could not read stands
+    on a panel in that contrasting colour as well. A display block the look says covers what the frame is about moves, as one unit, to the nearest
     height clear of where it stood, the heads, the printed words, the other type, the watermark and the platform's
     buttons; its words, size and timing stay. Captions keep their seat."""
     import copy

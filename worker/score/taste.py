@@ -1171,6 +1171,15 @@ def source_second(l1, t):
     return best[1] if best else t
 
 
+def framing(c):
+    """How far a camera crop pushes in past the film's own fit of the upload. The crop keeps the film's shape, so the
+    fit is the largest such rect in the source: 1 / max(width, height). Read against the width alone, a square
+    upload fitted to 9:16 (crop 0.56 wide, full height) was told to the look as 'framed at 1.78x', and the look
+    called the fit a zoom (p6275, #1817: 'Zoom crops the player names', on frames with no push-in)."""
+    z = 1.0 / max(float(c[2]) - float(c[0]), float(c[3]) - float(c[1]), 1e-3)
+    return f"the upload pushed in {z:.2f}x past its fit to the film's frame" if z >= 1.05 else "the upload fitted to the film's frame, no push-in"
+
+
 def on_screen(l1, t, devices, whats=None):
     """What the film added at this second, as the look's list: id, kind, the words if it is type, and for a
     found picture what the Bin says it shows: the look can't tell Webber's car from any car without it."""
@@ -1199,7 +1208,7 @@ def on_screen(l1, t, devices, whats=None):
                 c = c[len(c) // 2] if c and isinstance(c[0], list) else c
                 if gid and gid not in seen:
                     seen.add(gid)
-                    rows.append(f"{gid}: camera, the upload framed at {1 / max(c[2] - c[0], 1e-3):.2f}x" if c else f"{gid}: camera")
+                    rows.append(f"{gid}: camera, {framing(c)}" if c else f"{gid}: camera")
                 continue
             key = gid or it["id"]
             if key not in seen:

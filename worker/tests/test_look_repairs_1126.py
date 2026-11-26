@@ -5,6 +5,8 @@ p6275: four of six frames for the upload, nothing named, and the film went back 
 Scores and index stubs; no customer media."""
 import json
 
+import pytest
+
 import score.compiler as S
 from score import lower, taste
 from tests.test_score_taste import beats_over, comp, film, selfie, voice
@@ -26,18 +28,35 @@ def _texts(c, tmp_path, text):
     return [t for t in edl["texts"] if text in t["text"]], _rep
 
 
-def test_an_edged_dark_title_goes_out_light_inside_the_dark_outline(tmp_path):
-    """The renderer's title outline is dark only, so dark ink marked `edge` went out with no edge (p6304 '03 LOAD' on
-    dark straw, p6311 black type on a red dress). Before: colour #111111, outline 0. After: light ink, outline drawn."""
-    idx, text = _titled(ink="#111111")
+@pytest.mark.parametrize("ink,edge", [("#111111", "#F2F2F2"), ("#D62828", "#F2F2F2"), ("#1D3557", "#F2F2F2"), ("#FFD166", "#111111")])
+def test_an_edged_title_keeps_its_ink_inside_the_contrasting_edge(tmp_path, ink, edge):
+    """The renderer's title outline was dark only, so dark ink marked `edge` went out with no edge (p6304 '03 LOAD' on
+    dark straw, p6311 black type on a red dress). The edge now contrasts the ink and the ink stays: a red or navy the
+    customer or the Director chose is not turned white."""
+    idx, text = _titled(ink=ink)
     c = comp(text, idx, voice(20.0))
     words = [i for i in c.l1["items"] if i["k"] == "word" and i["id"].startswith("b01.big")]
     assert words
     for w in words:
-        w["ink"], w["edge"] = "#111111", True
+        w["ink"], w["edge"] = ink, True
     got, rep = _texts(c, tmp_path, "LINE 0")
-    assert got and all(t["color"] == "#FFFFFF" and t["outline_width"] > 0 and t["shadow"] == 1.0 for t in got)
-    assert rep.get("texts_edged_light")
+    assert got and all(t["color"] == ink and t["outline_color"] == edge and t["outline_width"] > 0 and t["shadow"] == 1.0 for t in got)
+    assert rep.get("texts_edged")
+
+
+def test_the_renderer_draws_a_title_edge_and_panel_in_the_item_outline_colour():
+    """graphics hard-coded the title outline as near-black (\\3c&H101010&): a light edge round navy ink could not be
+    drawn. The item's outline_color now reaches the edge, and the panel when boxed; without it nothing changes."""
+    import graphics
+    from schemas import TextItem
+    base = {"id": "t", "text": "LOAD", "start": 0.0, "end": 2.0, "template": "title", "color": "#1D3557", "outline_width": 2.2}
+    assert TextItem(**base).outline_color is None and TextItem(**base, outline_color="#F2F2F2").outline_color == "#F2F2F2"
+    plain = graphics._compile_item(dict(base), 4, (1080, 1920))["text"]
+    edged = graphics._compile_item(dict(base, outline_color="#F2F2F2"), 4, (1080, 1920))["text"]
+    boxed = graphics._compile_item(dict(base, outline_color="#F2F2F2", box=True), 4, (1080, 1920))["text"]
+    assert "\\3c&H101010&" in plain and "\\1c&H57351D&" in edged
+    assert "\\3c&HF2F2F2&" in edged and "\\3c&H101010&" not in edged
+    assert "\\3c&HF2F2F2&\\3a" in boxed
 
 
 def test_mend_lines_keep_the_title_edge_it_and_box_it_when_unreadable(tmp_path):
@@ -50,7 +69,7 @@ def test_mend_lines_keep_the_title_edge_it_and_box_it_when_unreadable(tmp_path):
     assert all(i.get("edge") and i.get("boxed") for i in after)
     assert m.meter["mended_type"]["boxed"]
     got, rep = _texts(m, tmp_path, "LINE 0")
-    assert got and all(t.get("box") and t["color"] == "#FFFFFF" for t in got) and rep.get("texts_boxed")
+    assert got and all(t.get("box") and t["color"] == "#FFFFFF" and t["outline_color"] == "#111111" for t in got) and rep.get("texts_boxed")
     others = [i for i in m.l1["items"] if i["k"] == "word" and i["id"].startswith("b02.big")]
     assert others and not any(i.get("boxed") for i in others)                     # only what was named
 
@@ -82,3 +101,13 @@ def test_the_look_is_told_the_film_frame_is_nine_sixteen_and_asked_for_faults():
     assert "9:16" in taste.LOOK_SYSTEM and '"fault"' in taste.LOOK_SYSTEM
     v = taste.read_look(json.dumps({"pairs": [{"n": 1, "post": "upload", "why": "x", "remove": [], "fault": {"cap": "unreadable"}}]}), 6, set())
     assert v["remove"] == ["cap"] and v["faults"] == {"cap": "unreadable"}
+
+
+def test_the_look_hears_a_fit_to_nine_sixteen_as_a_fit_not_a_zoom():
+    """p6275 (#1817): a square upload fitted to 9:16 is a crop 0.5625 wide and full height. The look's list said
+    'the upload framed at 1.78x' for it, and the look called four frames 'zoom crops the player names'. The push-in
+    is now read past the fit; a real push-in still reads as one."""
+    assert "no push-in" in taste.framing([0.0308, 0.0, 0.5933, 1.0])                   # p6275's crop, measured
+    assert "1.78x" not in taste.framing([0.0308, 0.0, 0.5933, 1.0])
+    assert "2.00x" in taste.framing([0.25, 0.25, 0.75, 0.75])                          # a 9:16 upload pushed in 2x
+    assert "1.33x" in taste.framing([0.1, 0.1, 0.1 + 0.5625 * 0.75, 0.85])            # a square upload pushed in past its fit
