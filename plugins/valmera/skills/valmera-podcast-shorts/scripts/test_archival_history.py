@@ -90,14 +90,16 @@ def test_contemporary_statement_and_spoken_memory_have_separate_credits(tmp_path
                                 {},{"interview":interview,"lab":record},[])
     ordinary = display.claim_fact(dict(claim,stance="concern"),{},{"interview":interview},[])
     monkeypatch.setattr(coverage,"speaker_moves",lambda *a:([],[]))
-    scene,_ = wf1_film.build(script,pack,"prints",dict(display_facts=[
+    scene,beats = wf1_film.build(script,pack,"prints",dict(display_facts=[
         dict(first=1,last=12,facts=[scoped]),dict(first=8,last=16,facts=[ordinary])]))
+    # The contemporary statement and the spoken memory keep separate credits, in the record: neither byline nor
+    # the archive's credit is printed over the speaker.
     words = [i for i in scene["items"] if i.get("fact_type")]
-    record_items = [i for i in words if i.get("t")=="Lab archive"]
-    assert record_items
-    lo,hi = record_items[0]["f"]
-    assert any(i.get("t")=="Founder · Recollection" and i["f"]==[lo,hi] for i in words)
-    assert all(i["f"][0]>=hi for i in words if i.get("t")=="Founder · Concern")
+    assert not any(i.get("t") in ("Founder · Recollection","Founder · Concern","Lab archive") for i in words)
+    facts = [f for p in beats["research_facts"] for f in p["facts"]]
+    assert {f["chain"]["stance"] for f in facts} == {"recollection","concern"}
+    assert [(p["first"],p["last"]) for p in beats["research_facts"]] == [(1,12),(8,16)]
+    assert all(f["attribution"] == "Founder" for f in facts)
 
 
     at = len(pack["words"]["words"]) - 15

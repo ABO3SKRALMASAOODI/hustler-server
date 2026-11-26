@@ -1021,10 +1021,14 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
         args = dict(a.get("args") or {})
         dev = str(a["dev"])
         row = dict(args, dev=dev, id=f"dr{k}", beat=a.get("beat"))
-        if dev == "counter" and "to" in row:
-            # A factual reading lands on its stated figure. Animate the ink,
-            # leaving fictional intermediate values out of the display.
+        # A factual reading lands on its stated figure: a counter without a sourced progression shows only that
+        # figure, never fictional values on the way, and first shows it on its spoken word (run 0, from its lands
+        # frame below). A sourced progression (wf1_display.bind) keeps its counted start.
+        flat = dev == "counter" and "to" in row and not any(
+            isinstance(x, dict) and isinstance(x.get("progression"), dict) for x in args.get("facts") or [])
+        if flat:
             row["from"] = row["to"]
+            row["run"] = 0
         row.pop("at", None)  # the word address above has already been resolved
         row.pop("until", None)
         row.pop("f", None)                                # the ask's own place is its at/until word, set below
@@ -1049,6 +1053,9 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
         if inner and (g is not None or spanning):         # a stretch reaches every step, section and cut it names
             g = max(g or f, max(inner) + (12 if pal and pal.spans(dev) else 0))
         row["f"] = [f, min(max(int(g), f + 2), dur_f)] if g is not None else f
+        land = row.get("lands")
+        if flat and type(land) is int and f < land < dur_f:
+            row["f"] = [land, min(max(row["f"][1], land + 2), dur_f)] if isinstance(row["f"], list) else land
         if isinstance(row.get("pool"), list) and pic_key:
             row["pool"] = [pic_key(str(p)) or p for p in row["pool"]]
         pics = [p for p in ([pic_key(p) for p in a.get("pics") or []] if pic_key else []) if p]

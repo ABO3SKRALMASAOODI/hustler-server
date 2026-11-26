@@ -572,3 +572,16 @@ def test_two_type_devices_share_one_factual_value_only_while_their_ink_overlaps(
     share_display_copy([figure,counter,*repeated])
     assert figure["op"] == [1]*3 + [0]*3 + [1]*6
     assert "op" not in counter and all("op" not in item for item in repeated)
+
+
+def test_a_display_copy_gives_way_to_a_grouped_device_showing_the_same_figure():
+    """A counter's steps carry a text_group in workflow mode: they keep their lettering, and an ungrouped display row
+    of the same figure is hidden while the counter shows it. The caption keeps its seat."""
+    from scene.text_layout import share_display_copy
+    steps = [dict(k="word",v="palette",role="big",t="1200 MILES",f=[f,f+4],text_group="ask3") for f in range(10,46,4)]
+    display = dict(k="word",v="dsp",role="big",t="1200  miles",f=[0,60])
+    caption = dict(k="word",v="cap",role="cap",t="1200 MILES",f=[20,30])
+    other = dict(k="word",v="dsp",role="big",t="LATER",f=[0,60])
+    share_display_copy([*steps,display,caption,other])
+    assert display["op"] == [1]*10 + [0]*36 + [1]*14
+    assert all("op" not in it for it in (*steps, caption, other))

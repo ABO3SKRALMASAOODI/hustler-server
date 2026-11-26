@@ -13,6 +13,15 @@ UCSD = "https://jacobsschool.ucsd.edu/news/release/888?id=888"
 INTERVIEW = "https://www.youtube.com/watch?v=1bR0gtecoHU"
 
 
+def said_on_screen(scene, words, ids):
+    """Every word of ids is readable while it is said: its caption, or a display word carrying it, on its mid frame."""
+    for w in (words[i] for i in ids):
+        at = round((w["start"]+w["end"])/2*30)+3
+        token = w["w"].strip(".,“”").lower()
+        assert any(i.get("k") == "word" and (i.get("role") == "cap" or not i.get("fact_type"))
+                   and token in i["t"].lower() and i["f"][0] <= at < i["f"][1] for i in scene["items"]), w["w"]
+
+
 def material(tmp_path):
     clauses = [
         (0, "Netflix started uh obviously in the Bay Area as DVDs that were mailed to you in an envelope and then you had this queue."),
@@ -224,7 +233,7 @@ def test_retained_multi_fact_estimate_pages_keep_the_qualifications(tmp_path, mo
     # Qualified estimates keep every qualification in the record; the timed speech captions keep the screen.
     assert beats["display_facts"] == [] and beats["research_facts"][0]["facts"] == facts
     assert not any(it.get("fact_type") for it in scene["items"])
-    assert any(it.get("role") == "cap" for it in scene["items"])
+    said_on_screen(scene, pack["words"]["words"], range(0, 16))
 
 
 def test_comparison_evidence_keeps_the_scope_and_researches_only_the_demo(tmp_path, monkeypatch):
@@ -314,7 +323,11 @@ def test_spoken_verdict_keeps_the_speaker_captions_and_byline(tmp_path, quiet_en
     scene, beats = wf.wf1_film.build(script,pack,"prints",direction)
     # No automatic byline: the live speaker and their captions carry the verdict.
     assert not any("Opinion" in str(i.get("t","")) for i in scene["items"])
-    assert any(i["k"]=="shot" for i in scene["items"]) and any(i.get("role")=="cap" for i in scene["items"])
+    said_on_screen(scene, words, range(12, 18))
+    for w in words[12:18]:
+        at = round((w["start"]+w["end"])/2*30)+3
+        assert any(i["k"]=="shot" and (i.get("pic")=="main" or str(i.get("pic","")).startswith("own:"))
+                   and i["f"][0] <= at < i["f"][1] for i in scene["items"]), w["w"]
     # The claim stays in the record, so no reading interval displaces the director's payoff word.
     assert beats["research_facts"][0]["facts"][0]["chain"]["stance"] == "characterization"
     assert any(row["text"] == "Excel killer" for row in beats["display"])
@@ -654,8 +667,19 @@ def test_empty_video_provider_still_searches_the_authored_depiction():
                     video_searches=["factory opening ceremony"])]
     [request] = wf.photo_requests(windows, [0], [], {}, [])
     assert request["name"] == "Headquarters"
-    assert request["searches"] == ["factory opening ceremony", "the actual factory exterior", "Headquarters"]
+    assert request["searches"] == ["Headquarters", "the actual factory exterior", "factory opening ceremony"]
     assert wf.photo_requests(windows, [], [], {}, []) == []
+
+
+def test_the_photo_libraries_search_the_name_and_depiction_before_youtube_phrases():
+    """Commons and Openverse keep three searches and Openverse reads the first: the name and the authored depiction
+    hold those slots, never the YouTube phrases that find no photographs."""
+    windows = [dict(name="Ingenuity", must_show="NASA's Ingenuity helicopter on Mars",
+                    video_searches=["Ingenuity first flight NASA JPL livestream", "Ingenuity helicopter flight footage Jezero",
+                                    "Ingenuity Mars helicopter test", "Ingenuity rotor spin up"])]
+    [request] = wf.photo_requests(windows, [0], [], {}, [])
+    assert request["searches"][:2] == ["Ingenuity", "NASA's Ingenuity helicopter on Mars"]
+    assert request["searches"][2:] == windows[0]["video_searches"]
 
 def test_only_authored_viewer_copy_or_a_designed_illustration_reaches_type():
     import wf1_display
@@ -674,3 +698,93 @@ def test_a_research_card_cannot_displace_the_timed_speech():
     display.append(dict(k="word",t="One real WIN.",f=[0,30]))
     spans, omitted = wf1_display.caption_handoffs(display, words, [(0,30)], words, lambda t: round(t*10))
     assert spans == [(0,30)] and omitted == words
+
+
+def test_an_authored_viewer_line_leaves_the_live_speaker_framed(tmp_path, quiet_engines, monkeypatch):
+    """26 Nov: a viewer line over a sourced statement kept a clause-long reading layout (the speaker letterboxed on a
+    dark page) after its three-second annotation had gone, leaving the lower frame empty. The annotation rides the
+    live, full-frame speaker and the page's interval is the annotation's own."""
+    from wf1_film import build, VIEWER_LINE_F
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *a: ([], []))
+    ctx, script, pack = material(tmp_path)
+    page = dict(first=0, last=17, viewer_line="The prize launched in 2006",
+                facts=[dict(source=dict(url=NETFLIX, publisher="Netflix TechBlog"), relation="Grand prize",
+                            value="$1 million",
+                            statement="Netflix announced the competition in 2006 and offered a $1 million grand prize.")])
+    l1, beats = build(script, pack, "prints", dict(display_facts=[page]))
+    assert [p["f"] for p in beats["display_facts"]] == [[0, VIEWER_LINE_F]]
+    assert not any(it.get("source_frame") or it.get("pic") == "plate" for it in l1["items"])
+    for f in range(0, 200, 10):
+        shots = [it for it in l1["items"] if it["k"] == "shot" and it["f"][0] <= f < it["f"][1]]
+        assert [it.get("pic") for it in shots] == ["main"], f
+    line = [it for it in l1["items"] if it.get("fact_type") and "2006" in it.get("t", "")]
+    assert line and all(it["f"] == [0, VIEWER_LINE_F] for it in line)
+
+
+def test_a_viewer_line_on_a_speaker_claim_reaches_the_screen():
+    """The writer's audience sentence on a fact ask survives when the ask overlaps a speaker claim."""
+    import wf1_display
+    words = [dict(w=w, t0=i*.4, t1=i*.4+.35, seg=0) for i, w in enumerate("They raised at sixty two billion".split())]
+    interview = dict(url="episode", publisher="Show")
+    paper = dict(url="https://example.com/series-j", publisher="Example News")
+    claim = dict(speaker="Guest", report="Databricks raised at a $62B valuation", first=0, last=5)
+    ask = dict(dev="facts", at=dict(w=2), until=dict(w=5), args=dict(
+        viewer_line="Series J at a $62B valuation",
+        facts=[dict(source="paper", relation="Valuation", value="$62B", statement="Series J valued it at $62B.")]))
+    editorial = dict(sources={"interview": interview, "paper": paper}, speaker_claims=[claim])
+    page, = wf1_display.bind(dict(asks=[ask], arc=[]), editorial, words)["display_facts"]
+    assert page["viewer_line"] == "Series J at a $62B valuation"
+    assert wf1_display.audience_page(page)
+    ask["args"]["viewer_line"] = ""
+    page, = wf1_display.bind(dict(asks=[ask], arc=[]), editorial, words)["display_facts"]
+    assert "viewer_line" not in page and not wf1_display.audience_page(page)
+
+
+def test_designed_pages_print_their_steps_never_research_labels_or_bylines(tmp_path, quiet_engines, monkeypatch):
+    """Scenario steps, a comparison and a closing estimate reach the screen as designed copy only: who proposed them
+    and how research classified them ('· Scenario', '· Hypothetical comparison', '· Personal estimate') stay in the
+    record (owner's bar: no research labels or bylines on screen)."""
+    from wf1_film import build
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *a: ([], []))
+    ctx, script, pack = material(tmp_path)
+    script["source_url"] = INTERVIEW
+    words = pack["words"]["words"]
+    seg = [next(i for i, w in enumerate(words) if w["seg"] == s) for s in range(6)]
+    interview = dict(url=INTERVIEW, publisher="All-In Podcast")
+    who = dict(source=interview, attribution="Jason Calacanis")
+    pages = [dict(first=seg[0], last=seg[1]-1, facts=[dict(who, value="DVDs by mail")],
+                  sequence=[dict(at=seg[0]+5, label="DVDs by mail"), dict(at=seg[0]+15, label="The queue")]),
+             dict(first=seg[3], last=seg[4]-1, sequence_kind="comparison", facts=[dict(who, value="Ten percent better")],
+                  sequence=[dict(at=seg[3]+4, label="Any team"), dict(at=seg[3]+12, label="Ten percent better")]),
+             dict(first=seg[5], last=len(words)-1, estimate_landing=seg[5]+1, facts=[dict(who, value="$50 million")])]
+    l1, beats = build(script, pack, "prints", dict(display_facts=pages))
+    shown = [it["t"] for it in l1["items"] if it.get("fact_type")]
+    assert {"DVDs by mail", "The queue", "Any team", "Ten percent better"} <= set(shown)
+    assert not any(label in t for t in shown for label in
+                   ("Scenario", "Hypothetical", "Personal estimate", "Estimate", "Jason Calacanis", "All-In Podcast"))
+    closing = next(p for p in beats["display_facts"] if p.get("estimate_landing") is not None)
+    assert closing["credit"] == "Jason Calacanis · Personal estimate"      # the record keeps it
+
+
+def test_a_record_example_shows_its_words_never_its_research_classifications(tmp_path, quiet_engines, monkeypatch):
+    """The enacted record shows the quoted question and the labels the speaker does not say; 'Inference',
+    'Recollection', 'Example · Recheck the wording', bylines and locators stay in the record. A label the speaker
+    already says leaves its interval to the live speaker and captions."""
+    from wf1_film import build
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *a: ([], []))
+    ctx, script, pack = material(tmp_path)
+    script.update(source_url=INTERVIEW, source_credit="All-In Podcast")
+    words = pack["words"]["words"]
+    s1 = next(i for i, w in enumerate(words) if w["seg"] == 1)
+    pack["coverage"]["record_example"] = dict(
+        first=s1, last=s1+14, speaker="Jason Calacanis", question=[s1, s1+2], inference=[s1+3, s1+5],
+        memory=[s1+6, s1+8], return_at=s1+9, accent=s1+10, release=s1+12,
+        inference_label="A public contest", memory_label=" ".join(w["w"] for w in words[s1+6:s1+9]))
+    l1, beats = build(script, pack, "prints", {})
+    shown = " | ".join(it["t"] for it in l1["items"] if it.get("fact_type"))
+    assert "A public contest" in shown and "“" in shown
+    for label in ("Inference", "Recollection", "Example", "hypothesis", "Recheck", "Jason Calacanis", "All-In Podcast"):
+        assert label not in shown, label
+    roles = {p.get("record_role"): p for p in beats["display_facts"]}
+    assert roles["inference"]["heading"] == "" and roles["inference"]["classification"] == "inference"
+    assert "memory" not in roles and any(p.get("record_role") == "memory" for p in beats["research_facts"])

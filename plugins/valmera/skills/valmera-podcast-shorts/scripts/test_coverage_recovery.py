@@ -620,11 +620,27 @@ def test_verified_action_uses_its_real_clock_and_keeps_the_next_physical_cut():
     first, best, racks = clip(3,33,0,9),clip(33,69,0,9),clip(105,153,1,9)
     best[4]["attribution"] = "WeatherService +29"
     rows = coverage.action_holds([first,best,racks],plan,detail=lambda *_: {"action_box":[.1,.2,.3,.5]})
-    assert rows[0][:4] == [3,105,"clip",best[3]]
+    # The row ends with its action: the take returns there, and the row's result credit ends with the picture.
+    assert rows[0][:4] == [3,39,"clip",best[3]]
     assert rows[0][4]["action_end"] == 39
     assert rows[1] == racks
     report = coverage.require_coverage(rows,plan,5,final=True)
     assert report["moving_seconds"] == (36+48)/30
+
+
+def test_an_action_one_frame_short_of_the_next_picture_keeps_that_frame():
+    """No take shot is one frame long: a sliver between the action and the next picture stays with the clip."""
+    import wf1_coverage as coverage
+    plan = {"contract": coverage.CONTRACT, "windows": [dict(t0=0,t1=4,single_action=True), dict(t0=4,t1=5)]}
+    best = [3,39,"clip","shot",dict(window=0,path="shot",fit=9,src=[0,1.2],verified_motion=True,placed_motion_p90=2)]
+    nxt = [40,90,"clip","next",dict(window=1,path="next",fit=9,src=[0,50/30])]
+    rows = coverage.action_holds([best,nxt],plan,detail=lambda *_: {"action_box":[.1,.2,.3,.5]})
+    assert rows[0][:2] == [3,40] and rows[0][4]["action_end"] == 39
+    assert rows[1] == nxt
+    clear = [3,39,"clip","shot",dict(best[4])]
+    later = [50,90,"clip","next",dict(nxt[4])]
+    rows = coverage.action_holds([clear,later],plan,detail=lambda *_: {"action_box":[.1,.2,.3,.5]})
+    assert rows[0][:2] == [3,39]                          # two frames or more: the take has them
 
 
 def test_research_only_the_distinct_missing_proof(tmp_path):

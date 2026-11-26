@@ -40,7 +40,7 @@ for _p in (os.path.join(SKILLS, "_shell"), os.path.join(SKILLS, "valmera-stories
 import film as F  # noqa: E402
 
 FPS, W, H, LEAD_F = F.FPS, F.W, F.H, F.LEAD_F
-CAPTION_CONTRACT = 14
+CAPTION_CONTRACT = 15        # 26 Nov: research pages left the reading intervals; captions yield only to laid copy
 Clock, r4, smooth = F.Clock, F.r4, F.smooth
 
 WALL = "YouTube is refusing this Mac as a bot"       # the words a short stops with when its footage could not be fetched for that reason
@@ -75,6 +75,7 @@ ORDER = ["footage-cut", "window", "archive-reel", "prints"]
 FOOTAGE_FRAME = (W, H)
 
 WINDOW_BOX = (0.04, 0.205, 0.96, 0.593)        # four by three, the width of the phone, between the mark and the caption seat
+VIEWER_LINE_F = 3 * FPS                        # an authored viewer line: a short annotation over the live picture
 PRINT_W = 0.62                                 # a square print, 670 px: small enough that the one under it shows
 PRINT_ROT = (-2.6, 1.9, -1.2, 2.4)
 PRINT_AT = ((0.36, 0.392), (0.64, 0.452), (0.385, 0.458), (0.615, 0.388))      # where prints land, in turn (frame fractions)
@@ -1229,13 +1230,23 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 all(wf1_display.personal_summary(f, script.get("source_url")) for f in facts)):
             personal_accounts.append(page)
             continue
-        if not wf1_display.audience_page(page):
-            # A research claim supplies the record only; the live picture and timed words keep the frame.
+        spoken_label = page.get("record_role") in ("inference", "memory") and F.norm_word(facts[0]["value"]) in F.norm_word(
+            " ".join(w["w"] for w in clock.words[page["first"]:page["last"]+1]))
+        if not wf1_display.audience_page(page) or spoken_label:
+            # A research claim supplies the record only; the live picture and timed words keep the frame. So does a
+            # record role whose label the speaker already says: its card would hold only research labels.
             research_pages.append(page)
+            continue
+        if page.get("viewer_line"):
+            # The authored line is a short annotation over the live picture. Its interval is the annotation's own,
+            # never the clause's: a clause-long reading layout left the speaker letterboxed over an empty dark frame
+            # once the line had gone (26 Nov).
+            if b > a:
+                timed_facts.append((a, min(b, a + VIEWER_LINE_F), page))
             continue
         own_account = d.get("caption_ends") and all(
             f.get("chain") and f["chain"].get("speaker") == f["chain"].get("subject") for f in facts)
-        if b > a and (page.get("viewer_line") or page.get("demo_note") or qualified or not (on_evidence(a,b) or ((on_presenter or own_account) and narrated))):
+        if b > a and (page.get("demo_note") or qualified or not (on_evidence(a,b) or ((on_presenter or own_account) and narrated))):
             timed_facts.append((a,b,page))
     # Retained directions can predate the claims chain. A dense attributed block
     # still gets a reading interval, with all its authored copy and provenance.
@@ -1257,7 +1268,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         rows = wf1_display.typeset(facts, P.R, DISPLAY_W * W, str.upper if st["upper"] else str)
         return len(rows) > 4
 
-    report_spans = [(a, b) for a, b, page in timed_facts if page.get("analogy_step") or page.get("model_phase") or page.get("principle_plate") or page.get("record_role") or page.get("scope_cue") or page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"])]
+    report_spans = [(a, b) for a, b, page in timed_facts if not page.get("viewer_line") and (page.get("analogy_step") or page.get("model_phase") or page.get("principle_plate") or page.get("record_role") or page.get("scope_cue") or page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"]))]
 
     # A remembered figure or reversal can live in the spoken cue and the show's own
     # shot. Release the timeline on the authored word, preserving the entire source frame.
@@ -1272,8 +1283,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     live_beats[start] = (end,step["beat"],step["at"])
     publisher_spans = {(a,b) for a,b,p in timed_facts if p.get("publisher_excerpt")}
     credited_spans = {(a,b) for a,b,p in timed_facts if (p.get("publisher_excerpt") or {}).get("credit")}
-    phase_spans = [(a,b) for a,b,p in timed_facts if p.get("model_phase")]
-    source_pages = phase_spans + [(a,b) for a,b,p in timed_facts if any(f.get("excerpt") or f.get("perspective") for f in p["facts"])]
+    phase_spans = [(a,b) for a,b,p in timed_facts if p.get("model_phase") and not p.get("viewer_line")]
+    source_pages = phase_spans + [(a,b) for a,b,p in timed_facts if not p.get("viewer_line")
+                                  and any(f.get("excerpt") or f.get("perspective") for f in p["facts"])]
     for span in (reporting_span, approval_span):
         if span:
             source_pages.append(span)
@@ -1703,9 +1715,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                            if all(type(s.get(k)) in (int,float) for k in ("start","end"))
                            and s["start"] < script.get("source_start",0)+clock.segs[segment][1] and source_time < s["end"]), "") or ""
         credit = "  ·  ".join(filter(None,(byline,citation)))
-        wf1_display.reading_card(P,(fa,fb),line if claim else "“"+line+"”",byline,citation,pal,centre=.46)
+        # The quotation reaches the screen; its byline, stance and citation stay in the record (quoted_source).
+        wf1_display.reading_card(P,(fa,fb),line if claim else "“"+line+"”","","",pal,centre=.46)
         # A short opening quotation hands the rest of the sentence back to
-        # the ordinary timed captions, even while its source credit stays up.
+        # the ordinary timed captions, even while the quotation stays up.
         quoted_end = fb if complete else min(fb, Clock.f(clock.words[(punctuated[-1] if punctuated else len(phrase))-1]["t1"]))
         if quoted_end > fa:
             reading_spans.append((fa,quoted_end))
@@ -2233,9 +2246,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         P.shot([f0, f1], key, F.cover_crop(pw_, ph_, W / H, (0.5, 0.45), (0.5, 0.40)), **kw)
 
     def window(f0, f1, kind, name, rec, key, source_ink=()):
-        end = f1
-        if kind == "clip":
-            f1 = min(end, max(f0 + 1, rec.get("action_end", end)))
+        # A verified action's row already ends where the action ends (wf1_coverage.action_holds); the take returns
+        # after it, and the row's credits end with it.
         n = f1 - f0
         mono = is_mono(f0)
         evidence = bool(source_ink or rec.get("action_box") or rec.get("attribution") or rec.get("reframe") or rec.get("full_source") or archive_event(rec)) or rec.get("provider") == "primary-document"
@@ -2297,8 +2309,6 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         if kind == "photo" and n > FPS:
             kw["s"] = [r4(.94 + .06 * smooth(j / (n - 1))) for j in range(n)]
         P.card([f0, f1], key, [x0, y0, x1, y1], **kw)
-        if f1 < end:
-            take_shot(f1, end)
         note(f0, f1, kind, name, rec, "window")
         P.pictures[-1]["source_crop"] = kw["crop"]
         if projection:
@@ -2699,6 +2709,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     # timing (a word too early, too close to another or too short to hold gives its place to the next), so a film
     # never loses its display words to timing. A long phrase is stacked (display_rows), never skipped for its length.
     omit = []
+    device_omit = []                                     # caption words a palette device draws itself (laid at the render)
     devices = []                                         # the palette's asks: rows whose type performs (laid at the render, chain.alien_bank)
     # An attributed claim carries the reading on the ground below its source picture.
     fact_pages = []
@@ -2782,9 +2793,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         facts = page["facts"]
         if page.get("viewer_line"):
             # Place a short annotation on the synchronous picture. The caption keeps its seat.
-            end = min(b, a + 3 * FPS)
-            wf1_display.reading_card(P,[a,end],page["viewer_line"],"","",pal,centre=.60)
-            fact_pages.append(dict(page, f=[a,end]))
+            wf1_display.reading_card(P,[a,b],page["viewer_line"],"","",pal,centre=.60)
+            fact_pages.append(dict(page, f=[a,b]))
             continue
         if page.get("demo_note"):
             fact = facts[0]
@@ -2822,29 +2832,16 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             fact = facts[0]
             stamp = int(fact["time_s"])
             locator = f'{fact["source"].get("publisher") or "Interview"} · {stamp//60}:{stamp%60:02d}'
+            # Its classification, byline and locator stay in the record (fact_pages); the screen shows the words.
+            heading = credit = ""
             if role in ("wording","return","qualification"):
-                heading = "Example · " + fact["attribution"]
                 body = "“" + fact["value"] + "”"
-                credit = locator
-                if role == "return":
-                    heading = "Example · Recheck the wording"
-                    credit = locator
-                elif role == "qualification":
-                    heading = fact["attribution"] + "’s qualification"
-                    credit = ""
                 if role in ("wording", "qualification"):
                     lo,hi = fact["word_ids"]
                     reading_spans.append((a, min(b,word_frame(hi+1) or b)))
                     omit.extend(clock.words[lo:hi+1])
             else:
-                heading = "Inference" if role == "inference" else "Recollection"
                 body = record[role+"_label"]
-                # The spoken question is already the caption. A short source
-                # label carries its epistemic status without printing it twice.
-                said_here = " ".join(w["w"] for w in clock.words[page["first"]:page["last"]+1])
-                if F.norm_word(body) in F.norm_word(said_here):
-                    body = ""
-                credit = fact["attribution"] + "’s hypothesis" if role == "inference" else ""
             begin = len(P.items)
             wf1_display.reading_card(P,[a,b],body,heading,credit,pal,centre=.645,max_height=.28,group="record-"+role)
             if role == "return":
@@ -2856,7 +2853,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     target = max(rows, key=lambda it: P.R.width(it["v"], it["t"]))
                     record_accent = dict(id="record-return-"+str(a), dev="highlight", f=[hit,target["f"][1]],
                                          t=target["t"],target_id=target["id"],style="under",c=pal["accent"])
-            fact_pages.append(dict(page,f=[a,b],body=body,heading=heading,credit=credit))
+            fact_pages.append(dict(page,f=[a,b],body=body,heading=heading,credit=credit,locator=locator,
+                                   classification=role,attribution=fact["attribution"]))
             P.events.append(a)
             continue
         if page.get("route_example"):
@@ -2906,11 +2904,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             P.events.append(a)
             continue
         if page.get("estimate_landing") is not None:
+            # The speaker's estimate lands in his voice and captions; who estimated it, and whether it was
+            # hypothetical, stay in the record. No card held only that byline to the end of the film.
             hypothetical = any(lo <= page["estimate_landing"] <= hi for lo,hi in hypotheticals)
-            credit = facts[0]["attribution"] + (" · Hypothetical" if hypothetical else " · Personal estimate")
-            wf1_display.reading_card(P,[a,f_end],"",credit,"",pal,
-                                     centre=.70,max_height=.10,group="estimate-close")
-            fact_pages.append(dict(page,f=[a,f_end]))
+            fact_pages.append(dict(page,f=[a,f_end],credit=facts[0]["attribution"] + (" · Hypothetical" if hypothetical else " · Personal estimate")))
             continue
         if page.get("sequence"):
             fact = facts[0]
@@ -2922,24 +2919,27 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             for i,(start,end) in enumerate(zip(cue,cue[1:])):
                 if start >= end:
                     continue
-                footer = fact["source"].get("publisher") or ""
+                # The episode is never credited on its own speaker's scenario; an outside publisher keeps its credit.
+                footer = "" if wf1_display.same_recording(fact["source"].get("url"), script.get("source_url")) else (
+                    fact["source"].get("publisher") or "")
                 if i == len(steps)-1:
                     footer = page.get("explanation") or footer
                     if page.get("callback_action") and not any(lo < end and start < hi and rec.get("episode_excerpt")
                                                               for lo,hi,_,_,rec in source_rows):
                         footer = page["callback_action"]
-                heading = fact["attribution"]+" · Scenario"
+                # Who proposed the scenario and how it is classified stay in the record; the steps are on screen.
+                heading = ""
                 if page.get("sequence_kind") == "comparison":
-                    # The final quantity lands in the verbatim cue on its own first word.
-                    if page.get("spoken_estimate"):
-                        wf1_display.reading_card(P,[start,end],"",fact["attribution"]+" · Estimate","",pal,
+                    # The final quantity lands in the verbatim cue on its own first word: the final state shows the
+                    # states so far, the last one active, never a label alone.
+                    final = i == len(steps)-1
+                    if page.get("spoken_estimate") or final:
+                        wf1_display.reading_card(P,[start,end],"","","",pal,
                             centre=.65,max_height=.23,group="comparison",
                             steps=[(s["label"],j==i) for j,s in enumerate(steps[:i+1])])
                         P.events.append(start)
                         continue
-                    final = i == len(steps)-1
-                    wf1_display.reading_card(P, [start,end], "" if final else steps[i]["label"],
-                                             fact["attribution"]+" · Hypothetical comparison", "", pal,
+                    wf1_display.reading_card(P, [start,end], steps[i]["label"], "", "", pal,
                                              centre=.65, max_height=.21, group="comparison")
                     P.events.append(start)
                     continue
@@ -2953,8 +2953,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 if page.get("sequence_kind") == "history":
                     source = steps[i]["source"]
                     heading = "Timeline"
-                    footer = (fact["attribution"]+" · Recollection" if source == fact["source"]
-                              else source.get("publisher") or source["url"])
+                    footer = ("" if source == fact["source"] else source.get("publisher") or source["url"])
                 if start in live_beats:
                     wf1_display.reading_card(P, [start,end], "", "", footer, pal, centre=.50 if live_beats[start][1]=="figure" else .67, group="memory-credit")
                     P.events.append(start)
@@ -3139,9 +3138,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 mask = palette_menu.drawn(ask, text)
                 span = F.said_span(clock, seg, text)
                 if all(mask):
-                    omit += span
+                    device_omit += span
                 else:
-                    omit += palette_menu.omit_of(span, text, mask, F.norm_word)
+                    device_omit += palette_menu.omit_of(span, text, mask, F.norm_word)
                 P.events.append(a)
                 shown.append((a, b, text))
                 continue
@@ -3232,11 +3231,17 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     if contrast:
         cue_starts.add(contrast["pivot"])
         reveal_words.add(contrast["switch"])
-    if marks and omit:
-        original_ids = {id(w) for w in omit}
-        omit = [caption_clock.words[i] for i,w in enumerate(clock.words) if id(w) in original_ids]
+    if marks and (omit or device_omit):
+        def on_caption_clock(ws):
+            original_ids = {id(w) for w in ws}
+            return [caption_clock.words[i] for i,w in enumerate(clock.words) if id(w) in original_ids]
+        omit, device_omit = on_caption_clock(omit), on_caption_clock(device_omit)
+    # A word yields its caption only to copy laid out at its time. The words a palette device draws are not laid out
+    # yet (scene.palette at the render), so they leave the caption on the device's own hand-off, never on this check.
     caption_holds, omit = wf1_display.caption_handoffs(
         P.items, caption_clock.words, reading_spans, omit, Clock.f)
+    kept = {id(w) for w in omit}
+    omit += [w for w in device_omit if id(w) not in kept]
     lines = F.caption_build(P, caption_clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
                             hold=caption_holds, omit=omit, phrase_ends=sorted(ends),
                             accents=d.get("caption_accents") or (), accent_ink=pal["accent"], cue_starts=cue_starts, reveal_words=reveal_words)

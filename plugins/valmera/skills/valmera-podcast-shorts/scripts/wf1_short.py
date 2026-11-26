@@ -503,7 +503,10 @@ def photo_subjects(footage, by_line):
 
 
 def photo_requests(windows, eligible, footage, by_line, subjects):
-    """Keep the authored depiction and its searches when the video provider has no results."""
+    """Keep the authored depiction and its searches when the video provider has no results. The photo libraries
+    (Commons, Openverse) are searched by the name and the depiction first: they keep a request's first three searches
+    and Openverse reads only the first, and the window's YouTube phrases ("... livestream", "... footage") find no
+    photographs there (26 Nov: those phrases took every kept slot and the depiction was never searched)."""
     names = {i: by_line.get(i) or [windows[i]["name"]] for i in eligible}
     bare = photo_subjects(footage, names)
     details = {s["name"]: s for s in subjects}
@@ -515,7 +518,7 @@ def photo_requests(windows, eligible, footage, by_line, subjects):
                 continue
             subject = details.get(name, {})
             depiction = subject.get("must_show") or window["must_show"]
-            queries = [*(window.get("video_searches") or []), depiction, name]
+            queries = [name, depiction, *(window.get("video_searches") or [])]
             # Different lines can refer to different events involving the same subject.
             key = (name, depiction)
             if key not in requests:

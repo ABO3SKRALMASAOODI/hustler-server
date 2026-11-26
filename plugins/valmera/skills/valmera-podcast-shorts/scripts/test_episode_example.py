@@ -48,10 +48,13 @@ def test_example_and_optional_definition_share_the_running_captions(tmp_path, qu
                for p in beats["display_facts"])
     assert next(p for p in beats["display_facts"] if p.get("episode_example"))["last"] == 10
     assert any(i.get("t")=="e.g." for i in scene["items"])
-    page = next(p for p in beats["display_facts"] if p["facts"][0].get("chain"))
-    caps = " ".join(i["t"] for i in scene["items"] if i.get("role")=="cap"
-                    and i["f"][0]<page["f"][1] and page["f"][0]<i["f"][1]).lower()
-    assert all(w["w"].strip(".,").lower() in caps for w in words[a:b+1])
+    # The spoken definition is a research claim: it stays in the record and every word of it is captioned.
+    assert any(p["facts"][0].get("chain") for p in beats["research_facts"])
+    for w in words[a:b+1]:
+        mid = round((w["start"]+w["end"])/2*30)+3
+        token = w["w"].strip(".,").lower()
+        assert any(i.get("role")=="cap" and token in i["t"].lower() and i["f"][0] <= mid < i["f"][1]
+                   for i in scene["items"]), w["w"]
 
 
 def test_complete_reply_uses_the_timed_turn_after_the_guest():

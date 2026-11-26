@@ -48,6 +48,24 @@ def test_spoken_address_uses_the_authored_display_spelling_without_changing_sour
     clock = film.Clock(dict(duration=7,words=[dict(w=w,seg=0,start=i,end=i+1)
                                               for i,w in enumerate(words)]),script)
     display = film.written_addresses(clock,script)
-    assert [w["w"] for w in display.words] == ["Try","it","at","valmera.io"]
+    assert [w["w"] for w in display.words] == ["Try","it","at","valmera.io."]
     assert display.words[-1]["t1"] == clock.words[-1]["t1"]
     assert len(clock.words) == 7
+
+
+def test_a_written_address_keeps_the_writers_phrase_lines():
+    """26 Nov: merging the address first broke the phrase spans' word count, phrases_of gave None and every caption
+    of the reel was re-chunked by the clock. The authored lines stay, the address on one word inside its phrase."""
+    import film
+    said = "Try it today. Go to valmera dot I O. It edits for you".split()
+    script = {"segments":[{"phrases":[[0,3],[3,9],[9,13]],
+                           "show":[{"text":"VALMERA.IO","word_i":5}]}]}
+    clock = film.Clock(dict(duration=14,words=[dict(w=w,seg=0,start=i,end=i+.9) for i,w in enumerate(said)]),script)
+    assert clock.phrases_of(script)
+    display, lines = film.written_captions(clock, script)
+    assert [text for _,_,text,_ in lines] == ["Try it today.", "Go to valmera.io.", "It edits for you"]
+    assert [w["w"] for w in lines[1][3]] == ["Go","to","valmera.io."]
+    assert lines[1][3][-1] is display.words[5] and lines[1][1] >= display.words[5]["t1"]
+    assert lines[2][0] == display.words[6]["t0"]
+    plain = {"segments":[{"phrases":[[0,3],[3,9],[9,13]]}]}
+    assert film.written_captions(clock, plain) == (clock, clock.phrases_of(plain))

@@ -722,7 +722,12 @@ def bind(direction, editorial, words):
                          or (selected.get("quote") and item.get("relation")))
                 start = claim["first"] if exact else max(first, claim["first"])
                 end = claim["last"] if exact or "until" not in ask else min(last, claim["last"])
-                pages.append(dict(first=start, last=end, facts=[item]))
+                page = dict(first=start, last=end, facts=[item])
+                line = str(args.get("viewer_line") or "").strip()
+                if line:
+                    # The writer's audience sentence reaches the screen on a claim's beat too.
+                    page["viewer_line"] = line
+                pages.append(page)
                 displayed.add(span)
             continue
         for fact in args.get("facts") or []:

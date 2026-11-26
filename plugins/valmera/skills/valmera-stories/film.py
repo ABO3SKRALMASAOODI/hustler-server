@@ -860,7 +860,10 @@ def written_addresses(clock, script):
                 token = norm_word(words[end]["w"])
                 spoken += "." if token == "dot" else token
                 if spoken == domain:
-                    replacements[id(words[start])] = (end-start+1, dict(words[start], w=domain, t1=words[end]["t1"]))
+                    # The last spoken word's closing punctuation stays: it ends the sentence the address ends.
+                    last = str(words[end]["w"])
+                    tail = last[len(last.rstrip(".,;:!?…\"'”’)")):]
+                    replacements[id(words[start])] = (end-start+1, dict(words[start], w=domain+tail, t1=words[end]["t1"]))
                     break
                 if not domain.startswith(spoken) or len(spoken) > len(domain):
                     break
@@ -868,12 +871,32 @@ def written_addresses(clock, script):
         return clock
     display = copy.copy(clock)
     display.words = []
+    display.written = {}                 # id of a source word -> its word on the caption clock (None: inside an address)
     i = 0
     while i < len(clock.words):
         count, word = replacements.get(id(clock.words[i]),(1,clock.words[i]))
         display.words.append(word)
+        display.written[id(clock.words[i])] = word
+        display.written.update((id(w), None) for w in clock.words[i+1:i+count])
         i += count
     return display
+
+
+def written_captions(clock, script):
+    """(caption clock, the script's phrase lines) with each spoken address on its written spelling. The phrase lines
+    are read on the source clock, whose words match the writer's spans one for one, and the address is merged inside
+    them: it stays in the phrase it starts in (26 Nov: merged first, the spans no longer matched, phrases_of gave None
+    and the whole reel lost its authored lines)."""
+    phrases = clock.phrases_of(script)
+    display = written_addresses(clock, script)
+    if display is clock or not phrases:
+        return display, phrases
+    out = []
+    for _, t1, _, ws in phrases:
+        kept = [w for w in (display.written.get(id(x), x) for x in ws) if w is not None]
+        if kept:
+            out.append((kept[0]["t0"], max(t1, kept[-1]["t1"]), " ".join(w["w"] for w in kept), kept))
+    return display, out
 
 
 def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z=0, max_chars=22, max_words=4, late=2, script=None, ink_lag_s=None,
@@ -890,9 +913,9 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
     gone = {id(w) for w in omit or ()}
     if not hasattr(P, "cap_lags"):
         P.cap_lags = []
+    ph = None
     if script is not None:
-        clock = written_addresses(clock, script)
-    ph = clock.phrases_of(script) if script is not None else None
+        clock, ph = written_captions(clock, script)
     seat_left = SAFE[0] + .012
     seat_right = (RAIL_X if y > .55 else SAFE[2]) - .012
     # Authored lines keep their existing measure. Clock chunks (e.g. after a voice

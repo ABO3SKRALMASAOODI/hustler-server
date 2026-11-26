@@ -620,3 +620,48 @@ def test_live_interview_uses_both_camera_tiles_and_captions_its_own_account(tmp_
     assert int(pixel[0]) > int(pixel[2])+55, pixel
     assert any(it.get("role")=="cap" and it["f"][0] <= 155 < it["f"][1] for it in plan.items)
     assert beats["display_facts"] == [] and beats["interview_accounts"] == [page]
+
+
+def _action_build(tmp_path, monkeypatch, next_row=None):
+    import placement_check
+    import wf1_coverage
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *a: ([], []))
+    pack = _sup(tmp_path, [dict(t0=0.0, t1=7.0, faces=[])])
+    pack["coverage"]["windows"] = [dict(t0=.9, t1=4.0, single_action=True, first=2, last=10),
+                                   dict(t0=4.0, t1=6.5, first=11, last=17)]
+    clip = dict(window=0, path="/clip.mp4", w=1280, h=720, fps=30, src=[0, 1.0], verified_motion=True, fit=9,
+                action_box=[.1, .2, .6, .5], attribution="WeatherService +29", action_caption="WeatherService shows +29",
+                source=dict(url="https://example.com/v", channel="Weather Channel"))
+    rows = [[30, 60, "clip", "weather", clip]] + ([next_row] if next_row else [])
+    pack["archived_placement_plan"] = dict(rows=rows, report=dict(contract=placement_check.CONTRACT, placements=[]),
+                                           run_id="action")
+    words = pack["words"]["words"]
+    script = dict(title="Coach", segments=[dict(say=" ".join(w["w"] for w in words if w["seg"] == i), pictures=[])
+                                           for i in (0, 1)])
+    l1, beats = film.build(script, pack, "window", dict(coverage_final=True))
+    return l1, beats
+
+
+def _bases(l1, f):
+    return [it for it in l1["items"] if it["k"] in ("shot", "card") and it["f"][0] <= f < it["f"][1]]
+
+
+def test_a_verified_action_hands_back_to_the_take_with_its_credit(tmp_path, quiet_engines, monkeypatch):
+    """26 Nov: the clip cut back to the live speaker where the action ended, but its result credit ran on for three
+    seconds over the speaker. The row, its picture and its credit end together."""
+    l1, beats = _action_build(tmp_path, monkeypatch)
+    clip = [p for p in beats["pictures"] if p["name"] == "weather"]
+    assert [p["f"] for p in clip] == [[30, 60]] and clip[0]["action_end"] == 60
+    credit = [it for it in l1["items"] if it["k"] == "word" and "Weather Channel" in it.get("t", "")]
+    assert credit and all(it["f"][1] <= 60 for it in credit)
+    for f in range(60, 90):
+        assert [it.get("pic") for it in _bases(l1, f) if it["k"] == "shot"] in (["main"], ["own:cut1"])
+        assert not any("Weather" in (it.get("t") or "") for it in l1["items"] if it["f"][0] <= f < it["f"][1])
+
+
+def test_a_verified_action_one_frame_short_of_the_next_picture_never_leaves_an_empty_frame(tmp_path, quiet_engines, monkeypatch):
+    photo = [61, 91, "photo", "other", dict(window=1, path="/p.jpg", w=1000, h=1000)]
+    l1, beats = _action_build(tmp_path, monkeypatch, photo)
+    for f in range(30, 91):
+        assert _bases(l1, f), f                                    # a picture on every frame
+    assert any(it["k"] == "card" and it["f"] == [30, 61] for it in l1["items"])
