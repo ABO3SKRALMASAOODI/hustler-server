@@ -89,16 +89,64 @@ def test_stabilize_video_writes_the_pass_and_measures_less_jitter(tmp_path):
 
 
 @needs_ffmpeg
-def test_stabilize_video_says_when_the_camera_already_holds_still(tmp_path):
+def test_stabilize_video_writes_the_pass_on_still_footage_too(tmp_path):
+    # Final review of 27 Nov: a 0.3 px threshold returned NO CHANGE and wrote
+    # nothing; the customer asked for the pass, so it is written and the
+    # result says the camera holds nearly still.
     from tools_ext import steady_tools
     src = _clip(str(tmp_path / "still.mp4"), "crop=340:340:30:30")
     ctx = _Ctx(str(tmp_path), src)
     out = steady_tools.stabilize_video(ctx)
-    # review of 26 Nov: the pass used to be written anyway, adding render
-    # time and mirrored-edge wobble to footage that holds still (p6311)
-    assert out.startswith("NO CHANGE"), out
-    assert "no measurable camera shake" in out
-    assert ctx.written is None
+    assert out.startswith("EDL v"), out
+    assert [s["kind"] for s in ctx.written["effects"]["stylize"]] == \
+        ["stabilize"]
+    assert "holds nearly still" in out
+
+
+def _before_px(out):
+    import re
+    m = re.search(r"jitter ([0-9.]+) px per frame before", out)
+    assert m, out
+    return float(m.group(1))
+
+
+@needs_ffmpeg
+def test_shake_at_the_head_and_tail_is_measured_and_steadied(tmp_path):
+    # Final review of 27 Nov: one 4 s window from the middle read a clip
+    # handheld at its ends and steady in the middle as still footage and
+    # told the customer there was no shake.
+    from tools_ext import steady_tools
+    hold = "between(t\\,4\\,8)\\,0\\,"
+    src = _clip(str(tmp_path / "ends.mp4"),
+                f"crop=340:340:30+if({hold}12*sin(n*1.7)+8*sin(n*0.9)):"
+                f"30+if({hold}10*cos(n*1.3)+6*sin(n*2.3))", dur=12.0)
+    ctx = _Ctx(str(tmp_path), src, duration=12.0)
+    out = steady_tools.stabilize_video(ctx)
+    assert out.startswith("EDL v"), out
+    assert ctx.written["effects"]["stylize"][0]["kind"] == "stabilize"
+    assert _before_px(out) > 5, out
+    assert "holds nearly still" not in out
+
+
+@needs_ffmpeg
+def test_jitter_along_the_long_axis_counts_in_full(tmp_path):
+    # Final review of 27 Nov: the 1080/256 factor on a square probe read a
+    # 16:9 frame's horizontal shake 1.78x short. A 16 px step on a 640x360
+    # frame is 48 px at 1080p scale (short side 1080).
+    from tools_ext import steady_tools
+    still = str(tmp_path / "wide.png")
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                    "testsrc2=s=720x400:r=25:d=1", "-frames:v", "1", still],
+                   check=True)
+    src = str(tmp_path / "wide.mp4")
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-loop", "1", "-r", "25", "-t", "4",
+         "-i", still, "-vf", "crop=640:360:40+16*mod(n\\,2):20",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16", src],
+        check=True)
+    ctx = _Ctx(str(tmp_path), src, duration=4.0)
+    out = steady_tools.stabilize_video(ctx, 0.5)
+    assert 42 < _before_px(out) < 54, out
 
 
 def test_find_meme_ranks_short_clips_and_hands_over_the_insert(monkeypatch):

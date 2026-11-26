@@ -130,10 +130,25 @@ def test_a_cut_leaves_every_other_edge_exactly_as_saved():
         [(1.0, 2.0), (3.0, 5.525)]
 
 
-def test_a_saved_edge_is_not_pulled_back_onto_a_shot_cut():
+def _sound_runs_to(t_end):
+    """_measured_edge_moves as the write boundary measures it: an end
+    placed before ``t_end`` cuts the word's sound, which still runs."""
+    def moves(ctx, keep, prev_keep, words):
+        old = {float(b) for _a, b in prev_keep or []}
+        return [{"side": "end", "from": float(b), "to": t_end, "word": "de",
+                 "db_from": -20.0, "db_to": -50.0}
+                for _a, b in keep if float(b) not in old and
+                t_end - 0.06 < float(b) < t_end]
+    return moves
+
+
+def test_a_saved_edge_is_not_pulled_back_onto_a_shot_cut(monkeypatch):
     """The write boundary moved the end 1040.22 -> 1040.26 (sound still
     running); shot hygiene moved it back on every write, so every cut
-    re-reported that stale repair."""
+    re-reported that stale repair. The shot pass now measures the same
+    sound and leaves that edge where the sound ends."""
+    monkeypatch.setattr(agent_tools, "_measured_edge_moves",
+                        _sound_runs_to(85.26))
     shots = [{"id": 1, "start": 0.0, "end": 85.24},
              {"id": 2, "start": 85.24, "end": 90.0}]
     before = [[60.0, 85.26]]
@@ -145,6 +160,21 @@ def test_a_saved_edge_is_not_pulled_back_onto_a_shot_cut():
     keep, notes = agent_tools._snap_keep_to_shots(
         [[60.0, 85.26]], ctx.index, WORDS, prev_keep=[[60.0, 80.0]])
     assert keep[0][1] < 85.24 and notes
+
+
+def test_an_old_sliver_edge_is_cleaned_on_the_next_write():
+    """Final review of 27 Nov: skipping every edge the previous keep had
+    left an exact write's sliver (an end 2 frames into the next shot, no
+    word and no sound there) flashing on every later write. The next
+    cut_range now moves it off the camera cut."""
+    shots = [{"id": 1, "start": 0.0, "end": 85.24},
+             {"id": 2, "start": 85.24, "end": 90.0}]
+    before = [[60.0, 85.30]]                   # 1.5 frames of the next shot
+    ctx = _Ctx(before, shots=shots)
+    res = agent_tools.cut_range(ctx, 69.72, 70.4, snap_to_words=True)
+    assert res.startswith("EDL v"), res
+    assert ctx._edl["keep"][-1][1] < 85.24, ctx._edl["keep"]
+    assert "SHOT-CUT HYGIENE" in res
 
 
 def test_whole_word_snap_still_keeps_a_word_an_edge_really_cuts():

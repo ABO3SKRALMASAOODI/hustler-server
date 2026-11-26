@@ -459,5 +459,49 @@ def test_plain_footage_with_a_named_background_uses_the_cutout(
     assert calls and calls[0][0] == "gradient"
     assert calls[0][1] == 0.0 and calls[0][2] == pytest.approx(3.0, abs=0.05)
     assert "person cut-out" in out
+    # Final review of 27 Nov: with no background named this ended NO
+    # CHANGE; the background the user wants gone goes behind the cut-out
+    calls.clear()
     plain = _Ctx(str(tmp_path), src, duration=3.0)
-    assert key_tools.chroma_key(plain).startswith("NO CHANGE")
+    out = key_tools.chroma_key(plain)
+    assert out.startswith("EDL v"), out
+    assert calls and calls[0][0] == "gradient"
+    assert "neutral background" in out and "person cut-out" in out
+
+
+@needs_ffmpeg
+def test_a_screen_in_part_of_the_frames_is_keyed_on_the_first_call(
+        tmp_path, monkeypatch):
+    # Final review of 27 Nov: a green screen in 5 of the 8 sampled frames
+    # (presence 0.62) is not 'keyable', and the first call ended NO CHANGE
+    # 'there is nothing of a screen to remove'. It is keyed now.
+    from tools_ext import key_tools, subject_tools
+    monkeypatch.setattr(subject_tools, "set_background",
+                        lambda *a, **k: pytest.fail("cut-out, not a key"))
+    frames = _screen_frames((0, 177, 64), 0.3, 240, 31) + \
+        _screen_frames((128, 90, 60), 0.3, 240, 19)
+    src = _frames_video(str(tmp_path / "part.mp4"), frames)
+    reading = ck.measure_frames(ck.sample_frames(
+        src, key_tools._times(2.0), key_tools.FRINGE_PROBE))
+    assert not reading["keyable"] and reading["presence"] < 0.75, reading
+    ctx = _Ctx(str(tmp_path), src, duration=2.0)
+    out = key_tools.chroma_key(ctx, background="solid", colour="#2030a0")
+    assert out.startswith("Keyed: the green backdrop"), out
+    assert ctx.written["effects"]["key"]["mode"] == "key"
+    left, lost = _nums(out)
+    assert lost <= 1.0, out
+
+
+@needs_ffmpeg
+def test_the_dry_run_compares_each_frame_with_its_own_time(tmp_path):
+    # Final review of 27 Nov: a sample time that could not be read shifted
+    # every later source frame onto the next time's render probe.
+    src = _frames_video(str(tmp_path / "vig.mp4"),
+                        _screen_frames((0, 177, 64), 0.85, 240, 50))
+    reading = ck.measure_frames(ck.sample_frames(src, [0.3, 1.5], 240))
+    item = dict(id="k", mode="key", colour=reading["colour"],
+                similarity=0.12, blend=0.04, despill=0.6, spill="green",
+                background={"kind": "solid", "colour": "#000000"})
+    clean = ck.dry_run(src, item, [0.3, 1.5])
+    gap = ck.dry_run(src, item, [0.3, 99.0, 1.5])
+    assert gap == clean, (gap, clean)

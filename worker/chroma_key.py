@@ -465,8 +465,10 @@ def input_args(edl, workdir, src_w, src_h, fetch, attempts=2):
 
 # ── measured dry run ────────────────────────────────────────────────────────
 
-def sample_frames(path, times, size=270):
-    """RGB frames of ``path`` at ``times`` (seconds), scaled to size x size."""
+def sample_pairs(path, times, size=270):
+    """[(t, frame)]: the RGB frame of ``path`` at each time it could be read,
+    scaled to size x size, with the time it was read at (a time that cannot
+    be read, past the end for instance, is left out with its frame)."""
     out = []
     for t in times:
         r = subprocess.run(
@@ -474,8 +476,14 @@ def sample_frames(path, times, size=270):
              "-frames:v", "1", "-vf", f"scale={size}:{size},format=rgb24",
              "-f", "rawvideo", "-"], capture_output=True, timeout=60)
         if r.returncode == 0 and len(r.stdout) == size * size * 3:
-            out.append(np.frombuffer(r.stdout, np.uint8).reshape(size, size, 3))
+            out.append((t, np.frombuffer(r.stdout, np.uint8).reshape(
+                size, size, 3)))
     return out
+
+
+def sample_frames(path, times, size=270):
+    """RGB frames of ``path`` at ``times`` (seconds), scaled to size x size."""
+    return [f for _t, f in sample_pairs(path, times, size)]
 
 
 def _render_probe(path, t, item, size):
@@ -514,12 +522,14 @@ def dry_run(path, item, times, size=270):
     transparency of the subject (everything 3 px or more away from that
     region). Fringe: the share of the picture reading as the leftover's
     channel-led colour before and after, and the share the clean changed."""
-    before = sample_frames(path, times, size)
+    # each source frame stays with the time it was read at: the render
+    # probe of that same time is compared with it
+    before = sample_pairs(path, times, size)
     screen = item.get("spill") or "green"
     if item.get("mode") == "fringe":
         tinted_b = tinted_a = changed = total = 0
         n = 0
-        for t, f in zip(times, before):
+        for t, f in before:
             out = _render_probe(path, t, item, size)
             if out is None:
                 continue
@@ -536,7 +546,7 @@ def dry_run(path, item, times, size=270):
                 "changed": round(changed / total, 4), "frames": n}
     left = region = lost = subject = 0.0
     n = 0
-    for t, f in zip(times, before):
+    for t, f in before:
         out = _render_probe(path, t, item, size)
         if out is None:
             continue

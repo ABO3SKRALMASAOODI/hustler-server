@@ -24,6 +24,7 @@ DEPARTMENT = "picture"
 
 PROBE_S = 4.0
 PROBE_SIZE = 256
+PROBE_WINDOWS = 4
 
 
 def _footage(ctx):
@@ -54,9 +55,15 @@ def _subpixel(c, i, n):
     return 0.0 if abs(den) < 1e-12 else 0.5 * (a - d) / den
 
 
-def jitter(frames):
-    """Mean global frame-to-frame shift in pixels of the probe size (phase
-    correlation, sub-pixel), and the share of steps that moved > 0.5 px."""
+MOVING_PX = 2.0         # 1080p px: a step that moved more than this
+
+
+def jitter(frames, sx=1.0, sy=1.0):
+    """Mean global frame-to-frame shift and the share of steps that moved
+    more than MOVING_PX (phase correlation, sub-pixel). The probe squashes
+    the frame to a square, so a horizontal step is scaled by ``sx`` and a
+    vertical one by ``sy`` (pixels of the measured frame per probe pixel,
+    each axis on its own)."""
     if len(frames) < 3:
         return None
     size = frames.shape[1]
@@ -75,31 +82,63 @@ def jitter(frames):
             dy -= size
         if dx > size / 2:
             dx -= size
-        shifts.append(float(np.hypot(dx, dy)))
+        shifts.append(float(np.hypot(dx * sx, dy * sy)))
         prev = cur
     s = np.array(shifts)
     return {"mean_px": round(float(s.mean()), 3),
-            "moving_share": round(float((s > 0.5).mean()), 3)}
+            "moving_share": round(float((s > MOVING_PX).mean()), 3)}
 
 
-def measure(path, start, dur, intensity):
-    before = jitter(_frames(path, start, dur))
-    after = jitter(_frames(path, start, dur, _stabilize_chain(intensity)))
+def _scale(ctx, path):
+    """(sx, sy): 1080p pixels per probe pixel along each axis. The footage
+    is measured at 1080p scale on its SHORT side, so a 16:9 frame is 1920
+    wide and a 9:16 one 1920 tall, and a step along the long axis counts
+    in full."""
+    v = ((getattr(ctx, "index", None) or {}).get("video") or {})
+    w, h = v.get("width"), v.get("height")
+    if not (w and h):
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                 path], capture_output=True, text=True, timeout=30)
+            w, h = (int(x) for x in r.stdout.strip().split(",")[:2])
+        except Exception:  # noqa: BLE001 - measured as a square frame
+            w = h = 1080
+    w, h = float(w), float(h)
+    k = 1080.0 / max(1.0, min(w, h))
+    return w * k / PROBE_SIZE, h * k / PROBE_SIZE
+
+
+def probe_starts(dur, span=PROBE_S, most=PROBE_WINDOWS):
+    """Where the probe windows start: spread over the whole footage, its
+    head and tail included (a clip handheld at its ends and steady in the
+    middle reads its shake)."""
+    if dur <= span * 1.5:
+        return [round(max(0.0, dur / 2.0 - span / 2.0), 3)]
+    n = int(min(most, max(2, dur // span)))
+    return [round((dur - span) * i / (n - 1), 3) for i in range(n)]
+
+
+def measure(path, start, dur, intensity, sx=1.0, sy=1.0):
+    before = jitter(_frames(path, start, dur), sx, sy)
+    after = jitter(_frames(path, start, dur, _stabilize_chain(intensity)),
+                   sx, sy)
     return before, after
 
 
-STILL_PX = 0.3          # 1080p px per frame: below this the camera holds
 TRY_STRENGTHS = (0.3, 0.5, 0.8)
 
 
 def stabilize_video(ctx, strength=None):
-    """WRITE: the whole-video stabilize pass, measured before it is written.
+    """WRITE: the whole-video stabilize pass, measured.
 
-    The jitter is measured first. Footage that holds still gets no pass
-    (deshake there only adds render time and mirrored-edge wobble round a
-    moving presenter). Otherwise the pass at the asked strength is measured,
-    and when it does not lower the jitter the other strengths are measured
-    too and the one that steadies most is written."""
+    The pass is always written: the customer asked for it. The camera's
+    jitter is measured on windows spread over the whole footage; on the
+    shakiest one the asked strength (0.5 by default) is measured through the
+    render's own chain, and when it does not lower the jitter the other
+    strengths are measured too and the one that steadies most is written.
+    The result reports the numbers as measured."""
     import agent_tools
     if not getattr(ctx, "has_main_video", False):
         return ("This project is a canvas of pictures and clips with no main "
@@ -109,32 +148,30 @@ def stabilize_video(ctx, strength=None):
             min(max(float(strength), 0.05), 1.0)
     except (TypeError, ValueError):
         asked = None
+    first = asked if asked is not None else 0.5
     dur = float(getattr(ctx, "duration", 0.0) or 0.0)
-    start = max(0.0, dur / 2.0 - PROBE_S / 2.0)
     span = min(PROBE_S, dur or PROBE_S)
-    scale = 1080.0 / PROBE_SIZE
     path = _footage(ctx)
-    try:
-        before = jitter(_frames(path, start, span))
-    except Exception as e:  # noqa: BLE001 - measured below or written blind
-        before, err = None, str(e)[:160]
-    else:
-        err = None
-    where = f"{span:g} s of the footage from {start:.1f} s"
-    if before and before["mean_px"] * scale < STILL_PX:
-        return (f"NO CHANGE — measured on {where}: camera jitter "
-                f"{before['mean_px'] * scale:.2f} px per frame (1080p scale); "
-                "the camera already holds still, so there is no shake to "
-                "remove and no pass was added. Tell the user the footage "
-                "has no measurable camera shake.")
-    tries = [asked if asked is not None else 0.5]
+    sx, sy = _scale(ctx, path)
+    err = None
+    reads = []
+    for st in probe_starts(dur, span):
+        try:
+            j = jitter(_frames(path, st, span), sx, sy)
+        except Exception as e:  # noqa: BLE001 - the other windows measure
+            err = str(e)[:160]
+            continue
+        if j:
+            reads.append((st, j))
+    start, before = max(reads, key=lambda r: r[1]["mean_px"]) if reads \
+        else (None, None)
     results = {}
     best = None
     if before:
-        for inten in tries + [x for x in TRY_STRENGTHS if x not in tries]:
+        for inten in [first] + [x for x in TRY_STRENGTHS if x != first]:
             try:
                 after = jitter(_frames(path, start, span,
-                                       _stabilize_chain(inten)))
+                                       _stabilize_chain(inten)), sx, sy)
             except Exception as e:  # noqa: BLE001 - next strength
                 err = str(e)[:160]
                 continue
@@ -143,36 +180,43 @@ def stabilize_video(ctx, strength=None):
             results[inten] = after
             if best is None or after["mean_px"] < results[best]["mean_px"]:
                 best = inten
-            if inten == tries[0] and after["mean_px"] < before["mean_px"]:
+            if inten == first and after["mean_px"] < before["mean_px"]:
                 break
-        if best is not None and \
-                results[best]["mean_px"] >= before["mean_px"]:
-            tried = ", ".join(f"{k:g}: {v['mean_px'] * scale:.2f} px"
-                              for k, v in results.items())
-            return (f"NO CHANGE — measured on {where}: camera jitter "
-                    f"{before['mean_px'] * scale:.2f} px per frame; the "
-                    f"stabilize pass did not lower it at any strength "
-                    f"({tried}). This movement is not handheld wobble (a pan, "
-                    "a walk, a whip or rolling shutter): deshake cannot "
-                    "steady it. Tell the user exactly that.")
-    inten = best if best is not None else tries[0]
+    # a strength that does not lower the jitter is no better than the asked
+    # one: the asked one is written
+    inten = best if best is not None and \
+        results[best]["mean_px"] < before["mean_px"] else first
     out = _write_pass(ctx, agent_tools, inten)
     if not (out.startswith("EDL v") or out.startswith("NO CHANGE")):
         return out
-    if not before or best is None:
+    if not before or inten not in results:
         return (out + "\nThe pass is on the whole video; its jitter could "
                 f"not be measured here ({err or 'too few frames'}).")
-    b = before["mean_px"] * scale
-    a = results[inten]["mean_px"] * scale
+    b, a = before["mean_px"], results[inten]["mean_px"]
+    where = (f"{span:g} s from {start:.1f} s, the shakiest of "
+             f"{len(reads)} stretch{'es' if len(reads) != 1 else ''} "
+             "measured across the footage" if len(reads) > 1 else
+             f"{span:g} s of the footage from {start:.1f} s")
     note = (f"\nMeasured on {where}: camera jitter {b:.2f} px per frame "
-            f"before, {a:.2f} px after (1080p scale; frames moving > 0.5 px: "
-            f"{before['moving_share'] * 100:.0f}% -> "
+            f"before, {a:.2f} px after (1080p scale; frames moving > "
+            f"{MOVING_PX:g} px: {before['moving_share'] * 100:.0f}% -> "
             f"{results[inten]['moving_share'] * 100:.0f}%), strength "
             f"{inten:g}.")
-    if asked is not None and inten != asked:
+    if len(reads) > 1:
+        note += (" Jitter by stretch: " + ", ".join(
+            f"{st:.0f} s {j['mean_px']:.2f} px" for st, j in reads) + ".")
+    if asked is not None and inten != asked and asked in results:
         note += (f" Strength {asked:g} measured "
-                 f"{results[asked]['mean_px'] * scale:.2f} px, so {inten:g} "
-                 "was written." if asked in results else "")
+                 f"{results[asked]['mean_px']:.2f} px, so {inten:g} was "
+                 "written.")
+    if b < 0.3:
+        note += (" The camera holds nearly still in every stretch measured; "
+                 "the pass keeps it so.")
+    elif a >= b:
+        note += (" The pass did not lower the jitter measured here: this "
+                 "movement looks like a pan, a walk, a whip or rolling "
+                 "shutter rather than handheld wobble, which deshake does "
+                 "not steady. Tell the user exactly that.")
     return (out + note + " Deshake smooths handheld wobble; a whip pan, a "
             "walk or rolling shutter stays.")
 
@@ -238,11 +282,11 @@ TOOL_SPECS = {
     "stabilize_video": (
         stabilize_video,
         "Remove camera shake: a whole-video stabilize pass (deshake), "
-        "measured first. The result reports the camera's frame-to-frame "
-        "jitter before and after the pass on the same frames, so say the "
-        "numbers. Footage that already holds still gets no pass (the "
-        "result says so); a strength that does not steady it is replaced "
-        "by one that does. strength 0.05-1 (default 0.5). Smooths handheld "
+        "measured across the footage. The result reports the camera's "
+        "frame-to-frame jitter before and after the pass on the shakiest "
+        "stretch, so say the numbers; a strength that does not steady it "
+        "is replaced by one that does. strength 0.05-1 (default 0.5). "
+        "Smooths handheld "
         "wobble; a whip pan, a walk or rolling shutter stays. One pass per "
         "edit (a new call replaces it).",
         {"strength": {"type": "number"}}),

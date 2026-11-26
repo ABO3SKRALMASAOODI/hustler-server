@@ -20,6 +20,10 @@ what that footage needs for "remove the green screen":
   filled from the picture around it). The footage's own backgrounds and
   every prop stay. A background the agent names explicitly is then laid
   behind the person cut-out as well, and the result says what that keeps.
+* a backdrop of the screen's colour that reads less than a full screen (in
+  part of the frames, dim, a tight shot) is keyed the same measured way;
+  footage with no screen colour at all gets the background behind the
+  person cut-out.
 
 The key runs on the SOURCE clock, so every later trim, framing, grade and
 caption sees the result.
@@ -323,22 +327,33 @@ def chroma_key(ctx, background=None, colour=None, colour2=None,
                     "to set_background to keep them. Say this to the user.")
         return (head + out + "\nThe new background could not be laid "
                 f"behind the person: {said}")
-    if named:
-        placed, said = _person_background(ctx, bg)
-        if placed:
-            return (head + said + "\nMeasured on "
-                    f"{len(frames)} frames: no green or blue screen and no "
-                    "screen-coloured leftover in this footage, so the new "
-                    f"background ({_bg_words(bg)}) is laid behind the person "
-                    "cut-out for the whole film; props in front of the old "
-                    "background go with it (pass a region to set_background "
-                    "to keep them). Say this to the user.")
-        return head + said
-    return (head + f"NO CHANGE — measured on {len(frames)} frames: no green "
-            "or blue screen behind the subject and no screen-coloured line "
-            "round it; there is nothing of a screen to remove. To key a "
-            "backdrop anyway, call again with mode='key' (and screen); to "
-            "replace the background, pass one.")
+    if reading.get("colour") and \
+            float(reading.get("share") or 0.0) >= ck.BACKDROP_MIN_SHARE:
+        # A backdrop of the screen's colour that reads less than a full
+        # screen (in part of the frames, dim, a tight shot): the user asked
+        # for it gone, so it is keyed; the dry run below narrows the key
+        # wherever it would take the subject.
+        head += (f"Keyed: the {reading['screen']} backdrop "
+                 f"({reading['colour']}) covers {reading['share'] * 100:.1f}% "
+                 "of the sampled picture, in "
+                 f"{reading.get('presence', 0) * 100:.0f}% of the frames.\n")
+        return head + _key(ctx, ck, edl, fx, path, times, reading, bg,
+                           similarity, mix)
+    # No screen colour in the footage at all: the background behind the
+    # person is what the user wants gone, so the person cut-out takes it.
+    placed, said = _person_background(ctx, bg)
+    if placed:
+        return (head + said + "\nMeasured on "
+                f"{len(frames)} frames: no green or blue screen and no "
+                "screen-coloured leftover in this footage, so the "
+                + ("" if named else "neutral ")
+                + f"background ({_bg_words(bg)}) is laid behind the person "
+                "cut-out for the whole film; props in front of the old "
+                "background go with it (pass a region to set_background "
+                "to keep them"
+                + ("" if named else "; pass a background to choose "
+                   "another") + "). Say this to the user.")
+    return head + said
 
 
 TOOL_SPECS = {

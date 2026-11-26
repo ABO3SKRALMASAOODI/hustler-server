@@ -3352,7 +3352,7 @@ def _index_fps(index):
     return fps if 1.0 <= fps <= 240.0 else 30.0
 
 
-def _snap_keep_to_shots(keep, index, words=None, prev_keep=None):
+def _snap_keep_to_shots(keep, index, words=None, prev_keep=None, ctx=None):
     """(keep, notes) with every keep edge pulled off a nearby camera cut.
 
     An indexed cut is the new shot's first frame index over the frame rate,
@@ -3367,11 +3367,15 @@ def _snap_keep_to_shots(keep, index, words=None, prev_keep=None):
     Speech takes priority: never remove an indexed word or part of one to
     hide a visual sliver. Retain that edge and report the visual tradeoff.
     notes is empty when no edge moved or needed speech protection.
-    With prev_keep, an edge the previous keep already had stays where that
-    version saved it (#1841): the write boundary had moved the end 1040.22
-    -> 1040.26 because the word's sound still ran there, this pass moved it
-    back to 1040.22 on every later write, and every cut, even one that
-    changed nothing, re-reported that same stale repair."""
+    With ctx, a move is also checked against the source's measured sound
+    (_measured_edge_moves, the write boundary's own measurement): an edge
+    that would cut a word whose sound still runs stays, like one that would
+    cut an indexed word (#1841: the boundary had moved the end 1040.22 ->
+    1040.26 because the word's sound still ran there, and this pass moved it
+    back on every later write). Every edge is placed, old ones included, so
+    a sliver an exact write or an earlier cut left is cleaned on the next
+    write; with prev_keep, an edge the previous keep already had that stays
+    for speech is not reported again."""
     cuts = _shot_cuts(index)
     if not cuts or not keep:
         return keep, []
@@ -3397,8 +3401,7 @@ def _snap_keep_to_shots(keep, index, words=None, prev_keep=None):
         s, e = span
         # Past the LAST cut in reach for a start, before the FIRST for an
         # end: two cuts a few frames apart are a sliver shot of their own.
-        if not (i > 0 and abs(src[i - 1][1] - s) <= 0.011) \
-                and not kept_before(s, old_starts):
+        if not (i > 0 and abs(src[i - 1][1] - s) <= 0.011):
             b = max((c for c in cuts if c - reach <= s < c + step),
                     default=None)
             # EDL keep times are hundredths (schemas._r): at least 0.01 past
@@ -3413,8 +3416,7 @@ def _snap_keep_to_shots(keep, index, words=None, prev_keep=None):
                 else:
                     moved.append(("start", s, first, b))
                     s = first
-        if not (i + 1 < len(src) and abs(src[i + 1][0] - e) <= 0.011) \
-                and not kept_before(e, old_ends):
+        if not (i + 1 < len(src) and abs(src[i + 1][0] - e) <= 0.011):
             b = min((c for c in cuts if c - step / 2.0 < e <= c + reach),
                     default=None)
             last = round(b - step / 2.0, 2) if b is not None else None
@@ -3427,6 +3429,31 @@ def _snap_keep_to_shots(keep, index, words=None, prev_keep=None):
                     moved.append(("end", e, last, b))
                     e = last
         span[0], span[1] = s, e
+    if moved and ctx is not None:
+        # The write boundary moves an edge that cuts a word's measured sound
+        # back out of it; a move it would undo is speech, kept like a word.
+        try:
+            sounding = _measured_edge_moves(ctx, out, src, speech)
+        except Exception:  # noqa: BLE001 - no measurement: the moves stand
+            sounding = []
+        for m in sounding:
+            k = 0 if m["side"] == "start" else 1
+            for mv in list(moved):
+                side, old, new, cut = mv
+                if side != m["side"] or abs(new - float(m["from"])) > 1e-6:
+                    continue
+                for j, span in enumerate(out):
+                    if abs(span[k] - new) <= 1e-6 and \
+                            abs(src[j][k] - old) <= 1e-6:
+                        span[k] = old
+                moved.remove(mv)
+                protected.append((side, old, cut,
+                                  [str(m.get("word") or "the word's sound")]))
+    # an edge the previous keep had that stays for speech was reported when
+    # it was placed; saying it again on every write is noise (#1841)
+    protected = [p for p in protected
+                 if not kept_before(p[1], old_starts if p[0] == "start"
+                                    else old_ends)]
     if not moved and not protected:
         return keep, []
     notes = []
@@ -3810,7 +3837,7 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
         # old ones included, exactly as the acoustic pass above does
         new_keep, shot_notes = _snap_keep_to_shots(
             new_keep, ctx.index, words,
-            prev_keep=None if place_all else prev_keep)
+            prev_keep=None if place_all else prev_keep, ctx=ctx)
     if never_grow:
         clipped = _within_keep(new_keep, prev_keep)
         if clipped:
@@ -14736,7 +14763,8 @@ def cut_output_range(ctx, start, end):
         new_keep, audio_notes, _quiet = _audio_safe_keep(
             ctx, new_keep, keep, ctx.index.get("words") or [])
         new_keep, shot_notes = _snap_keep_to_shots(
-            new_keep, ctx.index, ctx.index.get("words"), prev_keep=keep)
+            new_keep, ctx.index, ctx.index.get("words"), prev_keep=keep,
+            ctx=ctx)
         shot_notes = audio_notes + shot_notes
     else:
         shot_notes = []
