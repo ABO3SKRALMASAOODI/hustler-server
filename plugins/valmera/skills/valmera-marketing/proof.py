@@ -1541,16 +1541,14 @@ def recorded_recut(script, checks):
     if checks["ok"] or script["script"].get("format") == "showcase":
         return None
     receipts = script["receipts"]
-    if len(receipts["asks"]) != 1:
-        return None
     rec = jload(script["record"])
-    if not rec or not ui_shots(rec):
+    if not rec or not showcase_ui(rec):
         return None
     card = cards()[script["style"]["id"]]
     result = showcase_script(script["idea_full"], card, rec, receipts, script["export_check"],
                              {"original": {"record": script["record"]}}, "original", script.get("spend", []))
     result["styles_banned"] = script.get("styles_banned", [])
-    result["recut"] = dict(from_format="tutorial", recording=rec["sid"],
+    result["recut"] = dict(from_format="tutorial", recording=rec["sid"], turns=len(receipts["asks"]),
                            picture_repairs=(checks.get("marketing") or {}).get("picture_check"),
                            narration=(checks.get("stories") or {}).get("narration", {}).get("gate"))
     return result
@@ -1643,6 +1641,27 @@ def ui_shots(rec):
     return out
 
 
+def showcase_ui(rec):
+    """Play every submitted instruction in order, from the recording's own typing and Send photographs."""
+    ui = ui_shots(rec)
+    asks = rec.get("asks") or []
+    if not ui or len(asks) <= 1:
+        return ui
+    folder = ui["dir"]
+    sequence = []
+    for i, ask in enumerate(asks):
+        prefix = f"type_{i:02d}_"
+        shots = [prefix + f"{word:02d}.png" for word in range(len(ask["text"].split()) + 1)]
+        sent = prefix + "sent.png"
+        if not all(os.path.isfile(os.path.join(folder, name)) for name in [*shots, sent]):
+            return None
+        # Between two instructions, typed_line's separator holds the real preceding Send screen.
+        sequence.extend(shots if i == 0 else shots[1:])
+        if i + 1 < len(asks):
+            sequence.append(sent)
+    return dict(ui, typing=sequence, sent=sent)
+
+
 def player_rect(png, upload):
     """[top, bottom] of the Studio player's picture on a photograph of the screen, as fractions of its height: the
     first flat band (the controls' ground) below the top quarter is the picture's bottom, and the upload's own shape
@@ -1721,8 +1740,8 @@ def scale_plan(rec):
 def scale_supply(ctx, script, sup_dir, pk, rec, plan):
     """The scale film's pack: its grid's films, the hero and the voice track cut to devices.showcase_marks (the grid and
     the Studio carry their own sounds; the hero's own sound from where it grows out of the board)."""
-    ui = ui_shots(rec)
-    typed = script["receipts"]["typed"]
+    ui = showcase_ui(rec)
+    typed = typed_line(script["receipts"])
     win = [float(x) for x in (W3.direction_of(ctx).get("export_window") or plan["window"])]
     mk = D.showcase_marks([0.0, D.SCALE_HOOK_S], win, len(typed.split()), lead_f=F.LEAD_F, board_f=D.BOARD_F if ui and ui.get("board") else 0)
     parts = []
@@ -1782,8 +1801,8 @@ def showcase_supply(ctx, script, sup_dir, pk):
     d = W3.direction_of(ctx) if hasattr(ctx, "run_dir") else {}
     win = [float(x) for x in d.get("export_window") or showcase_window(ex, body, pics)]
     hook = [float(x) for x in d.get("hook_window") or showcase_hook(ex, body, pics)]
-    ui = ui_shots(rec)
-    typed = script["receipts"]["typed"]
+    ui = showcase_ui(rec)
+    typed = typed_line(script["receipts"])
     mk = D.showcase_marks(hook, win, len(typed.split()), lead_f=F.LEAD_F)
     voice = os.path.join(sup_dir, "voice.wav")
     lead = F.LEAD_F / F.FPS
@@ -1812,7 +1831,7 @@ def showcase_supply(ctx, script, sup_dir, pk):
     jsave(words, dict(voice="the recording", duration=round((mk["dur_f"] - mk["lead_f"]) / F.FPS, 3), words=[]))
     pack = dict(sid=ctx.sid, words=words, narration=voice, ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[], footage=[],
                 voices=[], work=os.path.join(sup_dir, "finish"), fit=[],
-                product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, later=later_label(rec),
+                product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
                              upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
                 format="showcase", studio_ui=bool(ui), site=bool(ui and ui.get("site")))
@@ -3436,11 +3455,11 @@ def showcase_score(ctx, script, pack):
     work = os.path.join(ctx.supply, "devices")
     prod = pack["product"]
     focus = face_focus(pack["ffmpeg"], upload["path"], prod["upload_at"], work, (0.5, 0.42))
-    ui = prod.get("ui") or ui_shots(rec)
+    ui = prod.get("ui") or showcase_ui(rec)
     if not ui:
         raise RuntimeError("the showcase needs the recording's Studio photographs (studio.py, phone view): record it again")
     page = ui.get("site") or dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
-    l1, beats = D.showcase(upload=upload, export=body, edl_b=edl, typed=script["receipts"]["typed"], window=prod["window"], hook=prod["hook"],
+    l1, beats = D.showcase(upload=upload, export=body, edl_b=edl, typed=typed_line(script["receipts"]), window=prod["window"], hook=prod["hook"],
                            ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"))
     out = os.path.join(ctx.supply, "l1.json")
     jsave(out, l1)
@@ -3451,7 +3470,7 @@ def showcase_score(ctx, script, pack):
     devices = dict(device="studio", format="showcase", laid=beats["devices"], faults=[], typed_line="studio")
     return dict(l1=out, l1_audio=l1_audio, turn_s=round(beats["reveal"][1] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
                 taste=taste, frames=l1["dur_f"], items=len(l1["items"]), direction=dict(format="showcase"), pace=beats["pace"],
-                recording_spans=[beats["export"]], instruction_panel=dict(typed=script["receipts"]["typed"], device="studio"), devices=devices,
+                recording_spans=[beats["export"]], instruction_panel=dict(typed=typed_line(script["receipts"]), device="studio"), devices=devices,
                 picture_check=dict(model=None, rounds=[], misfits_left=[], note="showcase: every picture is the recording's own"), spend=[])
 
 
@@ -3465,7 +3484,7 @@ def scale_score(ctx, script, pack, upload):
     page = ui.get("site") or dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
     tiles = [dict(t, path=t["path"]) for t in prod["tiles"]]
     hero = dict(path=tiles[0]["path"], w=tiles[0]["w"], h=tiles[0]["h"], fps=tiles[0]["fps"], dur=tiles[0]["dur"])
-    l1, beats = D.scale_showcase(upload=upload, hero=hero, tiles=tiles, typed=script["receipts"]["typed"], window=prod["window"], ui=ui, page=page,
+    l1, beats = D.scale_showcase(upload=upload, hero=hero, tiles=tiles, typed=typed_line(script["receipts"]), window=prod["window"], ui=ui, page=page,
                                  lib=lib, sid=ctx.sid, lead_f=F.LEAD_F, later=prod.get("later"), sub=prod.get("sub"))
     out = os.path.join(ctx.supply, "l1.json")
     jsave(out, l1)
@@ -3475,7 +3494,7 @@ def scale_score(ctx, script, pack, upload):
     taste = dict(ok=True, problems=[], min_text_px=min(d["min_text_px"] for d in beats["devices"] if d.get("min_text_px")), sounds=len(l1["sound"]))
     return dict(l1=out, l1_audio=l1_audio, turn_s=round(beats["reveal"][1] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
                 taste=taste, frames=l1["dur_f"], items=len(l1["items"]), direction=dict(format="showcase", variant="scale"), pace=beats["pace"],
-                recording_spans=[beats["export"]], instruction_panel=dict(typed=script["receipts"]["typed"], device="studio"),
+                recording_spans=[beats["export"]], instruction_panel=dict(typed=typed_line(script["receipts"]), device="studio"),
                 devices=dict(device="studio", format="showcase", variant="scale", laid=beats["devices"], faults=[], typed_line="studio"),
                 picture_check=dict(model=None, rounds=[], misfits_left=[], note="showcase: every picture is the recording's own"), spend=[])
 
