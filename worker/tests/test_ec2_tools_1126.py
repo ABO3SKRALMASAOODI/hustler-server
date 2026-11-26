@@ -322,3 +322,64 @@ def test_the_spoken_repetition_note_names_where_the_repeats_are():
     assert "'de de' at source 69.72s, 539.63s" in note
     assert "unless the request asks to remove repetitions" in note
     assert "should not be cut" not in note
+
+
+# ── #1830: a 9:16 window over a collage slideshow lands on a photo ──
+
+def _collage(w=320, h=180):
+    """A cream page with a photo panel on each side and a cream gutter in
+    the middle (project 6305's last collage)."""
+    import numpy as np
+    rng = np.random.default_rng(7)
+    a = np.zeros((h, w, 3), dtype=np.uint8)
+    a[:, :] = (243, 236, 222)                          # cream page
+    a[20:160, 10:120] = rng.integers(0, 255, (140, 110, 3))
+    a[30:170, 215:310] = rng.integers(0, 255, (140, 95, 3))
+    return a
+
+
+def test_a_window_on_the_collage_gutter_slides_onto_a_photo():
+    from score import panels
+    mask, page = panels.picture_mask(_collage())
+    assert mask is not None and page > 0.4
+    centre = [0.342, 0.0, 0.658, 1.0]                  # the 9:16 middle of 16:9
+    new, moved = panels.place(mask, centre)
+    assert moved and moved[0] < 0.2 and moved[1] > 0.6
+    assert abs((new[2] - new[0]) - (centre[2] - centre[0])) < 1e-3
+    assert new[2] <= 0.4 or new[0] >= 0.66             # on the left or the right photo
+
+
+def test_ordinary_footage_keeps_its_window():
+    import numpy as np
+    from score import panels
+    noisy = np.random.default_rng(3).integers(0, 255, (180, 320, 3)).astype(np.uint8)
+    mask, _share = panels.picture_mask(noisy)
+    assert mask is None
+    assert panels.place(mask, [0.342, 0.0, 0.658, 1.0]) == ([0.342, 0.0, 0.658, 1.0], None)
+
+
+def test_the_lowering_moves_the_main_uploads_overlay_and_reports_it():
+    from PIL import Image
+    from score import panels
+    img = Image.fromarray(_collage())
+    ovs = [{"id": "ov.b07.s0", "kind": "video", "asset_key": "main", "start": 29.47,
+            "duration_s": 4.43, "source_start_s": 41.47, "source_crop": [0.3298, 0.0, 0.6462, 1.0]},
+           {"id": "ov.x", "kind": "image", "asset_key": "fetched/plate.png", "source_crop": [0.3, 0, 0.6, 1]}]
+    rep = {}
+    panels.repair_windows(ovs, lambda k: "/src.mp4" if k == "main" else None, rep,
+                          grab=lambda path, t, width=None: img)
+    assert ovs[0]["source_crop"] != [0.3298, 0.0, 0.6462, 1.0]
+    assert rep["collage_windows"][0]["picture_after"] > 0.6
+    assert ovs[1]["source_crop"] == [0.3, 0, 0.6, 1]
+
+
+def test_a_person_before_a_plain_wall_keeps_the_window_on_them():
+    import numpy as np
+    from score import panels
+    a = np.zeros((180, 320, 3), dtype=np.uint8)
+    a[:, :] = (240, 240, 238)                                    # plain wall
+    a[40:180, 120:200] = np.random.default_rng(1).integers(0, 120, (140, 80, 3))   # the person
+    a[10:60, 250:318] = np.random.default_rng(2).integers(0, 255, (50, 68, 3))     # a busy poster
+    mask, _ = panels.picture_mask(a)
+    on_person = [0.342, 0.0, 0.658, 1.0]
+    assert panels.place(mask, on_person) == (on_person, None)

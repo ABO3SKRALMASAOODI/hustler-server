@@ -1106,6 +1106,9 @@ def lower(l1, work):
     fps = float(l1["fps"])
     keep, inserts = lower_spine(l1, bake, rep)
     overlays, zooms, tr_fx, runs = lower_pictures(l1, work, bake, rep)
+    # #1830: a window over a collage slideshow sits on its photos, never on the page between them
+    from . import panels
+    panels.repair_windows(overlays, lambda k: bake.locals.get(k) if k == "main" else None, rep)
     flash_fx, vectors, pool_ov = lower_flashes(l1, bake, rep)
     cards = lower_cards(l1, work, bake, rep)
     grade = (l1.get("film") or {}).get("grade") or {}
