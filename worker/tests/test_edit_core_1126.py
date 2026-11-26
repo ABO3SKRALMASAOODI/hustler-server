@@ -177,3 +177,37 @@ def test_restore_version_is_a_registered_editor_tool():
     import agent_tools
     assert "restore_version" in agent_tools.TOOLS
     assert "restore_version" in agent_tools.TOOL_DOMAINS["direction"]
+
+
+def test_a_low_confidence_tempo_still_gives_a_grid():
+    # p6238 (24 Nov): beat_align_cuts refused a 0.28-confidence song.
+    import agent_tools
+    p = {"bpm": 120.0, "bpm_conf": 0.28, "beats": [], "energy_bin_s": 0.5,
+         "energy": [-40.0, -30.0, -5.0] + [-6.0] * 17, "duration_s": 10.0}
+    grid = agent_tools._tempo_grid(p)
+    assert grid and abs(grid[1] - grid[0] - 0.5) < 1e-6 and grid[-1] <= 10.0
+    assert agent_tools._tempo_grid({"bpm": None}) == []
+
+
+def test_narration_only_project_transcript_reads_the_narration(monkeypatch):
+    # 19 Nov: get_transcript on a narration-only project answered
+    # "REJECTED: end must be greater than start." (the main recording is 0 s).
+    import read_tools
+
+    class _DB:
+        def run(self, fn, *a):
+            if getattr(fn, "__name__", "") == "asset_by_key":
+                return {"storage_key": a[1], "sha256": "abc"}
+            if getattr(fn, "__name__", "") == "get_index_by_sha":
+                return {"json": {"sentences": [{"id": "s1", "t0": 0.0, "t1": 2.0, "text": "Hello there"}]}}
+            # the _spoken_upload_key query and the asset lookup
+            return {"storage_key": "music/1/narration.mp3", "sha256": "abc"}
+
+    class _Ctx:
+        project_id, duration, index, db = 1, 0.0, {}, _DB()
+
+        def clamp(self, t):
+            return max(0.0, min(float(t), self.duration))
+    monkeypatch.setattr(read_tools, "asset_by_key", lambda conn, pid, key: {"storage_key": key, "sha256": "abc"})
+    out = read_tools.get_transcript(_Ctx())
+    assert "Hello there" in out and "narration.mp3" in out, out
