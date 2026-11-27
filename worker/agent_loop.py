@@ -1406,9 +1406,11 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
             + storyboard_text)
         msgs.append({"role": "system", "content": immutable_visual})
         _component("visual_index_digest", immutable_visual)
+    ctx._cache_static_messages = len(msgs)
+    turn_notes = []
     blueprint = director.prompt_block(getattr(ctx, "edit_plan", None))
     if blueprint:
-        msgs.append({"role": "system", "content": blueprint})
+        turn_notes.append({"role": "system", "content": blueprint})
         _component("durable_blueprint", blueprint)
     # THE FILMSTRIPS — rebuilt fresh every turn for every video in the
     # project, so the agent's picture of the footage can never go stale. A
@@ -1433,7 +1435,10 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
     current_state = state_block(
         ctx, worker_db, include_blueprint=False)
     ctx._cache_state_text = current_state
-    msgs.append({"role": "system", "content": current_state})
+    turn_notes.append({"role": "system", "content": current_state})
+    if getattr(ctx, "agent_model", None) != "gpt-6.2-sol":
+        msgs.extend(turn_notes)
+        turn_notes = []
     _component("current_project_edl_state", current_state)
     # The last few messages, not the last twenty (round 71f). Twenty was up
     # to 40k chars of stale conversation re-read on EVERY call of EVERY
@@ -1457,6 +1462,10 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
             msgs.append({"role": role, "content": content})
             if m["role"] == "user":
                 user_texts.append(content)
+                # The complete preceding request already includes this user and
+                # earlier chat. Keep replies posted since then when resuming.
+                ctx._sol_previous_user = (m["id"], len(msgs))
+    msgs.extend(turn_notes)
     user_texts.append(user_message["content"] or "")
     # What the customer typed, and nothing else. `msgs` also carries the
     # product's own English notes under role "user", so language is never
@@ -2337,6 +2346,7 @@ def run_agent_job(worker_db, job):
                       getattr(usage, "completion_tokens", None) if usage else None)
     _llm_recorder.spend_lane = spend_ledger.lane_of(job.get("user_id"))
     _llm_recorder.job_id = job["id"]
+    _llm_recorder.editor_session_key = f"edit:{ctx.project_id}:{session_id}"
     llm.set_recorder(_llm_recorder)
     if getattr(ctx, "credit_price_aliases", None):
         # Credit parity for a new subscriber's Claude lane (llm.record).
@@ -2398,6 +2408,11 @@ def run_agent_job(worker_db, job):
         if ctx.claude_trial is not None:
             _claude_trial_settle(ctx, result)
         if (result or {}).get("status") != "continued":
+            sol_plan = getattr(ctx, "_sol_tool_plan", None) or {}
+            if sol_plan.get("last_body") and not edit_rung.turn_fell_back():
+                import edit_session_history
+                edit_session_history.remember(edit_rung._cache_key(), user_message["id"],
+                                              sol_plan["last_body"], sol_plan["last_input_tokens"])
             agent_tools.queue_sharper_preview(ctx)
         return result
     except dbx.JobLeaseLost:
@@ -2730,7 +2745,7 @@ def _trial_planner_step(ctx, model, iteration, step_effort,
     planner off when that one call could not leave the account
     CLAUDE_TRIAL_PLANNER_RESERVE_USD for the steps that make the edit."""
     scope = getattr(ctx, "claude_trial", None)
-    if scope is None or not claude_lane.is_claude_model(model):
+    if scope is None or not (claude_lane.is_claude_model(model) or edit_rung.is_rung_model(model)):
         return model, step_effort
     planner = getattr(scope, "planner_model", None)
     if not planner or not claude_lane.is_claude_model(planner):
@@ -6407,6 +6422,23 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # Resumed slices rebuild messages. References belonged to the previous history.
             tool_plan["refs"] = {}
         tool_plan["volatile_system"] = getattr(ctx, "_cache_state_text", None)
+    elif model == "gpt-6.2-sol":
+        core_names = agent_tools.planning_tool_names()
+        catalog = agent_tools.openai_tools(model, compact=True, names=set(agent_tools.TOOLS),
+                                           engine=agent_tools.engine_on(ctx))
+        stable = [t for t in catalog if t["function"]["name"] in core_names]
+        effort = edit_rung.reasoning_effort(llm.editor_reasoning_effort(None, 0)) or "medium"
+        tool_plan = claude_lane.tool_plan(stable, catalog, effort)
+        tool_plan["initial_extra"] = sorted({t["function"]["name"] for t in tools} - core_names)
+        tool_plan["static_messages"] = getattr(ctx, "_cache_static_messages", 2)
+        ctx._sol_tool_plan = tool_plan
+        prior = getattr(ctx, "_sol_previous_user", None)
+        if prior and not _cont:
+            import edit_session_history
+            room = config.CLAUDE_HISTORY_COMPACT_TOKENS - _agent_request_token_estimate(messages, tools, 0)
+            tool_plan["previous_body"] = edit_session_history.previous(
+                edit_rung._cache_key(), prior[0], room)
+            tool_plan["skip_chat_until"] = prior[1]
     total_steps = _cont.get("steps", 0)
     t_start = _cont.get("t_start") or time.monotonic()
     turn_started = (time.monotonic() if _cont.get("durable_slice")
@@ -6856,7 +6888,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if step_effort and iteration > 0 \
                     and not llm.reasoning_effort_rejected(active_model):
                 active_extra["reasoning_effort"] = step_effort
-            elif step_effort and claude_lane.is_claude_model(active_model):
+            elif step_effort and (claude_lane.is_claude_model(active_model) or active_model == "gpt-6.2-sol"):
                 # Claude takes output_config.effort on the planning step too.
                 active_extra["reasoning_effort"] = step_effort
             if llm.tools_need_effort_none(active_model):
@@ -6874,12 +6906,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         tool_plan, active_model):
                     claude_lane.surface_tools(tool_plan, messages, tools)
                     active_kw["tool_plan"] = tool_plan
+            elif active_model == "gpt-6.2-sol" and tool_plan and "initial_extra" in tool_plan:
+                claude_lane.surface_tools(tool_plan, messages, tools)
+                active_kw["tool_plan"] = tool_plan
             affinity = llm.cache_affinity(active_model)
             if affinity:
                 active_kw["extra_headers"] = affinity
             return active_kw, active_extra
 
-        kw, extra = _chat_request(model)
+        kw, extra = _chat_request(call_model)
 
         # Reserve this exact request before every dispatch. Completed-call
         # rows are retrospective; this atomic ledger prevents two workers
@@ -7003,7 +7038,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 call_model = model
                 active_base_url = lane.get("base_url") or config.OPENAI_BASE_URL
                 active_api_key = lane.get("api_key") or config.OPENAI_API_KEY
-                kw, extra = _chat_request(model)
+                kw, extra = _chat_request(call_model)
                 ctx.llm_client, ctx.agent_model = client, model
                 llm.set_turn_plan(llm.turn_plan(), ctx.project_id, lane=lane)
                 agent_tools._metric(ctx, "provider_quota_fallbacks", 1)
@@ -7012,7 +7047,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                       f"on {lane.get('name') or 'fallback'}", flush=True)
                 return True
 
-            if llm.responses_available(model, active_base_url, effort=step_effort):
+            if not getattr(step_client, "is_claude_lane", False) and llm.responses_available(
+                    call_model, active_base_url, effort=step_effort):
                 while resp is None:
                     try:
                         resp = llm.responses_create(
@@ -7711,7 +7747,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # The broad contact sheets did their job on the first dispatch. Keep
         # exact look evidence added above, but never resend all project pixels
         # just because the model read a skill before recording its plan.
-        if _compact_initial_filmstrip(messages):
+        if (compact_history or model != "gpt-6.2-sol") and _compact_initial_filmstrip(messages):
             ctx.editing_metrics["initial_filmstrip_compacted"] = 1
 
         # Production projects 880/922/923 spent 20, 51 and 11+ read calls

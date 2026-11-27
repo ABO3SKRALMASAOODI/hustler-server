@@ -273,3 +273,88 @@ def test_a_fallback_refusal_that_is_not_a_lost_connection_stands(rung):
     with pytest.raises(ValueError):
         claude_lane.create("gpt-6.1-sol", MSGS, tools=TOOLS)
     assert len(rung.posts) == 2
+
+
+def test_sol_62_wire_prefix_grows_across_steps_and_new_job_recorders(monkeypatch):
+    from copy import deepcopy
+    import json
+    model = "gpt-6.2-sol"
+    core = [{"type": "function", "function": {"name": "look", "parameters": {"type": "object"}}}]
+    extra = {"type": "function", "function": {"name": "grade", "parameters": {"type": "object"}}}
+    messages = [{"role": "system", "content": "editor kernel"},
+                {"role": "system", "content": "capabilities"},
+                {"role": "user", "content": "first request"}]
+    plan = claude_lane.tool_plan(core, core + [extra], "high")
+    plan["initial_extra"] = []
+    def wire(job, history, tools, effort):
+        monkeypatch.setattr(llm, "get_recorder", lambda: SimpleNamespace(
+            job_id=job, editor_session_key="edit:17:42"))
+        return edit_rung.request_body(model, history, tools, effort=effort, tool_plan=plan)
+    a = wire(1, messages, core, "high")
+    history = deepcopy(messages) + [
+        {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "look", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "observed subject"}]
+    claude_lane.surface_tools(plan, history, [extra] + core)
+    b = wire(1, history, [extra] + core, "low")
+    c = wire(2, history + [{"role": "assistant", "content": "Done."},
+                            {"role": "user", "content": "Follow-up"}], core + [extra], "low")
+    for before, after in ((a, b), (b, c)):
+        # Compare transmitted JSON bytes, including the position of the tool and effort updates.
+        assert json.dumps(after["input"][:len(before["input"])]).encode() == json.dumps(before["input"]).encode()
+        for field in ("tools", "model", "reasoning", "prompt_cache_key", "prompt_cache_options"):
+            assert before[field] == after[field]
+    assert a["prompt_cache_key"] == "valmera:edit:17:42"
+    assert [i["type"] for i in b["input"] if i.get("type")][-2:] == ["additional_tools", "configuration_update"]
+    assert a["input"][0]["content"][0]["prompt_cache_breakpoint"]["ttl"] == "12h"
+
+
+def test_sol_reported_reads_and_both_write_lifetimes_survive_llm_record(monkeypatch):
+    rows = []
+    monkeypatch.setattr(llm, "get_recorder", lambda: lambda *args: rows.append(args))
+    u = edit_rung._RespUsage("gpt-6.2-sol", {"input_tokens": 10000, "output_tokens": 100,
+        "input_tokens_details": {"cached_tokens": 8000, "cache_write_tokens": 1500,
+                                "cache_write_tokens_details": {"ttl_12h_tokens": 1000}}})
+    u.prompt_cache = {"key": "valmera:edit:17:42", "cached_tokens": u.cache_read_input_tokens}
+    llm.record("agent", {"model": "gpt-6.2-sol"}, {}, u)
+    row = rows[0][2]
+    assert [row[k] for k in ("cached_in","cache_write_in","cache_write_12h_in","uncached_in")] == [8000,1500,1000,500]
+    assert row["prompt_cache"]["cached_tokens"] == 8000
+    assert row["provider_cost_usd"] == pytest.approx((8000*.1 + 500*2 + 500*2.5 + 1000*5 + 100*10)/1e6)
+
+
+def test_sol_trial_keeps_actual_opus_planner(monkeypatch):
+    from agent_loop import _trial_planner_step
+    monkeypatch.setattr(config, "EDIT_RUNG_MODELS", "gpt-6.2-sol")
+    ctx = SimpleNamespace(claude_trial=SimpleNamespace(
+        planner_model="claude-opus-5-5", remaining_usd=5, planner_effort="xhigh", executor_effort="high"))
+    assert _trial_planner_step(ctx, "gpt-6.2-sol", 0, "medium")[0] == "claude-opus-5-5"
+    assert _trial_planner_step(ctx, "gpt-6.2-sol", 1, "medium")[0] == "gpt-6.2-sol"
+
+
+def test_sol_new_job_rebuilds_changed_project_state_behind_real_previous_wire(monkeypatch):
+    import json
+    import edit_session_history as sessions
+    model = "gpt-6.2-sol"
+    key = "edit:17:99"
+    monkeypatch.setattr(llm, "get_recorder", lambda: SimpleNamespace(editor_session_key=key))
+    spec = [{"type": "function", "function": {"name": "look", "parameters": {"type": "object"}}}]
+    def plan():
+        return dict(claude_lane.tool_plan(spec, spec, "high"), initial_extra=[], static_messages=2)
+    base = [{"role": "system", "content": "kernel"}, {"role": "system", "content": "capabilities"}]
+    first = edit_rung.request_body(model, base + [
+        {"role": "system", "content": "version one"},
+        {"role": "user", "content": "trim"},
+        {"role": "assistant", "tool_calls": [{"id": "a", "function": {"name": "look", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "a", "content": "trim inspected"}], spec, tool_plan=plan())
+    sessions.remember(key, 18, first, 2400)
+    next_plan = plan()
+    next_plan.update(previous_body=sessions.previous(key, 18, 5000), skip_chat_until=3)
+    second = edit_rung.request_body(model, base + [
+        {"role": "user", "content": "trim"}, {"role": "assistant", "content": "Trimmed."},
+        {"role": "system", "content": "version two"}, {"role": "user", "content": "add captions"}],
+        spec, tool_plan=next_plan)
+    assert json.dumps(second["input"][:len(first["input"])]).encode() == json.dumps(first["input"]).encode()
+    assert [m["content"] for m in second["input"][len(first["input"]):]] == ["Trimmed.", "version two", "add captions"]
+    assert sessions.previous("different session", 18, 5000) is None
+    assert sessions.previous(key, 17, 5000) is None
+    assert sessions.previous(key, 18, 50) is None

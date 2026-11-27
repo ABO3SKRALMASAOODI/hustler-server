@@ -308,7 +308,7 @@ OPENAI_EDITS = os.getenv("OPENAI_EDITS", "0") == "1"
 # (.valmera/week-1112/lanes/EDIT-MODEL/table.json: gpt-6.1-sol 8/12 asks at
 # 4.4 against Haiku's 6/12 at 3.7). Setting the app_kv model back to
 # claude-haiku-5-5 is the switch-off; EDIT_RUNG_MODELS="" closes the rung.
-EDIT_RUNG_MODELS = os.getenv("EDIT_RUNG_MODELS", "gpt-6.1-sol")
+EDIT_RUNG_MODELS = os.getenv("EDIT_RUNG_MODELS", "gpt-6.1-sol,gpt-6.2-sol")
 EDIT_RUNG_FALLBACK_MODEL = os.getenv("EDIT_RUNG_FALLBACK_MODEL",
                                      "claude-haiku-5-5")
 EDIT_RUNG_TIMEOUT_S = float(os.getenv("EDIT_RUNG_TIMEOUT_S", "240"))

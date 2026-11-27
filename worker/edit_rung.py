@@ -30,6 +30,7 @@ account's allowance are priced at the fallback's (Haiku's) card for the same tok
 more. provider_cost_usd stays the true OpenAI cost on every row for every report.
 """
 
+import hashlib
 import json
 import threading
 import time
@@ -152,22 +153,10 @@ def _unreachable(exc):
 
 
 def _cache_key():
-    """One prompt-cache key per turn, so every step of a turn lands on the same cached prefix."""
-    try:
-        import claude_trial
-        scope = claude_trial.current()
-        if scope is not None and getattr(scope, "job_id", None):
-            return f"valmera-edit-{scope.job_id}"
-    except Exception:  # pragma: no cover
-        pass
-    try:
-        import llm
-        key = getattr(getattr(llm, "_turn", None), "cache_key", None)
-        if key:
-            return str(key)[:64]
-    except Exception:  # pragma: no cover
-        pass
-    return None
+    """Use the session bound by the editor, including its recorder in pool threads."""
+    import llm
+    return (getattr(llm.get_recorder(), "editor_session_key", None)
+            or getattr(llm._turn, "cache_key", None) or "editor")
 
 
 # ------------------------------------------------------------------ errors
@@ -201,9 +190,10 @@ class _RespUsage:
         self.prompt_tokens = int(raw.get("input_tokens") or 0)
         self.completion_tokens = int(raw.get("output_tokens") or 0)
         self.total_tokens = self.prompt_tokens + self.completion_tokens
-        self.input_tokens = max(0, self.prompt_tokens - cached)
+        written = int((raw.get("input_tokens_details") or {}).get("cache_write_tokens") or 0)
+        self.input_tokens = max(0, self.prompt_tokens - cached - written)
         self.cache_read_input_tokens = cached
-        self.cache_creation_input_tokens = 0
+        self.cache_creation_input_tokens = written
         self.output_tokens = self.completion_tokens
         self.prompt_tokens_details = dict(raw.get("input_tokens_details") or {})
         self.completion_tokens_details = {"reasoning_tokens": reasoning}
@@ -299,7 +289,33 @@ def responses_tools(tools):
 _EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "xhigh"}
 
 
-def request_body(model, messages, tools=None, max_tokens=None, effort=None, tool_choice=None):
+def reasoning_effort(value):
+    return _EFFORT.get(str(value or "").lower())
+
+
+def _session_tools(body, plan):
+    """Add newly discovered functions where the editor learned them. Keep old items in place."""
+    import openai_cache
+    body["tools"] = responses_tools(plan["stable"])
+    catalog = {tool["function"]["name"]: tool for tool in plan["catalog"]}
+    def addition(names):
+        return {"type": "additional_tools", "role": "developer",
+                "tools": openai_cache.stable_tools(responses_tools([catalog[n] for n in names]))}
+    items = []
+    for item in body["input"]:
+        items.append(item)
+        names = plan["refs"].get(item.get("call_id")) if item.get("type") == "function_call_output" else None
+        if names:
+            items.append(addition(names))
+    if plan.get("initial_extra"):
+        # Resume-only tools belong after the shared instructions, before the first user input.
+        at = next((i for i, item in enumerate(items) if item.get("role") != "developer"), len(items))
+        items.insert(at, addition(plan["initial_extra"]))
+    body["input"] = items
+
+
+def request_body(model, messages, tools=None, max_tokens=None, effort=None, tool_choice=None,
+                 tool_plan=None):
     body = {"model": model, "input": responses_input(messages), "store": False,
             "max_output_tokens": max(int(max_tokens or 8000), 8000)}
     rt = responses_tools(tools)
@@ -309,11 +325,58 @@ def request_body(model, messages, tools=None, max_tokens=None, effort=None, tool
             body["tool_choice"] = tool_choice
         elif isinstance(tool_choice, dict) and (tool_choice.get("function") or {}).get("name"):
             body["tool_choice"] = {"type": "function", "name": tool_choice["function"]["name"]}
-    e = _EFFORT.get(str(effort or "").lower())
+    e = reasoning_effort(effort)
     if e:
         body["reasoning"] = {"effort": e}
+    if tool_plan and model == "gpt-6.2-sol":
+        _session_tools(body, tool_plan)
+        body["reasoning"] = {"effort": tool_plan["effort"]}
+        # Keep each effort transition at its original history boundary, even
+        # on a retry. Drop anchors whose input was compacted in a later slice.
+        updates = tool_plan.setdefault("effort_updates", {})
+        previous = tool_plan["effort"]
+        items = body["input"]
+        history = []
+        for pos, item in enumerate(items):
+            history.append(item)
+            if pos not in updates and pos + 1 != len(items):
+                continue
+            fingerprint = hashlib.sha256(json.dumps(item, sort_keys=True).encode()).digest()
+            saved = updates.get(pos)
+            target = saved[1] if saved and saved[0] == fingerprint else previous
+            if pos + 1 == len(items) and e:
+                target = e
+            if target != previous:
+                updates[pos] = (fingerprint, target)
+                history.append({"type": "configuration_update", "reasoning": {"effort": target}})
+                previous = target
+            else:
+                updates.pop(pos, None)
+        body["input"] = history
     import openai_cache
-    return openai_cache.responses(body, "editor", conversation=True)
+    single_review = len(rt) == 1 and isinstance(tool_choice, dict)
+    conversation = not single_review and (bool(rt) or any(
+        msg.get("role") == "assistant" for msg in messages))
+    count = (tool_plan or {}).get("static_messages", 2)
+    result = openai_cache.responses(body, _cache_key(), conversation=conversation, static_messages=count)
+    if (tool_plan or {}).get("last_input_tokens", 0) >= config.CLAUDE_HISTORY_COMPACT_TOKENS:
+        tool_plan.pop("previous_body", None)
+    prior = (tool_plan or {}).get("previous_body")
+    if prior:
+        import edit_session_history
+        # Each leading instruction and historical chat message is a single
+        # Responses item. Additional tools can occur between those groups.
+        cut = tool_plan["skip_chat_until"] - count
+        shortened = list(result["input"][:count])
+        for item in result["input"][count:]:
+            if cut > 0 and item.get("role") in ("assistant", "user"):
+                cut -= 1
+            else:
+                shortened.append(item)
+        joined = edit_session_history.join(dict(result, input=shortened), prior, count)
+        if joined is not None:
+            return joined
+    return result
 
 
 def _completion(model, data):
@@ -333,10 +396,13 @@ def _completion(model, data):
     if data.get("status") == "incomplete":
         finish = "length"
     text = "\n".join(texts) or (refusal if refusal and not calls else None)
+    if refusal and not calls:
+        raise RungFailed(f"{model} returned a refusal")
     if not text and not calls:
         raise RungFailed(f"{model} answered with nothing (status {data.get('status')})")
     out = cl._Message(text, calls or None, refusal)
-    usage = _RespUsage(model, data.get("usage"))
+    usage = _RespUsage(model, {**(data.get("usage") or {}), "service_tier": data.get("service_tier")
+                               or (data.get("usage") or {}).get("service_tier")})
     result = cl._Completion([cl._Choice(out, finish)], usage, model, data.get("id"), finish)
     result.provider = PROVIDER
     return result
@@ -410,7 +476,7 @@ def _alert(reason):
 
 
 def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choice=None,
-           timeout=None, fallback=None):
+           timeout=None, fallback=None, tool_plan=None):
     """One call on the rung, or on the fallback when the rung cannot answer it.
 
     fallback(model) makes the same call on the Anthropic lane with that model. Raises only what
@@ -429,14 +495,15 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
             why = "OpenAI credit out: " + openai_credit.closed_reason()
     if why is None:
         claude_trial.guard_call(model)
-        body = request_body(model, messages, tools, max_tokens, effort, tool_choice)
         t0 = time.monotonic()
         try:
+            body = request_body(model, messages, tools, max_tokens, effort, tool_choice, tool_plan)
             data = _post(body, min(float(timeout or config.EDIT_RUNG_TIMEOUT_S),
                                    float(config.EDIT_RUNG_TIMEOUT_S)))
             result = _completion(model, data)
             import openai_cache
-            result.usage.prompt_cache = openai_cache.describe(body)
+            result.usage.prompt_cache = dict(openai_cache.describe(body),
+                cached_tokens=result.usage.cache_read_input_tokens)
         except RungFailed as exc:
             why = str(exc)
             if exc.wallet:
@@ -454,6 +521,9 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
         else:
             result.usage.latency_s = round(time.monotonic() - t0, 2)
             result.usage.answered_model = model
+            if tool_plan is not None and model == "gpt-6.2-sol":
+                tool_plan["last_body"] = body
+                tool_plan["last_input_tokens"] = result.usage.prompt_tokens
             _meter(model, result)
             return result
         _mark_turn(why)
@@ -477,9 +547,9 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
         print(f"[edit-rung] {fallback_model()} unreachable ({type(exc).__name__}: "
               f"{str(exc)[:160]}); asking {model} again", flush=True)
         claude_trial.guard_call(model)
-        body = request_body(model, messages, tools, max_tokens, effort, tool_choice)
         t0 = time.monotonic()
         try:
+            body = request_body(model, messages, tools, max_tokens, effort, tool_choice, tool_plan)
             data = _post(body, min(float(timeout or config.EDIT_RUNG_TIMEOUT_S),
                                    float(config.EDIT_RUNG_TIMEOUT_S)))
             result = _completion(model, data)
@@ -487,7 +557,8 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
             print(f"[edit-rung] {model} failed again: {str(again)[:200]}", flush=True)
             raise exc from again
         import openai_cache
-        result.usage.prompt_cache = openai_cache.describe(body)
+        result.usage.prompt_cache = dict(openai_cache.describe(body),
+                cached_tokens=result.usage.cache_read_input_tokens)
         result.usage.latency_s = round(time.monotonic() - t0, 2)
         result.usage.answered_model = model
         _meter(model, result)

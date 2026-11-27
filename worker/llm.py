@@ -339,10 +339,13 @@ def record(purpose, request, response, usage=None):
         actual = provider_cost_usd(usage, (request or {}).get("model"))
         if actual is not None and isinstance(response, dict):
             response = dict(response, provider_cost_usd=actual)
-            if (request or {}).get('model') in ('gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol'):
+            if (request or {}).get('model') in ('gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.2-sol'):
                 details = getattr(usage, 'prompt_tokens_details', {}) or {}
                 response['cache_write_in'] = (details.get('cache_write_tokens', 0)
                     if isinstance(details, dict) else getattr(details, 'cache_write_tokens', 0))
+                response['cache_write_12h_in'] = openai_cache.tokens(usage)['cache_write_12h_tokens']
+                response['uncached_in'] = max(0, int(usage.prompt_tokens or 0)
+                    - response['cached_in'] - int(response['cache_write_in'] or 0))
                 response['service_tier'] = (getattr(usage, 'service_tier', None)
                     or config.OPENAI_SERVICE_TIER or 'default')
                 response['cost_basis'] = 'reported_tokens_official_rates'
@@ -364,13 +367,12 @@ def record(purpose, request, response, usage=None):
                 # The trial lane: whose $1 this call spent, and the cache
                 # write slice (Anthropic bills it at its own 1.25x rate).
                 details = getattr(usage, 'prompt_tokens_details', {}) or {}
-                response['cache_write_in'] = (
-                    details.get('cache_write_tokens', 0)
-                    if isinstance(details, dict) else 0)
-                response['cache_write_1h_in'] = getattr(usage, 'hour_write_tokens', 0)
+                total_written = int(details.get('cache_write_tokens', 0) or 0) if isinstance(details, dict) else 0
+                response['cache_write_1h_in'] = min(total_written, getattr(usage, 'hour_write_tokens', 0))
+                response['cache_write_in'] = total_written - response['cache_write_1h_in']
                 response['uncached_in'] = max(0,
                     int(getattr(usage, 'prompt_tokens', 0) or 0)
-                    - response['cached_in'] - int(response['cache_write_in'] or 0))
+                    - response['cached_in'] - total_written)
                 response['provider'] = 'anthropic'
                 response['cost_basis'] = 'anthropic_usage_official_rates'
                 try:
@@ -911,7 +913,7 @@ def append_only_history(model):
     """Providers whose prompt cache rewards a byte-stable history (Grok, and
     the Claude lane, whose cache reads cost 5-10% of a miss)."""
     m = str(model or "").lower()
-    return m.startswith("grok-") or m.startswith("claude-")
+    return m.startswith(("grok-", "claude-", "gpt-6.2-sol"))
 
 
 def vision_client_for(plan):
@@ -1417,11 +1419,11 @@ def _seed_known_dialects():
     if "api.openai.com" not in (config.OPENAI_BASE_URL or ""):
         return
     for m in {config.AGENT_MODEL, config.FIRST_TURN_AGENT_MODEL,
-              config.EDITOR_MODEL, "gpt-6-sol", "gpt-6.1-sol", config.VISION_MODEL}:
+              config.EDITOR_MODEL, "gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", config.VISION_MODEL}:
         if m and re.match(r"gpt-[5-9]", m):
             _use_max_completion_tokens.add(m)
             _no_temperature.add(m)
-            if m != "gpt-6.1-sol":
+            if m not in ("gpt-6.1-sol", "gpt-6.2-sol"):
                 _tools_effort_none.add(m)
 
 
@@ -1749,7 +1751,7 @@ def responses_available(model, base_url, effort=None):
         # The Claude lane's client (an edit-rung model on it included):
         # edit_rung answers the call, never this process's Responses lane.
         return False
-    if model == "gpt-6.1-sol":
+    if model in ("gpt-6.1-sol", "gpt-6.2-sol"):
         # Tool calls have no Chat Completions fallback on this model.
         return True
     if not config.AGENT_RESPONSES_LANE or not (
@@ -1879,7 +1881,7 @@ def responses_create(base_url, api_key, model, messages, tools,
             "tools": _to_responses_tools(tools)}
     if cache_affinity(model):
         body["prompt_cache_key"] = cache_affinity(model)["x-grok-conv-id"]
-    if model == "gpt-6.1-sol":
+    if model in ("gpt-6.1-sol", "gpt-6.2-sol"):
         if effort in (None, "", "none", "minimal"):
             effort = "low"
     if tool_choice is not None:
@@ -2033,7 +2035,7 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
     purpose = extra.pop("cache_role", "editor")
     if extra.get("tools") and str(model).startswith("gpt-"):
         extra["tools"] = openai_cache.stable_tools(extra["tools"])
-    if model == "gpt-6.1-sol" and "tools" in extra \
+    if model in ("gpt-6.1-sol", "gpt-6.2-sol") and "tools" in extra \
             and not getattr(client_obj, "is_claude_lane", False):
         try:
             return responses_create(
@@ -2050,7 +2052,7 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
     kw.update(extra)
     if str(model).startswith("gpt-") and "api.openai.com" in str(getattr(client_obj, "base_url", "")):
         kw["extra_body"] = {**kw.get("extra_body", {}), **openai_cache.chat_options(model, purpose)}
-    if model == "gpt-6.1-sol" and kw.get("reasoning_effort") in ("none", "minimal"):
+    if model in ("gpt-6.1-sol", "gpt-6.2-sol") and kw.get("reasoning_effort") in ("none", "minimal"):
         kw["reasoning_effort"] = "low"
     headers = cache_affinity(model)
     if headers:

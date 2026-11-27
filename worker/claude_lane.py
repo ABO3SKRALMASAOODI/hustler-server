@@ -485,7 +485,7 @@ def to_anthropic(messages, tools=None, model=None, tool_refs=None):
         if fn.get("strict") is True:
             tool_defs[-1]["strict"] = True
             tool_defs[-1]["input_schema"] = _strict_schema(schema)
-    return system, out, tool_defs
+    return system, out, sorted(tool_defs, key=lambda tool: tool["name"])
 
 
 def _results_first(msgs):
@@ -529,6 +529,7 @@ def surface_tools(plan, messages, tools):
     if not plan:
         return []
     given = {t["function"]["name"] for t in plan["stable"]}
+    given.update(plan.get("initial_extra", []))
     for names in plan["refs"].values():
         given.update(names)
     known = {t["function"]["name"] for t in plan["catalog"]}
@@ -582,7 +583,8 @@ def _strict_schema(schema):
 
 def _one_shot(msgs, tools):
     """Single reviews do not reuse their project payload after this call."""
-    structured_brief = len(tools) == 1 and tools[0].get("name") == "record_request_contract"
+    structured_brief = len(tools) == 1 and tools[0].get("name") in {
+        "record_request_contract", "record_ask_check", "music_pick_verdict"}
     return (not tools or structured_brief) and all(m["role"] != "assistant" for m in msgs)
 
 
@@ -596,10 +598,10 @@ def _mark_cache(system, msgs, tools, model="", cache_policy=None, prefix_ttl=Non
     if cache_policy == "shared_only" or _one_shot(msgs, tools):
         # A critic's unique frames are one-shot.
         if tools:
-            tools[-1] = dict(tools[-1], cache_control={"type": "ephemeral"})
+            tools[-1] = dict(tools[-1], cache_control={"type": "ephemeral", "ttl": "1h"})
         if system:
             stable = min(1, len(system) - 1) if cache_policy == "shared_only" else 0
-            system[stable] = dict(system[stable], cache_control={"type": "ephemeral"})
+            system[stable] = dict(system[stable], cache_control={"type": "ephemeral", "ttl": "1h"})
         return
     # A large batch of images/observations can put the previous request's
     # write beyond Anthropic's 20-position lookback. Keep an explicit read
@@ -612,20 +614,21 @@ def _mark_cache(system, msgs, tools, model="", cache_policy=None, prefix_ttl=Non
         if last is not None:
             tools[last] = dict(tools[last], cache_control=stable)
         if system:
-            system[-1] = dict(system[-1], cache_control=stable)
+            shared = min(1, len(system) - 1)
+            system[shared] = dict(system[shared], cache_control=stable)
     else:
         if tools and anchor is None:
             last = max((i for i, tool in enumerate(tools)
                         if not tool.get("defer_loading")), default=None)
             if last is not None:
-                tools[last] = dict(tools[last], cache_control={"type": "ephemeral"})
+                tools[last] = dict(tools[last], cache_control={"type": "ephemeral", "ttl": "1h"})
         if system:
             # The editor kernel + capability directory are identical for every
             # project; one breakpoint after them is a cross-account read point,
             # the last leading block caches this project's context.
             stable = min(1, len(system) - 1)
             system[stable] = dict(system[stable],
-                                  cache_control={"type": "ephemeral"})
+                                  cache_control={"type": "ephemeral", "ttl": "1h"})
             if len(system) - 1 != stable:
                 system[-1] = dict(system[-1], cache_control={"type": "ephemeral"})
     for msg in reversed(msgs):
@@ -901,12 +904,12 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
     if edit_rung.is_rung_model(model):
         return edit_rung.create(
             model, messages, tools=tools, max_tokens=max_tokens, effort=effort,
-            tool_choice=tool_choice, timeout=timeout,
+            tool_choice=tool_choice, timeout=timeout, tool_plan=tool_plan,
             fallback=lambda fb: create(fb, messages, tools=tools,
                                        max_tokens=max_tokens, effort=effort,
                                        tool_choice=tool_choice, timeout=timeout,
                                        cache_policy=cache_policy,
-                                       tool_plan=tool_plan))
+                                       tool_plan=None if (tool_plan or {}).get("initial_extra") is not None else tool_plan))
     if not is_claude_model(model):
         # Anthropic serves only Claude ids: anything else is a 404 not_found_error after a paid
         # round trip (15 Nov 2026: gpt-6-sol sent here removed every first-film cutaway). Say so

@@ -20,7 +20,7 @@ EXTENDED = ("gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.2", "gpt-5.1-codex-max",
             "gpt-5", "gpt-5-codex", "gpt-4.1")
 DEFAULT_LOG = "/Users/masaoodi/Documents/Valmera/.valmera/week-1112/openai-spend.jsonl"
 # Standalone skills do not import worker/config or connect to a production DB.
-PRICES = {"gpt-6.1-sol": (2, .1, 10), "gpt-6.1-terra": (1, .05, 5),
+PRICES = {"gpt-6.2-sol": (2, .1, 10), "gpt-6.1-sol": (2, .1, 10), "gpt-6.1-terra": (1, .05, 5),
           "gpt-6-sol": (2, .2, 10), "gpt-6-luna": (.1, .01, .5),
           "gpt-5.6-luna": (.2, .02, 1.2), "gpt-5.5": (5, .5, 30),
           "gpt-4o-transcribe": (2.5, 2.5, 10), "gpt-4o-mini-transcribe": (1.25, 1.25, 5)}
@@ -57,7 +57,7 @@ def cost(model, usage):
     inp = ((t["prompt_tokens"] - t["cached_tokens"] - w) * pin + t["cached_tokens"] * pc
            + (w - long) * pin * 1.25 + long * pin * 2.5)
     out = t["completion_tokens"] * pout
-    if model in ("gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol") and t["prompt_tokens"] > 272000:
+    if model in ("gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol") and t["prompt_tokens"] > 272000:
         inp, out = inp * 2, out * 1.5
     tier = {"priority": 2, "fast": 2, "flex": .5, "batch": .5}.get(get(usage, "service_tier"), 1)
     return (inp + out) * tier / 1e6
@@ -115,7 +115,7 @@ def chat_options(model, role):
     return out
 
 
-def responses(body, role, *, conversation=False):
+def responses(body, role, *, conversation=False, static_messages=2):
     """Copy, never mutate caller messages. Static instructions precede variable input.
 
     One-shot calls write only the shared developer prefix; editor conversations
@@ -144,10 +144,12 @@ def responses(body, role, *, conversation=False):
     ttl = os.environ.get("VALMERA_OPENAI_PREFIX_TTL", "12h")
     if ttl not in ("30m", "12h"):
         ttl = "12h"
-    marked = 0
-    for msg in inp:
-        if msg.get("role") not in ("system", "developer") or marked == 2:
+    positions = {0, 1, max(0, static_messages - 1)}
+    for index, msg in enumerate(inp):
+        if index >= max(2, static_messages) or msg.get("role") not in ("system", "developer"):
             break
+        if index not in positions:
+            continue
         parts = msg.get("content", [])
         if isinstance(parts, str):
             parts = [{"type": "input_text", "text": parts}]
@@ -155,7 +157,6 @@ def responses(body, role, *, conversation=False):
         for part in reversed(parts):
             if part.get("type") == "input_text":
                 part["prompt_cache_breakpoint"] = {"mode": "explicit", "ttl": ttl}
-                marked += 1
                 break
     return b
 

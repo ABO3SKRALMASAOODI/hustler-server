@@ -291,9 +291,7 @@ def _write_cached_semantics(row, workdir):
         print(f"[visual-index] semantic cache write skipped: {exc}", flush=True)
 
 
-def _semantic_prompt(rows):
-    ids = ", ".join(row["evidence_id"] for row in rows)
-    return (
+_SEMANTIC_SYSTEM = (
         "You are indexing visual evidence for a professional video editor. "
         "Each contact-sheet frame is burned with its evidence_id and SOURCE "
         "clock. Return ONLY a JSON array, one object for every ID in the set below. "
@@ -301,8 +299,11 @@ def _semantic_prompt(rows):
         "actions (short string array), objects (short string array), setting "
         "(string), visible_text (exact text when readable), semantic_description "
         "(one concrete sentence), composition (one concise sentence). Never "
-        "invent unreadable text or off-screen facts.\n"
-        f"ID set: {ids}.")
+        "invent unreadable text or off-screen facts.")
+
+
+def _semantic_prompt(rows):
+    return "ID set: " + ", ".join(row["evidence_id"] for row in rows) + "."
 
 
 def _apply_semantic(row, semantic):
@@ -392,7 +393,7 @@ def _caption_semantics(evidence, sheets, workdir):
             paths = [sheet["path"] for sheet in page]
             names = [f'visual-sheet:{sheet["digest"]}' for sheet in page]
             answer = llm.ask_vision(
-                _semantic_prompt(rows), paths,
+                _semantic_prompt(rows), paths, system=_SEMANTIC_SYSTEM,
                 max_tokens=max(900, len(rows) * 140),
                 purpose="visual_index_semantics", image_names=names,
                 reasoning_effort="low")
@@ -402,7 +403,7 @@ def _caption_semantics(evidence, sheets, workdir):
                 # after a proven blind provider; a second attempt also covers a
                 # transient first-provider failure without making indexing fatal.
                 answer = llm.ask_vision(
-                    _semantic_prompt(rows), paths,
+                    _semantic_prompt(rows), paths, system=_SEMANTIC_SYSTEM,
                     max_tokens=max(900, len(rows) * 140),
                     purpose="visual_index_semantics_fallback", image_names=names,
                     reasoning_effort="low")

@@ -706,3 +706,13 @@ def test_lane_dict_carries_no_key():
     assert lane["api_key"] == "anthropic"
     assert not llm.responses_available(lane["model"], lane["base_url"],
                                        effort="high")
+
+
+@pytest.mark.parametrize("name", ["music_pick_verdict", "record_ask_check", "record_request_contract"])
+def test_forced_single_reviews_do_not_write_the_customer_payload(name):
+    system = [{"type": "text", "text": "fixed instructions"}]
+    msgs = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "project evidence"}]}]
+    tools = [{"name": name, "input_schema": {"type": "object"}}]
+    claude_lane._mark_cache(system, msgs, tools, "claude-haiku-5-5")
+    assert system[0]["cache_control"]["ttl"] == "1h"
+    assert not any("cache_control" in b for b in msgs[0]["content"])
