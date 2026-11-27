@@ -9,6 +9,39 @@ def fit(plan, span, key, clip, box, **options):
     return plan.card(span, key, seat, **options)
 
 
+def capture_server_passage(url, quote, destination):
+    """Recover a publisher paragraph from the original server HTML when the live UI hides it."""
+    from lxml import html
+    from playwright.sync_api import sync_playwright
+    import net_fetch
+    import webrecord
+
+    original = destination.with_suffix(".html")
+    net_fetch.download(url, str(original), max_bytes=8 << 20, timeout_s=30)
+    doc = html.parse(str(original))
+    needle = " ".join(quote.split())
+    for node in doc.xpath("//script|//style|//template|//noscript"):
+        node.drop_tree()
+    for node in doc.xpath("//p|//li|//blockquote|//figcaption|//td"):
+        paragraph = " ".join(node.text_content().split())
+        if needle not in paragraph:
+            continue
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            try:
+                page = browser.new_page(java_script_enabled=False, device_scale_factor=2,
+                                        viewport={"width": 900, "height": 1050})
+                page.route("**/*", lambda route: route.abort())
+                page.set_content(html.tostring(node, encoding="unicode", with_tail=False))
+                image = webrecord.passage_image(page.locator("body"), paragraph, focus=quote)
+                if image:
+                    destination.write_bytes(image)
+                    return
+            finally:
+                browser.close()
+    raise ValueError("quoted passage absent from the publisher HTML")
+
+
 def source_passage(clip, directory):
     """Refresh an old typeset exhibit from the actual primary publication and retain those pixels."""
     from pathlib import Path
@@ -32,7 +65,10 @@ def source_passage(clip, directory):
         if not dest.exists():
             with tempfile.TemporaryDirectory(dir=root) as scratch:
                 temp = Path(scratch)/"passage.png"
-                capture(dict(url=source["url"],quote=quote,mark=clip.get("mark")),str(temp))
+                try:
+                    capture(dict(url=source["url"],quote=quote,mark=clip.get("mark")),str(temp))
+                except Exception:
+                    capture_server_passage(source["url"], quote, temp)
                 temp.replace(dest)
         with Image.open(dest) as image:
             width,height = image.size
