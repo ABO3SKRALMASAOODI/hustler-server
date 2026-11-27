@@ -1097,7 +1097,15 @@ def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", ac
             text = printed.get(text, text)
             spoken = next((key for key, value in printed.items() if value == text), None)
             span = said_span(clock, i, spoken or text)
-            if spoken and span:
+            forms = spoken_forms(spoken or text)
+            normalized = [norm_word(w["w"]) for w in ws]
+            matches = [(pos, len(form)) for form in forms for pos in range(len(ws)-len(form)+1)
+                       if normalized[pos:pos+len(form)] == form]
+            if matches:
+                pos, count = min(matches, key=lambda pair: abs(pair[0] - wi) if type(wi) is int else pair[0])
+                span = ws[pos:pos+count]
+                first = span[0]
+            elif spoken and span:
                 first = span[0]
             elif type(wi) is int and 0 <= wi < len(ws):
                 first = ws[wi]

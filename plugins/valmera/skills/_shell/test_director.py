@@ -48,7 +48,7 @@ def test_an_unsaid_word_is_snapped_and_an_unknown_device_kept_for_the_palette(tm
     assert "until" not in d["asks"][2]                                          # an until before its start is dropped, the ask kept
     assert [s["segs"] for s in d["sections"]] == [[0], [1], [2]] or sorted(i for s in d["sections"] for i in s["segs"]) == [0, 1, 2]
     assert d["sections"][0]["layout"] == "grid" and any("layout" in r for r in d["repairs"])
-    assert d["turn_seg"] == 2 and d["story_turn_seg"] == 1
+    assert d["payoff_seg"] == 2 and d["turn_seg"] == d["story_turn_seg"] == 1
     assert json.load(open(tmp_path / "director.json"))["asks"] == d["asks"]
     assert DR.direct(str(tmp_path), SENTENCES, rows(), STRESS, ask=ask) == json.load(open(tmp_path / "director.json"))
     assert len(ask.calls) == 1
@@ -66,21 +66,16 @@ def test_a_failed_provider_still_gives_the_film_devices(tmp_path):
     ask = Ask(RuntimeError("insufficient_quota"))
     d = DR.direct(str(tmp_path), SENTENCES, rows(), STRESS, ask=ask, recent=["wf1 2026-11-19: white@hook, neg@turn"])
     assert d["by"] == "signal" and any("provider failed" in r for r in d["repairs"])
-    assert len(d["asks"]) >= 5 and d["beats"][0]["role"] == "hook"
-    assert {"black", "white"} <= {a["dev"] for a in d["asks"]}                   # the payoff is punctuated
-    assert d["asks"][0]["at"]["w"] == 0                                          # a device on screen at frame 0
-    asks, _ = DR.palette_asks(d, lambda w: 10 * w, lambda i: (i * 100, i * 100 + 90), None, 400)
-    assert asks and all(isinstance(a["f"], (int, list)) for a in asks)
+    assert d["asks"] == []
+    assert {"hook", "payoff"} <= {beat["role"] for beat in d["beats"]}
 
 
-def test_the_signal_director_varies_with_the_seed_and_the_ledger():
+def test_seed_and_device_ledger_do_not_change_the_story():
     sents, words = DR.numbered(SENTENCES, rows())
     hot = DR.stress_words(words, STRESS)
-    a = DR.signal_director(sents, words, hot, seed=1, recent=[])
-    b = DR.signal_director(sents, words, hot, seed=1, recent=[])
-    assert a == b
-    seqs = {tuple(x["dev"] for x in DR.signal_director(sents, words, hot, seed=s, recent=[])["asks"]) for s in range(8)}
-    assert len(seqs) > 1
+    plain = DR.signal_director(sents, words, hot, seed=1)
+    recent = DR.signal_director(sents, words, hot, seed=7, recent=["grid, neg, chapter"])
+    assert plain == recent
 
 
 def test_palette_asks_spans_sections_and_the_arc():
@@ -102,10 +97,12 @@ def test_palette_asks_spans_sections_and_the_arc():
     assert ans[0]["t"] == "Ask"                                                   # its diecut fallback has its word
 
 
-def test_around_moves_asks_clear_of_a_hero_device():
+def test_hero_device_performs_the_asks_on_its_frames():
     asks = [dict(dev="white", f=105), dict(dev="finish", f=[150, 200]), dict(dev="neg", f=20)]
-    out = DR.around(asks, [[100, 160]], 400)
-    assert [a["f"] for a in out] == [161, [161, 211], 20]
+    performed = []
+    out = DR.around(asks, [[100, 160]], 400, performed)
+    assert [a["f"] for a in out] == [20]
+    assert [a["at"] for a in performed] == [105, 150]
 
 
 def test_around_keeps_entire_device_out_of_verified_studio_titles():
@@ -113,9 +110,9 @@ def test_around_keeps_entire_device_out_of_verified_studio_titles():
     asks = [dict(dev="typewriter", f=[528, 700]), dict(dev="split", f=[566, 700]),
             dict(dev="match_pos", f=[396, 505], cuts=[396, 410]), dict(dev="chapter", f=718)]
     placed = DR.around(asks, spans, 983)
-    assert [a["f"] for a in placed] == [[660, 701], [660, 701], [396, 500], 748]
-    assert placed[-1]["bound"] == 767
-    assert placed[2]["cuts"] == [396, 410]
+    assert [a["f"] for a in placed] == [[396, 500]]
+    assert placed[0]["bound"] == 500
+    assert placed[0]["cuts"] == [396, 410]
 
 
 def test_the_ledger_keeps_each_films_sequence(tmp_path, monkeypatch):
@@ -186,7 +183,7 @@ def test_a_directors_contour_grid_collage_and_callback_land_on_the_frames_of_the
     assert all(s["f"][0] >= frame_of(2) for s in strobe)                                # never the film's first frames
 
 
-def test_the_signal_director_lays_lane_b_devices_by_signal():
+def test_stress_alone_keeps_the_composed_image():
     text = ["We started with nothing at all.", "Then the first shop opened in a small town by the river.",
             "Every year we added one more shop and one more city.", "Some years it nearly broke us.",
             "My father worked every single day of every single week.", "Now we all live within walking distance."]
@@ -199,16 +196,9 @@ def test_the_signal_director_lays_lane_b_devices_by_signal():
         t += 0.4
     sents, words = DR.numbered(sl, rw)
     hot = [w["n"] for w in words if w["n"] % 3 == 1]
-    devs = set()
-    for s in range(12):
-        d = DR.signal_director(sents, words, hot, seed=s, recent=[])
-        devs |= {a["dev"] for a in d["asks"]}
-        for a in d["asks"]:
-            if a["dev"] in ("grid", "collage"):
-                assert len(a["args"]["steps"]) >= 3 and all(isinstance(x, int) for x in a["args"]["steps"])
-    assert {"snap", "settle", "whip", "glimpse"} & devs and ({"grid", "collage"} & devs) and "burst" in devs
-
-
+    direction = DR.signal_director(sents, words, hot)
+    assert direction["asks"] == [] and direction["sections"] == []
+    assert all(beat["word"] == words[beat["w"]]["w"] for beat in direction["beats"])
 
 
 def test_the_cache_is_keyed_on_the_words_it_read(tmp_path):
@@ -232,7 +222,7 @@ def test_the_cache_is_keyed_on_the_words_it_read(tmp_path):
 def test_a_provider_failure_is_asked_again_on_resume(tmp_path):
     ask = Ask(RuntimeError("overloaded"))
     d1 = DR.direct(str(tmp_path), SENTENCES, rows(), STRESS, ask=ask, recent=[])
-    assert d1["by"] == "signal" and d1["retry"] and d1["asks"]
+    assert d1["by"] == "signal" and d1["retry"] and d1["beats"]
     ask2 = Ask(RuntimeError("still overloaded"))                    # fails again: the signal answer it had is kept
     d2 = DR.direct(str(tmp_path), SENTENCES, rows(), STRESS, ask=ask2, recent=[])
     assert len(ask2.calls) == 1 and d2["by"] == "signal" and d2["asks"] == d1["asks"] and d2["retry"]
@@ -326,8 +316,8 @@ def test_a_counters_figure_word_lands_on_its_frame():
                    dict(dev="staircase", at=dict(w=20, seg=1, word="x"), args=dict(lines=[dict(t="1,200", at=21), dict(t="MILES", at=22)]))])
     asks, _ = DR.palette_asks(d, lambda w: 10 * w, lambda i: (i * 100, i * 100 + 90), None, 400)
     # A flat figure first shows on its spoken word: never ahead of it, never fictional values on the way.
-    assert "at" not in asks[0] and (asks[0]["f"][0] if isinstance(asks[0]["f"], list) else asks[0]["f"]) == 210
-    assert asks[0]["lands"] == 210 and asks[0]["from"] == asks[0]["to"] == 1200 and asks[0]["run"] == 0
+    assert "at" not in asks[0] and (asks[0]["f"][0] if isinstance(asks[0]["f"], list) else asks[0]["f"]) == 200
+    assert asks[0]["lands"] == 200 and asks[0]["from"] == asks[0]["to"] == 1200 and asks[0]["run"] == 0
     assert [x["at"] for x in asks[1]["lines"]] == [210, 220]
 
 
@@ -377,4 +367,6 @@ def test_marketing_uses_the_existing_performance_at_its_addressed_word():
                             [dict(f=[529,659],text=typed)],
                             [dict(frames=[500,659],device="timeline"),dict(frames=[846,983],device="cta")])
     assert [a["id"] for a in left] == ["next"]
-    assert [r["text"] for r in represented] == ["BOTH UNITS",typed,"timeline","cta"]
+    assert represented[0]["text"] == "BOTH UNITS"
+    assert [r["owner"] for r in represented[1:]] == ["timeline", "timeline", "cta"]
+    assert [r["at"] for r in represented] == [355, 528, 559, 961]

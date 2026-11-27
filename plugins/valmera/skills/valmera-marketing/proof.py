@@ -2009,29 +2009,31 @@ def showcase_supply(ctx, script, sup_dir, pk):
         timed = upload_words(rec) or []
         words = [dict(w=w, t0=t, t1=min(t + .5, timed[i+1][0] if i+1 < len(timed) else t+.5))
                  for i, (t, w) in enumerate(timed)]
-    caption = caption_example(edl, words, visible, body)
-    win = d.get("export_window") or showcase_window(ex, body, pics, asked=asked)
-    if caption and not d.get("export_window"):
-        # Enter on the line's setup; retain the rest of the recorded passage, including later examples.
-        end = max(win[1], caption["hook"][1])
-        win = [min([caption["context_start"]] + [a for a, _ in asked]), body if body - end <= SHOWCASE_S[0] else end]
-    hook = d.get("hook_window") or (caption["hook"] if caption else showcase_hook(ex, body, pics, visible=visible))
-    thought = d.get("export_window") or (script.get("export_check") or {}).get("spoken_thought")
-    if (not caption and isinstance(thought, (list, tuple)) and len(thought) == 2
-            and all(isinstance(t, (int, float)) for t in thought) and 0 <= thought[0] < thought[1] <= body
-            and D.tone_region(edl, *thought)):
-        win = thought
-        if not d.get("hook_window"):
-            # Let the opening and the payoff share a sentence. The original speaker resumes
-            # after Send at exactly the pause where the matched comparison left off.
-            a, b = thought
-            gaps = pauses(ex["file"], a+1.5, min(a+5., b-2.5), min_s=.15) if b-a >= 5. else []
-            if gaps:
-                gap = min(gaps, key=lambda g: abs(sum(g)/2 - (a+b)/2))
-                cut_at = round(sum(gap)/2*F.FPS)/F.FPS
-                hook, win = [a, cut_at], [cut_at, b]
     story = script.get("script") or {}
     spans = (story.get("proof") or {}).get("spans") or {}
+    caption, win, hook = None, None, None
+    if not (spans.get("split") and spans.get("stretch")):
+        caption = caption_example(edl, words, visible, body)
+        win = d.get("export_window") or showcase_window(ex, body, pics, asked=asked)
+        if caption and not d.get("export_window"):
+            # Enter on the line's setup; retain the rest of the recorded passage, including later examples.
+            end = max(win[1], caption["hook"][1])
+            win = [min([caption["context_start"]] + [a for a, _ in asked]), body if body - end <= SHOWCASE_S[0] else end]
+        hook = d.get("hook_window") or (caption["hook"] if caption else showcase_hook(ex, body, pics, visible=visible))
+        thought = d.get("export_window") or (script.get("export_check") or {}).get("spoken_thought")
+        if (not caption and isinstance(thought, (list, tuple)) and len(thought) == 2
+                and all(isinstance(t, (int, float)) for t in thought) and 0 <= thought[0] < thought[1] <= body
+                and D.tone_region(edl, *thought)):
+            win = thought
+            if not d.get("hook_window"):
+                # Let the opening and the payoff share a sentence. The original speaker resumes
+                # after Send at exactly the pause where the matched comparison left off.
+                a, b = thought
+                gaps = pauses(ex["file"], a+1.5, min(a+5., b-2.5), min_s=.15) if b-a >= 5. else []
+                if gaps:
+                    gap = min(gaps, key=lambda g: abs(sum(g)/2 - (a+b)/2))
+                    cut_at = round(sum(gap)/2*F.FPS)/F.FPS
+                    hook, win = [a, cut_at], [cut_at, b]
     def source_span(name, fallback=None):
         value = spans.get(name) or fallback
         if isinstance(value, dict):
@@ -3719,9 +3721,9 @@ def showcase_score(ctx, script, pack):
     jsave(os.path.join(ctx.supply, "beats.json"), beats)
     taste = dict(ok=True, problems=[], min_text_px=min(d["min_text_px"] for d in beats["devices"] if d.get("min_text_px")), sounds=len(l1["sound"]))
     devices = dict(device="studio", format="showcase", laid=beats["devices"], faults=[], typed_line="studio")
-    return dict(l1=out, l1_audio=l1_audio, turn_s=round(beats["reveal"][1] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
+    return dict(l1=out, l1_audio=l1_audio, payoff_s=round(beats["export"][0] / F.FPS, 3), story_turn_s=round(beats["studio"][0] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
                 taste=taste, frames=l1["dur_f"], items=len(l1["items"]), direction=dict(format="showcase"), pace=beats["pace"],
-                recording_spans=[beats["export"]], instruction_panel=dict(typed=typed_line(script["receipts"]), device="studio"), devices=devices,
+                recording_spans=[span for key in ("before", "after", "stretch") if (span := (beats.get("marks") or {}).get(key)) and span[0] < span[1]] or [beats["export"]], instruction_panel=dict(typed=typed_line(script["receipts"]), device="studio"), devices=devices,
                 picture_check=dict(model=None, rounds=[], misfits_left=[], note="showcase: every picture is the recording's own"), spend=[])
 
 
@@ -3743,9 +3745,9 @@ def scale_score(ctx, script, pack, upload):
     jsave(l1_audio, F.audio_scene(l1, pack))
     jsave(os.path.join(ctx.supply, "beats.json"), beats)
     taste = dict(ok=True, problems=[], min_text_px=min(d["min_text_px"] for d in beats["devices"] if d.get("min_text_px")), sounds=len(l1["sound"]))
-    return dict(l1=out, l1_audio=l1_audio, turn_s=round(beats["reveal"][1] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
+    return dict(l1=out, l1_audio=l1_audio, payoff_s=round(beats["export"][0] / F.FPS, 3), story_turn_s=round(beats["studio"][0] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
                 taste=taste, frames=l1["dur_f"], items=len(l1["items"]), direction=dict(format="showcase", variant="scale"), pace=beats["pace"],
-                recording_spans=[beats["export"]], instruction_panel=dict(typed=typed_line(script["receipts"]), device="studio"),
+                recording_spans=[span for key in ("before", "after", "stretch") if (span := (beats.get("marks") or {}).get(key)) and span[0] < span[1]] or [beats["export"]], instruction_panel=dict(typed=typed_line(script["receipts"]), device="studio"),
                 devices=dict(device="studio", format="showcase", variant="scale", laid=beats["devices"], faults=[], typed_line="studio"),
                 picture_check=dict(model=None, rounds=[], misfits_left=[], note="showcase: every picture is the recording's own"), spend=[])
 
@@ -3947,7 +3949,7 @@ def score(ctx, script):
     turn_s = round(float(payoff["start"]) + F.LEAD_F / F.FPS, 3) if payoff else (round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None)
     if beats.get("turn_by") == "landing" and beats.get("turn_f") is not None:
         turn_s = round(beats["turn_f"] / F.FPS, 3)         # the music's drop and the sound's turn on the same landing
-    return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k != "look"}, taste=taste,
+    return dict(l1=out, l1_audio=l1_audio, payoff_s=turn_s, beats={k: v for k, v in beats.items() if k != "look"}, taste=taste,
                 frames=l1["dur_f"], items=len(l1["items"]), direction=dict(knobs, drop=drop), pace=pace_rec, recording_spans=spans,
                 instruction_panel=receipt_panel, devices=devices,
                 picture_check=dict(model=CHECK_MODEL, effort="low", rounds=rounds, misfits_left=rounds[-1]["misfits"]), spend=spend)

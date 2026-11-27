@@ -915,6 +915,9 @@ def direction_of(ctx, script, pack):
         if row.get("picture") in ids:
             row["picture_path"] = ids[row["picture"]]
     sources = material["sources"]
+    d["research_facts"] = [dict(facts=[dict(source=source, statement=" ".join(
+        value for value in source.get("supports") or [] if isinstance(value, str)))])
+        for key, source in sources.items() if key != "interview"]
     credits = {}
     for credit in d.get("archive_credits") or []:
         if not isinstance(credit, dict):
@@ -1389,7 +1392,7 @@ def descend(ctx, script, pack, missing):
 def film_direction(d):
     """Carry the Director's authored fields into the picture and sound composers."""
     knobs = {k: d.get(k) for k in ("display", "archive_views", "caption_ends", "caption_accents",
-                                  "past_segs", "payoff_seg", "turn_seg", "story_turn_seg", "arc")}
+                                  "past_segs", "payoff_seg", "turn_seg", "story_turn_seg", "arc", "research_facts")}
     if d.get("beats") or d.get("sections") or d.get("asks"):
         knobs["director"] = {k: d.get(k) for k in ("beats", "sections", "asks", "arc", "pictures", "by", "seed")}
     return knobs

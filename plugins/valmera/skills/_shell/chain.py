@@ -761,12 +761,18 @@ def story_music_brief(record):
     script = record.get("script") or record
     segments = script.get("segments") or []
     lines = [s.get("say") or s.get("text") for s in segments]
+    idea = record.get("idea_full") or record.get("idea") or {}
+    idea = idea if isinstance(idea, dict) else {}
+    receipts = record.get("receipts") or {}
+    if not lines:
+        lines = [value for value in [idea.get("claim"), *(r.get("text") for r in receipts.get("asks") or [] if isinstance(r, dict))]
+                 if value]
     beats = script.get("beats") or {}
     payoff = beats.get("payoff")
     landing = lines[payoff] if type(payoff) is int and 0 <= payoff < len(lines) else None
-    brief = dict(title=script.get("title") or record.get("title"), stakes=script.get("stakes"),
-                 chain=script.get("chain"), hook=script.get("hook_line") or record.get("hook_line"),
-                 payoff=landing or script.get("close_line") or record.get("close_line"), spoken=lines,
+    brief = dict(title=script.get("title") or record.get("title"), stakes=script.get("stakes") or idea.get("pain") or idea.get("claim"),
+                 chain=script.get("chain"), hook=script.get("hook_line") or record.get("hook_line") or idea.get("claim"),
+                 payoff=landing or script.get("close_line") or record.get("close_line") or receipts.get("visible"), spoken=lines,
                  direction=record.get("direction") or script.get("direction"))
     return json.dumps({k: v for k, v in brief.items() if v}, ensure_ascii=False)
 

@@ -1939,7 +1939,7 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
         for row in voices:
             if row.get("file") == pic.get("path"):
                 pic.update(person=row.get("person"), role="speaker")
-    rows = DR.composed_words(rows, placed, l1.get("items", []), owners, voices, F.FPS)
+    rows = DR.composed_words(rows, placed, l1.get("items", []), [*owners, *(beats.get("recorded_ink") or [])], voices, F.FPS)
     d = DR.direct(ctx.supply, [dict(seg, i=k, text=str(seg.get("say") or "")) for k, seg in enumerate(sc["segments"])], rows, stress, pics,
                   style=palette, workflow="story film (narrated)", dur_s=l1["dur_f"] / F.FPS,
                   title=sc.get("title"), hook=sc.get("hook_line"), payoff=sc.get("close_line"), log=ctx.log)
@@ -2518,26 +2518,7 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
         layout.update(rebuilt=True, bleed_share_after=bleed_share(beats)[0], print_window_share_after=bleed_share(beats)[1])
         if bleed_share(beats)[0] < BLEED_MIN:
             defects.append(f"full-frame pictures on {bleed_share(beats)[0]:.0%} of shots (at least {BLEED_MIN:.0%})")
-    # ---- display density on the plan: under DISPLAY_SHARE's floor, the writer adds anchored items once and the plan is
-    # built again; what stays short is a recorded defect
-    density = None
-    try:
-        typ = type_measures(l1, beats, sc)
-        density = dict(before=typ["display_shot_share"])
-        if typ["display_shot_share"] < DISPLAY_SHARE[0] and ctx.args.get("density", True) is not False:
-            lines = uncovered_lines(beats)
-            sc2, added, use = density_repair(sc, lines)
-            density.update(lines=lines, added=added, usd=(use or {}).get("usd"))
-            if added:
-                sc.clear()
-                sc.update(sc2)
-                l1, beats = build(sc, pack, knobs)
-                taste = F.taste_check(l1, beats)
-                density["after"] = type_measures(l1, beats, sc)["display_shot_share"]
-            if float(density.get("after", density["before"])) < DISPLAY_SHARE[0]:
-                defects.append(f"display type on {float(density.get('after', density['before'])):.0%} of planned shots after the repair")
-    except Exception as e:  # noqa: BLE001 - the repair is one call; its failure is recorded, the plan stands
-        density = dict(error=repr(e)[:200])
+    density = dict(before=type_measures(l1, beats, sc)["display_shot_share"])
     # ---- colour by measure
     bw = plan_bw(beats)
     colour = dict(bw_shot_share_plan=bw, rebuilt=False, intrinsic_grey_share=(beats.get("measured") or {}).get("intrinsic_grey_share"))

@@ -34,7 +34,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-CONTRACT = 6
+CONTRACT = 7
 ROLES = ("hook", "name", "figure", "list", "turn", "past", "quote", "contrast", "payoff", "close")
 ENERGIES = ("strobe", "brisk", "hold")
 LAYOUTS = ("bleed", "window", "prints", "collage", "grid", "split", "type")
@@ -285,7 +285,8 @@ def composed_words(words, pictures, items, owners, voices, fps):
                if i.get("k") == "word" and i.get("t")]
         active = list(visible(owners, a, b))
         for row in active:
-            for text in [row.get("title"), row.get("text"), *(row.get("labels") or []), *(row.get("lines") or [])]:
+            for text in [row.get("title"), row.get("text"), *(row.get("labels") or []), *(row.get("lines") or []),
+                         *(r.get("t") for r in row.get("texts") or []), *(row.get("printed") or [])]:
                 if text:
                     ink.append(dict(text=text, role=row.get("device"), f=row.get("frames") or row.get("f")))
         result.append(dict(word, screen=dict(pictures=pics, text=ink,
@@ -628,24 +629,8 @@ def repair(d, sentences, words, names=(), seed=0):
 
 # --------------------------------------------------------------------- the signal director
 
-POOL = ("white", "neg", "tint", "blur_in", "spotlight", "neg_split", "variant", "word_blend", "black", "snap", "settle", "whip", "glimpse")
-SPREADS = ("grid", "collage")      # a sentence dense with stress fills a layout one tile (or print) per stressed word
-VARIANT_MODES = ("thermal", "threshold", "halftone", "xray", "blueprint", "posterise", "solarise", "line", "mosaic", "night_vision")
-# a section's surface keeps the picture's own tones (faces and words read through it); the treatments that replace them
-# (thermal, threshold, x-ray) are beats of the variant device, never a section
-FINISHES = ("mono", "gate", "crt", "bloom", "vhs", "projector")
-
-
-def _least_used(choices, recent, rng):
-    """The choices ordered by how rarely the recent films used them, ties broken by the seed."""
-    text = " ".join(recent or [])
-    return sorted(choices, key=lambda c: (text.count(c), rng.random()))
-
-
 def signal_director(sentences, words, stress_w, pictures=(), seed=0, recent=(), dur_s=None):
-    """A director that reads no model: devices on the voice's stress peaks and the beats signal can find (the first
-    stressed word, the strongest stress of the middle, the payoff sentence's first word), seeded by the film and kept
-    away from the recent films' sequences. The film still carries devices when the provider fails."""
+    """Retain the narration beats and let the composed pictures carry the line on provider failure."""
     nseg = len(sentences)
     if not words or not nseg:
         return dict(contract=CONTRACT, beats=[], sections=[], asks=[], display=[], past_segs=[], payoff_seg=None, turn_seg=None,
@@ -672,7 +657,7 @@ def signal_director(sentences, words, stress_w, pictures=(), seed=0, recent=(), 
     # A stress peak alone says nothing about a picture's identity or story time.
     turn = next((b["seg"] for b in beats if b["role"] == "turn"), None)
     return dict(contract=CONTRACT, beats=beats, sections=[], asks=[], display=[], past_segs=[], payoff_seg=payoff,
-                turn_seg=turn, arc=[], why="Existing picture and caption carry the spoken beat", by="signal")
+                turn_seg=turn, story_turn_seg=turn, arc=[], why="Existing picture and caption carry the spoken beat", by="signal")
 
 
 # --------------------------------------------------------------------- the call
@@ -758,6 +743,7 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
     menu, names = palette_menu()
     sheet = moment_sheet(sents, hot, pictures, take, style, workflow, dur, recent, title, hook, payoff, can)
     if editorial:
+        system += "\nFor podcast type, viewer_text is the sole display writer. Leave display empty and keep text out of device asks. Use the viewer brief below."
         sheet += "\n\n" + editorial["writing"] + "\n" + json.dumps(editorial["material"], ensure_ascii=False)
     content = [{"type": "text", "text": sheet + "\n\n# The palette (one card a device: its fields with their units, then what it does and the moment it amplifies)\n" + menu}]
     if cs:
@@ -1222,7 +1208,7 @@ def around(asks, spans, dur_f=None, performed=None):
                 performed.append(dict(id=ask.get("id"), dev=ask["dev"], at=start, word_frame=start,
                                       frames=owner.get("frames") or owner["f"],
                                       owner=owner.get("device") or owner.get("role") or "recording",
-                                      text=owner.get("text")))
+                                      text=owner.get("text") or owner.get("typed") or owner.get("title")))
             continue
         bound = min([lo for lo, _, _ in owners if lo > start] +
                     [int(ask.get("bound") or dur_f or 10**9)])
