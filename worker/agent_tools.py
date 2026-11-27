@@ -19924,7 +19924,15 @@ def _set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             panels=rows_panels, source_track=card_track,
             follow=card_follow)).model_dump()
         if row["end"]-row["start"] < .5:
-            raise ValueError("Allow at least 0.5 seconds for a footage card")
+            # A card shorter than it can read is lengthened to the shortest
+            # that reads, inside the programme (p6238 gate, 27 Nov: refused
+            # "Allow at least 0.5 seconds for a footage card").
+            prog = round(program_duration(edl), 2)
+            new_end = min(round(row["start"] + .5, 3), prog) if prog > .5 else round(row["start"] + .5, 3)
+            new_start = round(max(0.0, new_end - .5), 3)
+            report.append(f"{row['start']:g}-{row['end']:g}s is under the 0.5 s a footage card needs "
+                          f"to read; it plays {new_start:g}-{new_end:g}s.")
+            row["start"], row["end"] = new_start, new_end
     except (ValueError,TypeError) as exc:
         return "REJECTED: " + str(exc)[:400]
     fx = edl.setdefault("effects", None) or {}
