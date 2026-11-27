@@ -1792,7 +1792,9 @@ def ui_shots(rec):
     or in the desktop view)."""
     u = rec.get("ui") or {}
     d = u.get("dir") or os.path.join(os.path.dirname(rec["upload"]["file"]), "ui")
-    files = sorted(u.get("files") or (os.listdir(d) if os.path.isdir(d) else []))
+    if not os.path.isdir(d):
+        d = os.path.join(os.path.dirname(rec["upload"]["file"]), "ui")
+    files = sorted(os.listdir(d)) if os.path.isdir(d) else []
     typing = [f for f in files if f.startswith("type_00_") and f[8:10].isdigit()]
     sent = next((f for f in files if f == "type_00_sent.png"), None)
     if not typing or not sent:
@@ -2512,6 +2514,8 @@ def footage_subjects(ctx, sc, lines, context=None):
     if old.get("context") == context and set(lines).issubset(old.get("lines") or []):
         return {int(k): v for k, v in (old.get("subjects") or {}).items() if int(k) in lines}, []
     have = {n.get("name"): n for n in sc.get("named") or [] if n.get("name")}
+    if (context or {}).get("studio_frames"):
+        have["THE STUDIO"] = dict(name="THE STUDIO",must_show="The recorded composer, result or site", **{"is":"product"})
     content = json.dumps(dict(story=context, narration=[s.get("say") for s in sc["segments"]], lines=[dict(line=i, say=sc["segments"][i].get("say")) for i in lines],
                               named=[dict(name=n.get("name"), is_a=n.get("is"), must_show=n.get("must_show")) for n in have.values()]),
                          ensure_ascii=False)
@@ -2519,10 +2523,12 @@ def footage_subjects(ctx, sc, lines, context=None):
         got, use = ask(
             "Read the whole story, the speaker's claim and the upload transcript. For each line select subjects "
             "that depict its action or evidence in that story. Use the real people, service, location or document "
-            "where it matters. When the Studio is the subject use its recorded photographs. Give the archive "
+            "where it matters. When the Studio is the subject select THE STUDIO with studio_frames listing "
+            "the exact frame names that show that action. Select the recording in place of any generic stock "
+            "substitute. Cite additional external subjects only if another part of the line depicts them. Give the archive "
             "queries that find this specific action. "
             'Return JSON {"lines": [{"line": index, "subjects": [a named name, or {"name", "is": thing|place|person, '
-            '"must_show": one plain sentence of what a frame shows, "video_searches": [one to three YouTube searches]}]}]}.',
+            '"must_show": what a frame shows, "studio_frames":[frame names if THE STUDIO], "video_searches":[queries]}]}]}.',
             content, what="footage subjects", effort="low", max_tokens=3000)
     except Exception as e:  # noqa: BLE001 - an outage after the retries: the lines keep the recording, the film goes on
         ctx.log(f"footage subjects not chosen ({repr(e)[:200]}); the recording lines keep the recording")
@@ -2537,12 +2543,15 @@ def footage_subjects(ctx, sc, lines, context=None):
             if not name or any(n["name"] == name for n in subs):
                 continue
             if name in have:
-                subs.append(have[name])
+                subject = dict(have[name])
+                if isinstance(x,dict) and x.get("studio_frames"):
+                    subject["studio_frames"] = x["studio_frames"]
+                subs.append(subject)
             elif isinstance(x, dict) and [q for q in x.get("video_searches") or [] if isinstance(q, str) and q.strip()]:
                 subs.append(dict(name=str(name), **{"is": x.get("is") if x.get("is") in ("thing", "place", "person") else "thing"},
                                  must_show=str(x.get("must_show") or name),
                                  video_searches=[str(q) for q in x["video_searches"] if isinstance(q, str) and q.strip()][:3]))
-        out[int(row["line"])] = subs[:2]
+        out[int(row["line"])] = subs
     jsave(path, dict(context=context, lines=list(lines), subjects={str(k): v for k, v in out.items()}, spend=[use]))
     return out, [use]
 
@@ -2585,7 +2594,10 @@ def external_footage(ctx, script, pack, durs, anchors, reel_kw, spend):
     idea = script.get("idea_full") or {}
     context = dict(title=sc.get("title"), claim=idea.get("claim"), upload_says=receipts.get("upload_says"),
                    speaker=idea.get("speaker") or sc.get("speaker"), clip=idea.get("why"), topic=idea.get("technique"))
-    fscript["script"]["title"] = json.dumps(context, ensure_ascii=False)
+    studio = (pack.get("pictures") or {}).get("THE STUDIO") or []
+    context.update(premise=idea.get("pain"),source=idea.get("source"),clip=idea.get("why") or idea.get("claim"),
+                   studio_frames=[r["title"] for r in studio])
+    fscript["script"]["title"] = json.dumps({k:v for k,v in context.items() if k!="studio_frames"}, ensure_ascii=False)
     for seg in fscript["script"]["segments"]:
         seg["pictures"] = [n for n in seg.get("pictures") or [] if n not in own]
         seg["see"] = [v for v in seg.get("see") or [] if v.get("thing") not in own]
@@ -2593,13 +2605,25 @@ def external_footage(ctx, script, pack, durs, anchors, reel_kw, spend):
     # never a whole line); the typed line and the call to action carry the film's devices
     pr = sc["proof"]
     title_lines = recorded_titles(script)
-    bare = [i for i, seg in enumerate(fscript["script"]["segments"]) if not seg.get("pictures") and "THE STUDIO" not in (sc["segments"][i].get("pictures") or [])
-            and i not in title_lines and i not in (int(pr["after_after"]), len(sc["segments"]) - 1)]
-    if bare:
-        subjects, uses = footage_subjects(ctx, fscript["script"], bare, context)
+    candidates = [i for i in range(len(sc["segments"])) if i not in title_lines and
+                  i not in (int(pr["after_after"]),len(sc["segments"])-1)]
+    if candidates:
+        subjects, uses = footage_subjects(ctx,fscript["script"],candidates,context)
         spend += uses
-        lend_subjects(fscript["script"], {i:[n for n in ns if n["name"] not in own] for i,ns in subjects.items()})
-        ctx.log(f"footage subjects for recording lines: {json.dumps({i: [n['name'] for n in v] for i, v in subjects.items()}, ensure_ascii=False)[:300]}")
+        for i, rows in subjects.items():
+            if not rows:
+                continue
+            selected = next((r for r in rows if r["name"]=="THE STUDIO"), None)
+            if selected and studio:
+                frames = [r for r in studio if r["title"] in (selected.get("studio_frames") or [])]
+                for rec in frames or studio:
+                    rec.setdefault("placement_lines",[]).append(i)
+            external = [r for r in rows if r["name"] not in own]
+            seg = fscript["script"]["segments"][i]
+            seg["pictures"] = []
+            seg["see"] = [b for b in seg.get("see") or [] if b.get("thing") in {r["name"] for r in external}]
+            lend_subjects(fscript["script"],{i:external})
+        ctx.log(f"Footage subjects from the film and upload: {[(i,[r['name'] for r in rows]) for i,rows in subjects.items()]}")
     search_lines = [i for i, seg in enumerate(fscript["script"]["segments"]) if seg.get("pictures")]
     foot = chain.footage(ctx, fscript, durs, anchors=anchors, lines=search_lines, **W3.footage_kw(reel_kw)) if search_lines else None
     passes = [("footage", foot)] if foot else []

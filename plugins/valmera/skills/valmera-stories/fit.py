@@ -321,6 +321,7 @@ def judged_lines(c, lines):
     (c["thing"]: a clip found for a moment or a voice subject of that thing), and the line it was found for."""
     names = {x for x in (c.get("subject"), c.get("thing")) if x}
     out = {i for i, ln in lines.items() if names and any((x.get("thing") in names or x.get("entity") in names) for x in ln.get("see") or [])}
+    out.update(i for i in c.get("placement_lines") or [] if i in lines)
     if isinstance(c.get("line"), int) and c["line"] in lines:
         out.add(c["line"])
     return sorted(out)
@@ -485,7 +486,12 @@ def verdicts(cands, sc, cache_path=None, ask=None, work=None, log=print, id_cach
     table, items = {}, []
     for c in cands:
         parent_ids = judged_lines(c, parents)
-        want = [ln for ln,(i,wi) in slots.items() if i in parent_ids]
+        names = {name for name in (c.get("subject"),c.get("thing")) if name}
+        direct = [ln for ln,(i,wi) in slots.items() if i in parent_ids and any(
+            b.get("thing") in names or b.get("moment") in names for b in lines[ln]["see"])]
+        local = {i for i in [c.get("line"),*(c.get("placement_lines") or [])] if i is not None}
+        want = sorted(set(direct) | {ln for ln,(i,_) in slots.items() if i in local or
+                      (not direct and i in parent_ids)})
         for ti, take in enumerate(c.get("takes") or takes_of(c)):
             row = table.setdefault(c["path"], {}).setdefault(ti, {})
             miss = []
@@ -573,7 +579,7 @@ def candidates(pack):
     out = []
     for name, recs in (pack.get("pictures") or {}).items():
         for r in recs:
-            out.append(dict(path=r["path"], kind="photo", subject=name, line=None, takes=[(0.0, 0.0)],
+            out.append(dict(path=r["path"], kind="photo", subject=name, line=None, placement_lines=r.get("placement_lines"), takes=[(0.0, 0.0)],
                             meta=dict(title=r.get("title"), description=r.get("description"), caption=r.get("shows"), page=r.get("page"),
                                       date=r.get("image_date") or r.get("date"))))
     for ln in pack.get("footage") or []:

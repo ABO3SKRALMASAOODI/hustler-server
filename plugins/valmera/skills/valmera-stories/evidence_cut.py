@@ -1,5 +1,5 @@
 """Place the evidence the line cites on the clock of the accepted narration."""
-from urllib.parse import urlsplit
+import os
 
 import film as F
 import fit
@@ -48,7 +48,9 @@ def place(script, clock, timeline, supply, identities):
             for photos in supply.pics.values():
                 for photo in photos:
                     identity = identities.get(fit.take_key(photo["path"], (0,0))) or {}
-                    subjects = [identity.get("work")] + [p.get("name") for p in identity.get("people") or []]
+                    subjects = [p.get("name") for p in identity.get("people") or []]
+                    if "people" not in identity:
+                        subjects.append(identity.get("work"))
                     if any(isinstance(n,str) and n.casefold() == name.casefold() for n in subjects):
                         portraits.append((photo,identity))
             if not portraits:
@@ -57,7 +59,6 @@ def place(script, clock, timeline, supply, identities):
             b = min(max(r[1] for r in timeline), a + round(1.5*F.FPS))
             photo,identity = max(portraits,key=lambda pair:supply.grade(pair[0]["path"],0,line))
             rec = dict(photo, pick_line=line, word_i=wi, tier="identity", depicted_name=name, identity=identity)
-            import os
             if (os.path.basename(photo["path"]),line) in supply.deny:
                 rec["portrait_repair"] = True
             # Join its already-placed image to the super, keeping a continuous push on that source.
@@ -76,12 +77,18 @@ def retain_checked(timeline, receipts, supply):
     media.update({r["path"]: r for group in supply.footage.values() for r in group})
     for p in receipts:
         original = media.get(p.get("path"))
-        if not original:
+        if not original or not supply.ok(original,p["line"]):
             continue
         a, b = p["f"]
         if b <= a or not any(r[0] <= a < r[1] and r[4].get("pick_line") == p["line"] for r in timeline):
             continue
-        rec = dict(original, src=p.get("src"), take=p.get("take_bounds"), take_i=p.get("take"),
+        wi = next((r[4].get("word_i",0) for r in timeline if r[0]<=a<r[1]),p.get("word_i",0))
+        ti = p.get("take") if p.get("take") is not None else 0
+        line_v = fit._rows(getattr(supply,"verdicts",{}).get(p["path"],{})).get(ti,{}).get(p["line"],{})
+        vs = line_v.get("phrases")
+        if vs and not fit.carries(vs.get(wi,vs.get(str(wi)))):
+            continue
+        rec = dict(original, word_i=wi, identity=p.get("identity"), src=p.get("src"), take=p.get("take_bounds"), take_i=p.get("take"),
                    pick_line=p["line"], tier=p.get("tier"), use=p.get("use"))
         if p.get("keep_full_frame") or (p.get("mode") == "window" and p.get("crop") == [0, 0, 1, 1]):
             rec["keep_full_frame"] = True

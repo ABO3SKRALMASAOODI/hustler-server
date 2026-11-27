@@ -156,12 +156,32 @@ def portrait_from_wikidata(entity, out):
     item = B._wikidata_id(entity)
     if not item:
         return None
+    folder = os.path.join(out,"portraits",item[0])
+    os.makedirs(folder,exist_ok=True)
+    import fcntl
+    with open(os.path.join(folder,".download.lock"),"a") as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        manifest = os.path.join(folder,"record.json")
+        if os.path.isfile(manifest):
+            with open(manifest) as f:
+                record = json.load(f)
+            if os.path.isfile(record["path"]):
+                return record
+        record = _p18_photo(B,entity,item,folder)
+        if record:
+            with open(manifest+".part","w") as f:
+                json.dump(record,f)
+            os.replace(manifest+".part",manifest)
+        return record
+
+
+def _p18_photo(B,entity,item,folder):
     data = B.net_fetch.get_json(B.WIKIDATA_API, params=dict(action="wbgetclaims",entity=item[0],
                                 property="P18",format="json"),timeout_s=15,allowed_hosts=["www.wikidata.org"])
     for claim in data.get("claims",{}).get("P18",[]):
         name = claim.get("mainsnak",{}).get("datavalue",{}).get("value")
         if isinstance(name,str):
-            record = commons_file(name,os.path.join(out,"portraits",item[0]),want_w=1280)
+            record = commons_file(name,folder,want_w=1280)
             return dict(record,name=entity,shows="Portrait of " + entity,entity_id=item[0])
     return None
 
@@ -180,6 +200,8 @@ def pictures(named, out, per=4, min_px=700):
         if subj.get("is") == "person":
             try:
                 portrait = portrait_from_wikidata(subj.get("entity") or subj["name"],out)
+                if portrait:
+                    portrait = dict(portrait,checked_brief=s["must_show"])
             except Exception as exc:
                 portrait_error = str(exc)[:160]
             else:

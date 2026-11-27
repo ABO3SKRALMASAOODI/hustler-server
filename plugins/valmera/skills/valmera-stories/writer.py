@@ -526,7 +526,7 @@ array of picture briefs covering every phrase. Start the first at word_i 0. Star
 word whose subject, action, version, or evidence changes. A list has a separate picture for each item.
 A brief has word_i, thing (a short free description), entity (the associated named entity or null),
 must_show (what the viewer must actually see happening), as_of, moment, search (photo search),
-video_searches (footage queries), portrait_of (the name only for an identifying portrait), document_fact
+video_searches (footage queries), display_word (the exact spoken word on a metaphor), portrait_of (the name only for an identifying portrait), document_fact
 (the cited fact id only when the original document is the evidence), still_only, keep_full_frame, and kind.
 Use literal for real people, companies, products, numbers, evidence and events. For a person's name,
 show any identifiable portrait unless the spoken words specify a time of life. Show the named role
@@ -589,7 +589,7 @@ def _clean_see(v, names):
     for x in v if isinstance(v, list) else []:
         if not isinstance(x, dict) or not isinstance(x.get("thing"), str) or not x["thing"].strip():
             continue
-        row = {k: x.get(k) for k in ("thing", "as_of", "must_show", "moment", "search", "entity", "portrait_of", "document_fact")}
+        row = {k: x.get(k) for k in ("thing", "as_of", "must_show", "moment", "search", "entity", "portrait_of", "document_fact", "display_word")}
         row.update(kind=x.get("kind") if x.get("kind") in ("literal", "metaphor", "callback", "card") else "literal",
                    word_i=x.get("word_i", 0), still_only=x.get("still_only") is True,
                    keep_full_frame=x.get("keep_full_frame") is True,
@@ -659,6 +659,14 @@ def _merge_ann(sc, got):
         if see and (see[0]["word_i"] != 0 or len({b["word_i"] for b in see}) != len(see)):
             problems.append(f"segment {k}: give each phrase its own first word, beginning at zero")
         if see:
+            for pos,brief in enumerate(see):
+                stop = see[pos+1]["word_i"] if pos+1<len(see) else n
+                name = next((item["text"] for item in g.get("show") or s.get("show") or []
+                             if isinstance(item,dict) and item.get("role")=="name" and
+                             _valid_i(item.get("word_i"),n) and brief["word_i"]<=item["word_i"]<stop and
+                             str(item.get("text")).casefold()==str(brief.get("entity")).casefold()),None)
+                if name:
+                    brief["portrait_of"] = brief["entity"]
             s["see"] = see
             s["pictures"] = list(dict.fromkeys(x["thing"] for x in see))
         else:

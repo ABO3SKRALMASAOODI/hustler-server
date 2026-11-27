@@ -1839,7 +1839,8 @@ def fit_supply(ctx, script, pack, durs, spend, anchors, reel_kw):
                     seg = repair["script"]["segments"][row["i"]]
                     seg["see"] = row["missing"]
                     seg["pictures"] = [x["thing"] for x in seg["see"] if x.get("thing")]
-            added = topup_once(ctx, repair, pack, durs, short, spend, f"footage{k + 2}", anchors, reel_kw, line_max=ask_max, want_voices=True)
+            added = topup_once(ctx, script, pack, durs, short, spend, f"footage{k + 2}", anchors, reel_kw,
+                               line_max=ask_max, want_voices=True, request=repair)
         rows = fit_report(pack, sc, durs)
         after = sum(r["deficit"] for r in rows)
         topups.append(dict(lines=short, line_max=ask_max, clips=added, deficit_before=before, deficit_after=after))
@@ -1885,7 +1886,7 @@ def supply_evidence(ctx, pack):
         recs.append(dict(record=n, counts=r.get("counts"), sources=[{k: s.get(k) for k in ("url", "title", "error", "rung")} for s in r.get("sources") or []][:40],
                          lines=[dict(i=ln.get("i"), want=ln.get("want"), clips=len(ln.get("clips") or []), lost=ln.get("lost"), replaced=ln.get("replaced"))
                                 for ln in r.get("lines") or []], looked=looked))
-    return dict(footage=recs, fit=pack.get("fit"), identity=pack.get("identity"), fit_report=pack.get("fit_report"),
+    return dict(footage=recs, phrase_searches=pack.get("phrase_searches") or [], fit=pack.get("fit"), identity=pack.get("identity"), fit_report=pack.get("fit_report"),
                 moment_cover=(pack.get("fit_report") or {}).get("moment_cover"),
                 sources_opened_share=_opened_share(recs))
 
@@ -2734,6 +2735,13 @@ def repair_layout(beats, windows, knobs, build, read=None):
                 verdicts = FIT._rows(pack.get("fit_verdicts", {}).get(path))
                 for ti, take in enumerate(R.Takes.of(c)):
                     v = verdicts.get(ti, {}).get(line)
+                    if v and v.get("phrases"):
+                        slot = next((p for p in (beats.get("measured",{}).get("phrase_plan") or {}).get("phrases",[])
+                                     if p["line"]==line and p["f"][0]<=a<p["f"][1]),None)
+                        if slot:
+                            wi = slot["word_i"]
+                            v = v["phrases"].get(wi,v["phrases"].get(str(wi)))
+                            b = min(b,slot["f"][1])
                     group = (c.get("take_group") or path, ti)
                     if FIT.usable(v) and group not in used and os.path.isfile(path):
                         native = round((take[1] - take[0]) * F.FPS) >= b - a
@@ -2777,6 +2785,10 @@ def topup_from_score(ctx, script_rec, pack, lines, windows=None, remaining=None)
     words = pack["words"] if isinstance(pack["words"], dict) else json.load(open(pack["words"]))
     durs = chain.seg_durs(words["words"], len(script_rec["script"]["segments"]))
     reused_frames = 0
+    if windows == []:
+        cached = ctx.out("score") if hasattr(ctx,"out") else None
+        plan = ((cached or {}).get("beats") or {}).get("measured",{}).get("phrase_plan") or {}
+        windows = [p for p in plan.get("phrases",[]) if p["line"] in lines and p.get("pictures")==0] or None
     if windows is not None:
         windows = [p for p in windows if p.get("line") in lines and p.get("f")]
         if remaining and windows:

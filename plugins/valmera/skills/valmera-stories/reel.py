@@ -662,10 +662,28 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
     for name, photos in sp.pics.items():
         for photo in photos:
             catalogue[photo["path"], 0] = ("photo", name, photo, (0,0))
+    recording_candidates = {}
+    for rec in proof_fill or []:
+        if not rec.get("ranked") or not os.path.isfile(rec.get("path") or ""):
+            continue
+        sp.note_origin(rec)
+        for line,ranked in rec["ranked"].items():
+            for place,(a,b,shot) in enumerate(ranked):
+                if b<=a or any(a<y and x<b for x,y in rec.get("busy") or []):
+                    continue
+                unit = rec["path"],shot
+                if unit not in catalogue:
+                    catalogue[unit] = ("clip","THE EXPORT",rec,(a,b))
+                recording_candidates.setdefault(int(line),{})[unit] = place
     ranks, assigned = {}, {}
     for index, (line, wi, lo, hi, brief) in enumerate(slots):
         ranks[index], assigned[index] = [], []
         for (path, ti), (kind, name, rec, bounds) in catalogue.items():
+            recording = recording_candidates.get(line,{}).get((path,ti))
+            if recording is not None and sp.ok(rec,line) and not sp.take_used(path,ti):
+                if len(script["segments"][line].get("see") or [])<=1 or brief.get("thing")=="THE EXPORT":
+                    ranks[index].append((2,1/(recording+1),path,ti))
+                continue
             if not sp.fits(path, line, ti) or not sp.ok(rec, line) or sp.take_used(path, ti):
                 continue
             by_take = getattr(sp, "verdicts", {}).get(path, {})
@@ -1314,7 +1332,7 @@ def name_supers(P, clock, sc, timeline, st, pal, f_end, shown, dropped, cards=()
                     b = min(b, partner[1])
                 else:
                     continue
-            if b - a < 14 or any(a < d1 and d0 < b for d0, d1, _ in shown + out):
+            if b - a < 14 or any(a < d1 and d0 < b for d0, d1, _ in (out if bound else shown + out)):
                 dropped.append(dict(seg=i, text=x["text"], role="name", why="no room"))
                 continue
             text = x["text"].upper() if st["upper"] else x["text"]
@@ -1332,7 +1350,7 @@ def name_supers(P, clock, sc, timeline, st, pal, f_end, shown, dropped, cards=()
             def card_overlap(y_):
                 return sum(max(0.0, min(y_ + 0.25 * hgt, c[3][3]) - max(y_ - hgt, c[3][1])) for c in up if c[3])
             order = (0.76, 0.27) if faces_hi else (0.27, 0.76)
-            y = .12 if bound else min(order, key=lambda y_: (card_overlap(y_) > 0, order.index(y_)))
+            y = min(order, key=lambda y_: (card_overlap(y_) > 0, order.index(y_)))
             n = b - a
             k = min(int(bake.BOUNCE["n"]), n)
             ys = [r4(y + float(q)) for q in bake.bounce(k, rest=0.0)] + [r4(y)] * (n - k)
@@ -1519,6 +1537,7 @@ def build(script, sup, style_id, direction=None):
         intrinsic = None
     sourced = bool(fit_on and script.get("facts") and d.get("source_evidence"))
     if sourced:
+        timeline = evidence_cut.retain_checked(timeline, d.get("checked_shots"), sp)
         timeline = evidence_cut.place(script, clock, timeline, sp, sup.get("identity") or {})
     timeline = F.pin_voices(timeline, sup.get("voices") or [])
     by_seg = {}
@@ -1812,7 +1831,7 @@ def build(script, sup, style_id, direction=None):
         device line keeps the palette and the gate runs over the line's real shots only), the type driven by a scale of
         DESIGNED_SCALE over the shot after the bake bounce, set on balanced lines (card_lines); a picture of its own, never
         another line's photograph."""
-        c0, c1 = plate_colours(pal["accent"])
+        c0, c1 = ("#080808","#080808") if rec.get("tier")=="card" else plate_colours(pal["accent"])
         P.page([f0, f1], c0, c1, grain=0.05)
         text = str(rec.get("big") or rec.get("text") or "")
         text = text.upper() if st["upper"] else text

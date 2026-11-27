@@ -101,14 +101,16 @@ def prepare(ctx, idea, receipts, ask, pictures, still, studio=()):
                         dict(type="image", source=dict(type="base64", media_type="image/jpeg", data=picture))])
     if not readable and not studio:
         raise RuntimeError("the acquired visual inventory could not be opened")
-    judged, use = ask(
-        "Describe this real visual inventory for a marketing-film writer. This is not a film rating. "
-        "For each picture state only what can actually be seen. Group duplicate images, re-crops, and near-identical "
-        "views of the same photographed scene under the earliest picture ID in that group; those are not distinct "
-        "new pictures. Different actual scenes remain separate. Reject unreadable or irrelevant images. "
-        'Return JSON {"pictures":[{"id":number,"usable":boolean,"group":earliest picture id,"shows":string}]}.',
-        content, what="visual inventory inspection", effort="low", max_tokens=6500)
-    spend.append(use)
+    judged = {"pictures":[]}
+    if content:
+        judged, use = ask(
+            "Describe this real visual inventory for a marketing-film writer. This is not a film rating. "
+            "For each picture state only what can actually be seen. Group duplicate images, re-crops, and near-identical "
+            "views of the same photographed scene under the earliest picture ID in that group; those are not distinct "
+            "new pictures. Different actual scenes remain separate. Reject unreadable or irrelevant images. "
+            'Return JSON {"pictures":[{"id":number,"usable":boolean,"group":earliest picture id,"shows":string}]}.',
+            content, what="visual inventory inspection", effort="low", max_tokens=6500)
+        spend.append(use)
     _save(root / "inspection.json", judged)
     selected, groups = {}, set()
     for verdict in judged.get("pictures", []):
