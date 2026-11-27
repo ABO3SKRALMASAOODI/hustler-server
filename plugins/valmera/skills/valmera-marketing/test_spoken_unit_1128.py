@@ -163,3 +163,37 @@ def test_excerpts_of_new_transcription_exclude_both_partial_edge_sentences(tmp_p
     rows, clock = proof.source_sentences(None, tmp_path/"source.mp4", "upload", 45, 55)
     assert [row["text"] for row in rows] == ["Whole thought."]
     assert heard[0][0] < 45 and heard[0][1] > 55 and len(clock) == 3
+
+
+def test_export_reuses_the_product_clock_only_when_its_audio_matches(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import wave
+    import numpy as np
+
+    rate = 16000
+    tone = np.rint(12000 * np.sin(2 * np.pi * 310 * np.arange(rate) / rate)).astype("<i2")
+    silence = np.zeros(rate, dtype="<i2")
+
+    def wav(name, middle, gain):
+        path = tmp_path / name
+        signal = np.concatenate((tone, middle, tone))
+        with wave.open(str(path), "wb") as stream:
+            stream.setparams((1, 2, rate, 0, "NONE", ""))
+            stream.writeframes((signal * gain).astype("<i2").tobytes())
+        return str(path)
+
+    upload = dict(file=wav("upload.wav", silence, 1), dur=3)
+    unchanged = dict(file=wav("levelled.wav", silence, .7), dur=3)
+    additional = dict(file=wav("insert.wav", tone, .7), dur=3)
+    ctx = SimpleNamespace(tmp=str(tmp_path))
+    words = [dict(w="First.", t0=0, t1=1), dict(w="Last.", t0=2, t1=3)]
+    calls = []
+    def transcribe(ctx, path, label, hi):
+        calls.append((path, hi))
+        return ["fresh export clock"]
+    monkeypatch.setattr(proof, "hear_clock", transcribe)
+    assert proof.export_speech_clock(ctx, upload, unchanged, 3, words) == words
+    assert not calls
+    assert json.loads((tmp_path / "speech-export.json").read_text())["waveform_match"]["audible_windows"] == 20
+    assert proof.export_speech_clock(ctx, upload, additional, 3, words) == ["fresh export clock"]
+    assert calls == [(additional["file"], 3)]

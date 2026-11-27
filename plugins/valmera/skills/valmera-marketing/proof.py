@@ -971,6 +971,67 @@ def export_words(rec, ex, edl=None):
     return out
 
 
+def matching_speech_clock(upload, export, seconds):
+    """Measure sample alignment throughout the two actual audio tracks, including gaps between words."""
+    from contextlib import closing
+    from itertools import zip_longest
+    import numpy as np
+
+    rate = 16000
+    window = rate // 10
+
+    def blocks(path):
+        command = [PX.FF, "-nostdin", "-v", "error", "-i", path, "-t", str(seconds), "-map", "0:a:0",
+                   "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"]
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as decoder:
+            try:
+                while data := decoder.stdout.read(window * 4):
+                    yield np.frombuffer(data, dtype="<f4")
+                if decoder.wait():
+                    raise ValueError("Audio decode failed")
+            finally:
+                decoder.stdout.close()
+                if decoder.poll() is None:
+                    decoder.kill()
+
+    count, minimum = 0, 1.0
+    silence = .001  # -60 dBFS RMS. Any audible addition in an upload's silent interval must be transcribed.
+    try:
+        with closing(blocks(upload)) as left, closing(blocks(export)) as right:
+            for a, b in zip_longest(left, right, fillvalue=np.empty(0, dtype=np.float32)):
+                size = max(len(a), len(b))
+                if len(a) < size:
+                    a = np.pad(a, (0, size-len(a)))
+                if len(b) < size:
+                    b = np.pad(b, (0, size-len(b)))
+                power_a, power_b = float(a @ a), float(b @ b)
+                if max(power_a, power_b) < size * silence**2:
+                    continue
+                agreement = float(a @ b) / math.sqrt(max(1e-24, power_a * power_b))
+                if agreement < .97:
+                    return None
+                minimum = min(minimum, agreement)
+                count += 1
+    except (OSError, ValueError):
+        return None
+    return dict(audible_windows=count, sample_rate=rate, window_samples=window,
+                minimum_correlation=minimum) if count else None
+
+
+def export_speech_clock(ctx, upload, ex, body, up_words):
+    # A picture-only edit can retain the studio transcript exactly. A trim, retime, replacement
+    # or additional voice takes the ordinary transcription path on the export itself.
+    if abs(float(upload["dur"]) - body) <= .05 and up_words and max(w["t1"] for w in up_words) <= body:
+        aligned = matching_speech_clock(upload["file"], ex["file"], body)
+        if aligned:
+            file = ex["file"]
+            signature = [file, os.stat(file).st_size, os.stat(file).st_mtime_ns, 0.0, body]
+            jsave(os.path.join(ctx.tmp, "speech-export.json"),
+                  dict(signature=signature, words=up_words, waveform_match=aligned))
+            return up_words
+    return hear_clock(ctx, ex["file"], "export", hi=body)
+
+
 def proof_plan(ctx, idea, rec, rc, ex):
     """Number the actual upload and authored export separately. Edits may reorder or remove speech."""
     body = export_program_seconds(ex, export_edl(ex))
@@ -978,7 +1039,7 @@ def proof_plan(ctx, idea, rec, rc, ex):
     up_words = rec.get("words") or []
     if not numbered_sentences(up_words):
         up_words = hear_clock(ctx, up["file"], "upload")
-    ex_words = hear_clock(ctx, ex["file"], "export", hi=body)
+    ex_words = export_speech_clock(ctx, up, ex, body, up_words)
     clocks = {"upload": up_words, "export": ex_words}
     rows = {key: numbered_sentences(words) for key, words in clocks.items()}
     rc.update(upload_says=" ".join(w["w"] for w in up_words), export_says=" ".join(w["w"] for w in ex_words),
