@@ -21902,6 +21902,14 @@ def _master_state(ctx, edl):
             "set_by": "edl" if explicit else "format default"}
 
 
+def set_source_pitch(ctx, semitones):
+    """Tune the source audio independently of its playback speed."""
+    pitch = round(max(-48, min(48, float(semitones))), 3)
+    edl = dict(ctx.latest_edl()["json"])
+    edl["source_pitch_semitones"] = pitch or None
+    return ctx.write_edl(edl, f"source audio pitch {pitch:+g} semitones, playback speed unchanged")
+
+
 def set_master_loudness(ctx, enabled):
     """Social mastering on, or the explicit natural opt-out (edl['master'])."""
     on = bool(enabled)
@@ -34786,6 +34794,8 @@ TOOLS = {
                     {"strength": {"type": "number"}}),
     "remove_stem_mix": (remove_stem_mix, "Restore the original mixed "
                         "soundtrack (undo separate_music).", {}),
+    "set_source_pitch": (set_source_pitch, "Change the original audio pitch in semitones, keeping its tempo and the current speed edits. 0 restores the original pitch.",
+                         {"semitones": {"type": "number"}}),
     "set_master_loudness": (set_master_loudness, "Social mastering: the "
                             "main dialogue is leveled to a steady -20 LUFS "
                             "(speakers on different mics meet in the middle) "
@@ -35185,7 +35195,7 @@ TOOL_DOMAINS = {
         "list_music_library", "add_library_music",
         "swap_music", "set_music_fit", "set_audio_gain", "set_volume",
         "add_voiceover", "remove_voiceover", "beat_align_cuts",
-        "separate_music", "remove_stem_mix", "set_master_loudness",
+        "separate_music", "remove_stem_mix", "set_source_pitch", "set_master_loudness",
         "clean_noise",
     },
     "sfx": {
@@ -35396,6 +35406,7 @@ REQUIRED_ARGS = {
     "enhance_video": [],
     "remove_stylize": ["id"],
     "set_grade_custom": [],
+    "set_source_pitch": ["semitones"],
     "set_master_loudness": ["enabled"],
     "get_audio_analysis": [],
     "get_editorial_map": [],
@@ -35464,7 +35475,7 @@ WRITE_TOOLS = {"apply_edit_batch", "keep_segments", "cut_range", "cut_output_ran
                "set_caption_fixes",
                "remove_stylize",
                "bind_motion_motif",
-               "set_grade_custom", "set_master_loudness",
+               "set_grade_custom", "set_source_pitch", "set_master_loudness",
                "separate_music", "remove_stem_mix", "clean_noise",
                "punch_in_on_emphasis", "conceal_jump_cuts", "fetch_sfx",
                "beat_align_cuts", "apply_look", "fetch_url"}
