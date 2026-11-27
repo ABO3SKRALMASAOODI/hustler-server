@@ -2194,6 +2194,8 @@ def lay_recorded_titles(l1, clock, titles, reserved):
             start = math.ceil(t["src"][0] * fps - 1e-6) / fps
             end = min(until, on + math.floor((t["src"][1] - start) * F.FPS + 1e-6))
             for a, b in _minus(on, end, reserved):
+                if a != on:
+                    continue  # the recording at the addressed word already performs this title
                 src = [round(start + (f - on) / F.FPS, 5) for f in (a, b)]
                 layer = D.Layer(l1, {}, f"studio-title-{a}")
                 key = layer.P.video("studio-title-export", dict(ex, path=ex["file"], fps=fps))
@@ -2856,17 +2858,10 @@ def as_delivered(l1, product_paths, spans=None):
     the hook's landing, the whole upload: sealed spans) nothing is drawn over it: no flash, no finish, no look, and a
     caption word is trimmed to the frames outside the span, never deleted whole (20 Nov: all 83 narration words the
     reel built were deleted, even over the film's one photograph). Where the reel lays a product clip as a print on its
-    board (its items marked proof_board), the narration's captions stay (they sit on the board below the print), and no
-    flash, finish or look touches the print. The writer's display words stay on their spoken words over a sealed span
-    (20 Nov: TRASH CAN and BLACK HOLE were said over the recording and printed nowhere), lifted to
-    DISPLAY_OVER_RECORDING_Y, above the recording's own captions; a name super stays too, at NAME_OVER_RECORDING_Y; a
-    designed card's words are left off it.
+    board (its items marked proof_board), narration captions occupy the board below the print.
     spans: only these frame spans, sealed (a repaired window that now plays the recording), else every span the recording
     plays. Returns the sealed spans."""
     keys = {k for k, a in (l1.get("assets") or {}).items() if a.get("path") in product_paths}
-    # one move a landing: the large part sets it (voice dsp<f0>), its small line under it (dsps<f0>) moves with it
-    moves = {int(it["f"][0]): DISPLAY_OVER_RECORDING_Y - rest_y(it) for it in l1["items"]
-             if is_display_word(it) and it.get("v") == f"dsp{int(it['f'][0])}" and rest_y(it) is not None}
     mine = [it for it in l1["items"] if it.get("k") in ("shot", "card") and it.get("pic") in keys and it.get("z", 0) <= 1]
     if spans is not None:
         spans, boards = sorted(tuple(s) for s in spans), []
@@ -2893,12 +2888,6 @@ def as_delivered(l1, product_paths, spans=None):
         board = [s for s in boards if it["f"][0] < s[1] and it["f"][1] > s[0]]
         if not (over or board) or it.get("pic") in keys or it.get("proof_board") or it.get("keep_over_proof"):
             out.append(it)                                 # the product's crop drawn on its own upload stays with it
-            continue
-        if over and is_display_word(it):
-            out.append(lift(it, moves.get(int(it["f"][0]), 0.0)))
-            continue
-        if over and is_name_super(it) and rest_y(it) is not None:
-            out.append(lift(it, NAME_OVER_RECORDING_Y - rest_y(it)))     # its own seat, high, off the recording's captions
             continue
         if it["k"] == "word":
             if not over:

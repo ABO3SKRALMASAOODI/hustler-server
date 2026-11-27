@@ -1,4 +1,5 @@
 """Force the spoken English script through a CTC acoustic model on the finished narration."""
+from collections import defaultdict
 import hashlib
 import json
 import os
@@ -47,13 +48,40 @@ def align(wav, segments, word_file):
         path, scores = forced_align(emission, torch.tensor([targets], dtype=torch.int32))
         aligned = merge_tokens(path[0], scores[0])
     words = []
+    previous = defaultdict(list)
+    for row in doc.get("words") or []:
+        previous[row.get("seg", 0)].append(row)
+    positions = defaultdict(int)
     for (seg, word), (a, b) in zip(tokens, slices):
         if a == b:  # punctuation-only tokens have no audible extent
             t0 = t1 = words[-1]["end"] if words else 0.
         else:
             t0 = aligned[a].start * stride / bundle.sample_rate
             t1 = aligned[b-1].end * stride / bundle.sample_rate
-        words.append(dict(w=word, seg=seg, start=round(t0, 4), end=round(t1, 4)))
+        pos = positions[seg]
+        positions[seg] += 1
+        old = previous[seg]
+        meta = old[pos] if pos < len(old) and old[pos]["w"] == word else {}
+        if old and "chunk" not in meta:
+            meta = dict(chunk=old[0].get("chunk", seg))
+        words.append(dict(meta, w=word, seg=seg, start=round(t0, 4), end=round(t1, 4)))
+    cursor = 0
+    phrases = []
+    for phrase in doc.get("phrases") or []:
+        count = len(phrase.get("text", "").split())
+        members = words[cursor:cursor + count]
+        if members and [r["w"] for r in members] == phrase["text"].split():
+            phrases.append(dict(phrase, start=members[0]["start"], end=members[-1]["end"]))
+            cursor += count
+        else:
+            phrases = []
+            break
+    if not phrases:
+        for i, segment in enumerate(segments):
+            members = [row for row in words if row["seg"] == i]
+            if members:
+                phrases.append(dict(seg=i, text=segment["text"], start=members[0]["start"], end=members[-1]["end"]))
+    doc["phrases"] = phrases
     doc.update(words=words, duration=len(audio)/bundle.sample_rate,
                alignment=dict(model="wav2vec2-base-960h", sha256=key, frame_s=stride/bundle.sample_rate))
     with tempfile.NamedTemporaryFile("w", dir=word_file.parent, delete=False) as f:

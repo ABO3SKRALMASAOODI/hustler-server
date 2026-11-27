@@ -1154,7 +1154,7 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
         bk = P.image("dv_board", board["path"], int(bw), int(bh))
         P.card("board", [f_sent_end, f_p + PUSH_F], bk, [0.0, r4(0.5 - bch / 2), 1.0, r4(0.5 + bch / 2)], z=2, x=0.5, y=0.5,
                s=[r4(min(1.0, 1.0 / bch) * (1.0 + 0.06 * q)) for q in MF.ease_io(n_b)])
-        L.hit("whoosh_soft_1", f_sent_end + 1, "whoosh")      # the screen turns to the board
+        L.hit("whoosh_soft_1", f_sent_end, "whoosh")      # the screen turns to the board
     if upload and ui.get("player"):
         p0, p1 = [float(v) for v in ui["player"]]
         pc = (p0 + p1) / 2
@@ -1188,7 +1188,7 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
         it["z"] = 6
     L.hit("whoosh_soft_1", f0, "whoosh")
     # the key run starts with the first word and ends as the last lands (its peak placed so its head is on f_t)
-    L.hit("typing_2", f_t + int(round(float((P.lib.get("typing_2") or {}).get("peak_s") or 0.0) * FPS)), "typing")
+    L.hit("typing_2", starts[0], "typing")
     L.hit("click_1", f_send, "click")
     L.hit("whoosh_soft_1", f_p + SEAT_F, "whoosh")     # the reveal: the result taking the frame
     rec = L.lay([f0, f_p + PUSH_F])
@@ -1245,9 +1245,7 @@ def site(l1, *, f0, f1, page, export, lib, src0=0.0, url="valmera.io", action_me
     w_url = R.width(L.k("dv_w"), url) / W
     L.text("url", [f0 + 4, f1], url, L.k("dv_w"), 0.5 - w_url / 2, base, "#FFFFFF", 1.0, rise=True)
     if action_media is None:
-        L.hit(CTA_RISER, f0 + 1, "riser")
         L.hit("whoosh_soft_1", f0, "whoosh")
-        L.hit("click_1", f0 + 5, "click")
     elif action < f1:
         L.hit("click_1", action, "click")
     rec = L.lay([f0, f1])
@@ -1280,6 +1278,7 @@ def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="
     pieces.append(("export", [start, f_e], [e0 if after else e0+(f_x-f_p)/FPS, e1], "dv_ex", export))
     for name, span, src, key, media in pieces:
         if span[0] < span[1]:
+            src = [r4(src[0]), r4(src[0] + (span[1] - span[0]) / FPS)]
             l1["items"].append(dict(id=name, k="shot", f=span, pic=key, src=src))
             pictures.append(dict(path=media["path"], f=span, src=src, name=name, role=name))
     proof_f = int(round((float(proof_at) - float(hook[0])) * FPS)) if proof_at is not None else None

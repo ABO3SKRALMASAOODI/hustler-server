@@ -1234,6 +1234,32 @@ def around(asks, spans, dur_f=None, performed=None):
     return out
 
 
+def compose_owned(original, composed, owners):
+    """Assemble the frame owner at each cut, preserving animated values and media source time."""
+    from scene.palette.kit import cut
+    spans = sorted(row.get("frames") or row["f"] for row in owners)
+    if not spans:
+        return composed
+    edges = sorted({edge for span in spans for edge in span})
+    def pieces(items, owned):
+        for item in items:
+            lo, hi = item["f"]
+            points = [lo, *(edge for edge in edges if lo < edge < hi), hi]
+            runs = []
+            for a, b in zip(points, points[1:]):
+                inside = any(x <= a < y for x, y in spans)
+                if inside == owned:
+                    if runs and runs[-1][1] == a:
+                        runs[-1][1] = b
+                    else:
+                        runs.append([a, b])
+            for a, b in runs:
+                yield item if [a, b] == list(item["f"]) else cut(item, a, b, f"{item['id']}~{a}")
+    items = [*pieces(composed["items"], False), *pieces(original["items"], True)]
+    events = [e for e in composed.get("composed_events") or [] if not any(a <= e["f"] < b for a,b in spans)]
+    return dict(composed, items=items, composed_events=events)
+
+
 def recorded_type(asks, headlines, recording, devices=()):
     """An existing title performs the addressed type. A recorded device owns the whole picture."""
     pal = _palette()

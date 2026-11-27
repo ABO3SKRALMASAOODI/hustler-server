@@ -1932,6 +1932,13 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
     sources = {r.get("path"): r for group in (pack.get("pictures") or {}).values() for r in group}
     sources.update({r.get("path"): r for group in pack.get("footage") or [] for r in group.get("clips") or []})
     placed = [dict(sources.get(p.get("path"), {}), **p) for p in beats.get("pictures") or [] if p.get("f")]
+    path_ids = {(l1.get("assets") or {}).get(asset, {}).get("path"): ident for ident, asset in ids.items()}
+    for pic in placed:
+        pic.setdefault("id", path_ids.get(pic.get("path")))
+        pic.setdefault("role", pic.get("tier") or pic.get("kind"))
+        for row in voices:
+            if row.get("file") == pic.get("path"):
+                pic.update(person=row.get("person"), role="speaker")
     rows = DR.composed_words(rows, placed, l1.get("items", []), owners, voices, F.FPS)
     d = DR.direct(ctx.supply, [dict(seg, i=k, text=str(seg.get("say") or "")) for k, seg in enumerate(sc["segments"])], rows, stress, pics,
                   style=palette, workflow="story film (narrated)", dur_s=l1["dur_f"] / F.FPS,
@@ -1962,12 +1969,36 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
     if beats.get("display") or ctx.workflow == "wf2":
         asks, performed = DR.recorded_type(asks, beats.get("display") or [], beats.get("recorded_ink") or [], beats.get("recorded_devices") or [])
     asks = DR.around(asks, owners, l1["dur_f"], performed)         # a reel's own hero device keeps its frames: the Director's land beside it
+    l1["frame_owners"] = owners
     if asks:
         l1["devices"] = list(l1.get("devices") or []) + asks
         ev = DR.device_events(asks)                      # landings the music and sound workflow may answer (no device sounds)
         beats["device_events"] = ev
         beats["events"] = sorted(set(beats.get("events") or []) | {e["f"] for e in ev})
     return dict(by=d.get("by"), performed=performed, asked=[a["dev"] for a in asks], placements=[dict(id=a["id"], f=a.get("f")) for a in asks], notes=notes, sections=d.get("sections"), why=d.get("why"))
+
+
+def hear_composed(ctx, l1, beats, pack):
+    owners = l1.get("frame_owners") or []
+    if not owners or not (l1.get("devices") or l1.get("alien")):
+        return chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))
+    source = os.path.join(ctx.supply, "l1_owners.json")
+    with open(source, "w") as stream:
+        json.dump(l1, stream)
+    path = chain.lay_devices(ctx, source)
+    if path == source:
+        return {}
+    with open(path) as stream:
+        composed = _director().compose_owned(l1, json.load(stream), owners)
+    sounds, report = F.replan_sound(composed, pack)
+    native = [s for s in l1.get("sound", []) if s.get("device")]
+    if not report.get("fault"):
+        composed["sound"] = native + [s for s in sounds if all(abs(s["event_f"]-n["event_f"]) > 2 for n in native)]
+        composed["sound_design"] = report
+    l1.clear()
+    l1.update(composed)
+    beats["device_events"] = l1.get("composed_events") or []
+    return dict(events=len(beats["device_events"]), sounds=len(l1.get("sound", [])))
 
 
 def with_director(ctx, script, sc):
@@ -1994,7 +2025,7 @@ def with_director(ctx, script, sc):
             for text in ([item.get("title")] + [row.get("t") for row in item.get("texts", [])]) if text])
         rec = director_devices(ctx, script, script["script"], pack, l1, beats, around=hero)
         l1["director_performance"] = rec
-        rec["heard"] = chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))     # the sound hears them
+        rec["heard"] = hear_composed(ctx, l1, beats, pack)     # the sound hears them
         json.dump(l1, open(out, "w"), ensure_ascii=False)
         ctx.log(f"director: {len(rec['asked'])} devices round the hero device ({rec.get('by')})")
         return out
@@ -2026,6 +2057,14 @@ def checked_render_shots(ctx, receipt):
 def music_times(script, clock, plan):
     """Story beat indices address the narration, including its programme lead-in."""
     authored = script.get("beats") or {}
+    if not authored:
+        # Delivered scripts before beats used structured segment roles.
+        roles = {"hook":"hook", "low":"setback", "turn":"turn", "payoff":"payoff", "close":"meaning"}
+        authored = {}
+        for i, segment in enumerate(script.get("segments") or []):
+            role = roles.get(segment.get("beat"))
+            if role:
+                authored.setdefault(role, i)
     times = {}
     for role in ("hook", "setback", "turn", "payoff", "meaning", "coda"):
         i = authored.get(role)
@@ -2109,7 +2148,7 @@ def score(ctx, script):
             ctx.log(f"director: the film keeps its builder's devices: {e!r}"[:300])
     if l1.get("devices") or l1.get("alien"):
         # the sound design hears the devices: laid now, their landings planned again with the film's own turn and words
-        beats["devices_heard"] = chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))
+        beats["devices_heard"] = hear_composed(ctx, l1, beats, pack)
     out = os.path.join(ctx.supply, "l1.json")
     json.dump(l1, open(out, "w"), ensure_ascii=False)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")       # the same scene with the narration as its spine: what the song is cut to

@@ -552,10 +552,13 @@ def spoken_forms(text):
         body = t.replace(",", "")
         if body.replace(".", "", 1).isdigit():
             whole = body.split(".")[0]
-            forms = [[norm_word(w) for w in _spell(int(whole))], [norm_word(body)]]
+            spoken = _spell(int(whole))
+            forms = [[norm_word(w) for w in spoken], [norm_word(body)],
+                     [norm_word(part) for w in spoken for part in w.split("-")]]
             if len(whole) == 4 and 1100 <= int(whole) <= 2099 and "." not in body:
                 a, b = int(whole[:2]), int(whole[2:])
-                forms.append([norm_word(w) for w in _spell(a) + (_spell(b) if b >= 10 else (["hundred"] if b == 0 else ["oh"] + _spell(b)))])
+                year = _spell(a) + (_spell(b) if b >= 10 else (["hundred"] if b == 0 else ["oh"] + _spell(b)))
+                forms.extend([[norm_word(w) for w in year], [norm_word(part) for w in year for part in w.split("-")]])
             alts = [x + f for x in alts for f in forms]
         else:
             alts = [x + [norm_word(t)] for x in alts]
