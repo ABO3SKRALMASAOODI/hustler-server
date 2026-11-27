@@ -1219,14 +1219,39 @@ def _run_clip_index(worker_db, job, asset):
         streamed_source = config.index_source_should_stream(
             asset["kind"], asset.get("bytes"))
         proxy_kbps = None
-        if streamed_source:
-            src, sha, info, proxy_kbps = _stream_index_source(
-                worker_db, job, asset, workdir)
-        else:
-            src = os.path.join(workdir,
-                               "src" + os.path.splitext(asset["storage_key"])[1])
-            storage.download_to(asset["storage_key"], src)
+        local_src = os.path.join(
+            workdir, "src" + os.path.splitext(asset["storage_key"])[1])
+        try:
+            if streamed_source:
+                src, sha, info, proxy_kbps = _stream_index_source(
+                    worker_db, job, asset, workdir)
+            else:
+                src = local_src
+                storage.download_to(asset["storage_key"], src)
+                sha = media.sha256_file(src)
+                if not is_music:
+                    info = media.probe(src)
+        except media.MediaError as exc:
+            if is_music or not _no_picture(exc):
+                raise
+            # Sound but no picture (p6336, 27 Nov 2026: a music mix saved
+            # as .mp4 and uploaded as a clip). It is a sound: index it the
+            # way a music upload is indexed (transcript, silences), record
+            # that it has no picture, and the upload lands. The renderer
+            # plays such a file as sound wherever it is placed.
+            print(f"[index {job_id}] clip has sound but no picture: "
+                  "indexed as sound", flush=True)
+            is_music, streamed_source = True, False
+            if not os.path.isfile(local_src):
+                storage.download_to(asset["storage_key"], local_src)
+            src = local_src
             sha = media.sha256_file(src)
+            try:
+                worker_db.run(dbx.update_asset_meta, asset["id"],
+                              {"no_video": True})
+            except Exception as meta_exc:  # noqa: BLE001 - index stands
+                print(f"[index {job_id}] no_video not recorded: "
+                      f"{str(meta_exc)[:120]}", flush=True)
         _set_progress(worker_db, job_id, 10)
         _mark("download_s")
         if is_music:
@@ -1234,8 +1259,6 @@ def _run_clip_index(worker_db, job, asset):
             info = {"duration": dur or (asset.get("duration_s") or 0.0),
                     "width": 0, "height": 0, "fps": 0.0, "has_audio": True,
                     "vfr": False}
-        elif not streamed_source:
-            info = media.probe(src)
         worker_db.run(dbx.update_asset_probe, asset["id"], info["duration"],
                       info["width"], info["height"], info["fps"], sha)
         _set_progress(worker_db, job_id, 20)

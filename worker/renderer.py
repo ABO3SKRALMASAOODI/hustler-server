@@ -7419,6 +7419,9 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     def _fetch(key, tag, idx):
         return _render_asset_source(key, tag, idx, workdir, asset_locals)
 
+    edl, _ = _sound_only_overlays_to_music(
+        edl, lambda k: _fetch(k, "overlay", 0))
+
     music_inputs, insert_inputs, vo_inputs, sfx_inputs = [], [], [], []
     extra_inputs = []
     next_idx = 0                       # no main video: inputs start at [0]
@@ -8040,6 +8043,56 @@ def _noise_clean_local(nc, audio_path, index, workdir, fetch, applies_to):
         return None
 
 
+def _sound_only_overlays_to_music(edl, fetch):
+    """A video overlay whose file has no picture plays as sound.
+
+    A sound-only .mp4 (p6336, 27 Nov 2026: a lofi music mix) dropped on the
+    overlay track bound [idx:v] to nothing and every preview and export
+    failed with "Error binding filtergraph inputs/outputs". What the person
+    placed is a sound, so it is heard exactly where it sits: a music cue on
+    the overlay's own window (start, length, source offset), at the music
+    lane's default level and ducking. A file with neither picture nor sound
+    contributes nothing. Returns (edl, notes); the EDL is a copy and is only
+    rebuilt when something moved."""
+    overlays = edl.get("overlays") or []
+    kept, cues, notes = [], [], []
+    for item in overlays:
+        key = item.get("asset_key")
+        if item.get("kind") != "video" or not key or item.get("screen"):
+            kept.append(item)
+            continue
+        try:
+            local = fetch(key)
+        except Exception:  # noqa: BLE001 - the normal staging reports it
+            kept.append(item)
+            continue
+        if media.has_video_stream(local):
+            kept.append(item)
+            continue
+        start = max(0.0, float(item.get("start") or 0.0))
+        dur = max(0.0, float(item.get("duration_s") or 0.0))
+        if dur > 0.0 and media.has_audio_stream(local):
+            cue = {"id": f"{item.get('id') or 'ov'}_sound",
+                   "storage_key": key, "start": round(start, 3),
+                   "end": round(start + dur, 3),
+                   "offset_s": max(0.0, float(item.get("source_start_s")
+                                              or 0.0))}
+            cues.append(cue)
+            notes.append(f"overlay {item.get('id')} has sound but no picture: "
+                         "played as sound on its window")
+        else:
+            notes.append(f"overlay {item.get('id')} has no picture or sound: "
+                         "nothing to show")
+    if not notes:
+        return edl, notes
+    out = dict(edl)
+    out["overlays"] = kept
+    out["music"] = list(edl.get("music") or []) + cues
+    for n in notes:
+        print(f"[render] {n}", flush=True)
+    return out, notes
+
+
 def _render_asset_source(key, tag, idx, workdir, asset_locals=None):
     with _measure_render_detail("input_fetch_s"):
         return _render_asset_source_impl(key, tag, idx, workdir, asset_locals)
@@ -8426,6 +8479,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 
     def _fetch(key, tag, idx):
         return _render_asset_source(key, tag, idx, workdir, asset_locals)
+
+    edl, _ = _sound_only_overlays_to_music(
+        edl, lambda k: _fetch(k, "overlay", 0))
 
     music_inputs, insert_inputs, vo_inputs, sfx_inputs = [], [], [], []
     extra_inputs = []
