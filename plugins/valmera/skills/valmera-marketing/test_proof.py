@@ -39,15 +39,21 @@ def test_uses_the_stories_film_not_this_folders():
     assert set(P.cards()) <= set(P.R.STYLES)
 
 
-def test_boundaries_on_full_stops_and_on_pauses():
-    w = [(0.0, "one"), (0.3, "two."), (0.6, "three"), (0.9, "four"), (2.4, "five")]
-    assert P.boundaries(w) == {1, 3}
+def test_numbered_sentences_keep_an_unfinished_tail_out_of_the_menu():
+    words = [dict(t0=i, t1=i+.2, w=word) for i, word in
+             enumerate(("One", "answer.", "A", "second", "answer!", "Until"))]
+    assert P.numbered_sentences(words) == [
+        dict(i=0, t0=0, t1=1.2, text="One answer."),
+        dict(i=1, t0=2, t1=4.2, text="A second answer!")]
 
 
 def test_snap_window_starts_and_ends_on_sentences():
-    w = [(float(t), f"w{t}" + ("." if t % 8 == 7 else "")) for t in range(60)]
-    a, b = P.snap_window(w, 9.2, 31.0)
-    assert a == 7.75 and 30.0 <= b <= 41.0
+    words = [dict(t0=i, t1=i+.5, w=f"w{i}" + ("." if i%8 == 7 else "")) for i in range(60)]
+    rows = P.numbered_sentences(words)
+    selection = [1, 3]
+    def silence(path, start, end, **kwargs):
+        return [(7.5, 8.), (31.5, 32.)]
+    assert P.snap_window(rows, selection, "source", 60, clock=words, silence=silence) == [7.75, 31.75]
 
 
 def test_script_problems_catch_untrue_or_missing_parts():

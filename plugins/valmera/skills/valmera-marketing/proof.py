@@ -292,8 +292,10 @@ def snap_window(rows, choice, path, duration, *, clock=None, silence=None):
     left = rows[first-1]["t1"] if first else 0.0
     right = rows[last+1]["t0"] if last+1 < len(rows) else duration
     if clock:
-        left = max((w["t1"] for w in clock if w["t1"] <= start), default=left)
-        right = min((w["t0"] for w in clock if w["t0"] >= end), default=right)
+        # Some ASR word times overlap at sentence boundaries. The word clock can
+        # narrow a gap around the selection, never widen it across its neighbor.
+        left = max((w["t1"] for w in clock if left < w["t1"] <= start), default=left)
+        right = min((w["t0"] for w in clock if end <= w["t0"] < right), default=right)
 
     def edge(a, b, word_edge):
         if a >= b:
