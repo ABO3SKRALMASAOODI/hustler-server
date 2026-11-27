@@ -428,12 +428,17 @@ def script_problems(report):
 
 
 def needs_annotate(sc):
-    """A script without the picture brief or the display anchors (a delivered film from before 14 Nov), or with a brief
-    from before round 2 (no photo search per item, no list reading): it is annotated again on its own words."""
-    segs = sc.get("segments") or []
-    return any(not s.get("see") or any(isinstance(x, str) or not isinstance(x, dict) or "word_i" not in x for x in s.get("show") or [])
-               or not s.get("phrases") or "list" not in s or any(isinstance(x, dict) and "search" not in x for x in s.get("see") or [])
-               for s in segs)
+    """Refresh delivered or draft scripts that predate phrase-specific visual acquisition."""
+    for segment in sc.get("segments") or []:
+        pictures = segment.get("see") or []
+        if not pictures or not segment.get("phrases") or "list" not in segment:
+            return True
+        if any(not isinstance(item, dict) or "word_i" not in item for item in segment.get("show") or []):
+            return True
+        if any(not isinstance(item, dict) or not {"kind", "word_i", "search", "video_searches"} <= item.keys()
+               for item in pictures):
+            return True
+    return False
 
 
 def annotate_script(ctx, sc, idea_full, spend, reel=True):

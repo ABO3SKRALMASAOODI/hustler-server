@@ -98,3 +98,13 @@ def test_adjacent_phrases_can_hold_the_same_photo_when_it_depicts_both():
     assert len(rows)==1 and rows[0][:2]==[0,120]
     assert [p["word_i"] for p in rows[0][4]["phrase_spans"]]==[0,2]
     assert not sp.shortfall
+
+
+
+def test_remake_refreshes_entity_only_brief_even_when_display_clock_is_current():
+    import wf3
+    old = dict(thing="company", search="company", word_i=0)
+    seg = dict(say="A team asked", see=[old], phrases=[[0, 3]], show=[], list=False)
+    assert wf3.needs_annotate(dict(segments=[seg]))
+    old.update(kind="literal", video_searches=["team making the request"])
+    assert not wf3.needs_annotate(dict(segments=[seg]))
