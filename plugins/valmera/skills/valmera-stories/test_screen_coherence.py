@@ -91,3 +91,6 @@ def test_composed_fallback_keeps_recorded_after_whole():
     scene = director.compose_owned(original, laid, [dict(frames=[5,8],device="after")])
     assert [(it["id"], it["f"]) for it in scene["items"] if it["f"][0] < 8 and 5 < it["f"][1]] == [("raw~5",[5,8])]
     assert [it["op"] for it in scene["items"] if it["k"]=="word"] == [[0,1,2],[6,7]]
+
+def test_printed_form_inside_a_longer_text_field():
+    assert director.printed_text("Visit valmera dot I O today", {"valmera dot I O": "VALMERA.IO"}) == "Visit VALMERA.IO today"

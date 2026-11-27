@@ -757,13 +757,15 @@ def payoff_time(ctx, sc):
     return args.get("payoff_s", args.get("turn_s", sc.get("payoff_s", sc.get("turn_s"))))
 
 
-def story_music_brief(record):
+def story_music_brief(record, words=()):
     script = record.get("script") or record
     segments = script.get("segments") or []
     lines = [s.get("say") or s.get("text") for s in segments]
     idea = record.get("idea_full") or record.get("idea") or {}
     idea = idea if isinstance(idea, dict) else {}
     receipts = record.get("receipts") or {}
+    if words:
+        lines = [" ".join(w["w"] for w in words if w.get("seg", 0) == i) for i in dict.fromkeys(w.get("seg", 0) for w in words)]
     if not lines:
         lines = [value for value in [idea.get("claim"), *(r.get("text") for r in receipts.get("asks") or [] if isinstance(r, dict))]
                  if value]
@@ -773,7 +775,7 @@ def story_music_brief(record):
     brief = dict(title=script.get("title") or record.get("title"), stakes=script.get("stakes") or idea.get("pain") or idea.get("claim"),
                  chain=script.get("chain"), hook=script.get("hook_line") or record.get("hook_line") or idea.get("claim"),
                  payoff=landing or script.get("close_line") or record.get("close_line") or receipts.get("visible"), spoken=lines,
-                 direction=record.get("direction") or script.get("direction"))
+                 direction=(record.get("direction") or script.get("direction")) if segments or script.get("format") != "showcase" else None)
     return json.dumps({k: v for k, v in brief.items() if v}, ensure_ascii=False)
 
 
@@ -826,7 +828,8 @@ def music_version(ctx, rd, sc):
         brief = ""
         try:
             sj = json.load(open(os.path.join(ctx.run_dir, "script.json")))
-            brief = story_music_brief(sj)
+            clock = jload(os.path.join(ctx.supply, "words.json"), {})
+            brief = story_music_brief(sj, clock.get("words", []) if isinstance(clock, dict) else [])
         except (OSError, ValueError):
             pass
         bf = os.path.join(ctx.supply, f"{tag}_brief.txt")

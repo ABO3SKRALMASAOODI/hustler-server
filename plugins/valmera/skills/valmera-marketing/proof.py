@@ -2004,7 +2004,7 @@ def showcase_supply(ctx, script, sup_dir, pk):
     visible = (script.get("receipts") or {}).get("visible") or ()
     asked = asked_spans(visible, body)
     words = rec.get("words") or []
-    if not words and edl.get("captions") and rec.get("source"):
+    if not words and rec.get("source"):
         # Older recordings may only have the source caption clock.
         timed = upload_words(rec) or []
         words = [dict(w=w, t0=t, t1=min(t + .5, timed[i+1][0] if i+1 < len(timed) else t+.5))
@@ -2051,10 +2051,20 @@ def showcase_supply(ctx, script, sup_dir, pk):
     read = W3.narrate_script(ctx, dict(story, segments=[dict(typed_segment, say=typed_segment.get("say") or typed)]),
                              os.path.join(sup_dir, "studio_voice"))
     spoken = jload(read["words"])["words"]
-    offsets = [round(w["start"] * F.FPS) for w in spoken] + [round(read["duration"] * F.FPS)]
-    if len(offsets) != len(typed.split()) + 1:
-        # The printed and spoken forms can have different word counts.
-        offsets = [offsets[min(len(spoken), k * len(spoken) // len(typed.split()))] for k in range(len(typed.split()) + 1)]
+    # The narrator may introduce the instruction or speak a printed figure as several words.
+    # Match the photographed composer tokens against the take with its authored print map.
+    from difflib import SequenceMatcher
+    take = F.Clock(read["words"], dict(segments=[typed_segment]))
+    written = F.written_addresses(take, dict(segments=[typed_segment]))
+    timed_tokens = [(F.norm_word(token), max(0, round(w["t0"]*F.FPS)-F.LEAD_F))
+                    for w in written.words for token in w["w"].split()]
+    target = [F.norm_word(word) for word in typed.split()]
+    marks = {i+k: timed_tokens[j+k][1] for i,j,n in SequenceMatcher(
+        None, target, [w for w,_ in timed_tokens], autojunk=False).get_matching_blocks() for k in range(n)}
+    end_f = round(read["duration"]*F.FPS)
+    offsets = [end_f] * (len(target)+1)
+    for i in reversed(range(len(target))):
+        offsets[i] = marks.get(i, offsets[i+1])
     mk = D.showcase_marks(hook, win, len(typed.split()), lead_f=F.LEAD_F, typing_frames=offsets,
                           before=before, after=after)
     voice = os.path.join(sup_dir, "voice.wav")
@@ -2087,9 +2097,8 @@ def showcase_supply(ctx, script, sup_dir, pk):
     lst = os.path.join(sup_dir, "voice.txt")
     open(lst, "w").write("".join(f"file '{p}'\n" for p in parts))
     subprocess.run([PX.FF, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-ac", "1", "-ar", "48000", voice], check=True, timeout=120)
-    words_on_upload = words
+    upload_words_timed = words
     words = os.path.join(sup_dir, "words.json")
-    upload_words_timed = words_on_upload
     cursor = 0.
     export_words_timed = []
     for lo, hi in edl.get("keep") or [[0., body]]:

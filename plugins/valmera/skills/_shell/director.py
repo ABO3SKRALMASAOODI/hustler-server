@@ -1,25 +1,8 @@
-"""The Director: one model call a film (one a chapter in long-form) that chooses, moment by moment, which devices of the
-scene engine's palette land where. It reads a moment sheet (the spoken words numbered with their times and the voice's
-stress, the pictures on one contact sheet with what signal measured of them, the take, the style as a starting palette,
-the device sequences of the films delivered lately) and the palette's menu, and answers DIRECTOR_CONTRACT 4:
+"""Compose sentence-motivated picture, text and sound asks on the programme word clock.
 
-    beats     [{role: hook|name|figure|list|turn|past|quote|contrast|payoff|close, w, seg, word, energy: strobe|brisk|hold}]
-    sections  [{start: word, end: word, segs: [sentences it touches], surface: colour|mono|gate|crt|bloom|thermal|...,
-                layout: bleed|window|prints|collage|grid|split|type, energy: strobe|brisk|hold}]   (they tile the film)
-    asks      [{dev, beat, at: {w, seg, word}, until?: {w, seg, word}, args: {...}, pics: [ids]}]      (overlap and stack)
-    and the older fields every builder reads: display, past_segs, payoff_seg, turn_seg, story_turn_seg, arc
-
-A bad answer is repaired, never refused: a word not said is snapped to the nearest said word of its sentence, a device
-name nothing knows is mapped to its family (the palette resolves it), an answer with no JSON is asked again with the
-parse error shown, and when the provider still fails a signal director lays seeded devices on the voice's stress peaks
-and the beats it can find by signal, away from the ledger's recent sequences, so the film still carries devices. Every
-repair is logged in the answer. The call goes through llm.ask (the run's provider, its dollars recorded) and is cached
-at supply/director.json, keyed on what the model read (the numbered words, the pictures and their contact sheet, the
-take): words scored again are directed again, and a signal answer laid because the provider failed is asked of the model
-again on resume (kept as the answer only if the model fails again). The sheet also says, measured, what this material
-can hold (pictures with a round shape, faces, the speaker on camera), so the model asks for devices that can stand.
-
-No reference's timeline is ever in the prompt (owner, 14 Nov 2026: things are spontaneous): principles only.
+The director reads shot identities, visible lettering, recorded voices and story beats. The
+palette resolves its asks on their addressed frames. Source-owned intervals stay with their
+existing performance. The device ledger records variety across completed films.
 """
 import base64
 import difflib
@@ -27,7 +10,6 @@ import hashlib
 import io
 import json
 import os
-import random
 import sys
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -417,6 +399,27 @@ SETS_SAID = ("ladder", "type_run", "verb", "brackets", "highlight", "flip", "typ
 SAID_SPAN = {"ladder": 4, "type_run": 6, "typewriter": 8, "redact": 8, "staircase": 4, "marquee": 3, "chapter": 4, "name": 3}
 
 
+def printed_text(value, forms):
+    """Apply the writer's spoken-to-print map wherever its contiguous tokens occur in a text field."""
+    if not forms or not isinstance(value, str):
+        return value
+    tokens = value.split()
+    original = [_norm(token) for token in tokens]
+    choices = sorted((([_norm(token) for token in key.split()], output) for key, output in forms.items()
+                      if isinstance(key, str) and key.strip() and isinstance(output, str)), key=lambda row:-len(row[0]))
+    i, out = 0, []
+    while i < len(tokens):
+        match = next(((key, output) for key,output in choices if original[i:i+len(key)] == key), None)
+        if match:
+            key, output = match
+            out.append(output)
+            i += len(key)
+        else:
+            out.append(tokens[i])
+            i += 1
+    return " ".join(out)
+
+
 def said_text(dev, args, at, until, words):
     """An ask's text fields as the words said. A word number written where text belongs (7, "7", [7, 9], a ladder row
     {"t": 7}) becomes the word or words said there, unless that number is itself said in the ask's own sentences (then it
@@ -571,7 +574,7 @@ def repair(d, sentences, words, names=(), seed=0):
         print_map = sentences[at["seg"]].get("print") or {}
         def printed(v):
             if isinstance(v, str):
-                return next((value for key, value in print_map.items() if _norm(v) == _norm(key)), v)
+                return printed_text(v, print_map)
             if isinstance(v, list):
                 return [printed(item) for item in v]
             if isinstance(v, dict):
@@ -582,13 +585,14 @@ def repair(d, sentences, words, names=(), seed=0):
                 row["args"][field] = printed(row["args"][field])
         rep += [f"ask {k} {row['dev']}: {w_}" for w_ in why]
         if row["dev"] == "counter" and any(row["args"].get(k) is None for k in ("from", "to")):
-            row["args"].setdefault("t", at["word"])  # preserve the landing through the palette's word fallback
+            row["args"].setdefault("t", printed_text(at["word"], print_map))  # preserve the landing through the palette's word fallback
         asks.append(row)
     display = []
     for r in d.get("display") or []:
         if isinstance(r, dict) and r.get("text") and isinstance(r.get("seg"), int) and 0 <= r["seg"] < nseg:
             role = r.get("role") if r.get("role") in ("hook", "turn", "payoff", "figure", "name", "contrast") else "hook"
-            display.append(dict(r, role=role, accent=r.get("accent", role in ("figure", "payoff"))))
+            display.append(dict(r, text=printed_text(r["text"], sentences[r["seg"]].get("print")), role=role,
+                                accent=r.get("accent", role in ("figure", "payoff"))))
     selected = {}
     for row in display:
         selected.setdefault(row["seg"], row)

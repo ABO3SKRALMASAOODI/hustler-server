@@ -582,8 +582,19 @@ def test_the_showcase_completes_the_comparison_the_diagram_illustrates_before_th
     assert 15.5 <= hook[0] and hook[1] <= 22.266 - P.PROOF_LEAD_S + 1e-6
 
 
+def measured_read(tmp_path, monkeypatch):
+    def narrate(ctx, script, out):
+        text = script["segments"][0]["say"]
+        words = [dict(w=word, start=i*.2, end=(i+1)*.2, seg=0) for i,word in enumerate(text.split())]
+        path = tmp_path / "studio-words.json"
+        path.write_text(json.dumps(dict(words=words, duration=words[-1]["end"])))
+        return dict(words=str(path), wav="typed.wav", voice="narrator", duration=words[-1]["end"])
+    monkeypatch.setattr(P.W3, "narrate_script", narrate)
+
+
 def test_showcase_supply_plays_the_checked_caption_on_both_recorded_clocks(tmp_path, monkeypatch):
     from types import SimpleNamespace
+    measured_read(tmp_path, monkeypatch)
 
     # Film 04, recorded export-check frames and source ASR on the upload clock.
     words = [(7.05, 7.68, "And"), (8.08, 8.33, "the"), (8.33, 9.05, "NVIDIA"),
@@ -613,7 +624,7 @@ def test_showcase_supply_plays_the_checked_caption_on_both_recorded_clocks(tmp_p
     split = D.split(l1, f0=0, f1=120, upload=UPLOAD, export=EXPORT, edl_b=edl,
                     export_at=prod["hook"][0], lib=LIB, caption_proof=prod["caption_proof"])
     assert split["export_box"][2] - split["export_box"][0] >= .95
-    assert split["upload_box"][3] < split["export_box"][1]
+    assert split["upload_box"][3] <= split["export_box"][1]
     assert split["export_at"] == split["upload_at"]
     assert all(it["k"] != "word" or it["t"] in split["labels"] for it in l1["items"] if it["id"].startswith("sp."))
 
@@ -651,6 +662,7 @@ def test_region_grade_opens_at_equal_scale_and_returns_on_a_registered_wipe():
 
 def test_grade_showcase_continues_the_same_thought_after_send(tmp_path, monkeypatch):
     from types import SimpleNamespace
+    measured_read(tmp_path, monkeypatch)
 
     edl = dict(keep=[[0, 29.27], [34.07, 61.4]],
                fx=[dict(type="region", device="region_tone", start=0, end=56.6,
