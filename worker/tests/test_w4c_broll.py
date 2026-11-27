@@ -668,7 +668,7 @@ def test_remove_broll_and_the_batch_path(project):
                                        ctx.db.keys)
     out = _write.commit(ctx, [_write.upsert_fx(item)], "x")
     assert out.startswith("EDL") and ctx._edl["fx"] == via_batch["fx"]
-    assert broll_tools.remove_broll(ctx, ["nope"]).startswith("REJECTED")
+    assert "already absent" in broll_tools.remove_broll(ctx, ["nope"])
     out = broll_tools.remove_broll(ctx, ["br1"])
     assert out.startswith("EDL") and not [
         i for i in ctx._edl.get("fx") or [] if i.get("type") == "broll"]
