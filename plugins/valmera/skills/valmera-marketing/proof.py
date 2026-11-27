@@ -1331,7 +1331,7 @@ and show why the editor needs this particular change. Place the whole before aft
 the speaker's recording plays once. Say what was actually typed (including each follow-up), then
 let the export make its point in the speaker's own voice. Keep the CTA to one line over the end card.
 Use the source title, upload_says and verified receipts. Attribute the claim to the speaker.
-Write from THE UPLOAD, THE EXPORT and the supplied picture inventory. THE STUDIO holds the real composer, sent request, result and site photographs.
+Write from THE UPLOAD, THE EXPORT and the supplied picture inventory. Show the real Studio composer, sent request, result and site photographs on their corresponding words.
 For showcase use the recording's own pictures, Studio and site. Speak all numbers in words.
 
 Return JSON with title, voice, pace, energy, names, named and segments, one segment per sheet row.
@@ -1797,7 +1797,7 @@ def scale_supply(ctx, script, sup_dir, pk, rec, plan):
                 # the label over the push is the recording's own time from Send to the finished films (the board's turn and the editors)
                 product=dict(paths=[plan["hero"]["file"]], window=win, marks=mk, ui=ui, variant="scale", tiles=tiles,
                              later=later_label(rec),
-                             hero=tiles[0], sub=f"from a {mins}-min podcast", upload_at=0.0, cta_s=D.SITE_S, cta_said=None))
+                             hero=tiles[0], sub=f"from a {mins}-min podcast", upload_at=0.0, cta_s=(mk["site"][1]-mk["site"][0])/F.FPS, cta_said=None))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
                 format="showcase", variant="scale", shorts=len(tiles), hero=dict(project_id=plan["hero"].get("project_id"),
                                                                                   cuts_per_10s=round(plan["hero"]["rate"] * 10, 1)))
@@ -1806,10 +1806,7 @@ def scale_supply(ctx, script, sup_dir, pk, rec, plan):
 
 
 def showcase_supply(ctx, script, sup_dir, pk):
-    """The showcase's pack (devices.showcase): the export's seconds for the split hook and for its own stretch, and the
-    film's voice track cut to the showcase's frames: the export's own sound under the split, the Studio's stretch
-    without a voice (its keys and its Send are the device's sounds, the film's bed carries it), the export's own sound
-    from where it grows out of the Studio, then the site. No narrator, no footage search."""
+    """Compose the recorded speaker and narrated instruction on their measured windows."""
     rec = json.load(open(script["record"]))
     plan = scale_plan(rec)
     if plan:                      # a Shorts board carried to films: the scale film
@@ -1820,20 +1817,16 @@ def showcase_supply(ctx, script, sup_dir, pk):
     os.makedirs(prod, exist_ok=True)
     body = export_program_seconds(ex, edl)    # 27 Nov: a Pro export ends on the edit, not on a card (41.2 s cut to 35.6)
     cut(ex["file"], 0.0, body, os.path.join(prod, "export_body.mp4"))
-    pics = [(float(o["start"]), float(o["duration_s"])) for o in D.MF.pictures_of(edl) + D.MF.titles_of(edl)]
-    d = W3.direction_of(ctx) if hasattr(ctx, "run_dir") else {}
     visible = (script.get("receipts") or {}).get("visible") or ()
     story = script.get("script") or {}
-    words = rec.get("words") or []
-    if not words:
-        words = hear_clock(ctx, rec["upload"]["file"], "upload")
-    caption = caption_example(edl, words, visible, body)
-    spans = (story.get("proof") or {}).get("spans")
-    if not spans:
+    proof = story.get("proof") or {}
+    spans = proof.get("spans") or {}
+    if not all(spans.get(key) for key in ("split", "before", "after", "stretch")):
         _, proof, _ = proof_plan(ctx, script["idea_full"], rec, script["receipts"], ex)
         spans = proof["spans"]
-    win, hook = spans["stretch"], spans["split"]
-    before, after = spans.get("before"), spans.get("after")
+    hook, before, after, win = (spans[key] for key in ("split", "before", "after", "stretch"))
+    words = rec.get("words") or hear_clock(ctx, rec["upload"]["file"], "upload")
+    caption = caption_example(edl, words, visible, body)
     if caption and not hook[0] <= caption["seen_s"] < hook[1]:
         caption = None
     ui = showcase_ui(rec)
@@ -1888,8 +1881,9 @@ def showcase_supply(ctx, script, sup_dir, pk):
     lst = os.path.join(sup_dir, "voice.txt")
     open(lst, "w").write("".join(f"file '{p}'\n" for p in parts))
     subprocess.run([PX.FF, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-ac", "1", "-ar", "48000", voice], check=True, timeout=120)
-    upload_words_timed = words
+    words_on_upload = words
     words = os.path.join(sup_dir, "words.json")
+    upload_words_timed = words_on_upload
     cursor = 0.
     export_words_timed = []
     for lo, hi in edl.get("keep") or [[0., body]]:
@@ -1921,7 +1915,7 @@ def showcase_supply(ctx, script, sup_dir, pk):
     pack = dict(sid=ctx.sid, words=words, narration=voice, ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[], footage=[],
                 voices=[], screen_voices=voices, programme_segments=turns, work=os.path.join(sup_dir, "finish"), fit=[],
                 product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, before=before, after=after, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
-                             upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None,
+                             upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=(mk["site"][1]-mk["site"][0])/F.FPS, cta_said=None,
                              caption_proof=caption, proof_at=proof_push_at(proof_span(visible, hook), hook)))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
                 format="showcase", studio_ui=bool(ui), site=bool(ui and ui.get("site")))
@@ -3674,7 +3668,7 @@ def scale_score(ctx, script, pack, upload):
     tiles = [dict(t, path=t["path"]) for t in prod["tiles"]]
     hero = dict(path=tiles[0]["path"], w=tiles[0]["w"], h=tiles[0]["h"], fps=tiles[0]["fps"], dur=tiles[0]["dur"])
     l1, beats = D.scale_showcase(upload=upload, hero=hero, tiles=tiles, typed=typed_line(script["receipts"]), window=prod["window"], ui=ui, page=page,
-                                 lib=lib, sid=ctx.sid, lead_f=F.LEAD_F, later=prod.get("later"), sub=prod.get("sub"))
+                                 lib=lib, sid=ctx.sid, lead_f=F.LEAD_F, later=prod.get("later"), sub=prod.get("sub"), site_s=prod.get("cta_s"))
     out = os.path.join(ctx.supply, "l1.json")
     jsave(out, l1)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")
@@ -3692,8 +3686,8 @@ def lay_cta(ctx, l1, sc, pack, clock, script):
     """The call to action on the film's last line, held CTA_S or to the end of the programme: the website itself
     (devices.site, the recording's photograph of valmera.io) when the recording has it, else devices.cta."""
     try:
-        words = clock.seg_words(len(sc["segments"]) - 1)
-        f0 = max(F.Clock.f(words[0]["t0"]) - 2, 0) if words else max(l1["dur_f"] - int(D.CTA_S * F.FPS), 0)
+        end = int(l1["dur_f"])
+        f0 = max(0, end - D.card_join_frames())
         body = os.path.join(os.path.dirname(pack["product"]["paths"][0]), "export_body.mp4")
         m = D.media(pack["ffmpeg"], body)
         lib = dict(pack.get("sounds") or {})
@@ -3702,22 +3696,9 @@ def lay_cta(ctx, l1, sc, pack, clock, script):
         record = jload(script.get("record") or "", {})
         ui = ui_shots(record) if record else None
         if ui and ui.get("site"):
-            # End on the accepted result when the final visible check supplies
-            # its clock; otherwise show the recording's freshly uploaded player.
-            action = dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
-            receipt = script.get("receipts") or {}
-            final = next((ex for ex in reversed(record.get("exports") or []) if ex.get("file")
-                          and ex.get("sha256") == (receipt.get("export") or {}).get("sha256")), None)
-            if final:
-                result = dict(final, path=final["file"], fps=final.get("fps") or F.FPS)
-                checked = [t for row in receipt.get("visible") or [] for t in row.get("seconds") or []
-                           if isinstance(t, (int, float)) and 0 <= t < result["dur"]]
-                if checked:
-                    hold = (l1["dur_f"] - f0 + 1) // 2 / F.FPS
-                    action = dict(result, at=max(0., min(max(checked) - hold/2, result["dur"] - hold)))
-            return D.site(l1, f0=f0, f1=int(l1["dur_f"]), page=ui["site"], export=m, lib=lib,
-                          src0=src0, action_media=action)
-        return D.cta(l1, f0=f0, f1=int(l1["dur_f"]), export=m, lib=lib, src0=src0)
+            return D.site(l1, f0=f0, f1=end, page=ui["site"], export=m, lib=lib, src0=src0)
+        # Keep the moving proof through the card's reveal when the recording has no site.
+        return dict(device="cta", frames=[f0,end], lines=[], brand_join=True)
     except Exception as e:  # noqa: BLE001 - the film keeps its spoken call to action
         ctx.log(f"call to action not laid: {repr(e)[:300]}")
         return dict(device="cta", fault=repr(e)[:300])
@@ -3789,13 +3770,7 @@ def score(ctx, script):
     after_v = next((v for v in pack.get("voices") or [] if v.get("person") == "after"), None)
     if after_v:   # the payoff is the after: the drop lands on its first picture landing (the export's own), else on its arrival
         knobs["turn_span_s"] = [round(float(after_v["start"]) + F.LEAD_F / F.FPS, 3), round(float(after_v["end"]) + F.LEAD_F / F.FPS, 3)]
-    try:          # the call to action holds CTA_S on screen: the programme runs on past the last word for it
-        ck = F.Clock(pack["words"], sc)
-        last = ck.seg_words(len(sc["segments"]) - 1)
-        if last:
-            knobs.setdefault("tail_f", max(15, int(D.CTA_S * F.FPS) - (F.Clock.f(ck.dur) - F.Clock.f(last[0]["t0"]))))
-    except (OSError, ValueError, KeyError, IndexError):
-        pass
+    knobs.setdefault("tail_f", D.card_join_frames())
     sys.path[:0] = [p for p in W3.env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     build = R.builder(script["style"]["id"])

@@ -46,7 +46,12 @@ def visible(frame, mask, pos):
 
 def missing_ink(film, frames, sprites, size, ffmpeg):
     w,h = [int(n)//2 for n in size]
-    pick = "+".join(f"eq(n\\,{f})" for f in sorted(frames))
+    terms = [f"eq(n\\,{f})" for f in sorted(frames)]
+    if not terms:
+        return []
+    while len(terms) > 1:
+        terms = [f"({terms[i]}+{terms[i+1]})" if i+1 < len(terms) else terms[i] for i in range(0,len(terms),2)]
+    pick = terms[0]
     cmd = [ffmpeg,"-v","error","-i",film,"-vf",f"select={pick},scale={w}:{h}","-fps_mode","vfr",
            "-an","-pix_fmt","gray","-f","rawvideo","pipe:1"]
     missing = []

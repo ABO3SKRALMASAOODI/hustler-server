@@ -69,3 +69,10 @@ def test_a_written_address_keeps_the_writers_phrase_lines():
     assert lines[2][0] == display.words[6]["t0"]
     plain = {"segments":[{"phrases":[[0,3],[3,9],[9,13]]}]}
     assert film.written_captions(clock, plain) == (clock, clock.phrases_of(plain))
+
+def test_long_caption_frame_selection_decodes_every_sample(tmp_path):
+    ff = os.environ.get("FFMPEG_BIN", "ffmpeg")
+    film = str(tmp_path / "clock.mp4")
+    subprocess.run([ff, "-v", "error", "-f", "lavfi", "-i", "color=black:s=32x32:r=30:d=6",
+                    "-c:v", "libx264", film], check=True)
+    assert caption_pixels.missing_ink(film, {f: [] for f in range(160)}, {}, (32,32), ff) == []

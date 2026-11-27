@@ -922,12 +922,16 @@ READ_F = 12                    # the whole sentence held before Send
 SENT_F = 14                    # Send, the sentence in its bubble
 PUSH_F = 18                    # the result: seated under the sent sentence (SEAT_F), then growing out of the Studio to full frame
 SEAT_F = 6                     # the sentence and its result read together before the result takes the frame (26 Nov)
-SITE_S = 3.4                   # the website: its name and a page to recognise, with the landing
+def card_join_frames():
+    """The ending starts where the shared finisher first draws the brand card."""
+    import brand
+    return brand._renderer().outro_join_frames(FPS)
+
 LATER_LABEL = "EDIT TIME  {}"
 
 
 
-def showcase_marks(hook, window, n_words, lead_f=3, site_s=SITE_S, over_s=0.0, board_f=0, typing_frames=None, before=None, after=None):
+def showcase_marks(hook, window, n_words, lead_f=3, site_s=None, over_s=0.0, board_f=0, typing_frames=None, before=None, after=None):
     """A single frame clock for both mixes. Source spans are half-open media seconds."""
     def length(span):
         return max(1, round(float(span[1]) * FPS) - round(float(span[0]) * FPS)) if span else 0
@@ -942,7 +946,7 @@ def showcase_marks(hook, window, n_words, lead_f=3, site_s=SITE_S, over_s=0.0, b
     f_a = f_p + length(after)
     f_v = f_a + length(window)
     f_x = min(f_p + PUSH_F, f_a if after else f_v)
-    f_end = f_v + round(site_s * FPS)
+    f_end = f_v + (card_join_frames() if site_s is None else round(site_s * FPS))
     return dict(split=[0, f_h], before=[f_h, f_u], after=[f_p, f_a], stretch=[f_a, f_v],
                 studio=[f_u, f_p], typing=[f_t, f_send], type_frames=[f_t + k for k in offsets],
                 send=f_send, board=[f_b, f_p] if board_f else None, push=[f_p, f_x], export=[f_p, f_v],
@@ -1208,6 +1212,13 @@ def site(l1, *, f0, f1, page, export, lib, src0=0.0, url="valmera.io", action_me
     follows (the shell's, unchanged). True by construction: everything on it is the site's own words."""
     L = Layer(l1, lib, "ct")
     P, R = L.P, L.R
+    if f1 - f0 <= card_join_frames():
+        # The card's own head dissolves over this photograph in the brand finish.
+        key = P.image("dv_site", page["path"], int(page["w"]), int(page["h"]))
+        P.card("page", [f0, f1], key, [0, 0, 1, 1], z=1,
+               crop=cover(page["w"] / page["h"], W / H))
+        return dict(L.lay([f0, f1]), device="cta", frames=[f0, f1], seconds=(f1-f0)/FPS,
+                    lines=[], lands=[f0], brand_join=True)
     key = P.video("dv_cx", export)
     desk(L, [f0, f1], key, export, src0=src0)
     P.block("veil", [f0, f1], [0.0, 0.0, 1.0, 1.0], "#07080B", z=1, op=[r4(min(0.62, 0.62 * (q + 1) / 6.0)) for q in range(f1 - f0)])
@@ -1258,7 +1269,7 @@ def site(l1, *, f0, f1, page, export, lib, src0=0.0, url="valmera.io", action_me
 
 
 def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="wf2", focus=(0.5, 0.42), lead_f=3, later=None,
-             site_s=SITE_S, proof_at=None, over_s=0.0, caption_proof=None, marks=None, before=None, after=None):
+             site_s=None, proof_at=None, over_s=0.0, caption_proof=None, marks=None, before=None, after=None):
     """The whole programme of a film with no narrator (owner, 17 Nov: "an extremely powerful edit ... then the CTA";
     "show the website directly"): split, studio, export, site (see above). `hook` / `window`: export seconds of the
     split and of the export's own stretch; `ui`: the recording's Studio photographs; `page`: its photograph of the
@@ -1306,7 +1317,7 @@ def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="
                                  name="THE EXPORT") for a,b in ((f_x,start),(start+length,f_e))]
     beats = dict(format="showcase", marks=mk, split=mk["split"], studio=mk["studio"], reveal=mk["push"], export=[f_p, f_e], cta=mk["site"],
                  pictures=pictures, events=sorted({s["event_f"] for s in l1["sound"]}),
-                 look=[0, mk["split"][1] - 10, mk["typing"][0] + 20, mk["send"] + 6, f_x + 30, (f_x + f_e) // 2, f_e + 20, mk["dur_f"] - 2],
+                 look=[0, mk["split"][1] - 10, mk["typing"][0] + 20, mk["send"] + 6, f_x + 30, (f_x + f_e) // 2, (f_e + mk["dur_f"]) // 2, mk["dur_f"] - 2],
                  pace=dict(split_s=round(mk["split"][1] / FPS, 2), studio_s=round((f_p - mk["split"][1]) / FPS, 2),
                            export_s=round((f_e - f_p) / FPS, 2), cta_s=round((mk["dur_f"] - f_e) / FPS, 2)),
                  style="showcase", devices=[rec_s, rec_u, *([exchange] if exchange else []), rec_c], export_window=[r4(e0), r4(e1)], hook_window=[r4(hook[0]), r4(hook[1])])
@@ -1390,7 +1401,7 @@ def grid_live(l1, *, f0, f1, tiles, lib, upload=None, top="1 SENTENCE IN VALMERA
     return rec
 
 
-def scale_showcase(*, upload, hero, tiles, typed, window, ui, page, lib, sid="wf2", lead_f=3, later=None, site_s=SITE_S, sub=None):
+def scale_showcase(*, upload, hero, tiles, typed, window, ui, page, lib, sid="wf2", lead_f=3, later=None, site_s=None, sub=None):
     """The scale film: the grid of every finished short (counted), the Studio (the sentence typed, Send, the board),
     the hero short growing out of the board and playing full frame on its own sound (`window`, its seconds), then the
     website under its last line. `hero`: {path, w, h, fps, dur} of the hero's export, which is tiles[0]."""
@@ -1408,7 +1419,7 @@ def scale_showcase(*, upload, hero, tiles, typed, window, ui, page, lib, sid="wf
     beats = dict(format="showcase", variant="scale", marks=mk, grid=mk["split"], studio=mk["studio"], reveal=mk["push"], export=[f_p, f_e],
                  cta=mk["site"], pictures=[dict(path=hero["path"], f=[f_x, f_e], name="THE EXPORT")],
                  events=sorted({s["event_f"] for s in l1["sound"]}), look=[0, mk["split"][1] - 6, mk["typing"][0] + 30, (mk["board"] or [f_p])[0] + 10,
-                                                                            f_x + 20, (f_x + f_e) // 2, f_e + 20, mk["dur_f"] - 2],
+                                                                            f_x + 20, (f_x + f_e) // 2, (f_e + mk["dur_f"]) // 2, mk["dur_f"] - 2],
                  pace=dict(grid_s=round(mk["split"][1] / FPS, 2), studio_s=round((f_p - mk["split"][1]) / FPS, 2),
                            export_s=round((f_e - f_p) / FPS, 2), cta_s=round((mk["dur_f"] - f_e) / FPS, 2)),
                  style="showcase", devices=[rec_g, rec_u, rec_c], export_window=[r4(e0), r4(e1)], shorts=len(tiles))
