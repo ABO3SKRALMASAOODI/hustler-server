@@ -2,10 +2,8 @@
 
 ideas   the writer finds stories on the web itself (writer.find_ideas), then each idea's pictures are probed on
         Wikimedia Commons and Openverse: an idea whose named things have no free photographs cannot be made
-script  VERIFY FIRST: the best idea's spine (hook, turn, payoff, close) is researched and every claim verified on its
-        page before a word is written (writer.spine_bank; the next idea when it cannot be); the writer writes from the
-        verified bank alone (writer.write_from_bank), every line judged on its quotes and the spine held
-        (writer.hold_spine), then the ear and the final support pass; every number on screen stands in a verified quote
+script  Research the central claim and its causes. Plan the sheet, write the first draft and use
+        support, repeat, spine and spoken-time measurements in one whole-script revision.
 supply  the narrator (narrate tool, local, through heavy.sh) and the pictures (worker/broll_source: Commons and
         Openverse, checked by a vision model against what each must show, licence kept), and real video per line
         (worker/footage through _shell/chain.footage: YouTube and archive.org, transcribed and checked on OpenAI,
@@ -236,8 +234,11 @@ def script(ctx, ideas_out):
             break
         pick = queue.pop(0)
         card = able[pick["style"]]
-        prior = old["script"]["script"] if old else {}
-        got = from_spine(ctx, pick, card, spend, n, verified=prior.get("facts", ()))
+        prior = old["script"] if old else {}
+        read = {r["id"]: r for r in (prior.get("verify") or {}).get("facts", []) if r["found"]}
+        verified = [dict(f, prior_source=read[f["id"]].get("source") or f["url"])
+                    if f["id"] in read else f for f in prior.get("script", {}).get("facts", [])]
+        got = from_spine(ctx, pick, card, spend, n, verified=verified)
         n += 1
         if got["ok"]:
             sc, rep, bank = got["script"], got["verify"], got["bank"]

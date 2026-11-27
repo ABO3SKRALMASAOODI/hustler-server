@@ -289,7 +289,7 @@ def check_script(script, dos):
     chs = {c.get("id") for c in script.get("chapters") or []}
     if len(chs) < 2:
         problems.append(f"{len(chs)} chapters; a long film needs distinct story movements")
-    return dict(ok=not problems, problems=problems, words=n, segments=len(script.get("segments") or []), facts_used=len(used),
+    return dict(ok=not problems, problems=problems, words=writer.words_of(script), segments=len(script.get("segments") or []), facts_used=len(used),
                 figures_unbacked=unbacked)
 
 
