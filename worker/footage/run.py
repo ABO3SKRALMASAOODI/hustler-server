@@ -168,9 +168,8 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
     avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again.
     hear_s, read_s, per: a caller with a deadline (a first film, score.film) hears less or nothing of each source, reads
     less of it and opens fewer sources a subject; None keeps the engine's own (HEAR_MAX_S, fetch.PROXY_MAX_S, PER_SUBJECT).
-    shot_s, line_max: a caller that cuts faster than SHOT_S (a story reel: a picture every 0.45 s) asks for
-    min(line_max, ceil(dur / shot_s) + 2) clips a line, each window clamp(2 * shot_s, cut.MIN_S, 1.6) s; None keeps
-    min(4, round(dur / SHOT_S)) clips of dur / n s.
+    Briefed lines acquire distinct takes that depict their words. shot_s and line_max provide
+    historical defaults for unbriefed callers. line_max also bounds acquisition breadth.
     Opt-in (a story reel; all off by default, so every other caller cuts exactly as before):
     strict_lines   a frame fills line i only when the look named i among its lines (never by its subject alone)
     motion_first   each source shot's content motion is measured on the proxy (footage.motion): short shots (0.3 s and
@@ -210,6 +209,16 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         # Cached originals are candidates, not a closed source whitelist. A cache
         # may contain only unsuitable footage; continue discovering alternatives.
         flat = [(si, q) for si, s in enumerate(subjects) for q in s["searches"]]
+        for si, subject in enumerate(subjects):
+            matching = [brief for line in lines for brief in line.get("see") or []
+                        if subject["name"] in (brief.get("thing"), brief.get("entity"), brief.get("moment"))]
+            seen = {(q.get("where"), q["q"]) for index,q in flat if index == si}
+            for brief in matching:
+                for query in brief.get("video_searches") or []:
+                    for source in ("archive", "youtube"):
+                        if (source, query) not in seen:
+                            flat.append((si, dict(where=source, q=query)))
+                            seen.add((source, query))
         found = {} if source_only else search.run([q for _, q in flat])
         hits = dict(primary)
         for k, (si, _) in enumerate(flat):
@@ -370,7 +379,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         for sp in os.listdir(work):
             if sp.startswith("sheet_"):
                 shutil.copyfile(os.path.join(work, sp), os.path.join(out_dir, "sheets", sp))
-        good = [c for c in pool_frames if c["ok"] and c["clean"] and c["grade"] >= 3]
+        good = fitting_frames(pool_frames, preserve_source=preserve_source)
         reused = sum(bool(c.get("look_reused")) for c in pool_frames)
         log(f"look: {len(pool_frames)-reused} frames checked, {reused} reused, {len(good)} pass")
         look.dump([{k: v for k, v in c.items() if k not in ("jpg",)} for c in pool_frames], os.path.join(out_dir, "looked.json"))
@@ -575,7 +584,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 clips.append(dict(verification=p.get("verification"), file=p["file"], seconds=round(p["t1"] - p["t0"], 2), subject=p["subject"], shows=p["shows"], grade=p["grade"],
                                   source=dict(url=s["url"], title=s["title"], channel=s.get("channel"), where=s["where"],
                                               **({"description": s["description"][:600]} if s.get("description") else {})),
-                                  rung=s.get("rung"), source_size=[s.get("w"), s.get("h")],
+                                  rung=s.get("rung"), source_needs_framing=p.get("clean") is False, source_size=[s.get("w"), s.get("h")],
                                   time_range=[p["t0"], p["t1"]], frame_at=p["t"], x=p.get("x"), eq=p.get("eq"), trim=p.get("trim"),
                                   how=p.get("how"), sheet=p.get("sheet"), **({"motion_p90": p["motion_p90"]} if "motion_p90" in p else {})))
             out_lines.append(dict(i=r["i"], say=r["say"], show=r["show"], dur=r["dur"], want=r["want"], clips=clips,
@@ -739,6 +748,12 @@ def _keep_sources(sources, log=print):
     return added
 
 
+def fitting_frames(frames, *, preserve_source):
+    """A fitted compositor can frame a relevant part of an otherwise cluttered source."""
+    return [frame for frame in frames if frame["ok"] and frame["grade"] >= 3 and
+            (frame["clean"] or (preserve_source and frame.get("lines")))]
+
+
 def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict=False, motion_of=None, alloc=None):
     """Step 6, clips to lines: [{"i", "say", "show", "dur", "want", "picks"}]. Each slot takes the best frame whose window
     inside its shot overlaps no window already cut (`taken`, updated). Defaults: line by line, a frame named for the line
@@ -752,6 +767,11 @@ def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict
     for ln in lines:
         dur = _line_dur(ln)
         n, win_s = line_shots(dur, shot_s, line_max)
+        if ln.get("see") or ln.get("visual"):
+            distinct = {(c["source"], tuple(shots.shot_at(src_of[c["source"]]["shots"], c["t"])))
+                        for c in good if ln["i"] in c["lines"]}
+            n = min(len(distinct), line_max or len(distinct))
+            win_s = dur
         if ln.get("single_action") is True:
             n, win_s = 1, dur
         if ln.get("want_n"):
@@ -769,6 +789,8 @@ def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict
         for c in good:
             s = src_of[c["source"]]
             shot = shots.shot_at(s["shots"], c["t"])
+            if (ln.get("see") or ln.get("visual")) and shot_uses.get((c["source"], shot[0])):
+                continue
             if shot[1] - shot[0] < min_len:
                 continue
             mo = ((motion_of or {}).get(c["source"]) or {}).get(tuple(shot)) if motion_of is not None else None
@@ -785,6 +807,8 @@ def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict
                 score = c["grade"] - 1.0
             else:
                 continue
+            if c.get("clean") is False:
+                score -= 1.0
             if c["source"] == last_src:
                 score -= 0.7
             if any(x["source"] == c["source"] for x in chosen):

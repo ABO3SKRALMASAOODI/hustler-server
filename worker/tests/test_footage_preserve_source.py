@@ -44,3 +44,12 @@ def test_legacy_supply_still_uses_requested_canvas(tmp_path, monkeypatch):
     vf = calls[0][calls[0].index('-vf')+1]
     assert 'crop=270:480' in vf
     assert 'iw*0.800' in vf
+
+
+
+def test_matched_demo_in_a_split_reaches_the_fitted_compositor():
+    from footage.run import fitting_frames
+    demo = dict(ok=True, clean=False, grade=4, lines=[5])
+    unrelated = dict(demo, lines=[])
+    assert fitting_frames([demo, unrelated], preserve_source=True) == [demo]
+    assert fitting_frames([demo], preserve_source=False) == []

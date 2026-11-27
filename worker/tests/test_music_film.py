@@ -321,3 +321,18 @@ def test_marketing_mix_keeps_the_picture_frame_and_ducks_the_word_on_its_own_ste
     report = music.mix(l1, str(tmp_path), songs["full"], kind="marketing", index=index)
     assert report["final_sounds"][0]["event_f"] == 90
     assert report["audibility"]["bed_under_voice_db"] > 0
+
+def test_authored_beats_shape_the_mix_without_a_model(tmp_path, monkeypatch):
+    from score import music
+    scene, index = _film(24.)
+    scene["music_marks"] = dict(beats=dict(hook=0., setback=4., turn=9., payoff=16., meaning=20.))
+    captured = {}
+    def mix(doc, work, song, **kwargs):
+        captured.update(doc["music_marks"])
+        return dict(plan=dict(ok=True), ok=True)
+    monkeypatch.setattr(music, "mix", mix)
+    report = MF.score(scene, str(tmp_path), song="licensed.mp3", index=index)
+    assert report["marks"]["turn_s"] == 9. and report["marks"]["payoff_s"] == 16.
+    joints = {j["kind"]: j for j in captured["joints"]}
+    assert (joints["voice"]["t0"], joints["voice"]["t1"]) == (4., 9.)
+    assert joints["swell"]["t"] == 16. and joints["close"]["next_first_word_t"] == 20.
