@@ -304,7 +304,8 @@ def test_sol_62_wire_prefix_grows_across_steps_and_new_job_recorders(monkeypatch
         for field in ("tools", "model", "reasoning", "prompt_cache_key", "prompt_cache_options"):
             assert before[field] == after[field]
     assert a["prompt_cache_key"] == "valmera:edit:17:42"
-    assert [i["type"] for i in b["input"] if i.get("type")][-2:] == ["additional_tools", "configuration_update"]
+    assert [i["type"] for i in b["input"] if i.get("type")][-3:] == [
+        "additional_tools", "function_call_output", "configuration_update"]
     assert a["input"][0]["content"][0]["prompt_cache_breakpoint"]["ttl"] == "12h"
 
 

@@ -305,10 +305,12 @@ def _session_tools(body, plan):
                 "tools": openai_cache.stable_tools(responses_tools([catalog[n] for n in names]))}
     items = []
     for item in body["input"]:
-        items.append(item)
         names = plan["refs"].get(item.get("call_id")) if item.get("type") == "function_call_output" else None
         if names:
+            # The tool finished before this request was built. Install its schemas
+            # alongside its result, inside the implicit tool-response cache boundary.
             items.append(addition(names))
+        items.append(item)
     if plan.get("initial_extra"):
         # Resume-only tools belong after the shared instructions, before the first user input.
         at = next((i for i, item in enumerate(items) if item.get("role") != "developer"), len(items))
