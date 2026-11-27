@@ -62,6 +62,74 @@ def cache_take_analysis(out):
     LN._judge_files=judged
 
 
+def read_max_tempo():
+    """The tempo ceiling the read runs under (the shared lines module's), for a stage written before it was kept."""
+    import lines as LN
+    return LN.MAX_TEMPO
+
+
+def bounded_generation(original_generate):
+    """Shared Read.generate_phonon with the take budget of a resume: six initial + four six-take rounds.
+    The word gate remains unchanged, including after exhaustion. Same signature as the method it wraps."""
+    def bounded_generate(self,job,out,log,seed0=7):
+        import copy
+        bounded=copy.deepcopy(job)
+        for row in bounded['lines']:
+            requested=int(row.get('takes') or bounded.get('takes') or 6)
+            row['takes']=min(requested,30)
+            if requested>30:log(row['id']+': thirty-take retry budget spent; retaining strict gate')
+        base=int(bounded.get('takes') or 6)
+        if all(shared.whole_take(Path(out)/f"{row['id']}_t{k}.wav") for row in bounded['lines'] for k in range(int(row.get('takes') or base))):
+            # every take asked for is on disk: the shared generator would still load the Phonon model (about 100 s) to make none
+            log(f"phonon {bounded['voice']}: 0 takes in 0.0s (stories read; every take already on disk, model not loaded)")
+            return
+        return original_generate(self,bounded,out,log,seed0)
+    return bounded_generate
+
+
+def cache_gate_listening(out):
+    """The gate listens to the whole joined read, then a model writes the heard words in spoken form. Both are
+    pure functions of the audio and the script: when a round joins the same takes as an earlier one (the budget
+    is spent and no line changed, or the film resumes after a later crash), the answer is read back from
+    gate-cache/ instead of a 4-minute listen and a model call that return the same words.
+    """
+    import narrate as N
+    import spoken
+    import numpy as np
+    root=Path(out)/'gate-cache';root.mkdir(parents=True,exist_ok=True)
+    version=hashlib.sha256(Path(N.__file__).read_bytes()+Path(spoken.__file__).read_bytes()).digest()
+    def remembered(key,compute,log_as,keep=lambda value:True):
+        path=root/(key+'.pickle')
+        if path.exists():
+            try:
+                with open(path,'rb') as stream:value=pickle.load(stream)
+                if log_as:N.log(f'{log_as}: unchanged, heard before; read back, no listening')
+                return value
+            except Exception:path.unlink(missing_ok=True)
+        value=compute()
+        if not keep(value):return value      # a failed model call is asked again, never remembered
+        temp=path.with_suffix('.tmp')
+        with open(temp,'wb') as stream:pickle.dump(value,stream,pickle.HIGHEST_PROTOCOL)
+        os.replace(temp,path)
+        return value
+    listen_long=N.listen_long
+    def cached_listen_long(x,sr,fn=None,max_s=25.0):
+        key=hashlib.sha256(version+b'listen'+str(sr).encode()+np.ascontiguousarray(x).tobytes()).hexdigest()
+        return remembered(key,lambda:listen_long(x,sr,fn,max_s),'gate listener')
+    N.listen_long=cached_listen_long
+    listen=N.listen
+    def cached_listen(x,sr,model=None):
+        key=hashlib.sha256(version+b'take'+str(sr).encode()+str(model).encode()+np.ascontiguousarray(x).tobytes()).hexdigest()
+        return remembered(key,lambda:listen(x,sr,model),None)
+    N.listen=cached_listen
+    spoken_form=spoken.spoken_form
+    def cached_spoken_form(heard,script,names=(),model=None):
+        key=hashlib.sha256(version+json.dumps([heard,script,list(names),model]).encode()).hexdigest()
+        row=remembered(key,lambda:spoken_form(heard,script,names,model),'spoken form',keep=lambda row:bool(row.get('ok')))
+        return row
+    spoken.spoken_form=cached_spoken_form
+
+
 def tempo_factor(rate, median):
     if 11.7<=rate<=17.4 and .22<=median<=.28: return 1.0
     lo=max(.92,11.9/rate,median/.278)
@@ -248,8 +316,14 @@ def finish(out, script):
     raise ValueError('Easton read has word errors after its corrections: '+json.dumps(after))
 
 
-def raw_checkpoint(out,script,groups,picks=None):
-    """Commit the read before the shared mastering FFT allocates its buffers."""
+def raw_checkpoint(out,script,groups,picks=None,tone_fn=None,max_tempo=1.0):
+    """Commit the read before the shared mastering FFT allocates its buffers.
+
+    It stands in for voice.finish inside the read, so it takes exactly what voice.finish takes
+    (test_longform_voice.py compares the two signatures). The mastering that follows is the shared finish
+    in its own process, which gets the read's tempo ceiling back from read-stage.json; tone_fn belongs to
+    that later call, which passes room_tone itself.
+    """
     import narrate as N
     N.free_gate_listener();N.free_take_listener()
     out=Path(out)
@@ -257,7 +331,7 @@ def raw_checkpoint(out,script,groups,picks=None):
         shutil.copy2(out/name,out/(Path(name).stem+'_raw'+Path(name).suffix))
     for name in ('narration_performance.wav','words_performance.json','render_performance.json','longform_voice.json','check.json'):
         (out/name).unlink(missing_ok=True)
-    (out/'read-stage.json').write_text(json.dumps(dict(script=script,groups=groups,picks=picks or [])))
+    (out/'read-stage.json').write_text(json.dumps(dict(script=script,groups=groups,picks=picks or [],max_tempo=max_tempo)))
 
 
 def room_tone(n,sr,db):
@@ -322,7 +396,7 @@ def main():
             (out/name).unlink(missing_ok=True)
         import narrate as N
         N.malloc_returns_memory()
-        shared.finish(out,stage['script'],stage['groups'],stage['picks'],tone_fn=room_tone)
+        shared.finish(out,stage['script'],stage['groups'],stage['picks'],tone_fn=room_tone,max_tempo=stage.get('max_tempo',read_max_tempo()))
         (out/'shared-finish.sha256').write_text(master_version())
         return
     if a.cmd=='_render':
@@ -339,18 +413,8 @@ def main():
         os.environ['NARRATE_KEEP_TAKES']='1'
         cache_take_analysis(a.out)
         os.environ.pop('NARRATE_ALLOW_FALLBACK',None)
-        original_generate=shared.Read.generate_phonon
-        def bounded_generate(self,job,dest,log,seed0=7):
-            # A resume keeps its spent budget: six initial + four six-take rounds.
-            # The word gate remains unchanged, including after exhaustion.
-            import copy
-            bounded=copy.deepcopy(job)
-            for row in bounded['lines']:
-                requested=int(row.get('takes') or bounded.get('takes') or 6)
-                row['takes']=min(requested,30)
-                if requested>30:log(row['id']+': thirty-take retry budget spent; retaining strict gate')
-            return original_generate(self,bounded,dest,log,seed0)
-        shared.Read.generate_phonon=bounded_generate
+        shared.Read.generate_phonon=bounded_generation(shared.Read.generate_phonon)
+        cache_gate_listening(a.out)
         shared.finish=raw_checkpoint
         shared.render(a)
         rendered=json.loads((Path(a.out)/'render.json').read_text())
