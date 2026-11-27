@@ -1,30 +1,5 @@
-"""The writer: finds stories worth telling and writes them as narration, every fact with its source.
-
-Workflow 3 (topic and founder stories, 45-75 s) and workflow 4 (long-form voiceover, 10-20 min) both
-call it; `FORMS` holds what differs. Two model calls, each with the web (search and fetch):
-
-    find_ideas(form, cards, avoid, line)   -> ranked ideas: a subject, why it hooks, the named things
-                                              a camera could show, the sources
-    write(idea, card, form, voices)        -> the script: segments to be spoken (with the actor's
-                                              direction), what is shown, every fact with a quote and
-                                              its URL, and the style's own data
-    verify(script)                         -> each quote fetched from its URL here, not trusted from
-                                              the model; every number on screen must be in a
-                                              verified quote. A comparison of measured strings.
-    settle(script)                         -> verify, then a failed fact is sourced again (one call),
-                                              else its lines are rewritten without it or dropped;
-                                              only an unverifiable hook, turn, payoff or close stops the film
-    spine_bank(idea)                       -> VERIFY FIRST (15 Nov): the idea's spine (hook, turn, payoff,
-                                              close) researched as claims and verified before a word is
-                                              written: its own sources, then up to three search rounds a
-                                              claim with new queries, primary sources first
-    write_from_bank(idea, card, form, bank) -> the script written from the verified bank alone (no web)
-    hold_spine(script, bank)               -> every line judged on its quotes; each spine beat must carry
-                                              the idea's point, rewritten on the bank or searched again
-    final_support(script)                  -> the last text gate after the ear
-
-The model decides what a story is and how it is told; nothing here reads its words by rule.
-The key comes from this process's environment (run under .valmera/claude_trial_env.sh).
+"""Research a verified fact bank, plan the causal arc and write narration from that sheet.
+Support, redundancy, spine and timing observations inform the same whole-script revision.
 """
 import html
 import html.parser
@@ -1252,6 +1227,8 @@ def check_fact(f):
     if not r["found"] and f.get("url") in FETCHED:
         r["found"] = quote_found(q, norm(FETCHED[f["url"]]))
         r["read"] = "web_fetch"
+    if not r["found"] and r.get("error") and f.get("prior_source"):
+        r.update(found=True, read="previous verification", source=f["prior_source"], reread_error=r["error"])
     if r["found"]:
         r.pop("error", None)
         r.pop("missing", None)
@@ -1352,14 +1329,7 @@ Cite only pages a plain script can read: Wikipedia and Wikimedia, archive.org, g
 
 Answer with one JSON object only: {"facts": [{"id": the fact id, "sources": [up to three {"url": the page, "quote": the sentence copied word for word}]}]}"""
 
-REWRITE_SYSTEM = """You are the writer of a narrated documentary film. Every fact was checked against its page; the film may say only what the checked quotes state. You get the whole script, the facts that were checked (each with its quote), the facts that could not be checked (no readable page states them, so the film must not say them), and the segments that must change, each with the reason. Rewrite each of those segments so every claim in it is stated by the quote of a checked fact it cites (cite them in "facts"), keeping its place and job in the story and the narrator's voice and length, or drop it (say null) when nothing true is left to say there. Never change any other segment, never use an unchecked fact, and never say what another segment of the film already says (neither its point nor its words).
-
-"say" is spoken: numbers and years written as words the way they are said, no digits, no abbreviations, no symbols. "show": at most two display items in the same form as the script's ({"text": as printed, "role": one of the roles given}), digits only when the same figure stands in a checked fact's quote; or []. "quotes": every span of "say" that presents someone's own words (in quotation marks, or as what they said, recalled, wrote or asked), each copied word for word from the quote of a checked fact the segment cites and from that person; or []. Never put words in anyone's mouth that a checked quote does not hold.
-
-Answer with one JSON object only: {"segments": [{"i": the segment index, "say": the new words or null to drop it, "show": [...], "facts": [checked fact ids], "quotes": [{"words": the span exactly as in say, "who": whose words, "fact": the fact id whose quote holds them}]}]}"""
-
 SUPPORT_MODEL = "gpt-6.1-sol"           # pinned to OpenAI: the judgement of meaning is a model's, never a rule's
-SUPPORT_ROUNDS = 2                      # an unsupported line is rewritten at most twice, then dropped (or the core fails)
 
 SUPPORT_SYSTEM = """Measure each line in the context of the complete causal chain and verified bank. A link is supported when the bank holds the cause, including in another line's source. Several quotes can establish the want, objection, decision and consequence together. A conjunction needs no separate quote. Distinguish a documented cause from mere chronology. Report missing evidence and its fact ids when the citation belongs elsewhere.
 
@@ -1521,7 +1491,7 @@ FETCH_THREADS = 6
 
 SPINE_CLAIMS_SYSTEM = """Propose checkable claims to research for this story. Give the starting paradox,
 who wanted what and why, who objected on what grounds, what decided the outcome, what changed as a result,
-the turn and one payoff figure that answers the hook. For gaps give the researcher a concrete question to answer.
+the turn and one payoff figure that answers the hook. State causal claims as simple positive propositions to look for. Use only the motive, objection, decision or direct consequence the story needs.
 Return JSON {"spine":[{"beat":"hook|want|objection|decision|turn|payoff|outcome|close","claim":"..."}]}.
 A close returns to the hook's word and explains what it came to mean."""
 
@@ -1570,7 +1540,7 @@ def spine_claims(idea, ask=None):
     if not {r["beat"] for r in rows} >= set(SPINE_BEATS + CAUSAL_BEATS):
         ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=6000, what="spine claims",
                                                          model=SPINE_MODEL))
-        view = {k: idea.get(k) for k in ("title", "hook", "story", "turn", "payoff") if idea.get(k)}
+        view = {k: idea.get(k) for k in ("title", "hook", "story", "turn", "payoff", "spine") if idea.get(k)}
         try:
             text, use = ask(SPINE_CLAIMS_SYSTEM, f"# The idea\n{json.dumps(view, ensure_ascii=False)}")
             got = json_block(text)
@@ -1802,16 +1772,22 @@ def _research_round(bank, story, claims, rnd, asks, spend, log, why=None):
     return added
 
 
-def spine_view(bank):
-    """[{beat, claim, by}]: the spine as the writer and the later point checks read it (stated claims only, as stated)."""
-    return [dict(beat=c["beat"], claim=c.get("as_stated") or c["claim"], by=list(c.get("by") or []))
-            for c in bank.get("claims") or [] if c.get("stated")]
+def spine_view(bank, sheet=None):
+    """The researched spine, narrowed to the planned resolution after the planner picks it."""
+    claims = [dict(beat=c["beat"], claim=c.get("as_stated") or c["claim"], by=list(c.get("by") or []))
+              for c in bank.get("claims", []) if c.get("stated")]
+    if sheet:
+        ending = sheet["sheet"][sheet["beats"]["payoff"]]
+        claims = [c for c in claims if c["beat"] != "payoff"]
+        claims.append(dict(beat="payoff", claim=ending["action"], by=ending["facts"]))
+    return claims
 
 
 def bank_facts(bank):
     """The bank as the script's facts: every verified quote with its page, whose statement it is and when."""
     return [dict(id=f["id"], claim=f.get("claim") or f["quote"], quote=f["quote"], url=f["url"], source=f.get("source"),
-                 speaker=f.get("speaker"), when=f.get("when"), also=[]) for f in bank.get("facts") or []]
+                 speaker=f.get("speaker"), when=f.get("when"), also=f.get("also", []),
+                 **({"prior_source": f["prior_source"]} if f.get("prior_source") else {})) for f in bank.get("facts") or []]
 
 
 def spine_bank(idea, log=print, ask_claims=None, ask_research=None, ask_extract=None, ask_judge=None, rounds=SPINE_ROUNDS, verified=()):
@@ -1851,7 +1827,6 @@ def spine_bank(idea, log=print, ask_claims=None, ask_research=None, ask_extract=
         used = [f["url"] for f in bank["facts"] if f["url"] not in bank["story_copied"]]
         bank["extracted"] = [u for u in bank["extracted"] if u not in used]
         _extract(bank, used, [c for c in claims if c["stated"]], STORY_SENTENCES, ask_extract, spend, log, "story copy")
-    missing = [c for c in claims if not c["stated"]]
     # A missing subsidiary detail changes the telling. Only abandon an unsourced central story.
     bank["ok"] = any(c["stated"] for c in claims if c["beat"] in ("hook", "turn", "payoff", "outcome"))
     bank["why"] = "" if bank["ok"] else f"No source for the central claim after {rounds} searches"
@@ -1925,7 +1900,7 @@ def write_from_bank(idea, card, form, bank, voices=None, notes=None, effort="hig
                f"# Voices\n{json.dumps({k: VOICES[k] for k in voices if k in VOICES})}\n\n"
                f"# The spine (each beat's claim, as the verified quotes state it, and the bank facts that state it; the close "
                f"reframes the hook on the hook's facts, and its own claim, when given, may support it)\n"
-               f"{json.dumps(spine_view(bank), ensure_ascii=False, indent=1)}\n\n"
+               f"{json.dumps(spine_view(bank, sheet), ensure_ascii=False, indent=1)}\n\n"
                f"# The bank: the only facts this film may state\n"
                f"{json.dumps([dict(id=f['id'], quote=f['quote'], url=f['url'], source=f.get('source'), speaker=f.get('speaker'), when=f.get('when')) for f in bank['facts']], ensure_ascii=False, indent=0)}\n\n" +
                (f"# Notes from the last attempt\n{notes}\n\n" if notes else ""))
@@ -1936,7 +1911,7 @@ def write_from_bank(idea, card, form, bank, voices=None, notes=None, effort="hig
         s["facts"] = [f for f in s.get("facts") or [] if f in ids] if isinstance(s.get("facts"), list) else []
         s["quotes"] = [q for q in s.get("quotes") or [] if isinstance(q, dict) and q.get("fact") in ids] if isinstance(s.get("quotes"), list) else []
     sc["facts"] = bank_facts(bank)
-    sc["spine"] = spine_view(bank)
+    sc["spine"] = spine_view(bank, sheet)
     sc["idea_point"] = {k: idea.get(k) for k in ("hook", "turn", "payoff") if idea.get(k)}
     if sc.get("segments"):
         sc["hook_line"], sc["close_line"] = sc["segments"][0].get("say"), sc["segments"][-1].get("say")
