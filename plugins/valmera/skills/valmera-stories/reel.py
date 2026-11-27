@@ -45,6 +45,7 @@ import subprocess
 
 import film as F
 import evidence_cut
+import fit
 
 FPS, W, H, LEAD_F = F.FPS, F.W, F.H, F.LEAD_F
 Clock, r4, smooth = F.Clock, F.r4, F.smooth
@@ -676,7 +677,6 @@ def slot_edges(start, end, capacities):
 
 def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer_new=False, proof_fill=()):
     """Assign distinct fitting pictures to their spoken phrases before choosing their durations."""
-    import fit
     slots = phrase_slots(script, clock, f_end)
     catalogue = {}
     for line, clips in sp.footage.items():
