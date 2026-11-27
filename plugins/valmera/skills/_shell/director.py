@@ -294,6 +294,9 @@ def composed_words(words, pictures, items, owners, voices, fps):
     return result
 
 
+MEMORY_SURFACES = ("mono", "gate", "projector", "vhs", "crt", "xerox")
+
+
 def shot_sections(direction, pictures, frame_of, seg_span, segments, dur_f):
     """Choose a section once per shot. Unknown or contemporary footage retains its original colour."""
     import datetime
@@ -302,12 +305,22 @@ def shot_sections(direction, pictures, frame_of, seg_span, segments, dur_f):
     edges = {0, dur_f}
     for picture in pictures:
         edges.update(f for f in picture["f"] if 0 < f < dur_f)
+    finishes = {}
+    for ask in direction.get("asks") or []:
+        surface = ask.get("dev")
+        if surface == "finish":
+            surface = (ask.get("args") or {}).get("surface")
+        if surface in MEMORY_SURFACES and isinstance(ask.get("at"), dict):
+            frame = frame_of(ask["at"]["w"])
+            if frame is not None:
+                finishes[frame] = surface
     result = []
     cuts = sorted(edges)
     for a, b in zip(cuts, cuts[1:]):
         section = next((s for (lo, hi), s in requested if lo is not None and hi is not None and lo <= a < hi), {})
         surface = section.get("surface", "colour")
-        if surface in ("mono", "gate", "projector", "vhs", "crt", "xerox"):
+        surface = next((v for f, v in finishes.items() if a <= f < b), surface)
+        if surface in MEMORY_SURFACES:
             visible = [p for p in pictures if p["f"][0] <= a < p["f"][1]]
             def historical(p):
                 i = p.get("line", p.get("seg"))
@@ -396,7 +409,7 @@ def snap(addr, sentences, words):
 
 # The words a device sets on the frame are words he says (20 Nov rating: ladders printed '3 4 5 11' and type pages '0 1 2 3'
 # where the answer gave word numbers in a text field, and type_run, ladder and redact asked with no words landed nothing).
-TEXT_FIELDS = ("t", "text", "word", "name", "title", "kicker")
+TEXT_FIELDS = ("t", "text", "word", "name", "title", "kicker", "label")
 TEXT_LISTS = ("words", "lines", "struck")
 SETS_SAID = ("ladder", "type_run", "verb", "brackets", "highlight", "flip", "typewriter", "redact", "marquee", "behind",
              "lamp", "diecut", "staircase", "name", "chapter")
@@ -554,6 +567,18 @@ def repair(d, sentences, words, names=(), seed=0):
         if known and row["dev"] not in known:
             rep.append(f"ask {k}: device {row['dev']!r} is not in the palette; the palette maps it to its family")
         row["args"], why = said_text(row["dev"], row["args"], row["at"], row.get("until"), words)
+        print_map = sentences[at["seg"]].get("print") or {}
+        def printed(v):
+            if isinstance(v, str):
+                return next((value for key, value in print_map.items() if _norm(v) == _norm(key)), v)
+            if isinstance(v, list):
+                return [printed(item) for item in v]
+            if isinstance(v, dict):
+                return {k: printed(value) if k in TEXT_FIELDS else value for k, value in v.items()}
+            return v
+        for field in (*TEXT_FIELDS, *TEXT_LISTS):
+            if field in row["args"]:
+                row["args"][field] = printed(row["args"][field])
         rep += [f"ask {k} {row['dev']}: {w_}" for w_ in why]
         if row["dev"] == "counter" and any(row["args"].get(k) is None for k in ("from", "to")):
             row["args"].setdefault("t", at["word"])  # preserve the landing through the palette's word fallback
@@ -983,6 +1008,9 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
         f = max(int(f), 0)
         args = dict(a.get("args") or {})
         dev = str(a["dev"])
+        if any("frames" in sec for sec in d.get("sections") or []) and (
+                dev in MEMORY_SURFACES or dev == "finish" and args.get("surface") in MEMORY_SURFACES):
+            continue  # the shot section performs the requested archival look
         row = dict(args, dev=dev, id=f"dr{k}", beat=a.get("beat"))
         # A factual reading lands on its stated figure: a counter without a sourced progression shows only that
         # figure, never fictional values on the way, and first shows it on its spoken word (run 0, from its lands
@@ -1042,12 +1070,12 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
         out.append(row)
     for s_ in d.get("sections") or []:
         surf = str(s_.get("surface") or "colour").lower()
-        if surf in ("colour", "color", "none", "mono"):
+        if surf in ("colour", "color", "none") or surf == "mono" and "frames" not in s_:
             continue
         f0, f1 = section_frames(s_, frame_of, seg_span, dur_f)
         if f0 is None or f1 is None or f1 - f0 < 8:
             continue
-        out.append(dict(dev="finish", id=f"ds{s_.get('start', min(s_.get('segs') or [0]))}", surface=surf, f=[int(f0), int(min(f1, dur_f))]))
+        out.append(dict(dev="finish", id=f"ds{int(f0)}", surface=surf, f=[int(f0), int(min(f1, dur_f))]))
     marks = []
     for m in d.get("arc") or []:
         f = frame_of(m["w"]) if isinstance(m.get("w"), int) else None

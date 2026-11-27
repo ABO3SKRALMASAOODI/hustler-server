@@ -378,9 +378,7 @@ def caption_track(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), z=0, ink_f
     """Captions at one seat for the whole film (TASTE P1), centred, a few words at a time. ink_for(a, b, box) may
     return (voice, ink) for a chunk from what is measured under it (TASTE P4: flip the ink before anything else)."""
     ph = clock.phrases()
-    base_voice = v
     for i, (t0, t1, text, ws) in enumerate(ph):
-        v = phrase_voices.get(id(ws[0]), base_voice)
         a, b = Clock.f(t0) - 1, Clock.f(t1)
         if i + 1 < len(ph):
             b = min(b, Clock.f(ph[i + 1][0]) - 1)       # one chunk at a time, never two on the seat
@@ -822,6 +820,13 @@ def written_addresses(clock, script):
     replacements = {}
     for i, segment in enumerate(script.get("segments", [])):
         words = clock.seg_words(i)
+        for spoken, printed in (segment.get("print") or {}).items():
+            keys = [norm_word(token) for token in spoken.split()]
+            for start in range(len(words) - len(keys) + 1):
+                span = words[start:start + len(keys)]
+                if keys and [norm_word(row["w"]) for row in span] == keys:
+                    tail = span[-1]["w"][len(span[-1]["w"].rstrip(".,;:!?…")):]
+                    replacements[id(span[0])] = (len(span), dict(span[0], w=printed + tail, t1=span[-1]["t1"]))
         for field in segment.get("show", []):
             if not isinstance(field, dict) or not isinstance(field.get("word_i"), int):
                 continue
@@ -830,7 +835,7 @@ def written_addresses(clock, script):
             if len(labels) < 2 or not all(label.isalnum() for label in labels):
                 continue
             start = field["word_i"]
-            if not 0 <= start < len(words):
+            if not 0 <= start < len(words) or id(words[start]) in replacements:
                 continue
             spoken = ""
             for end in range(start,len(words)):
@@ -1066,7 +1071,12 @@ def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", ac
     _, _, bake = _engines()
     out, last, placed = [], -10 ** 6, []
     for i, s in enumerate(script["segments"]):
-        for x in s.get("show") or []:
+        items = s.get("show") or []
+        if "display" in s:
+            printed = s["display"]
+            items = [next((row for row in items if isinstance(row, dict) and row.get("text") == printed),
+                          dict(text=printed, role="figure" if any(ch.isdigit() for ch in printed) else "key"))] if printed else []
+        for x in items:
             item = x if isinstance(x, dict) else dict(text=str(x))
             text, word, role = str(item.get("text") or ""), item.get("word"), item.get("role")
             if not text or role in roles_skip:
@@ -1080,36 +1090,42 @@ def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", ac
                 continue
             ws = clock.seg_words(i)
             wi = item.get("word_i")
-            if isinstance(wi, int) and not isinstance(wi, bool) and 0 <= wi < len(ws):
-                hit = (ws[wi]["t0"], 1)
-            elif anchored_only:
-                hit = None
+            printed = s.get("print") or {}
+            text = printed.get(text, text)
+            spoken = next((key for key, value in printed.items() if value == text), None)
+            span = said_span(clock, i, spoken or text)
+            if spoken and span:
+                first = span[0]
+            elif type(wi) is int and 0 <= wi < len(ws):
+                first = ws[wi]
+            elif span and (spoken or not anchored_only or s.get("display") == text):
+                first = span[0]
             else:
-                hit = said_at(clock, i, text)
-                if hit is None and word:
-                    hit = (clock.word_t(i, word), 1)
-            if hit is None:
-                drop("not found in the words")
+                drop("no spoken anchor")
                 continue
-            a = max(Clock.f(hit[0]) - 1, 1)
+            a = max(Clock.f(first["t0"]), 0)
             fig = role == "figure"
-            if (a - last < gap_s * FPS and not fig) or a >= f_end - 12:
-                drop("too close to the last" if a < f_end - 12 else "at the end")
+            if (a - last < gap_s * FPS and not fig) or a >= f_end:
+                drop("too close to the last" if a < f_end else "at the end")
                 continue
-            b = int(min(a + (max(hold_s, figure_hold_s) if fig else hold_s) * FPS, f_end, Clock.f(clock.segs[i][1]) + (int(figure_hold_s * FPS) if fig else 10)))
-            if fig and isinstance(wi, int) and 0 <= wi < len(ws):
-                # The figure can take longer to say than the minimum reading hold.
-                forms = spoken_forms(text)
-                last_words = {form[-1] for form in forms}
-                window = ws[wi:wi + max(map(len, forms), default=0) + 3]
-                last_word = next((w for w in window if norm_word(w["w"]) in last_words), None)
-                if last_word:
-                    b = min(f_end, max(b, Clock.f(last_word["t1"]) + 1))
+            b = min(f_end, Clock.f(first["t0"] + hold_s))
+            if fig:
+                # The annotated first word can be an article, e.g. "a hundred and eighty six million".
+                # End on the spoken unit of this occurrence, even when the display includes punctuation.
+                if span and span[-1]["t1"] > first["t0"] and first["t0"] <= span[0]["t0"]:
+                    end_word = span[-1]
+                else:
+                    forms = spoken_forms(spoken or text)
+                    tails = {form[-1] for form in forms}
+                    start = ws.index(first)
+                    end_word = next((w for w in ws[start:start + max((len(f) for f in forms), default=1) + 4]
+                                     if norm_word(w["w"]) in tails), first)
+                b = min(f_end, max(a+1, Clock.f(end_word["t1"])))
             if out and out[-1][1] > a:          # never two at once: the one before yields
                 out[-1] = (out[-1][0], a, out[-1][2])
                 for layer in placed[-1]:
                     layer["f"][1] = a
-            if b - a < 14:
+            if b <= a or (not fig and b - a < 14):
                 drop("no room")
                 continue
             vk = f"{v}{a}"
@@ -1171,6 +1187,7 @@ def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", ac
             P.events.append(a)
             out.append((a, b, text))
             last = a
+            break
     return out
 
 
@@ -1301,7 +1318,7 @@ def design_sound(l1, sup, d, turn_f=None, spoken=None, np10=None):
         # each word's own moment on the narration's clock (the film's clock repairs spans the aligner shared out)
         words = [dict(t0=float(a), t1=float(b)) for a, b in spoken] if spoken else \
             [dict(t0=float(w["start"]), t1=float(max(w["end"], w["start"] + 0.02))) for w in wd["words"]]
-        sounds, rep = SD.design(dict(l1, spine=spine, sound=[]), index=dict(words=words, video=dict(duration=dur)), src=sup["narration"],
+        sounds, rep = SD.design(dict(l1, spine=spine, sound=[], picture_bound_sound=True), index=dict(words=words, video=dict(duration=dur)), src=sup["narration"],
                                 turn_s=(turn_f / FPS if turn_f is not None else None), bed=bool(d.get("bed")),
                                 supply=dict(np10=float(np10) if np10 is not None else None, bed=bool(d.get("bed")),
                                             delivery_tail_s=float(d.get("delivery_tail_s", 0.0)),

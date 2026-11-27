@@ -119,6 +119,10 @@ def drive(run, sid, browser="chrome"):
             """The sentence typed the way a person types it, the real Studio photographed at every word (a film shows the
             product's own screen, never a drawing of it): ui/type_<send>_<k>.png, at the view's device scale, numbered by
             the sentences sent (a count of the files over 100 named a follow-up's photographs type_00 too, over the first's)."""
+            if not getattr(self, "sends", 0):
+                if self.tray_pending():
+                    self.press_send_empty()
+                self.wait_settled("analysis before typing", 0, 0, D.TIME_LIMITS["first"], need_reply=False)
             p = self.page
             if not os.path.exists(os.path.join(self.out, "shots", "site.png")):
                 self.site_shot()
@@ -500,6 +504,22 @@ def edl_facts(j):
     return out
 
 
+def processing_seconds(timeline):
+    """Union of observed running intervals for the recorded requests, excluding queued time."""
+    if not os.path.isfile(timeline):
+        return None
+    total = 0.
+    previous = None
+    with open(timeline) as stream:
+        for line in stream:
+            row = json.loads(line)
+            if previous and previous["phase"] == row["phase"] and previous["phase"].startswith("request "):
+                if any(state == "running" for _, state, *_ in previous["jobs"]):
+                    total += max(0., row["t"] - previous["t"])
+            previous = row
+    return round(total, 2) if total else None
+
+
 def collect_one(run, sid):
     sys.path.insert(0, os.path.join(G, "runner"))
     import stack as S
@@ -579,7 +599,8 @@ def collect_one(run, sid):
                models=j.get("settings"), recorded_at=j.get("started_at"), state=j.get("state"), failures=j.get("failures"),
                source=dict(file=sess["studio"]["source"], t0=sess["studio"]["t0"], t1=sess["studio"]["t1"]),
                upload=dict(file=os.path.join(out, "upload.mp4"), sha256=sha256(os.path.join(tmp, "upload.mp4")), **probe(os.path.join(tmp, "upload.mp4"))),
-               first_result_s=j.get("first_result_s"), seconds=j.get("seconds"), cost_usd=j.get("cost_usd"), asks=asks, exports=kept, previews=previews,
+               first_result_s=j.get("first_result_s"), processing_s=processing_seconds(os.path.join(sdir, "timeline.jsonl")),
+               seconds=j.get("seconds"), cost_usd=j.get("cost_usd"), asks=asks, exports=kept, previews=previews,
                turns=j.get("turns"),
                edl_versions={str(k): v for k, v in sorted(edls.items())}, journey=os.path.join(out, "journey.json"),
                shorts=dict(plan=sh.get("plan"), children=sh.get("children"), edited=sh.get("edited"), finals=sh.get("finals"),

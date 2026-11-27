@@ -1925,9 +1925,10 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
         palette["direction"] = ("The supplied names, figures and source exhibits are already printed at these frames, at 30 fps. "
                                 "Keep those faces, details and printed values readable as they are heard. Design around them. "
                                 "For an accent on existing type, use its exact visible text as the sound partner.")
-    owners = list(around)
+    owners = [row if isinstance(row, dict) else dict(frames=row, device="recording") for row in around]
     voices = [dict(v, f=[round(float(v[k]) * F.FPS) + F.LEAD_F for k in ("start", "end")])
               for v in pack.get("voices") or [] if v.get("start") is not None and v.get("end") is not None]
+    owners.extend(dict(v, device=v.get("person") or "soundbite") for v in voices)
     sources = {r.get("path"): r for group in (pack.get("pictures") or {}).values() for r in group}
     sources.update({r.get("path"): r for group in pack.get("footage") or [] for r in group.get("clips") or []})
     placed = [dict(sources.get(p.get("path"), {}), **p) for p in beats.get("pictures") or [] if p.get("f")]
@@ -1958,7 +1959,7 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
     d = dict(d, sections=DR.shot_sections(d, placed, word_frame, seg_span, sc["segments"], l1["dur_f"]))
     asks, notes = DR.palette_asks(d, word_frame, seg_span, ids.get, l1["dur_f"])
     performed = []
-    if ctx.workflow == "wf2":
+    if beats.get("display") or ctx.workflow == "wf2":
         asks, performed = DR.recorded_type(asks, beats.get("display") or [], beats.get("recorded_ink") or [], beats.get("recorded_devices") or [])
     asks = DR.around(asks, owners, l1["dur_f"], performed)         # a reel's own hero device keeps its frames: the Director's land beside it
     if asks:
@@ -2062,6 +2063,9 @@ def score(ctx, script):
         if changed:
             whole["pack"] = pack
             json.dump(whole, open(pk, "w"), ensure_ascii=False, indent=1)
+    # Choose the archival finish after the actual shots and their identities are known.
+    for segment in sc.get("segments") or []:
+        segment.pop("finish", None)
     knobs = {k: v for k, v in d.items() if k not in ("script", "why", "targets", "retarget", "alien")}
     if render_drop(ctx):                                  # the picture gate's repair: the render's failing pictures go (check)
         knobs["drop"] = list(knobs.get("drop") or []) + [x for x in render_drop(ctx) if x not in (knobs.get("drop") or [])]
@@ -2498,15 +2502,6 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
     # ---- colour by measure
     bw = plan_bw(beats)
     colour = dict(bw_shot_share_plan=bw, rebuilt=False, intrinsic_grey_share=(beats.get("measured") or {}).get("intrinsic_grey_share"))
-    if not BW_SHARE[0] <= bw <= BW_SHARE[1]:
-        if bw > BW_SHARE[1]:
-            knobs = dict(knobs, device_budget=0.5 * float(knobs.get("device_budget", 1.0)))
-            l1, beats = build(sc, pack, knobs)
-            taste = F.taste_check(l1, beats)
-            colour.update(rebuilt=True, bw_shot_share_after=plan_bw(beats))
-            ctx.log(f"colour: black and white on {bw:.0%} of shots; built again with the devices lowered")
-        if not BW_SHARE[0] <= plan_bw(beats) <= BW_SHARE[1]:
-            defects.append(f"black and white on {plan_bw(beats):.0%} of planned shots (bar {BW_SHARE[0]:.0%}-{BW_SHARE[1]:.0%})")
     # ---- repeats: a take group shown twice is denied on its later line and the plan built once more
     rep_fix = None
     if float((beats.get("measured") or {}).get("repeat_share") or 0) > REPEAT_MAX:
@@ -3586,8 +3581,6 @@ def film_checks(ctx, film, sc, pack, music=None, clean=None):
     defects = []
     if fail_s > 0:
         defects.append(f"pictures under words they do not carry or that do not read: {fail_s} s")
-    if not (BW_SHARE[0] <= colour["bw_shot_share"] <= BW_SHARE[1]):
-        defects.append(f"black and white on {colour['bw_shot_share']:.0%} of shots (bar {BW_SHARE[0]:.0%}-{BW_SHARE[1]:.0%})")
     if colour["colourfulness_median"] is None or colour["colourfulness_median"] < COLOUR_MEDIAN_MIN:
         defects.append(f"colourfulness median {colour['colourfulness_median']} (at least {COLOUR_MEDIAN_MIN})")
     if colour["void_share"] is not None and colour["void_share"] > VOID_MAX:

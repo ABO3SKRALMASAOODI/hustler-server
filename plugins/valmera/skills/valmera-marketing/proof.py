@@ -1774,7 +1774,7 @@ def showcase_hook(ex, body, pics, span=None, visible=()):
     checklist it sells). Otherwise the export's longest picture or title, entered a breath before it lands, SPLIT_S
     long; without one, the stretch of the same length at two fifths of the body. Snapped to the quietest point near
     each end (between words)."""
-    span = float(span or D.SPLIT_S)
+    span = float(span or min(body, 2.8))  # legacy recording with no scripted split
     whole = proof_span(pics, body, visible)
     if whole and whole[1] - PROOF_LEAD_S - span >= 0.0:
         t1 = whole[1] - PROOF_LEAD_S
@@ -1888,12 +1888,12 @@ def player_rect(png, upload):
 
 def later_label(rec):
     """The recording's own time from the upload to its first result, as the push's label ("3 MIN"), or None."""
-    s = rec.get("first_result_s")
+    s = rec.get("processing_s")
     try:
         s = float(s)
     except (TypeError, ValueError):
         return None
-    return f"{max(int(round(s / 60.0)), 1)} MIN" if s >= 45 else f"{int(round(s))} SEC"
+    return f"{int(round(s))} SEC" if s > 0 else None
 
 
 def cut_times(path, lo=0.0, hi=None, jump=18.0, fps=8):
@@ -1975,8 +1975,7 @@ def scale_supply(ctx, script, sup_dir, pk, rec, plan):
                 work=os.path.join(sup_dir, "finish"), fit=[],
                 # the label over the push is the recording's own time from Send to the finished films (the board's turn and the editors)
                 product=dict(paths=[plan["hero"]["file"]], window=win, marks=mk, ui=ui, variant="scale", tiles=tiles,
-                             later=later_label(dict(first_result_s=float((rec.get("asks") or [{}])[0].get("seconds") or 0)
-                                                    + float((rec.get("shorts") or {}).get("seconds") or 0))),
+                             later=later_label(rec),
                              hero=tiles[0], sub=f"from a {mins}-min podcast", upload_at=0.0, cta_s=D.SITE_S, cta_said=None))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
                 format="showcase", variant="scale", shorts=len(tiles), hero=dict(project_id=plan["hero"].get("project_id"),
@@ -2028,22 +2027,41 @@ def showcase_supply(ctx, script, sup_dir, pk):
             a, b = thought
             gaps = pauses(ex["file"], a+1.5, min(a+5., b-2.5), min_s=.15) if b-a >= 5. else []
             if gaps:
-                gap = min(gaps, key=lambda g: abs(sum(g)/2 - (a+D.SPLIT_S)))
+                gap = min(gaps, key=lambda g: abs(sum(g)/2 - (a+b)/2))
                 cut_at = round(sum(gap)/2*F.FPS)/F.FPS
                 hook, win = [a, cut_at], [cut_at, b]
-    grade = D.tone_region(edl, *hook)
-    win, hook = list(map(float, win)), list(map(float, hook))
+    story = script.get("script") or {}
+    spans = (story.get("proof") or {}).get("spans") or {}
+    def source_span(name, fallback=None):
+        value = spans.get(name) or fallback
+        if isinstance(value, dict):
+            value = [value.get("t0", value.get("start")), value.get("t1", value.get("end"))]
+        if value and len(value) == 2 and all(isinstance(t, (int, float)) for t in value) and value[1] > value[0]:
+            return list(map(float, value))
+        return fallback
+    win, hook = source_span("stretch", win), source_span("split", hook)
+    before, after = source_span("before"), source_span("after")
     if caption and not hook[0] <= caption["seen_s"] < hook[1]:
         caption = None
     ui = showcase_ui(rec)
     typed = typed_line(script["receipts"])
-    over = 0.0 if grade and not caption else site_handover(ex, win, D.SITE_OVER_S)
-    mk = D.showcase_marks(hook, win, len(typed.split()), lead_f=F.LEAD_F, over_s=over)
+    typed_segment = next((seg for seg in story.get("segments") or [] if seg.get("role") == "typed"), {})
+    read = W3.narrate_script(ctx, dict(story, segments=[dict(typed_segment, say=typed_segment.get("say") or typed)]),
+                             os.path.join(sup_dir, "studio_voice"))
+    spoken = jload(read["words"])["words"]
+    offsets = [round(w["start"] * F.FPS) for w in spoken] + [round(read["duration"] * F.FPS)]
+    if len(offsets) != len(typed.split()) + 1:
+        # The printed and spoken forms can have different word counts.
+        offsets = [offsets[min(len(spoken), k * len(spoken) // len(typed.split()))] for k in range(len(typed.split()) + 1)]
+    mk = D.showcase_marks(hook, win, len(typed.split()), lead_f=F.LEAD_F, typing_frames=offsets,
+                          before=before, after=after)
     voice = os.path.join(sup_dir, "voice.wav")
     lead = F.LEAD_F / F.FPS
     parts = []
 
     def piece(name, src, a, n_f):
+        if n_f <= 0:
+            return
         p = os.path.join(sup_dir, f"voice_{name}.wav")
         n = n_f / F.FPS
         if src:
@@ -2054,19 +2072,26 @@ def showcase_supply(ctx, script, sup_dir, pk):
             subprocess.run([PX.FF, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-t", f"{n:.3f}", p], check=True, timeout=60)
         parts.append(p)
 
-    # the voice starts on frame LEAD_F: the split's picture at frame f shows hook[0] + f / FPS, so its sound starts there too
     piece("split", ex["file"], hook[0] + lead, mk["split"][1] - mk["lead_f"])
-    piece("studio", None, 0.0, mk["export"][0] - mk["split"][1])
-    piece("export", ex["file"], win[0], mk["export_voice"][1] - mk["export_voice"][0])     # under the website's arrival too
-    piece("site", None, 0.0, mk["dur_f"] - mk["export_voice"][1])
+    if before:
+        piece("before", rec["upload"]["file"], before[0], mk["before"][1] - mk["before"][0])
+    piece("studio_in", None, 0., mk["typing"][0] - mk["studio"][0])
+    piece("typed", read["wav"], 0., offsets[-1])
+    piece("send", None, 0., mk["studio"][1] - mk["typing"][0] - offsets[-1])
+    if after:
+        piece("after", ex["file"], after[0], mk["after"][1] - mk["after"][0])
+    piece("export", ex["file"], win[0], mk["stretch"][1] - mk["stretch"][0])
+    piece("site", None, 0., mk["site"][1] - mk["site"][0])
     lst = os.path.join(sup_dir, "voice.txt")
     open(lst, "w").write("".join(f"file '{p}'\n" for p in parts))
     subprocess.run([PX.FF, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-ac", "1", "-ar", "48000", voice], check=True, timeout=120)
     words = os.path.join(sup_dir, "words.json")
-    jsave(words, dict(voice="the recording", duration=round((mk["dur_f"] - mk["lead_f"]) / F.FPS, 3), words=[]))
+    shift = (mk["typing"][0] - mk["lead_f"]) / F.FPS
+    jsave(words, dict(voice=read["voice"], duration=(mk["dur_f"] - mk["lead_f"]) / F.FPS,
+                      words=[dict(w, start=w["start"] + shift, end=w["end"] + shift) for w in spoken]))
     pack = dict(sid=ctx.sid, words=words, narration=voice, ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[], footage=[],
                 voices=[], work=os.path.join(sup_dir, "finish"), fit=[],
-                product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, over_s=over, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
+                product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, before=before, after=after, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
                              upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None,
                              caption_proof=caption, proof_at=proof_push_at(proof_span(pics, body, visible), hook)))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
@@ -3697,7 +3722,7 @@ def showcase_score(ctx, script, pack):
     page = ui.get("site") or dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
     l1, beats = D.showcase(upload=upload, export=body, edl_b=edl, typed=typed_line(script["receipts"]), window=prod["window"], hook=prod["hook"],
                            ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"), proof_at=prod.get("proof_at"), caption_proof=prod.get("caption_proof"),
-                           over_s=float(prod["over_s"]) if prod.get("over_s") is not None else D.SITE_OVER_S)
+                           marks=prod.get("marks"), before=prod.get("before"), after=prod.get("after"))
     out = os.path.join(ctx.supply, "l1.json")
     jsave(out, l1)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")
@@ -3877,7 +3902,7 @@ def score(ctx, script):
         receipt_panel = (instruction_panel(l1, clock, sc, typed_line(script["receipts"])) if not devices.get("typed_line")
                          else dict(typed=typed_line(script["receipts"]), device=devices["typed_line"]))
         spans_dev = [d["frames"] for d in devices.get("laid") or []]
-        reserved = spans_dev + ([receipt_panel["frames"]] if receipt_panel.get("frames") else [])
+        reserved = list(spans) + spans_dev + ([receipt_panel["frames"]] if receipt_panel.get("frames") else [])
         title_shots = lay_recorded_titles(l1, clock, recorded_titles(script), reserved)
         devices["laid"].extend(title_shots)
         title_spans = [t["frames"] for t in title_shots]
