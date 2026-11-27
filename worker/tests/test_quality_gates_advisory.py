@@ -301,12 +301,14 @@ def test_no_preview_or_time_cap_on_a_request(monkeypatch):
 
 
 def test_flash_and_corrupt_glyph_findings_still_hold_export():
-    for code in ('flash_rate_exceeded', 'corrupt_glyph'):
+    # A corrupt glyph still holds the export. Flash safety informs and never
+    # holds a film the customer asked to strobe (held vetoes, #1655).
+    for code, status in (('flash_rate_exceeded', 'advisory'),
+                         ('corrupt_glyph', 'repair_required')):
         ctx = _handoff_ctx(
             critics_advisory=True,
             last_visual_critic={"verdict": "pass", "findings": []},
             verification_records={3: {
                 "status": "repair_required",
                 "unresolved_findings": [{"code": code, "message": "x"}]}})
-        assert agent_loop._quality_handoff(ctx)["quality_status"] \
-            == "repair_required"
+        assert agent_loop._quality_handoff(ctx)["quality_status"] == status

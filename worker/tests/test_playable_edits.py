@@ -77,9 +77,10 @@ def test_malformed_or_misspelled_batch_is_rejected(operation):
 
 
 def test_selected_clip_must_fit_its_own_media():
+    # A window past the source's end is moved back inside it, never refused (edit-core 1127).
     operation=dict(action='upsert',layer='inserts',id='i',value=dict(kind='video',asset_key='clip',at_output_s=0,duration_s=4,source_start_s=8))
-    with pytest.raises(ValueError,match='beyond its source'):
-        apply_batch(default_edl(20),[operation],20,{'clip':{'duration_s':10}})
+    item,=apply_batch(default_edl(20),[operation],20,{'clip':{'duration_s':10}})['inserts']
+    assert item['duration_s']==4 and item['source_start_s']+item['duration_s']<=10
 
 
 def test_caption_mutes_report_their_actual_intervals():
