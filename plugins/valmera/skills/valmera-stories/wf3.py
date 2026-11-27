@@ -319,9 +319,18 @@ def spine_record(sc, bank):
 
 def from_spine(ctx, pick, card, spend, n, verified=()):
     """Plan on the researched bank, measure one draft, revise it as a whole."""
-    bank, more = writer.spine_bank(pick, log=ctx.log, verified=verified)
-    spend.extend(dict(stage="spine", **u) for u in more if u)
-    chain_record(ctx, f"spine{n}", bank)
+    bank_path = os.path.join(ctx.run_dir, f"spine{n}.json")
+    source_key = hashlib.sha256(json.dumps([pick, verified], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    try:
+        with open(bank_path) as saved:
+            bank = json.load(saved)
+    except (FileNotFoundError, ValueError):
+        bank = {}
+    if bank.get("request") != source_key or not bank.get("ok"):
+        bank, more = writer.spine_bank(pick, log=ctx.log, verified=verified)
+        spend.extend(dict(stage="spine", **u) for u in more if u)
+        bank["request"] = source_key
+        chain_record(ctx, f"spine{n}", bank)
     tried = dict(title=pick.get("title"), why=bank.get("why"))
     if not bank["ok"]:
         return dict(ok=False, tried=tried)
@@ -340,14 +349,15 @@ def from_spine(ctx, pick, card, spend, n, verified=()):
     measures, more = writer.measurements(draft, verified_quotes)
     spend.extend(dict(stage="measurement", **u) for u in more)
     measures["timing"] = timed(ctx, draft)
-    measures["facts"] = script_problems(writer.verify(draft))
+    prior = {(f["url"], f["quote"]): f["prior_source"] for f in verified if f.get("prior_source")}
+    measures["facts"] = script_problems(writer.verify(draft, previous=prior))
     chain_record(ctx, "script_measurements", measures)
     guidance = dict(draft=draft, measurements=measures, instruction=
                     "Return the whole revised script on the same sheet. Keep supported causal links, "
                     "setups and the conflict. Fix findings in context. Move words between the last two "
                     "lines if the measured close runs long.")
     sc = write(json.dumps(guidance, ensure_ascii=False))
-    rep = writer.verify(sc)
+    rep = writer.verify(sc, previous=prior)
     chain_record(ctx, "script_final", dict(script=sc, report=rep))
     return dict(ok=True, script=sc, bank=bank, verify=rep, tried=tried)
 

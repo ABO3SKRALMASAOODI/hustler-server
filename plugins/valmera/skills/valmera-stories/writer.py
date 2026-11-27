@@ -1227,8 +1227,6 @@ def check_fact(f):
     if not r["found"] and f.get("url") in FETCHED:
         r["found"] = quote_found(q, norm(FETCHED[f["url"]]))
         r["read"] = "web_fetch"
-    if not r["found"] and r.get("error") and f.get("prior_source"):
-        r.update(found=True, read="previous verification", source=f["prior_source"], reread_error=r["error"])
     if r["found"]:
         r.pop("error", None)
         r.pop("missing", None)
@@ -1296,12 +1294,15 @@ def speech_problems(script, quotes_by_id):
     return out
 
 
-def verify(script):
+def verify(script, previous=None):
     """Each quote fetched from its own page; every number on screen inside a verified quote; every span the narration
     presents as someone's words verbatim in a verified quote the line cites."""
     rows, ok_quotes, by_id = [], [], {}
     for f in script.get("facts") or []:
         r = check_fact(f)
+        prior = (previous or {}).get((f.get("url"), f.get("quote")))
+        if prior and r.get("error") and not r["found"]:
+            r = dict(r, found=True, read="delivered verification", source=prior, reread_error=r["error"])
         if r["found"]:
             ok_quotes.append(norm(f.get("quote", "")))
             by_id[f.get("id")] = str(f.get("quote") or "")
@@ -1507,7 +1508,7 @@ Answer with one JSON object only: {"claims": [{"id": the claim id, "queries": [e
 
 EXTRACT_SYSTEM = """You copy sentences from web pages a script has already fetched, for the fact bank of a narrated documentary film. Every sentence you give is checked against the page text below word for word, so copy it exactly: the same words in the same order (you may leave out a footnote mark).
 
-For each claim, copy every sentence on these pages that states it (or the part of it the page states). Then copy the number of sentences asked for that tell the rest of this story: who wanted what and why, who objected and on what grounds, what decided it and what it led to. Copy the causal action itself from the first-hand account. Each one a whole sentence, or a clause of at least eight words that makes sense alone: never a heading, a caption, a short list item, a bare date or a number.
+For each claim, copy the best one or two sentences from these pages that establish its cause or outcome. Then copy the number of sentences asked for that tell the rest of this story: who wanted what and why, who objected and on what grounds, what decided it and what it led to. Copy the causal action itself from the first-hand account. Each one a whole sentence, or a clause of at least eight words that makes sense alone: never a heading, a caption, a short list item, a bare date or a number.
 
 For each sentence say whose statement it is (the court, the company, the newspaper, the author), the person whose own words it quotes when it quotes someone (else null), and when (the date of the event it states, as the page gives it, else null).
 
@@ -1619,10 +1620,8 @@ def extract_quotes(urls, claims, story=STORY_SENTENCES, ask=None, known=()):
                "\n\n".join(f"# Page {k}: {u}\n{t[:EXTRACT_CHARS]}" for k, (u, t) in enumerate(pages)))
     if known:
         content += ("\n\n# Facts already on file\n" + json.dumps(known, ensure_ascii=False) +
-                    "\nRead through the end of each primary account. Copy new sentences that explain how the outcome "
-                    "happened and qualify competing accounts of dates, geographic scope or product changes. Select "
-                    "the demonstration, the response and the next action as a sequence. Give these new sources "
-                    "before repeated descriptions of the premise or sales totals.")
+                    "\nCopy new evidence for the want, objection, deciding action or consequence. "
+                    "Prefer a firsthand explanation when accounts differ.")
     text, use = ask(EXTRACT_SYSTEM, content)
     try:
         got = json_block(text)
@@ -1786,21 +1785,12 @@ def spine_view(bank, sheet=None):
 def bank_facts(bank):
     """The bank as the script's facts: every verified quote with its page, whose statement it is and when."""
     return [dict(id=f["id"], claim=f.get("claim") or f["quote"], quote=f["quote"], url=f["url"], source=f.get("source"),
-                 speaker=f.get("speaker"), when=f.get("when"), also=f.get("also", []),
-                 **({"prior_source": f["prior_source"]} if f.get("prior_source") else {})) for f in bank.get("facts") or []]
+                 speaker=f.get("speaker"), when=f.get("when"), also=f.get("also", [])) for f in bank.get("facts") or []]
 
 
 def spine_bank(idea, log=print, ask_claims=None, ask_research=None, ask_extract=None, ask_judge=None, rounds=SPINE_ROUNDS, verified=()):
-    """(bank, spend): VERIFY FIRST. The idea's spine (hook, turn, payoff, close) is researched as claims and verified
-    before a word is written:
-      0. the idea's own evidence for each claim is fetched and looked for on its page (every door: check_fact), and the
-         pages it read are copied from (extract_quotes: one call, the sentences that state each claim and that tell the
-         rest of the story), each sentence verified word for word; a model judges which claims the verified quotes state;
-      1. a claim not stated gets up to `rounds` search rounds, each with queries never tried before, primary sources
-         first (SPINE_TIERS: court records, filings, the company's own statements, news written at the time; then any
-         readable page), its candidates verified the same way and the new pages copied from, then judged again.
-    bank["ok"] only when every spine claim is stated by verified quotes; else bank["why"] names each claim, what is
-    missing and the queries tried, and the caller takes the next idea. Every quote is a meaningful fragment (thin_quote)."""
+    """Retain the delivered bank on a remake. Research missing links through independent sources.
+    A partially sourced secondary claim stays in the research log; the plan uses stated facts."""
     spend = []
     claims, use = spine_claims(idea, ask=ask_claims)
     if use:
@@ -1904,8 +1894,11 @@ def write_from_bank(idea, card, form, bank, voices=None, notes=None, effort="hig
                f"# The bank: the only facts this film may state\n"
                f"{json.dumps([dict(id=f['id'], quote=f['quote'], url=f['url'], source=f.get('source'), speaker=f.get('speaker'), when=f.get('when')) for f in bank['facts']], ensure_ascii=False, indent=0)}\n\n" +
                (f"# Notes from the last attempt\n{notes}\n\n" if notes else ""))
-    text, use = ask(system, content)
-    sc = json_block(text)
+    def request(repair):
+        text, usage = ask(system, content + "\n" + repair)
+        return json_block(text), usage
+
+    sc, use = story_chain.write_segments(sheet, request)
     ids = {f["id"] for f in bank["facts"]}
     for s in sc.get("segments") or []:
         s["facts"] = [f for f in s.get("facts") or [] if f in ids] if isinstance(s.get("facts"), list) else []
@@ -1915,7 +1908,7 @@ def write_from_bank(idea, card, form, bank, voices=None, notes=None, effort="hig
     sc["idea_point"] = {k: idea.get(k) for k in ("hook", "turn", "payoff") if idea.get(k)}
     if sc.get("segments"):
         sc["hook_line"], sc["close_line"] = sc["segments"][0].get("say"), sc["segments"][-1].get("say")
-    return story_chain.attach(sc, sheet), use
+    return sc, use
 
 
 # ----------------------------------------------------------------- the spine held on the written lines
