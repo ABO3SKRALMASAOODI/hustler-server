@@ -764,7 +764,11 @@ def test_a_legacy_card_keeps_its_signature_and_knobs_normalize():
     row = PictureCard.model_validate(dict(
         CARD, background_style="vertical_gradient", background_color2="#ff00aa")).model_dump()
     assert row["background_color2"] == "#FF00AA"
-    for bad in ({"background_color2": "red", "background_style": "radial_gradient"},
+    # 26 Nov: a colour name is a colour (repaired to hex); a value naming no colour is refused.
+    row = PictureCard.model_validate(dict(
+        CARD, background_color2="red", background_style="radial_gradient")).model_dump()
+    assert row["background_color2"] == "#FF0000"
+    for bad in ({"background_color2": "banana", "background_style": "radial_gradient"},
                 {"grain": 1.5}, {"vignette": -.1}, {"background_style": "plaid"}):
         with pytest.raises(ValueError):
             PictureCard.model_validate(dict(CARD, **bad))

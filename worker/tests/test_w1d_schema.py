@@ -98,8 +98,6 @@ BAD = [
     ({"id": "x6", "type": "junction", "stage": "junction", "at": 10.0,
       "style": "iris", "origin": {"kind": "glyph", "ref": "nope"}},
      "not in this edit"),
-    ({"id": "x7", "type": "junction", "stage": "junction", "at": 10.0,
-      "style": "iris", "count": 4}, "count belongs"),
     ({"id": "x8", "type": "strobe", "stage": "pre_captions", "start": 1.0,
       "end": 1.4, "frames": [{"source": {"kind": "previous"}}]},
      "a strobe frame is a still"),
@@ -326,3 +324,11 @@ def test_the_skills_apply_edit_batch_examples_are_valid_operations():
         back = edit_batch.apply_batch(out, [{"action": "remove", "layer": "fx",
                                              "id": op["id"]}], DUR, KEYS)
         assert schemas.edl_signature(back) == sig, op["id"]
+
+
+def test_a_junction_field_its_style_does_not_draw_is_left_out_not_refused():
+    # p6238 gate (27 Nov): set_junction refused "colour belongs to hit_flash".
+    from fx_schemas.accents import JunctionFx
+    j = JunctionFx.model_validate({"id": "x7", "type": "junction", "stage": "junction",
+                                   "at": 10.0, "style": "iris", "count": 4, "colour": "#000000"})
+    assert j.count is None and j.colour is None

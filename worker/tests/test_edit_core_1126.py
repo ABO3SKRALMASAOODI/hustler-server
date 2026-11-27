@@ -233,3 +233,11 @@ def test_a_clip_window_past_its_source_is_moved_back_inside():
     m2 = next(i for i in out["inserts"] if i["id"] == "m2")
     assert m1["duration_s"] == 1.0 and m1["source_start_s"] + 1.0 <= 5.0
     assert not m2["source_start_s"] and m2["duration_s"] <= 0.6
+
+
+def test_a_junction_field_its_style_does_not_draw_is_left_out():
+    # p6238 gate (27 Nov): set_junction refused "colour belongs to hit_flash".
+    from fx_schemas.accents import JunctionFx as Junction
+    j = Junction.model_validate({"type": "junction", "id": "jn1", "at": 2.0, "stage": "junction",
+                                 "style": "iris", "colour": "#000000"})
+    assert j.colour is None

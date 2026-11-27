@@ -332,27 +332,23 @@ def test_a_pronoun_contraction_or_question_word_never_earns_a_device():
     assert "140" in said and plan["payoff"]["word"] == "140"
 
 
-def test_zoom_and_sound_asks_respect_negation():
+def test_zoom_and_sound_asks_come_from_the_model_read_ledger():
+    # No regex on intent (owner, 6 Nov): what the customer asked for, negations
+    # included, is the ask ledger's model reading (score.asks devices), never a
+    # keyword match on the message.
     import tools_ext.verify_tools as vt
 
     class Ctx:
-        user_message = ""
+        user_message = "no zooms please, punch in on the payoff"
 
-    def asked(text, extra=()):
+    def asked(devices, extra=()):
         c = Ctx()
-        c.user_message = text
+        c.ask_ledger = {"asks": [{"id": "a1", "devices": list(devices)}]}
         return vt._asked(c, extra)
-    assert "zoom" in asked("punch in on the payoff")
-    assert "zoom" in asked("zoom in on 140, keep it calm")
-    assert "sfx" in asked("add a whoosh on the cut")
-    for text in ("no zooms please", "don't zoom", "remove the zoom",
-                 "without sound effects", "less zooming, no whoosh",
-                 "stop adding sfx"):
-        got = asked(text)
-        assert "zoom" not in got and "sfx" not in got, (text, got)
-    got = asked("don't add sound effects, just zoom on the payoff")
-    assert "zoom" in got and "sfx" not in got
-    assert asked("", ["zoom", "music"]) == {"zoom"}
+    assert asked(["zoom"]) == {"zoom"}
+    assert asked(["sfx", "zoom"]) == {"sfx", "zoom"}
+    assert asked([]) == set()
+    assert asked([], ["zoom", "music"]) == {"zoom"}
 
 
 def test_set_intensity_steps_up_without_thinning_flashes(monkeypatch):
@@ -459,10 +455,10 @@ def test_trim_thins_device_flashes_around_the_edits_other_flashes():
     assert flash_safety.assess(edl)["peak_per_s"] == 5
     gone = device_planner.trim_plan(edl, index, "charged", cards=cards,
                                     opted_in=False)
-    # the charged card budget drops one (closer than 0.34 s); flash safety
-    # then drops another, counted against the two stylize flashes
-    assert any(r["reason"].startswith("flash safety") for r in gone), gone
+    # the charged card budget drops one (closer than 0.34 s). Flash safety is
+    # information since p5968 (held vetoes branch): the plan does not thin
+    # flashes for it; the export is marked contains_flashing instead.
+    assert not any(r["reason"].startswith("flash safety") for r in gone), gone
     left = dict(edl, fx=[i for i in edl["fx"]
                          if i["id"] not in {r["id"] for r in gone}])
-    assert flash_safety.assess(left)["peak_per_s"] <= 3
     assert left["effects"]["stylize"] == edl["effects"]["stylize"]
