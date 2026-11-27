@@ -205,15 +205,18 @@ def podcast_clock(media, lo, hi):
             words.append(dict(w=word.strip(), t0=float(start), t1=float(end)))
         else:
             if words and words[0]["t0"] < hi and words[-1]["t1"] >= hi-1:
-                excerpt = [w for w in words if lo <= w["t0"] < hi]
-                if numbered_sentences(excerpt):
-                    return excerpt
+                return words
     return []
 
 
 def source_sentences(ctx, media, tag, lo, hi):
     """Prefer the podcast's completed transcript. Its timed fragments end at real word edges."""
     from pathlib import Path
+
+    def in_window(rows):
+        selected = (r for r in rows if r["t1"] >= lo and r["t0"] <= hi)
+        return [dict(r, i=i) for i, r in enumerate(selected)]
+
     segments = jload(Path(media).parent / "valmera-segments.json")
     if isinstance(segments, list) and segments:
         fragments = []
@@ -227,13 +230,32 @@ def source_sentences(ctx, media, tag, lo, hi):
         else:
             # When a timestamped fragment contains an interior sentence end, a fresh word clock
             # supplies that internal edge. Never interpolate a word time from character positions.
-            rows = [r for r in numbered_sentences(fragments) if r["t1"] >= lo and r["t0"] <= hi]
+            rows = in_window(numbered_sentences(fragments))
             if rows and not any(w.rstrip('”’"').endswith((".", "!", "?"))
                                 for f in fragments if rows[0]["t0"] <= f["t0"] <= rows[-1]["t1"]
                                 for w in f["w"].split()[:-1]):
-                return [dict(r, i=i) for i, r in enumerate(rows)], fragments
-    words = podcast_clock(media, lo, hi) or hear_clock(ctx, media, tag, lo, hi)
-    return numbered_sentences(words), words
+                return rows, fragments
+    words = podcast_clock(media, lo, hi)
+    rows = in_window(numbered_sentences(words))
+    if rows:
+        return rows, words
+
+    # A transcription starting mid-file can give a clipped phrase punctuation at either edge.
+    # Hear the neighboring sentences too. Extend the read if a long thought fills the window.
+    duration = probe_wh(media)[2]
+    margin = 15.0
+    while True:
+        start, end = max(0.0, lo-margin), min(duration, hi+margin)
+        words = hear_clock(ctx, media, tag, start, end)
+        rows = numbered_sentences(words)
+        if start > 0:
+            rows = rows[1:]
+        if end < duration:
+            rows = rows[:-1]
+        selected = in_window(rows)
+        if selected or (start == 0 and end == duration):
+            return selected, words
+        margin *= 2
 
 
 def hear_clock(ctx, media, tag, lo=0.0, hi=None):
@@ -576,7 +598,6 @@ def ideas(ctx):
         if not rows:
             continue
         clocks[src["id"]], sentences[src["id"]] = words, rows
-        # A partial first/last sentence at an excerpt edge is context for the model.
         menu.append(dict(id=src["id"], title=src["title"], seconds=dur, sentences=rows,
                          excerpt_edges=[lo, hi], picture=look_line(source_look(src["file"], lo, hi))))
     system = """Read the numbered, punctuated speech first. Find one complete thought from one speaker.

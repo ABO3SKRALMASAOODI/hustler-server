@@ -129,3 +129,27 @@ def test_typed_instruction_accepts_the_writers_spoken_to_print_mapping():
         {"say":"Hear it.", "fallback_text":"Hear it"},
         {"say":"Try it.", "show":["VALMERA.IO"], "fallback_text":"Try it"}]}
     assert proof.script_problems(sc,"Make it 9:16.",{}) == []
+
+
+def test_saved_word_clock_preserves_the_sentence_before_the_requested_start(tmp_path):
+    words = [dict(w=word, t0=t, t1=t+.3) for t, word in
+             [(1, "Intro."), (5, "That"), (6, "changed"), (7, "everything."), (10, "Afterward.")]]
+    (tmp_path/"words.json").write_text(json.dumps(words))
+    rows, clock = proof.source_sentences(None, tmp_path/"source.mp4", "upload", 6, 8)
+    assert [row["text"] for row in rows] == ["That changed everything."]
+    assert clock == words
+
+
+def test_excerpts_of_new_transcription_exclude_both_partial_edge_sentences(tmp_path, monkeypatch):
+    monkeypatch.setattr(proof, "probe_wh", lambda media: (1920, 1080, 100))
+    heard = []
+
+    def transcribe(ctx, media, tag, start, end):
+        heard.append((start,end))
+        return [dict(w="Tail.",t0=start,t1=start+.3),dict(w="Whole thought.",t0=49,t1=50),
+                dict(w="Unfinished.",t0=end-.3,t1=end)]
+
+    monkeypatch.setattr(proof, "hear_clock", transcribe)
+    rows, clock = proof.source_sentences(None, tmp_path/"source.mp4", "upload", 45, 55)
+    assert [row["text"] for row in rows] == ["Whole thought."]
+    assert heard[0][0] < 45 and heard[0][1] > 55 and len(clock) == 3
