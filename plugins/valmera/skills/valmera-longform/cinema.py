@@ -1113,7 +1113,7 @@ def build(sc,pack,*,edit=None):
     return l1,shots,chapters
 
 
-def frame_programme(sc, pack, shots, clock, end):
+def frame_programme(sc, pack, shots, clock, end, *, passage_dir=None):
     from film_long import Plan
     chapters=chapter_clock(sc,clock,end)
     voices={'cap':dict(font='InterDisplay-Bold.ttf',px=40,track=0,shadow={'a':0.9}),
@@ -1138,8 +1138,19 @@ def frame_programme(sc, pack, shots, clock, end):
                     # of the same publication. Show those pixels in place of the neighbouring passage.
                     companion = design
                     row['companion_source'] = design['source']
-                    key = P.image(f'evidence-passage-{j}', companion)
-                document_shot(P, row['f'], key, companion or c)
+                from documentary_layout import source_passage
+                directory = passage_dir
+                if directory is None and isinstance(pack.get("words"), (str, Path)):
+                    directory = Path(pack["words"]).parent / "publication-excerpts"
+                passage = companion or c
+                if directory:
+                    passage = source_passage(passage, directory)
+                if passage["path"] != c["path"]:
+                    key = P.image(f'evidence-passage-{j}',passage)
+                    row["framed_passage"] = dict(path=passage["path"],source=passage["source"])
+                if passage.get("capture_error"):
+                    row["capture_error"] = passage["capture_error"]
+                document_shot(P,row['f'],key,passage)
             else:
                 n=row['f'][1]-row['f'][0]
                 ratio=c['w']/c['h']

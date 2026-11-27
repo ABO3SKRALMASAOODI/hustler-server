@@ -796,9 +796,22 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
             planted, treatment = plants[pays]
             selected = [planted]
         card = brief.get("kind") == "card" and seg.get("job") in ("time_jump","reveal")
+        if not selected and not card and out and out[-1][2]=="photo" and out[-1][1]==lo:
+            previous = out[-1][4]
+            held = next((row for row in ranks[index] if row[2]==previous["path"]),None)
+            if previous.get("pick_line")==line and held and seg.get("job")!="list":
+                # An uninterrupted photograph that depicts both clauses stays in place.
+                # Preserve both word spans for the measurement and the Director.
+                out[-1][1] = hi
+                previous.setdefault("phrase_spans",[
+                    dict(word_i=previous.get("word_i",0),f=[out[-1][0],lo])]).append(dict(word_i=wi,f=[lo,hi]))
+                sp.plan["phrases"].append(dict(line=line,word_i=wi,f=[lo,hi],pictures=1,held=previous["path"],brief=brief))
+                continue
         if card or not selected:
             # Record exhausted research on the actual words so score_search can acquire the missing slot.
-            text = str(seg.get("fallback_text") or seg["say"])
+            next_word = slots[index+1][1] if index+1<len(slots) and slots[index+1][0]==line else None
+            words_here = " ".join(seg["say"].split()[wi:next_word])
+            text = str((seg.get("fallback_text") if card else None) or words_here)
             if not card:
                 sp.shortfall[line] = sp.shortfall.get(line,0) + hi-lo
             out.append([lo,hi,"designed",None,dict(path=f"spoken:{line}:{wi}",text=text,role="key",
@@ -1608,6 +1621,8 @@ def build(script, sup, style_id, direction=None):
             else (rec.get("motion") or {}).get("p90")
         P.pictures.append(dict(f=[f0, f1], kind=kind, name=name, path=rec["path"], shows=rec.get("shows"), mode=mode,
                                finish=fin[seg_at(f0)], use=rec.get("use"), word_i=rec.get("word_i"), identity=rec.get("identity"),
+                               phrase_spans=rec.get("phrase_spans"),year=(rec.get("identity") or {}).get("year"),
+                               version=(rec.get("identity") or {}).get("version"),vintage=(rec.get("identity") or {}).get("vintage"),
                                source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"), time_range=rec.get("time_range"),
                                src=rec.get("src"), tier=rec.get("tier") or ("voice" if rec.get("voice") else None), take=rec.get("take_i"),
                                take_bounds=rec.get("take"), take_group=rec.get("take_group"), line=rec.get("pick_line", seg_at(f0)), spoken_line=seg_at(f0),
@@ -1992,16 +2007,49 @@ def build(script, sup, style_id, direction=None):
         return (rec.get("identity") or {}).get("meaning_box") or rec.get("keep_full_frame") or rec.get("depicted_name") or rec.get("tier") == "detail" or (abs(aspect - 1) > .05 and any(
             x.get("thing") == name and x.get("keep_full_frame") for x in briefs))
 
+    def fit_collage(run):
+        from scene.motion import fit_panel
+        from keepout import watermark_zone
+        left, top, right, bottom = .035, watermark_zone(W,H)[3]+.025, .965, .83
+        end = timeline[run[-1]][1]
+        P.page([timeline[run[0]][0],end],"#171B20",grain=.008)
+        for position,index in enumerate(run):
+            a,b,kind,name,rec = timeline[index]
+            identity = rec.get("identity") or {}
+            target = identity.get("meaning_box") or [0,0,1,1]
+            geo = F.evidence_frame(rec,target,identity.get("clean_crop"))
+            y = top+(bottom-top)*position/len(run)
+            seat = [left,y,right,top+(bottom-top)*(position+1)/len(run)-.012]
+            panel = fit_panel(geo["crop"],(rec["w"],rec["h"]),(W,H),seat)
+            P.card([a,end],keys[rec["path"]],panel,z=1,crop=geo["crop"],source_ink=[panel])
+            note(a,b,kind,name,rec,"collage")
+            P.pictures[-1].update(crop=geo["crop"],panel=panel,meaning_box=target,visible_f=[a,end],
+                 meaning_height_px=round(H*(panel[3]-panel[1])*(target[3]-target[1])/(geo["crop"][3]-geo["crop"][1])))
+            layer_spans.append((a,end,2))
+
     sealed = full_frame | board
     board_on, revealed = bool(d.get("board_paths")), set()     # marketing's board: a whole-frame file reveals once
     runs, k = [], 0
     while k < len(timeline):
         i = seg_at(timeline[k][0])
+        if fit_on and i in collage and timeline[k][2]=="photo":
+            group = []
+            for j in range(k,min(k+3,len(timeline))):
+                a,b,kind,name,rec = timeline[j]
+                if (kind!="photo" or rec.get("depicted_name") or rec.get("document_fact") or
+                        rec.get("word_i")!=timeline[k][4].get("word_i") or seg_at(a)!=i):
+                    break
+                group.append(j)
+            if len(group)>=2:
+                runs.append(("fit_collage",group))
+                k = group[-1]+1
+                continue
         if i in collage and not timeline[k][4].get("voice") and timeline[k][2] != "designed" and timeline[k][4]["path"] not in sealed and not needs_native(timeline[k]):
             # a run of prints: consecutive pictures of the collage line, five at most (a pinned voice breaks it)
             run, j = [k], k + 1
             while j < len(timeline) and len(run) < len(PRINT_AT) and seg_at(timeline[j][0]) == i and not timeline[j][4].get("voice") \
-                    and timeline[j][2] != "designed" and timeline[j][4]["path"] not in sealed and not needs_native(timeline[j]):
+                    and timeline[j][2] != "designed" and timeline[j][4]["path"] not in sealed and not needs_native(timeline[j]) \
+                    and timeline[j][4].get("word_i") == timeline[k][4].get("word_i"):
                 run.append(j)
                 j += 1
             if len(run) >= 3:
@@ -2011,7 +2059,9 @@ def build(script, sup, style_id, direction=None):
         runs.append(("one", [k]))
         k += 1
     for kind_, run in runs:
-        if kind_ == "prints":
+        if kind_ == "fit_collage":
+            fit_collage(run)
+        elif kind_ == "prints":
             prints(run, paper=bool(st.get("paper")))
             f0 = timeline[run[0]][0]
             if st["flash"] == "runs" and (not flashes or f0 - flashes[-1][0] >= 4 * FPS):

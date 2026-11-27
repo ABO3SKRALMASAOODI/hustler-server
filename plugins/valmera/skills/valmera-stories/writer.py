@@ -736,16 +736,27 @@ def _merge_ann(sc, got):
     return out, problems
 
 
+def spoken_briefs(segment):
+    """Preserve the actual words for photo and footage researchers when annotation is unavailable."""
+    words = str(segment.get("say") or "").split()
+    spans = [span for span in segment.get("phrases") or []
+             if isinstance(span, (list, tuple)) and len(span) == 2
+             and all(type(i) is int for i in span) and 0 <= span[0] < span[1] <= len(words)]
+    rows = []
+    for start, stop in spans or ([(0, len(words))] if words else []):
+        phrase = " ".join(words[start:stop])
+        rows.append(dict(word_i=start, thing=phrase, must_show=phrase, search=phrase,
+                         video_searches=[phrase], kind="literal",
+                         source="spoken passage"))
+    return rows
+
+
 def annotate_segment(sc, k, idea_full=None, ask=None):
     """(see items, usage) for ONE segment that came back without a picture brief: a call pinned to ANNOTATE_MODEL on
     OpenAI (ask_openai, never ask(), so Anthropic spend stays at zero)."""
     ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=8000, what="annotate segment",
                                                      model=ANNOTATE_MODEL))
     names = {n.get("name") for n in sc.get("named") or [] if n.get("name")}
-    s = sc["segments"][k]
-    named = [dict(name=n.get("name"), is_=n.get("is"), must_show=n.get("must_show")) for n in sc.get("named") or []]
-    idea = {q: (idea_full or {}).get(q) for q in ("title", "story", "turn", "payoff") if (idea_full or {}).get(q)}
-    near = [dict(i=j, say=sc["segments"][j].get("say")) for j in range(max(k - 1, 0), min(k + 2, len(sc["segments"])))]
     content = _ann_content(sc, idea_full) + f"\nReturn see for segment {k} only."
     text, use = ask(SEE_SYSTEM, content)
     try:
@@ -756,7 +767,7 @@ def annotate_segment(sc, k, idea_full=None, ask=None):
 
 
 def annotate(sc, idea_full=None, ask=None, verify_fn=None, log=print, problems=None):
-    """(script, report): the final script with its picture brief (see), its devices (finish, colour_turn), its display
+    """(script, report): the final script with its phrase picture briefs (see), its display
     items anchored to word indices (show[].word_i) and its caption phrases, written by one model call (a second when
     the first answer is not structurally valid). `say` is never changed; only valid output is laid in; the result is
     verified again (every figure on screen must stand in a verified quote), and items the model added that do not

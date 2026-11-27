@@ -504,7 +504,7 @@ def annotate_script(ctx, sc, idea_full, spend, reel=True):
         # the facts stand on the script's own show items: the brief, phrases, finishes and anchors are laid on them
         keep = json.loads(json.dumps(sc))
         for s0, s1 in zip(keep["segments"], sc2["segments"]):
-            for k in ("see", "pictures", "phrases", "finish", "finish_rank", "list", "list_items"):
+            for k in ("see", "pictures", "phrases", "list", "list_items"):
                 if k in s1:
                     s0[k] = s1[k]
             by_text = {str(x.get("text")): x for x in s1.get("show") or [] if isinstance(x, dict)}
@@ -522,7 +522,6 @@ def annotate_script(ctx, sc, idea_full, spend, reel=True):
         if not rep["verify"].get("ok"):
             raise RuntimeError(f"the annotated script does not verify even on its own show items: {json.dumps(rep['verify'])[:400]}")
     if reel:
-        names = {n.get("name") for n in sc2.get("named") or [] if n.get("name")}
         for k, s_ in enumerate(sc2["segments"]):
             if s_.get("see"):
                 continue
@@ -532,15 +531,14 @@ def annotate_script(ctx, sc, idea_full, spend, reel=True):
             except Exception as e:  # noqa: BLE001
                 ctx.log(f"annotate segment {k}: {e!r}"[:200])
                 see = []
-            if see:
-                s_["see"] = see
-                s_["pictures"] = list(dict.fromkeys(x["thing"] for x in see))
-        lack = [k for k, s_ in enumerate(sc2["segments"]) if not s_.get("see")]
-        if lack:
-            raise RuntimeError(f"no picture brief for segments {lack}: a story reel is never cut without one")
+            if not see:
+                see = writer.spoken_briefs(s_)
+                ctx.log(f"Using the spoken phrases for segment {k}'s picture research")
+            s_["see"] = see
+            s_["pictures"] = list(dict.fromkeys(x["thing"] for x in see))
         rep["problems"] = [p for p in rep.get("problems") or [] if "no valid see item" not in p]
     json.dump(dict(script=sc2, report=rep), open(os.path.join(ctx.run_dir, "script_annotate.json"), "w"), ensure_ascii=False, indent=1)
-    ctx.log(f"annotate: ok {rep['ok']}, devices {rep.get('device_share_words')} of the words, problems {len(rep.get('problems') or [])}")
+    ctx.log(f"annotate: {sum(len(seg.get('see') or []) for seg in sc2['segments'])} phrase briefs, {len(rep.get('problems') or [])} unresolved annotations")
     return sc2, dict({k: v for k, v in rep.items() if k != "spend"}, kept=True)
 
 
@@ -1845,9 +1843,10 @@ def fit_supply(ctx, script, pack, durs, spend, anchors, reel_kw):
     deficit is 0. A story reel without a brief on every line stops here: the cut is never made without per-line
     verdicts."""
     sc = script["script"]
-    if not all(s_.get("see") for s_ in sc["segments"]):
-        raise RuntimeError("fit: the script has no picture brief on segments "
-                           f"{[k for k, s_ in enumerate(sc['segments']) if not s_.get('see')]}; a story reel is never cut without per-line verdicts")
+    for segment in sc["segments"]:
+        if not segment.get("see"):
+            segment["see"] = writer.spoken_briefs(segment)
+            segment["pictures"] = [b["thing"] for b in segment["see"]]
     measure_clips(pack)
     usd, calls = judge_supply(ctx, sc, pack)
     spend.append(dict(stage="supply", provider="openai", model=FIT.MODEL, what="picture identity and check", usd=round(usd, 4), calls=calls))

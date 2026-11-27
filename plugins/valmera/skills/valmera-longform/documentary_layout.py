@@ -9,6 +9,39 @@ def fit(plan, span, key, clip, box, **options):
     return plan.card(span, key, seat, **options)
 
 
+def source_passage(clip, directory):
+    """Refresh an old typeset exhibit from the actual primary publication and retain those pixels."""
+    from pathlib import Path
+    import hashlib
+    import tempfile
+    from PIL import Image
+    from cited_page import capture
+
+    source = clip.get("source") or {}
+    if source.get("presentation") != "Attributed quotation card" or not source.get("url"):
+        return clip
+    quote = next((q["quote"] for q in source.get("primary_context") or []
+                  if q.get("quote") and q["quote"] == clip.get("shows")),None)
+    if not quote:
+        return clip
+    root = Path(directory)
+    root.mkdir(parents=True,exist_ok=True)
+    digest = hashlib.sha256((source["url"]+"\n"+quote).encode()).hexdigest()
+    dest = root/(digest+".png")
+    try:
+        if not dest.exists():
+            with tempfile.TemporaryDirectory(dir=root) as scratch:
+                temp = Path(scratch)/"passage.png"
+                capture(dict(url=source["url"],quote=quote,mark=clip.get("mark")),str(temp))
+                temp.replace(dest)
+        with Image.open(dest) as image:
+            width,height = image.size
+    except Exception as exc:
+        return dict(clip,capture_error=f"{type(exc).__name__}: {str(exc)[:200]}")
+    return dict(clip,path=str(dest),w=width,h=height,meaning_box=[0,0,1,1],
+                source=dict(source,presentation="Original publication excerpt"))
+
+
 def reading_box(clip):
     """Keep whole text lines around an original underline, including the wrap below it."""
     if clip.get("meaning_box"):
@@ -36,7 +69,10 @@ def reading_box(clip):
     groups = [g for g in groups if len(g)>=max(3,h*.009)]
     if not groups:
         return [0,0,1,1]
-    center = marked.mean()
+    # Printed headings may have the same ink as the underline. Use the strongest continuous
+    # horizontal stroke as the reading anchor, preserving its whole neighbouring lines.
+    score = color.sum(axis=1)
+    center = np.flatnonzero(score>=score.max()*.9).mean()
     i = max((j for j,g in enumerate(groups) if g[0] <= center),default=0)
     line_h = max(3,groups[i][-1]-groups[i][0]+1)
     top = max(0,int(min(groups[i][0],marked.min())-line_h*.22))

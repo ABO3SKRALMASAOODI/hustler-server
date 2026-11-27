@@ -80,3 +80,21 @@ def test_scarce_picture_is_reported_on_the_specific_uncovered_phrase():
     report, = wf3.fit_report(dict(fit_verdicts=table),dict(segments=[dict(see=[
         dict(word_i=0,thing="first"),dict(word_i=2,thing="second")])]),[3.])
     assert report["deficit"]==1 and report["missing"][0]["word_i"] in (0,2)
+
+
+def test_a_short_witness_plays_at_native_speed_while_the_true_still_holds():
+    assert reel.slot_edges(10,100,[12,90])==[10,22,100]
+
+
+def test_adjacent_phrases_can_hold_the_same_photo_when_it_depicts_both():
+    words=["His","desk","held","letters"]
+    clock=SimpleNamespace(segs=[(0,4)],seg_words=lambda _:[dict(w=w,t0=i) for i,w in enumerate(words)])
+    sc=dict(segments=[dict(say=" ".join(words),see=[dict(thing="desk",word_i=0),dict(thing="letters",word_i=2)])])
+    v=dict(fits_line=True,exact_thing=True,time_ok=True,version_ok=True,contradicts=False,grade=5)
+    table={"desk-photo":{0:{0:dict(v,phrases={0:v,2:v})}}}
+    sp=reel.Supply({"desk":[dict(path="desk-photo")]},{},fit=fit.fits(table))
+    sp.verdicts=table
+    rows=reel.cut_fit(sc,clock,sp,120,[])
+    assert len(rows)==1 and rows[0][:2]==[0,120]
+    assert [p["word_i"] for p in rows[0][4]["phrase_spans"]]==[0,2]
+    assert not sp.shortfall
