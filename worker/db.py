@@ -3287,7 +3287,8 @@ def _capped_payload(obj, *, preserve_usage=False):
             cache = safe.get("prompt_cache")
             if isinstance(cache, dict):
                 capped["prompt_cache"] = {k: cache[k] for k in
-                    ("version", "key", "model", "policy", "cached_tokens", "tools_sha", "system_sha")
+                    ("version", "key", "model", "provider_model", "policy", "cache_read_reported",
+                     "cached_tokens", "tools_sha", "system_sha")
                     if isinstance(cache.get(k), (int, float, str)) and len(str(cache[k])) <= 128}
         return capped
     return json.loads(s)

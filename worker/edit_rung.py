@@ -185,7 +185,9 @@ class _RespUsage:
 
     def __init__(self, model, raw):
         raw = raw or {}
-        cached = int((raw.get("input_tokens_details") or {}).get("cached_tokens") or 0)
+        details = raw.get("input_tokens_details") or {}
+        self.cache_read_reported = details.get("cached_tokens") is not None
+        cached = int(details.get("cached_tokens") or 0)
         reasoning = int((raw.get("output_tokens_details") or {}).get("reasoning_tokens") or 0)
         self.prompt_tokens = int(raw.get("input_tokens") or 0)
         self.completion_tokens = int(raw.get("output_tokens") or 0)
@@ -489,7 +491,8 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
         result = _completion(model, data)
         import openai_cache
         result.usage.prompt_cache = dict(openai_cache.describe(body),
-                                        cached_tokens=result.usage.cache_read_input_tokens)
+            provider_model=data.get("model"), cache_read_reported=result.usage.cache_read_reported,
+            cached_tokens=result.usage.cache_read_input_tokens if result.usage.cache_read_reported else None)
         result.usage.latency_s = round(time.monotonic() - started, 2)
         result.usage.answered_model = model
         if tool_plan is not None and model == "gpt-6.2-sol":

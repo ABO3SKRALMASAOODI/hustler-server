@@ -332,7 +332,8 @@ def record(purpose, request, response, usage=None):
             # need the same actual cache-read accounting. Previously only
             # the editor's recorder reliably persisted it; other consumers
             # could report/charge a full-price input despite a provider hit.
-            response = dict(response, cached_in=cached_input_tokens(usage))
+            cached = cached_input_tokens(usage) if getattr(usage, 'cache_read_reported', True) else None
+            response = dict(response, cached_in=cached)
             cache_info = getattr(usage, 'prompt_cache', None)
             if isinstance(cache_info, dict):
                 response['prompt_cache'] = cache_info
@@ -344,11 +345,13 @@ def record(purpose, request, response, usage=None):
                 response['cache_write_in'] = (details.get('cache_write_tokens', 0)
                     if isinstance(details, dict) else getattr(details, 'cache_write_tokens', 0))
                 response['cache_write_12h_in'] = openai_cache.tokens(usage)['cache_write_12h_tokens']
-                response['uncached_in'] = max(0, int(usage.prompt_tokens or 0)
+                response['uncached_in'] = (max(0, int(usage.prompt_tokens or 0)
                     - response['cached_in'] - int(response['cache_write_in'] or 0))
+                    if response['cached_in'] is not None else None)
                 response['service_tier'] = (getattr(usage, 'service_tier', None)
                     or config.OPENAI_SERVICE_TIER or 'default')
-                response['cost_basis'] = 'reported_tokens_official_rates'
+                response['cost_basis'] = ('reported_tokens_official_rates' if response['cached_in'] is not None
+                                          else 'reported_input_output_cache_unavailable')
             if getattr(usage, 'latency_s', None) is not None:
                 response['latency_s'] = usage.latency_s
             if _is_rung_call(request, usage):

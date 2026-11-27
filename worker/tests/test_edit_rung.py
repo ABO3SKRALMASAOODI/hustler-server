@@ -429,3 +429,13 @@ def test_sol_history_moves_between_workers_and_expires_in_postgres(monkeypatch):
     finally:
         conn.rollback()
         conn.close()
+
+
+def test_missing_sol_cache_counter_stays_unknown_in_reporting(monkeypatch):
+    rows = []
+    monkeypatch.setattr(llm, "get_recorder", lambda: lambda *args: rows.append(args))
+    usage = edit_rung._RespUsage("gpt-6.2-sol", {"input_tokens": 1000, "output_tokens": 2})
+    assert not usage.cache_read_reported
+    llm.record("agent", {"model": "gpt-6.2-sol"}, {}, usage)
+    assert rows[0][2]["cached_in"] is None
+    assert rows[0][2]["uncached_in"] is None
