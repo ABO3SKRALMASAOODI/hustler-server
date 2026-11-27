@@ -592,7 +592,16 @@ def remove_finish(ctx, ids):
         return _rejected("name the ids to remove")
     from tools_ext._write import removal_targets
     current = [i["id"] for i in edl.get("fx") or [] if i.get("type") in ("grade_window", "finish")]
-    ids, note = removal_targets(ids, current, "finish")
+    # An id that names another fx item (an accent, a cutaway) is said to be
+    # that item, not "already absent": it is still in the film.
+    other = {str(i.get("id")): str(i.get("type") or "item") for i in edl.get("fx") or []
+             if i.get("type") not in ("grade_window", "finish")}
+    misnamed = [i for i in ids if i in other]
+    wrong = " ".join(f"{i} is a {other[i]}, not a grade window or finish; it stays."
+                     for i in misnamed)
+    rest = [i for i in ids if i not in other]
+    ids, note = removal_targets(rest, current, "finish") if rest else ([], "")
+    note = " ".join(x for x in (wrong, note) if x)
     if not ids:
         return note
     return _commit(ctx, [_write.remove_fx(i) for i in ids],
