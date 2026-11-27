@@ -16,6 +16,16 @@ def test_spoken_unit_ignores_a_long_pause_and_cannot_snap_across_its_neighbors()
     assert proof.snap_window(rows,[1,1],"x",10,clock=words,silence=gaps) == [2.5,8.5]
 
 
+def test_overlapping_word_times_do_not_expand_the_cut_into_a_neighboring_sentence():
+    words = [dict(w=w, t0=a, t1=b) for w, a, b in
+             [("A", 0, .5), ("thought.", .6, 2.1), ("Next", 2, 3),
+              ("thought.", 3, 4.1), ("Then", 4, 5), ("this.", 6, 7)]]
+    def silence(*args, **kwargs):
+        return [(.8, 1.8), (4.5, 5.5)]
+    assert proof.snap_window(proof.numbered_sentences(words), [1, 1], "clip", 7,
+                             clock=words, silence=silence) == [2, 4.1]
+
+
 def test_recorded_clips_use_the_separate_upload_and_export_clocks(tmp_path, monkeypatch):
     rec = {"upload":{"file":"up","sha256":"up-sha","dur":56}, "exports":[
         {"file":"ex","sha256":"ex-sha","dur":38,"tag":"final"}]}
