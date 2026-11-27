@@ -10,7 +10,7 @@ FROM public.ecr.aws/docker/library/python:3.11-slim-bookworm
 # so the registry can upload and retry each package group independently.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ffmpeg fontconfig fonts-dejavu-core xz-utils \
+       ffmpeg espeak-ng fontconfig fonts-dejavu-core xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update \

@@ -138,7 +138,7 @@ def _animated_card(path, fps=60, dur=4.0, cuts=(1.5, 2.75)):
 def test_the_map_of_an_animated_card_holds_only_its_real_cuts(tmp_path):
     src = _animated_card(str(tmp_path / "card.mp4"))
     got = picture_map.measure(src)
-    assert got["v"] == picture_map.VERSION == 2
+    assert got["v"] == picture_map.VERSION == 3
     assert len(got["cuts"]) == 2, got["cuts"]
     assert got["cuts"][0] == pytest.approx(1.5, abs=0.02)
     assert got["cuts"][1] == pytest.approx(2.75, abs=0.02)

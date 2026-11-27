@@ -2107,7 +2107,7 @@ def fit_fractions(src_w, src_h, W, H, mode=None, focus=None):
     return ("crop", 0.0, y0, 1.0, y0 + fh)
 
 
-def _atempo_chain(rate):
+def _insert_atempo_chain(rate):
     """atempo stage(s) for an insert's rate — one stage covers [0.5, 4];
     below 0.5 two stages chain (atempo's own floor is 0.5). Pitch-corrected
     by the filter itself."""
@@ -4816,8 +4816,20 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         fx_juncs = fxgraph.junction_specs(
             fx_plan, _fx_cuts(order, keep, edl.get("keep"), blk_frames))
         shot_starts = _index_shot_starts(index)
-        for spec in fx_juncs:
+        from timeline import same_shot_gap
+        for spec in list(fx_juncs):
             ka, kb = spec["k"], spec["k"] + 1
+            if order[ka][0] == order[kb][0] == "seg" and same_shot_gap(
+                    index, keep[order[ka][1]][1], keep[order[kb][1]][0]):
+                # A silence cut can move a previously placed dissolve onto
+                # a jump within a take. Preserve other devices on this cut.
+                for item in list(spec["items"]):
+                    if item.get("style") == "dissolve":
+                        spec["items"].remove(item)
+                        fx_plan.note(item, "reduced", "same-shot gap plays as a jump cut")
+                if not spec["items"]:
+                    fx_juncs.remove(spec)
+                    continue
             # Past a join between two spans that touch in the source lies the
             # other side's own picture, and an item a tool measured against
             # a baked cut says so: both edges hold.
@@ -5015,6 +5027,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         p_acc = 0.0        # sped seconds consumed within this segment so far
         for j, (ps, pe, f) in enumerate(pcs):
             spts = "" if abs(f - 1.0) < 1e-9 else f"/{f:.4f}"
+            # Discard frames on the output sampling grid before per-pixel
+            # effects. Always retain the first frame, even in a tiny piece.
+            sample = (f",select='isnan(prev_selected_t)+"
+                      f"gt(floor((t-start_t)*{fps:.8f}/{f:g}),"
+                      f"floor((prev_selected_t-start_t)*{fps:.8f}/{f:g}))'"
+                      if f > 4 else "")
             if regions:
                 # Region windows arrive in PROGRAM time; inside a sped piece
                 # the local pre-speed clock runs `f` times program speed.
@@ -5037,13 +5055,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                                               end=(b - p0) * f))
                     else:
                         local_rgs.append(dict(rg, start=None, end=None))
-                parts.append(f"[pv{i}_{j}]trim=start={ps:.3f}:end={pe:.3f},"
+                parts.append(f"[pv{i}_{j}]trim=start={ps:.3f}:end={pe:.3f}{sample},"
                              f"setpts=PTS-STARTPTS[pvr{i}_{j}]")
                 _region_parts(parts, f"pvr{i}_{j}", f"pvt{i}_{j}", local_rgs,
                               sw, sh, 0.0, pe - ps, f"sp{i}_{j}")
                 parts.append(f"[pvt{i}_{j}]setpts=PTS{spts}[pvz{i}_{j}]")
             else:
-                parts.append(f"[pv{i}_{j}]trim=start={ps:.3f}:end={pe:.3f},"
+                parts.append(f"[pv{i}_{j}]trim=start={ps:.3f}:end={pe:.3f}{sample},"
                              f"setpts=(PTS-STARTPTS){spts}[pvz{i}_{j}]")
             tempo = "" if abs(f - 1.0) < 1e-9 else f",{_atempo_chain(f)}"
             # Joins INSIDE a sped segment meet two independently retimed
@@ -5562,7 +5580,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 parts.append(
                     f"[{idx}:a]atrim=start={off:.3f}"
                     f":end={off + dur * rate:.3f},"
-                    f"asetpts=PTS-STARTPTS,{_atempo_chain(rate)},"
+                    f"asetpts=PTS-STARTPTS,{_insert_atempo_chain(rate)},"
                     f"{AUDIO_NORM},{pad}[a_ins{j}]")
             else:
                 parts.append(f"[{idx}:a]atrim=start={off:.3f}"

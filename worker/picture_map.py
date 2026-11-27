@@ -36,7 +36,7 @@ import numpy as np
 
 # 2: cuts measured over the footage's drawn steps (p6311, ticket 1844); a
 # version-1 map is measured again.
-VERSION = 2
+VERSION = 3
 # The analysis frame. Rectangles are read on it, so its width is what they
 # are good to: 1/640 of the frame, under two pixels of a 1080p export.
 ANALYSIS_W = 640
@@ -236,6 +236,36 @@ def _shot_row(first, last, fps, duration, lo, hi, peak, best):
             "best": round(best[1] / fps, 2), "flat": bool(best[0] < FLAT_STD)}
 
 
+def _fill_rows(shot, samples, fps):
+    """Keep persistent changes of matte geometry inside a single indexed shot.
+
+    The exposure/cut detector can group a dark dissolve and the next shot.
+    A maximum over that whole interval loses black bands as soon as one
+    sample lights them up. Only split the fill geometry, never the edit.
+    """
+    if len(samples) < 2:
+        return [shot]
+    runs = []
+    for frame_number, frame in samples:
+        rect = find_rect(frame, frame)
+        if runs and max(abs(a - b) for a, b in zip(rect, runs[-1][2])) < 0.012:
+            runs[-1][1] = frame_number
+        else:
+            runs.append([frame_number, frame_number, rect])
+    stable = [run for run in runs if run[1] > run[0]]
+    if not stable:
+        return [shot]
+    rows = []
+    start = shot["start"]
+    for n, (_, last, rect) in enumerate(stable):
+        end = (cut_grid(round((last + stable[n + 1][0]) / 2), fps)
+               if n + 1 < len(stable) else shot["end"])
+        rows.append(dict(shot, start=start, end=end, rect=rect,
+                         bars=rect != [0.0, 0.0, 1.0, 1.0]))
+        start = end
+    return rows
+
+
 def measure(src, *, ffmpeg=None, info=None):
     """The map of ``src`` (a local path or a signed URL). Raises only for a
     source that cannot be read at all; the caller keeps the index's shots."""
@@ -291,7 +321,7 @@ def measure(src, *, ffmpeg=None, info=None):
     duration = float(info.get("duration") or i / fps)
     edges = [0] + cuts + [i]
     d = np.asarray(diffs, dtype=np.float32)
-    shots = []
+    shots, fill_shots = [], []
     pos = 0
     for a, b in zip(edges, edges[1:]):
         lo = hi = None
@@ -314,9 +344,10 @@ def measure(src, *, ffmpeg=None, info=None):
         peak = float(inner.max()) if inner.size else 0.0
         shots.append(_shot_row(a, b if b < i else None, fps, duration,
                                lo, hi, peak, best))
+        fill_shots.extend(_fill_rows(shots[-1], wanted, fps))
     return {"v": VERSION, "fps": round(fps, 3), "frames": i,
             "duration": round(duration, 3), "width": W, "height": H,
-            "cuts": [cut_grid(c, fps) for c in cuts], "shots": shots}
+            "cuts": [cut_grid(c, fps) for c in cuts], "shots": shots, "fill_shots": fill_shots}
 
 
 def run_on(local, info=None):

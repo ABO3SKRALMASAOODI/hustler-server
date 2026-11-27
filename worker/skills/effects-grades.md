@@ -115,7 +115,7 @@ WRITE YOUR OWN CHAIN (`add_custom_filter`) for a look no preset makes
   `huesaturation=saturation=-1:colors=b:strength=10`). Check a frame with and
   without the object.
 
-SPEED (`set_speed` / `remove_speed`): 0.25–4x on a SOURCE range; audio keeps
+SPEED (`set_speed` / `remove_speed`): 0.25x upward (including 6x, 10x and 50x) on a SOURCE range; audio keeps
 pitch; everything re-anchors. Below 0.6x frames are duplicated, so prefer
 0.6–0.8x and say the trade-off.
 

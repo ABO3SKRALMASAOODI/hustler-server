@@ -78,7 +78,7 @@ def floor(fps_src, fps_out):
 
 
 def plan(src0, src1, curve, *, fps_src=30.0, fps_out=30.0, max_steps=None,
-         min_step_s=MIN_STEP_S, min_factor=0.25, max_factor=4.0,
+         min_step_s=MIN_STEP_S, min_factor=0.25, max_factor=math.inf,
          prefix="rp", allow_duplicates=False):
     """Contiguous speed spans over SOURCE [src0, src1] following ``curve``
     (a callable f(u) or keys [(u, factor)]). Returns (spans, report):
