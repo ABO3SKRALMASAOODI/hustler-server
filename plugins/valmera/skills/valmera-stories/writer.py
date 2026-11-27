@@ -444,51 +444,14 @@ STYLE_DATA = {
 
 
 def write(idea, card, form, voices=None, notes=None, effort="high"):
-    """The script for one idea in one style. Facts are re-read on the web; every one carries a quote and its URL."""
-    F = FORMS[form]
-    voices = voices or card.get("voice") or list(VOICES)
-    system = ("You are the writer and voice director of Valmera's story workflow. You write narration that is spoken by a synthetic "
-              "narrator over real footage and photographs of what it names, for a " + F["name"] + ". Every sentence is true and checked on the web now; nothing "
-              "is invented, rounded or dramatised beyond the sources. You also direct the actor: pace, energy, melody, emphasis and "
-              "pauses per segment. Write for the ear: a thought runs on with commas and 'and', 'but', 'so' until it lands, a full stop only where it lands, lengths mixed (never three short sentences in a row, never a verbless fragment as a sentence), concrete nouns, numbers a listener can hold.")
-    system += f"\n\n# The bar\n{references()}\n\n"
-    system += "\n\n" + (("Read the sources again with the web tools and check every fact. The first segment is the hook: it must work in the "
-               "first second (a known name and something that should not be true, or a stake), never a greeting or a question to the "
-               "viewer. The last segment reframes the hook in one sentence. No call to action, no 'follow for more'.\n\n"
-               "Return JSON only: {\"title\": a plain title, \"voice\": one voice id, \"pace\": slow|steady|brisk|fast, \"energy\": "
-               "low|mid|high, \"hook_line\": the first segment's words, \"close_line\": the last segment's words, \"names\": [every "
-               "proper noun the narration says, exactly as spelled; the narrator's listeners hear with them], \"segments\": [{\"say\": "
-               "the words spoken, numbers and years written as words the way they are said (\"nineteen seventy-three\", \"five thousand "
-               "dollars\"), no digits, no abbreviations, no symbols, \"show\": at most two short display strings for this segment as they "
-               "would be printed, digits allowed (a year, a figure, a name), or [], \"beat\": hook|setup|turn|low|payoff|close, \"pace\": slow|steady|brisk|fast (how fast this "
-               "segment's pictures change and its voice moves: brisk on a list or on money, slow on the turn), "
-               "\"pictures\": names from the named list this segment talks about, in order, \"melody\": falling|rising|level|wide, "
-               "\"emphasis\": [one or two words of say], \"pause_after\": seconds of silence after it (0.18 to 0.26 inside the story; "
-               "0.35 to 0.5 only where the story turns, at most three times), \"direction\": a few "
-               "words for the actor, \"facts\": ids of the facts it states, \"quotes\": every span of say that presents "
-               "someone's own words (in quotation marks, or as what they said, recalled, wrote or asked) as {\"words\": the span "
-               "exactly as in say, \"who\": whose words, \"fact\": the id of the fact whose quote holds those words word for word}, "
-               "or [] (never put words in anyone's mouth that a fact's quote does not hold verbatim)}], \"facts\": [{\"id\": \"f1\", \"claim\": the fact in plain "
-               "words, \"quote\": a whole sentence copied exactly, word for word, from the page at url that states it (never a bare "
-               "date, number or fragment: a quote of fewer than four words besides its numbers is refused), \"url\": the page, "
-               "\"also\": [other readable pages you read that carry the same sentence, or []]}], "
-               "\"named\": [{\"name\", \"is\", \"searches\", \"must_show\"} for every person, place or thing the film shows], ") +
-               (STYLE_DATA.get(card["id"], "")) +
-               ("}\n"
-               "Every digit that appears in `show` or in the style's data must appear in some fact's quote (only the numbers of a list the "
-               "film itself counts out, marked role ordinal, are exempt; a rank such as #1 is a figure and needs its quote, or say it in "
-               "words). Every quote is checked "
-               "by fetching its URL with a plain script, so cite pages a script can read (Wikipedia, Wikimedia, archive.org, "
-               "government and university pages, a company's own newsroom) and read each one with web_fetch before quoting it; "
-               "pages behind a paywall or a bot wall (Britannica, most newspapers) and PDF files cannot be checked and will be dropped: "
-               "cite the HTML page that says the same thing."))
-    content = ((f"# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
-               f"# Form\n{F['name']}: {F['words'][0]}-{F['words'][1]} spoken words in {F['segments'][0]}-{F['segments'][1]} segments "
-               f"(about {F['seconds'][0]}-{F['seconds'][1]} s at 175 words a minute). {F['shape']}.\n\n"
-               f"# Voices\n{json.dumps({k: VOICES[k] for k in voices if k in VOICES})}\n\n") +
-               (f"# Notes from the last attempt\n{notes}\n\n" if notes else ""))
-    text, use = ask_web(system, content, effort=effort, max_tokens=32000, searches=8, fetches=10, what="write")
-    return json_block(text), use
+    """Standalone callers use the same source bank and beat sheet as the workflow."""
+    bank, research = spine_bank(idea)
+    if not bank["ok"]:
+        raise ValueError(bank["why"])
+    sheet, planner = story_chain.plan("story", idea, dict(facts=bank_facts(bank), spine=spine_view(bank)))
+    script, use = write_from_bank(idea, card, form, bank, voices, notes, effort, sheet=sheet)
+    return script, dict(use, research=research, planner=planner,
+                        usd=sum(float(u.get("usd", 0)) for u in [*research, planner, use] if u))
 
 
 # ----------------------------------------------------------------- the picture brief on the final words

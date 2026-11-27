@@ -263,8 +263,7 @@ def printed_strings(script):
 
 
 def check_script(script, dos):
-    """Measured: the facts it cites exist and were verified, every printed figure stands in a verified quote, the length
-    is inside the form, the spoken form carries no digits."""
+    """Measure source citations, printed figures, chapter turns and spoken notation. Report the runtime in words."""
     facts = {f["id"]: f for f in dos.get("facts") or []}
     problems = []
     used = set()

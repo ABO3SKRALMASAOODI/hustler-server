@@ -326,6 +326,18 @@ def from_spine(ctx, pick, card, spend, n, verified=()):
             bank = json.load(saved)
     except (FileNotFoundError, ValueError):
         bank = {}
+    if bank and "request" not in bank and bank.get("idea") == pick.get("title"):
+        # Older interrupted runs saved the idea and the bank separately. Recover a bank only
+        # from this run's exact selected idea, with all original source receipts represented.
+        try:
+            with open(os.path.join(ctx.run_dir, "ideas.json")) as saved:
+                matching_idea = pick in json.load(saved)["ideas"]
+        except (OSError, KeyError, ValueError):
+            matching_idea = False
+        have = {(f["url"], f["quote"]) for f in bank.get("facts", [])}
+        if matching_idea and all((f["url"], f["quote"]) in have for f in verified):
+            bank["request"] = source_key
+            chain_record(ctx, f"spine{n}", bank)
     if bank.get("request") != source_key or not bank.get("ok"):
         bank, more = writer.spine_bank(pick, log=ctx.log, verified=verified)
         spend.extend(dict(stage="spine", **u) for u in more if u)
@@ -516,8 +528,11 @@ def timed(ctx, sc, narrate=None):
         return {"available": False, "reason": "a supplied read belongs to the final script"}
     try:
         os.makedirs(ctx.supply, exist_ok=True)
-        read = (narrate or narrate_script)(ctx, sc, os.path.join(ctx.supply, "narration_draft"))
-        return timing.measure(read["words"], sc)
+        meaning = sc.get("beats", {}).get("meaning", len(sc["segments"])-1)
+        indexes = sorted({0, meaning})
+        sample = dict(sc, segments=[sc["segments"][i] for i in indexes], beats={"meaning": indexes.index(meaning)})
+        read = (narrate or narrate_script)(ctx, sample, os.path.join(ctx.supply, "narration_draft"))
+        return dict(timing.measure(read["words"], sample), segment_indexes=indexes)
     except (OSError, RuntimeError, ValueError) as exc:
         ctx.log(f"draft read unavailable: {exc}")
         return {"available": False, "reason": str(exc)[:300]}

@@ -62,3 +62,14 @@ def test_recoverable_tutorial_error_resumes_the_same_record_and_format(tmp_path,
     monkeypatch.setattr(batch.shell,"run",resume)
     batch.edit_film("wf2",root,work,0,{"title":"Pain","style":"window"},False)
     assert visits == [(str(folder.parent),script)]*2
+
+def test_podcast_fragments_keep_both_word_edges_when_the_thought_crosses_a_pause(tmp_path):
+    media = tmp_path/"source.mp4"
+    rows = [{"text":"They wanted", "start":0.4, "end":1.0},
+            {"text":"the same thing.", "start":3.1, "end":4.2},
+            {"text":"So they agreed.", "start":5.2, "end":6.1}]
+    (tmp_path/"valmera-segments.json").write_text(json.dumps(rows))
+    sentences, edges = proof.source_sentences(None, media, "upload", 0.8, 5.8)
+    assert sentences == [{"i":0, "text":"They wanted the same thing.", "t0":0.4, "t1":4.2},
+                         {"i":1, "text":"So they agreed.", "t0":5.2, "t1":6.1}]
+    assert edges[2]["t0"] == 5.2
