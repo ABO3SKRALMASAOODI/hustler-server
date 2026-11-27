@@ -381,6 +381,19 @@ def test_the_trials_own_limit_stays_a_budget_stop(world):
     assert world.ticket("auto-request-partial-budget")["severity"] == "P2"
 
 
+def test_a_trial_stop_before_subscribing_is_not_paid_out(world):
+    # #1760: account 3505 met the trial's daily pacing at 11:52, subscribed at
+    # 11:55; the plan is read today, the turn spent no subscription.
+    paying(world, balance=500)
+    turn(world, project=PAID_PROJECT, user=PAYER, state="done", result={
+        "outcome": "blocked", "status": "budget", "steps": 0,
+        "credits_charged": 0.0, "billable": False,
+        "claude_trial": {"decision": "unavailable",
+                         "reason": "not_granted: daily_usd_cap"}})
+    world.tick()
+    assert world.ticket(paid_out.CAUSE_KEY) is None
+
+
 def test_a_slice_handing_over_is_not_an_end(world):
     paying(world)
     turn(world, project=PAID_PROJECT, user=PAYER, state="done", result={

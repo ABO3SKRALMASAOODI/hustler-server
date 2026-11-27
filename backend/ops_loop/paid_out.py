@@ -38,7 +38,12 @@ def rows(cur, since, now, limit=400):
     A budget stop is the worker saying the wallet is spent (it fires only when a
     turn tried to spend all of it). Any other ending counts on the balance, which
     is today's, so it speaks only for the customer's latest turn: the intake's
-    window reaches back, and every earlier turn would read as out of credits."""
+    window reaches back, and every earlier turn would read as out of credits.
+
+    A turn the worker ran or stopped on the free-trial lane (its result carries
+    ``claude_trial``) spent no subscription: the plan is read today, so an
+    account that met the trial's pacing at 11:52 and subscribed at 11:55 would
+    otherwise page as a subscriber whose credits ran out (#1760, 27 Nov)."""
     i = _i()
     cur.execute(f"""
         SELECT j.id AS job_id, j.user_id, j.project_id, j.updated_at AS at,
@@ -61,6 +66,7 @@ def rows(cur, since, now, limit=400):
                  WHERE c.spent > 0) spent
          WHERE j.updated_at > %(since)s AND j.updated_at <= %(now)s
            AND {i.ENDED_SHORT} AND {defs.paying("u")} AND {i._customers()}
+           AND NOT (COALESCE(j.result, '{{}}'::jsonb) ? 'claude_trial')
            AND (COALESCE(j.result->>'status', '') = ANY(%(budget)s)
                 OR (COALESCE(u.credits_balance, 0) < %(out)s
                     AND NOT EXISTS (
