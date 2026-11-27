@@ -445,6 +445,18 @@ def test_assign_without_flags_is_todays_step_six():
     assert [len(r["picks"]) for r in rows] == [1, 1] and rows[0]["picks"][0]["t"] == 1.5 and rows[1]["picks"][0]["source"] in ("s1", "s0")
 
 
+def test_briefed_assignment_uses_only_distinct_depicting_takes_at_both_durations():
+    from footage import run
+    times = [(0.,3.),(3.,6.),(6.,9.)]
+    sources = {"s0":_src("s0",times),"other":_src("other",times)}
+    frames = [_good("s0",1.,[0]),_good("s0",1.5,[0]),_good("s0",7.,[0]),_good("other",1.,[1])]
+    for duration in (2.,10.):
+        row, = run.assign([dict(i=0,say="spoken action",dur=duration,
+            see=[dict(word_i=0,thing="action")])],frames,sources,{}, {},shot_s=.45)
+        assert row["want"]==2
+        assert {(p["source"],tuple(p["shot"])) for p in row["picks"]}=={("s0",times[0]),("s0",times[2])}
+
+
 def test_strict_lines_never_fill_a_line_by_subject_alone():
     from footage import run
     src_of = {"s0": _src("s0", [(0.0, 3.0), (3.0, 6.0), (6.0, 9.0)])}
