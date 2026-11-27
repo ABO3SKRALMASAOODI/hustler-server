@@ -1711,7 +1711,12 @@ def prepare_picture_mix(ctx, sc):
             continue
         with open(target) as handle:
             doc = json.load(handle)
-        if doc.get("sound") != sounds or doc.get("sound_design") != report:
+        items = doc["items"]
+        if target == scene_path:
+            import palette_menu
+            items = palette_menu.caption_handoff(items)
+        if items != doc["items"] or doc.get("sound") != sounds or doc.get("sound_design") != report:
+            doc["items"] = items
             doc.update(sound=sounds, sound_design=report)
             with open(target+".part","w") as handle:
                 json.dump(doc,handle,ensure_ascii=False)

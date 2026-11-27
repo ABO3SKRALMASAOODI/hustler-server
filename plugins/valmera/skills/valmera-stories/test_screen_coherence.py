@@ -101,3 +101,12 @@ def test_shot_metadata_from_pictures_is_visible_at_the_word():
     picture = dict(f=[0,15], identity=dict(year=1978, version="prototype", people=["designer"], meaning_box=[.1,.2,.6,.8]))
     view = director.composed_words(words,[picture],[],[],[],30)[0]["screen"]["pictures"][0]
     assert (view["identity_year"], view["version"], view["people"], view["meaning_box"]) == (1978,"prototype",["designer"],[.1,.2,.6,.8])
+
+def test_caption_handoff_reads_fallback_ink_not_the_asked_duration():
+    import palette_menu
+    director.palette_module()
+    cap = dict(id="cap",k="word",role="cap",t="said",f=[0,12])
+    fallback = dict(id="title",k="word",role="big",t="seen",f=[2,8],op=[0,0,1,1,1,0])
+    rows = palette_menu.caption_handoff([cap,fallback])
+    assert [r["f"] for r in rows if r["role"]=="cap"] == [[0,4],[7,12]]
+    assert palette_menu.caption_handoff(rows) == rows
