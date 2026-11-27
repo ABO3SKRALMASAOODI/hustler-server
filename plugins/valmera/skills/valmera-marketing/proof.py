@@ -2192,12 +2192,11 @@ def product_clips(script, out):
     up = rec["upload"]
     os.makedirs(out, exist_ok=True)
     body = export_program_seconds(ex, export_edl(ex))
-    spans = script["script"]["proof"].get("spans")
-    if not spans:
-        # Resume an already written legacy tutorial at its recorded proof, on that record's clocks.
-        spans = dict(before=chk["before"], after=chk["after"])
-    a, b = spans["after"]
-    ba, bb = spans["before"]
+    proof = (script.get("script") or {}).get("proof") or {}
+    spans = proof.get("spans") or {}
+    # Legacy scripts keep these intervals in the export check. Each is on its own file's clock.
+    a, b = spans.get("after") or chk["after"]
+    ba, bb = spans.get("before") or chk["before"]
     cut(up["file"], ba, bb, os.path.join(out, "before.mp4"))
     cut(ex["file"], a, b, os.path.join(out, "after.mp4"))
     hook = None

@@ -163,22 +163,21 @@ def test_picture_check_supplies_phrase_context_without_widening_exact_words(monk
     assert "chairs" not in text
 
 
-def test_proof_holds_stay_bounded_after_audio_snap(tmp_path, monkeypatch):
+def test_legacy_tutorial_reuses_its_full_checked_before_and_after_intervals(tmp_path, monkeypatch):
     import json
     record = tmp_path / "record.json"
     record.write_text(json.dumps(dict(upload=dict(file="raw.mp4", dur=30, sha256="raw"),
                                       exports=[dict(tag="final", file="export.mp4", dur=35, sha256="export")])))
     cuts = []
-    monkeypatch.setattr(P, "endcard_s", lambda: 5)
-    monkeypatch.setattr(P, "quiet_snap", lambda path, t: t + (0.4 if t > 4 else -0.1))
     monkeypatch.setattr(P, "cut", lambda src, a, b, out, **kw: cuts.append((src, a, b, out)))
     script = dict(record=str(record), export_check=dict(before=[1, 9], after=[4, 13], tease_s=15))
     product = P.product_clips(script, str(tmp_path / "product"))
-    assert product["before"]["t"][1] - product["before"]["t"][0] <= 3
-    assert product["after"]["t"][1] - product["after"]["t"][0] <= 4
+    assert product["before"]["t"] == [1, 9]
+    assert product["after"]["t"] == [4, 13]
+    assert [cut[:3] for cut in cuts[:2]] == [("raw.mp4", 1, 9), ("export.mp4", 4, 13)]
     assert len(cuts) == 3 and product["hook"] is None             # no opening beat on the script: no opening clip
-    assert cuts[-1][1:] == (0.0, 30, str(tmp_path / "product" / "export_body.mp4"))   # the whole export, for lines short of pictures
-    assert product["body"]["t"] == [0.0, 30]
+    assert cuts[-1][1:] == (0.0, 35, str(tmp_path / "product" / "export_body.mp4"))
+    assert product["body"]["t"] == [0.0, 35]
 
 
 def test_the_before_knows_the_exports_own_crop_of_the_upload(tmp_path):
