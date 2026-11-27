@@ -204,26 +204,34 @@ def supply(script, subjects, got, out, per):
     import openai_budget
     root = Path(out)/'publisher'
     root.mkdir(parents=True, exist_ok=True)
-    cited = list(dict.fromkeys(f["url"] for f in facts.values()))
-    plan = root/(identifier([briefs, cited])+'.json')
-    uses, reports = [], list(captures)
-    try:
-        images = json.loads(plan.read_text())
-    except (FileNotFoundError, ValueError):
+    uses, reports, images = [], list(captures), []
+    # A single web-research budget shared by the entire script left late phrases unsearched.
+    # A pair shares research when the archival source is common; each pair resumes independently.
+    for start in range(0,len(briefs),2):
+        pair = briefs[start:start+2]
+        pages = list(dict.fromkeys(f["url"] for b in pair for f in b["sources"]))
+        plan = root/(identifier([pair,pages,"phrase-research-2"])+'.json')
         try:
-            catalog = []
-            for page in cited:
-                try:
-                    catalog.extend(captioned_images(page, root))
-                except Exception as exc:
-                    openai_budget.propagate(exc)
-            images, use = lookup(briefs, writer, catalog)
+            images.extend(json.loads(plan.read_text()))
+            continue
+        except (FileNotFoundError,ValueError):
+            pass
+        catalog = []
+        for page in pages:
+            try:
+                catalog.extend(captioned_images(page,root))
+            except Exception as exc:
+                openai_budget.propagate(exc)
+        try:
+            found,use = lookup(pair,writer,catalog)
         except Exception as exc:
             openai_budget.propagate(exc)
-            return captures + [dict(subject=b['name'], must_show=b['must_show'], errors=[str(exc)[:180]]) for b in briefs], uses
-        uses.append(dict(stage='supply', **use))
-        with tempfile.NamedTemporaryFile(mode='w', dir=root, delete=False) as f:
-            json.dump(images, f)
+            reports.extend(dict(subject=b["name"],must_show=b["must_show"],errors=[str(exc)[:180]]) for b in pair)
+            continue
+        uses.append(dict(use,stage="supply"))
+        images.extend(found)
+        with tempfile.NamedTemporaryFile(mode="w",dir=root,delete=False) as f:
+            json.dump(found,f)
         Path(f.name).replace(plan)
     for name in dict.fromkeys(b['name'] for b in briefs):
         rows, eligible, local, errors = [], {}, {}, []
@@ -238,7 +246,7 @@ def supply(script, subjects, got, out, per):
                 errors.append(dict(url=item['url'], error=str(exc)[:160]))
                 continue
             local[key] = rec['path']
-            if usable and max(rec['w'], rec['h']) >= 700 and min(rec['w'], rec['h']) >= 420:
+            if usable:
                 eligible[key] = rec
             rows.append(dict(id=key, title=rec['title'], description=rec['description'], credit=rec['credit'],
                              image_date=rec.get('image_date'), publication_date=rec.get('publication_date'),
@@ -252,12 +260,12 @@ def supply(script, subjects, got, out, per):
                 issues.append(dict(error=str(exc)[:180]))
                 kept, checked, usd = [], [], 0
             results = got.setdefault(name, [])
-            have = {r['url'] for r in results}
+            have = {r.get('url') for r in results}
             before = len(results)
             for c in kept:
                 rec = eligible.get(c['id'])
                 if rec and rec['url'] in have:
-                    existing = next(r for r in results if r['url'] == rec['url'])
+                    existing = next(r for r in results if r.get('url') == rec['url'])
                     briefs_seen = existing.setdefault('checked_briefs', [])
                     if b['must_show'] not in briefs_seen:
                         briefs_seen.append(b['must_show'])

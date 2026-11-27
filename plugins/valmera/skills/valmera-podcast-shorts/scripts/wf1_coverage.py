@@ -847,6 +847,50 @@ def publisher_recovery(coverage, missing, pictures, work):
     return reports, spend, added
 
 
+def publisher_motion(coverage, missing, footage, work):
+    """Scout independently downloadable publisher films using the same worker as the initial search."""
+    import chain
+    import shell
+    import wf1_primary_sources
+    import wf1_short
+    refs = coverage["research_context"].get("references") or []
+    windows = coverage["windows"]
+    briefs = [dict(windows[i],i=i,primary_research=[ref for ref in refs if i in (ref.get("windows") or [])],
+                   source_request="Seek the original publisher's downloadable master or an institutional archive copy.")
+              for i in missing]
+    key = hashlib.sha256(json.dumps(briefs,sort_keys=True).encode()).hexdigest()[:16]
+    root = work/key
+    root.mkdir(parents=True,exist_ok=True)
+    state = dict(workflow="wf1",run_id=work.parent.parent.name)
+    ctx = shell.Ctx(str(root),state,str(work))
+    originals = wf1_primary_sources.acquire(briefs,os.path.join(ctx.supply,"sources"),wf1_short._llm())
+    sources = originals.get("sources") or {}
+    report = dict(subjects=list(sources),errors=originals.get("errors") or [],briefs=briefs)
+    if not sources:
+        return report,originals["spend"],0
+    named = [dict(name=w["name"],must_show=w["must_show"],video_sources=sources[w["name"]])
+             for w in briefs if w["name"] in sources]
+    script = dict(title=coverage.get("context") or "Documentary inserts",
+                  segments=[footage_segment(i,w) for i,w in enumerate(windows)],named=named)
+    rec = chain.footage(ctx,dict(script=script),[w["t1"]-w["t0"] for w in windows],
+                        lines=missing,preserve_source=True,native_pixels=True,whole_first=True,
+                        keep_sources=True,source_only=True,strict_lines=True,look_itself=True,hear_s=0)
+    count = 0
+    if rec:
+        pool = dict(footage=[],credits=[])
+        wf1_short.merge_footage(ctx,pool,rec,"footage")
+        for line in pool["footage"]:
+            clips = footage.setdefault(line["i"],[])
+            known = {c["path"] for c in clips}
+            for clip in line["clips"]:
+                if clip["path"] not in known:
+                    clips.append(clip)
+                    known.add(clip["path"])
+                    count += 1
+    report["added"] = count
+    return report,originals["spend"],count
+
+
 def checked_proposals(coverage, footage, pictures, duration, checker, composed_stills=(), rejected=None,
                       originals=None, cut_dir=None, ffmpeg=None, _publisher_pass=True):
     """The picture check chooses among the local candidates before any acquisition; prior motion never approves a new
@@ -890,19 +934,33 @@ def checked_proposals(coverage, footage, pictures, duration, checker, composed_s
         # already the ranking) the choice is made. A re-proposal reuses every verdict it already has.
         ins=proposals(coverage,footage,pictures,rejected=rejected,fits=fits,**fresh)
     uses = [s for attempt in attempts for s in attempt['spend']]
-    placed = {row[4]["window"] for row in accepted}
-    missing = [i for i, w in enumerate(coverage["windows"]) if i not in placed and
-               not (w.get("on_take") or w.get("publisher_camera"))]
+    def still_missing():
+        placed = {row[4]["window"] for row in accepted}
+        return [i for i,w in enumerate(coverage["windows"]) if i not in placed and
+                not (w.get("on_take") or w.get("publisher_camera"))]
+
+    def recheck():
+        nonlocal accepted, report
+        accepted, report = checked_proposals(coverage,footage,pictures,duration,checker,composed_stills,
+                                             rejected,originals,cut_dir,ffmpeg,_publisher_pass=False)
+        attempts.extend(report["attempts"])
+        uses.extend(report["spend"])
+
+    missing = still_missing()
     if _publisher_pass and missing and cut_dir and coverage.get("research_context"):
-        reports, spend, added = publisher_recovery(coverage, missing, pictures, Path(cut_dir).parent/"press-stills")
-        uses.extend(spend)
+        work = Path(cut_dir).parent
+        searches, spend, added = publisher_recovery(coverage,missing,pictures,work/"press-stills")
+        uses.extend({k:v for k,v in u.items() if k not in ("stage","what")} for u in spend)
         if added:
-            accepted, retry = checked_proposals(coverage, footage, pictures, duration, checker, composed_stills,
-                                                rejected, originals, cut_dir, ffmpeg, _publisher_pass=False)
-            attempts.extend(retry["attempts"])
-            uses.extend(retry["spend"])
-            report = retry
-        report["publisher_searches"] = reports
+            recheck()
+        missing = still_missing()
+        if missing and ffmpeg:
+            video, spend, added = publisher_motion(coverage,missing,footage,work/"publisher-motion")
+            searches.append(video)
+            uses.extend({k:v for k,v in u.items() if k not in ("stage","what")} for u in spend)
+            if added:
+                recheck()
+        report["publisher_searches"] = searches
     return accepted,dict(report,attempts=attempts,spend=uses,
                          rejected_paths=sorted(set(report.get("rejected_paths") or []) |
                                                {p for _,p in rejected if p is not None}))

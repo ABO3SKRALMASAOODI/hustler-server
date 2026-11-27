@@ -1707,9 +1707,46 @@ def footage_kw(reel_kw, **more):
     return dict(reel_kw, **{k: v for k, v in dict(FOOTAGE_FLAGS, **more).items() if k in ok}) if reel_kw else {}
 
 
+def name_portraits(ctx, sc, pack):
+    """Acquire the real portrait for each timed person introduction, including in saved scripts."""
+    people = {n["name"].casefold(): n["name"] for n in sc.get("named") or [] if is_person(n) and n.get("name")}
+    lines = {}
+    for i,seg in enumerate(sc["segments"]):
+        for item in seg.get("show") or []:
+            if isinstance(item,dict) and item.get("role") == "name":
+                person = people.get(str(item.get("text","")).casefold())
+                if person:
+                    lines.setdefault(person,set()).add(i)
+        for brief in seg.get("see") or []:
+            if brief.get("portrait_of"):
+                lines.setdefault(brief["portrait_of"],set()).add(i)
+    for person,placements in lines.items():
+        records = pack.setdefault("pictures",{}).setdefault(person,[])
+        rec = next((r for r in records if r.get("entity_id") and os.path.isfile(r["path"])),None)
+        if not rec:
+            try:
+                rec = PX.portrait_from_wikidata(person,os.path.join(ctx.supply,"pics"))
+            except Exception as exc:
+                ctx.log(f"Portrait lookup for {person}: {type(exc).__name__}, trying the other archives")
+                rec = None
+        if rec:
+            existing = next((r for r in records if r["path"] == rec["path"]),None)
+            if existing is None:
+                rec = dict(rec)
+                try:
+                    rec["faces"] = PX.faces(rec["path"])
+                except (OSError,ValueError,RuntimeError):
+                    rec["faces"] = []
+                records.append(rec)
+            else:
+                rec = existing
+            rec["placement_lines"] = sorted(set(rec.get("placement_lines") or [])|placements)
+
+
 def judge_supply(ctx, sc, pack):
     """Every take of the supply identified once and judged per (take, line) (fit.verdicts): pack["fit"], ["fit_verdicts"]
     and ["identity"]. Returns (usd, calls)."""
+    name_portraits(ctx,sc,pack)
     table, u, c, ids = FIT.verdicts(FIT.candidates(pack), sc, cache_path=os.path.join(ctx.supply, "fit.json"), work=os.path.join(ctx.tmp, "fit"),
                                     log=ctx.log)
     pack["fit"], pack["fit_verdicts"], pack["identity"] = FIT.fits(table), table, ids
