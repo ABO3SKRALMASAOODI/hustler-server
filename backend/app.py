@@ -43,6 +43,7 @@ from routes.admin_video import admin_video_bp
 from routes.admin_v2 import admin_v2_bp
 from routes.admin_ops import admin_ops_bp, start_journey_warmer
 from routes.onboarding import onboarding_bp
+from routes.enterprise import enterprise_bp
 from routes.mcp import mcp_bp
 from routes.mcp_oauth import mcp_oauth_bp
 from routes.phone_status import phone_status_bp
@@ -281,6 +282,7 @@ def create_app():
     # No url_prefix: this blueprint owns routes under BOTH /onboarding and
     # /admin, so the prefixes live on the routes themselves.
     app.register_blueprint(onboarding_bp)
+    app.register_blueprint(enterprise_bp)
     # MCP: the editor as tools for an outside model. No UI anywhere; reachable
     # only with a token the admin account minted (see routes/mcp.py).
     app.register_blueprint(mcp_bp)
