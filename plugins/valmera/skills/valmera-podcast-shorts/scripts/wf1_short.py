@@ -825,6 +825,12 @@ def director_pictures(pack, most=36):
             out.append(dict(id=f"P{len(out)}", path=p, src=p, kind="document" if r.get("provider") == "primary-document" else "photo",
                             archive_source=source,
                             label=str(r.get("shows") or r.get("title") or name)[:60], faces=len(r.get("faces") or [])))
+    inventory = {r.get("path"):r for group in (pack.get("pictures") or {}).values() for r in group}
+    inventory.update({r.get("path"):r for group in pack.get("footage") or [] for r in group.get("clips") or []})
+    for picture in out:
+        source = wf1_film._director().picture_identity(inventory.get(picture["src"], {}))
+        picture.update({key:source[key] for key in ("identity_year","version","meaning_box","people","overlays","printed_text")
+                        if source.get(key) is not None})
     out = out[:most]
     return out, {p["id"]: p["src"] for p in out}
 
@@ -884,7 +890,10 @@ def direction_of(ctx, script, pack):
         window = next((w for w in coverage.get("windows", []) if w["first"] <= i <= w["last"]), {})
         speaker = next((t["speaker"] for t in turns if t["start"] <= word["t0"] - F.LEAD_F / F.FPS < t["end"]), None)
         on_take = not window or window.get("on_take")
-        word["screen"] = dict(voice=speaker or "speaker", text=[word["w"]],
+        paths = {row.get("path") for row in coverage.get("passed_placements", {}).get(str(window.get("first")), [])}
+        identified = [{key:pic[key] for key in ("id", "kind", "label", "identity_year", "meaning_box", "version", "people", "overlays", "printed_text")
+                       if key in pic} for pic in pics if pic.get("src") in paths]
+        word["screen"] = dict(voice=speaker or "speaker", text=[word["w"]], pictures=identified,
                               picture=window.get("must_show") or window.get("name") or "interview",
                               role="speaker" if on_take else "planned cutaway",
                               faces=take.get("faces") if on_take else None,

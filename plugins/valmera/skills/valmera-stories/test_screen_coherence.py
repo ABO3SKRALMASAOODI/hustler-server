@@ -94,3 +94,10 @@ def test_composed_fallback_keeps_recorded_after_whole():
 
 def test_printed_form_inside_a_longer_text_field():
     assert director.printed_text("Visit valmera dot I O today", {"valmera dot I O": "VALMERA.IO"}) == "Visit VALMERA.IO today"
+
+
+def test_shot_metadata_from_pictures_is_visible_at_the_word():
+    words = [dict(w="prototype", t0=0., t1=.5)]
+    picture = dict(f=[0,15], identity=dict(year=1978, version="prototype", people=["designer"], meaning_box=[.1,.2,.6,.8]))
+    view = director.composed_words(words,[picture],[],[],[],30)[0]["screen"]["pictures"][0]
+    assert (view["identity_year"], view["version"], view["people"], view["meaning_box"]) == (1978,"prototype",["designer"],[.1,.2,.6,.8])

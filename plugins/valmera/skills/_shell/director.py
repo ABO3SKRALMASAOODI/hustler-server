@@ -246,7 +246,18 @@ def words_sheet(sentences, stress_w=()):
 
 
 PICTURE_FIELDS = ("kind", "name", "shows", "subject", "role", "person", "identity_year", "version",
-                  "identity_version", "meaning_box", "faces", "printed_text", "highlight", "text")
+                  "identity_version", "meaning_box", "faces", "people", "overlays", "passages", "printed_text", "highlight", "text")
+
+
+def picture_identity(picture):
+    """Use the PICTURES record carried by a placement or by its acquired source."""
+    identity = picture.get("identity") or {}
+    merged = dict(identity, **picture)
+    if identity.get("year") is not None:
+        merged.setdefault("identity_year", identity["year"])
+    if identity.get("speaking_on_camera"):
+        merged.setdefault("role", "speaker")
+    return merged
 
 
 def composed_words(words, pictures, items, owners, voices, fps):
@@ -257,6 +268,7 @@ def composed_words(words, pictures, items, owners, voices, fps):
             if span and span[0] < b and a < span[1]:
                 yield row
 
+    pictures = [picture_identity(p) for p in pictures]
     result = []
     for word in words:
         a = round(word["t0"] * fps)
@@ -284,6 +296,7 @@ def shot_sections(direction, pictures, frame_of, seg_span, segments, dur_f):
     """Choose a section once per shot. Unknown or contemporary footage retains its original colour."""
     import datetime
     current_year = datetime.date.today().year
+    pictures = [picture_identity(p) for p in pictures]
     requested = [(section_frames(s, frame_of, seg_span, dur_f), s) for s in direction.get("sections") or []]
     edges = {0, dur_f}
     for picture in pictures:
