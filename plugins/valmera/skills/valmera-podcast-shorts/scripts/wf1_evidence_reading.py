@@ -59,29 +59,3 @@ def seat(rows, coverage, references, word_frame, word_count, end):
                 # Two views of the same document can carry one direction. Keep the original cuts.
                 return rows
     return planned
-
-
-def compose(plan, span, key, rec, palette, size):
-    from wf1_display import reading_card
-    read = rec["spoken_reading"]
-    plan.page(span, "#14171B", grain=0)
-    history = read["history"]
-    if history:
-        for i,row in enumerate(history):
-            centre = .29 + i * .164
-            reading_card(plan, span, row["label"], row["stamp"], "", palette,
-                         centre=centre, max_height=.15, group="source-history-"+str(i))
-        return
-    from scene.motion import marked_figure
-    box, mark = marked_figure(rec["action_box"], rec["mark_box"], (rec["w"],rec["h"]), size)
-    plan.card(span,key,box,crop=rec["action_box"],source_ink=[box],document_excerpt=True,
-              look=None,grade=dict(gain=1.),caption_baseline=.88)
-    hit = max(span[0], read["at"])
-    if hit < span[1]:
-        plan.block([hit,span[1]],mark,palette["accent"],z=2)
-    credit = " · ".join(filter(None, (rec.get("credit"), "Example")))
-    operation = "Reviewer · " + read["operation"] if read.get("operation") else ""
-    reading_card(plan,span,read["text"],credit,operation,palette,
-                 centre=.65,max_height=.26,group="source-result")
-    if read["owner"]:
-        reading_card(plan,span,"",read["owner"]+" replies","",palette,centre=.22,max_height=.10,group="reply")

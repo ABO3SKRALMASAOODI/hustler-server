@@ -38,24 +38,3 @@ def example(raw, word_count, interview_cues=()):
                   if first < c["first"] <= finding <= c["last"] < levels[0]["at"]
                   and c.get("speaker") == raw["speaker"]), finding)
     return dict(raw, finding_at=onset, levels=levels, counts=counts)
-
-
-def draw(plan, start, end, rec, frame, palette, width, height):
-    from scene.palette.type import reporting_chain
-    from wf1_display import reading_card
-
-    finding = frame(rec["finding_at"])
-    levels = [(frame(row["at"]),row["label"]) for row in rec["levels"]]
-    counts = [(frame(row["at"]),row["value"],frame(row["level_at"]) if "level_at" in row else None)
-              for row in rec["counts"]]
-    flat = frame(rec["flat_at"])
-    reading_card(plan,[start,end],"",rec["speaker"]+" · Recollection","",palette,
-                 centre=.485,max_height=.06,group="reporting-credit")
-    for a,b,text in ((start,finding,rec["question"]),(finding,levels[0][0],rec["finding"])):
-        if a < b:
-            reading_card(plan,[a,b],text,"","",palette,centre=.625,max_height=.22,group="reporting-summary")
-    result = reporting_chain(f"reporting-{start}",end,levels,counts,flat,width=width,height=height,
-                             voice=plan.voices["cap"],ink=palette["ink"],accent=palette["accent"])
-    plan.items.extend(result["items"])
-    plan.voices.update(result["voices"])
-    plan.events.extend([start,finding,flat,*(f for f,_ in levels),*(f for f,_,_ in counts)])

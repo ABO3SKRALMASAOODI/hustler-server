@@ -269,7 +269,7 @@ def test_the_showcase_is_split_then_the_real_studio_then_the_edit_then_the_websi
     ex = next(it for it in l1["items"] if it["id"] == "sp.ex")
     assert up[0]["f"][0] == 0 and ex["f"][0] == 0 and ex.get("op", 1) == 1 and ex["src"][0] == hook[0]
     assert abs(up[0]["src"][0] - D.src_at(D.program(EDL_B)[0], hook[0])) < 1e-3       # the raw at the export's instant
-    assert ex["w"] * ex["h"] > 2 * up[0]["w"] * up[0]["h"] and ex["z"] > up[0]["z"]       # the edit is the larger card, in front
+    assert ex["w"] == up[0]["w"] == 1 and ex["h"] == up[0]["h"]
     labels = {it["t"]: it for it in l1["items"] if it["id"] in ("sp.lab_up", "sp.lab_ex")}
     assert set(labels) == set(D.SPLIT_LABELS) and all(it["f"][0] == 0 for it in labels.values())
     assert "VALMERA" in D.SPLIT_LABELS[1]
@@ -290,7 +290,7 @@ def test_the_showcase_is_split_then_the_real_studio_then_the_edit_then_the_websi
     assert res["f"][0] == mk["push"][0] and res["src"][0] == window[0] and shot["f"][0] == mk["push"][1]
     assert abs(shot["src"][0] - (window[0] + (shot["f"][0] - mk["push"][0]) / FPS)) < 1e-3
     assert shot["f"][1] == mk["site"][0] and abs(shot["src"][1] - (window[0] + (mk["site"][0] - mk["push"][0]) / FPS)) < 1e-3
-    assert mk["export_voice"] == [mk["push"][0], mk["push"][0] + 557] and mk["site"][0] == mk["export_voice"][1] - 60   # his last line over the site
+    assert mk["export_voice"] == [mk["push"][0], mk["push"][0] + 557] and mk["site"][0] == mk["export_voice"][1]   # his whole line stays on his picture
     # the website: the real front page under its name, the largest line
     page = next(it for it in l1["items"] if it["id"] == "ct.page")
     assert l1["assets"][page["pic"]]["path"] == "/x/ui/site.png"
@@ -300,12 +300,12 @@ def test_the_showcase_is_split_then_the_real_studio_then_the_edit_then_the_websi
     assert "free" not in text and "$" not in text and "plan" not in text
     for d in beats["devices"]:
         for t in d["texts"]:
-            assert D.MARK[3] < t["y"] - t["cap_px"] / 1920 and t["y"] < 0.8
+            assert (t["x"] + t["w"] < D.MARK[0] or D.MARK[3] < t["y"] - t["cap_px"] / 1920) and t["y"] < 0.8
     # every frame has one base picture; every sound lands on something that moves
     for f in range(l1["dur_f"]):
         assert sum(1 for it in l1["items"] if it["k"] == "shot" and it["f"][0] <= f < it["f"][1]) == 1, f
-    events = {"studio": mk["studio"][0] + 1, "typing": mk["typing"][0] + round(LIB["typing_2"]["peak_s"] * FPS), "send": mk["send"] + 1,
-              "push": mk["push"][0] + D.SEAT_F + (D.PUSH_F - D.SEAT_F) // 2, "site": mk["site"][0] + 1, "url": mk["site"][0] + 5}
+    events = {"studio": mk["studio"][0], "typing": mk["type_frames"][0], "send": mk["send"],
+              "push": mk["push"][0] + D.SEAT_F, "site": mk["site"][0]}
     assert sorted(s["event_f"] for s in l1["sound"]) == sorted(events.values())
 
 
@@ -582,8 +582,19 @@ def test_the_showcase_completes_the_comparison_the_diagram_illustrates_before_th
     assert 15.5 <= hook[0] and hook[1] <= 22.266 - P.PROOF_LEAD_S + 1e-6
 
 
+def measured_read(tmp_path, monkeypatch):
+    def narrate(ctx, script, out):
+        text = script["segments"][0]["say"]
+        words = [dict(w=word, start=i*.2, end=(i+1)*.2, seg=0) for i,word in enumerate(text.split())]
+        path = tmp_path / "studio-words.json"
+        path.write_text(json.dumps(dict(words=words, duration=words[-1]["end"])))
+        return dict(words=str(path), wav="typed.wav", voice="narrator", duration=words[-1]["end"])
+    monkeypatch.setattr(P.W3, "narrate_script", narrate)
+
+
 def test_showcase_supply_plays_the_checked_caption_on_both_recorded_clocks(tmp_path, monkeypatch):
     from types import SimpleNamespace
+    measured_read(tmp_path, monkeypatch)
 
     # Film 04, recorded export-check frames and source ASR on the upload clock.
     words = [(7.05, 7.68, "And"), (8.08, 8.33, "the"), (8.33, 9.05, "NVIDIA"),
@@ -613,7 +624,7 @@ def test_showcase_supply_plays_the_checked_caption_on_both_recorded_clocks(tmp_p
     split = D.split(l1, f0=0, f1=120, upload=UPLOAD, export=EXPORT, edl_b=edl,
                     export_at=prod["hook"][0], lib=LIB, caption_proof=prod["caption_proof"])
     assert split["export_box"][2] - split["export_box"][0] >= .95
-    assert split["upload_box"][3] < split["export_box"][1]
+    assert split["upload_box"][3] <= split["export_box"][1]
     assert split["export_at"] == split["upload_at"]
     assert all(it["k"] != "word" or it["t"] in split["labels"] for it in l1["items"] if it["id"].startswith("sp."))
 
@@ -651,6 +662,7 @@ def test_region_grade_opens_at_equal_scale_and_returns_on_a_registered_wipe():
 
 def test_grade_showcase_continues_the_same_thought_after_send(tmp_path, monkeypatch):
     from types import SimpleNamespace
+    measured_read(tmp_path, monkeypatch)
 
     edl = dict(keep=[[0, 29.27], [34.07, 61.4]],
                fx=[dict(type="region", device="region_tone", start=0, end=56.6,

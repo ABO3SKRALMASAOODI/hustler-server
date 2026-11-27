@@ -1709,12 +1709,12 @@ def player_rect(png, upload):
 
 def later_label(rec):
     """The recording's own time from the upload to its first result, as the push's label ("3 MIN"), or None."""
-    s = rec.get("first_result_s")
+    s = rec.get("processing_s")
     try:
         s = float(s)
     except (TypeError, ValueError):
         return None
-    return f"{max(int(round(s / 60.0)), 1)} MIN" if s >= 45 else f"{int(round(s))} SEC"
+    return f"{int(round(s))} SEC" if s > 0 else None
 
 
 def cut_times(path, lo=0.0, hi=None, jump=18.0, fps=8):
@@ -1796,8 +1796,7 @@ def scale_supply(ctx, script, sup_dir, pk, rec, plan):
                 work=os.path.join(sup_dir, "finish"), fit=[],
                 # the label over the push is the recording's own time from Send to the finished films (the board's turn and the editors)
                 product=dict(paths=[plan["hero"]["file"]], window=win, marks=mk, ui=ui, variant="scale", tiles=tiles,
-                             later=later_label(dict(first_result_s=float((rec.get("asks") or [{}])[0].get("seconds") or 0)
-                                                    + float((rec.get("shorts") or {}).get("seconds") or 0))),
+                             later=later_label(rec),
                              hero=tiles[0], sub=f"from a {mins}-min podcast", upload_at=0.0, cta_s=D.SITE_S, cta_said=None))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
                 format="showcase", variant="scale", shorts=len(tiles), hero=dict(project_id=plan["hero"].get("project_id"),
@@ -1824,24 +1823,48 @@ def showcase_supply(ctx, script, sup_dir, pk):
     pics = [(float(o["start"]), float(o["duration_s"])) for o in D.MF.pictures_of(edl) + D.MF.titles_of(edl)]
     d = W3.direction_of(ctx) if hasattr(ctx, "run_dir") else {}
     visible = (script.get("receipts") or {}).get("visible") or ()
-    caption = caption_example(edl, rec.get("words") or [], visible, body)
-    proof = (script.get("script") or {}).get("proof") or {}
-    if not proof.get("spans"):
+    story = script.get("script") or {}
+    words = rec.get("words") or []
+    if not words:
+        words = hear_clock(ctx, rec["upload"]["file"], "upload")
+    caption = caption_example(edl, words, visible, body)
+    spans = (story.get("proof") or {}).get("spans")
+    if not spans:
         _, proof, _ = proof_plan(ctx, script["idea_full"], rec, script["receipts"], ex)
-    win, hook = proof["spans"]["stretch"], proof["spans"]["split"]
-    grade = D.tone_region(edl, *hook)
-    win, hook = list(map(float, win)), list(map(float, hook))
+        spans = proof["spans"]
+    win, hook = spans["stretch"], spans["split"]
+    before, after = spans.get("before"), spans.get("after")
     if caption and not hook[0] <= caption["seen_s"] < hook[1]:
         caption = None
     ui = showcase_ui(rec)
     typed = typed_line(script["receipts"])
-    over = 0.0
-    mk = D.showcase_marks(hook, win, len(typed.split()), lead_f=F.LEAD_F, over_s=over)
+    typed_segment = next((seg for seg in story.get("segments") or [] if seg.get("role") == "typed"), {})
+    read = W3.narrate_script(ctx, dict(story, segments=[dict(typed_segment, say=typed_segment.get("say") or typed)]),
+                             os.path.join(sup_dir, "studio_voice"))
+    spoken = jload(read["words"])["words"]
+    # The narrator may introduce the instruction or speak a printed figure as several words.
+    # Match the photographed composer tokens against the take with its authored print map.
+    from difflib import SequenceMatcher
+    take = F.Clock(read["words"], dict(segments=[typed_segment]))
+    written = F.written_addresses(take, dict(segments=[typed_segment]))
+    timed_tokens = [(F.norm_word(token), max(0, round(w["t0"]*F.FPS)-F.LEAD_F))
+                    for w in written.words for token in w["w"].split()]
+    target = [F.norm_word(word) for word in typed.split()]
+    marks = {i+k: timed_tokens[j+k][1] for i,j,n in SequenceMatcher(
+        None, target, [w for w,_ in timed_tokens], autojunk=False).get_matching_blocks() for k in range(n)}
+    end_f = round(read["duration"]*F.FPS)
+    offsets = [end_f] * (len(target)+1)
+    for i in reversed(range(len(target))):
+        offsets[i] = marks.get(i, offsets[i+1])
+    mk = D.showcase_marks(hook, win, len(typed.split()), lead_f=F.LEAD_F, typing_frames=offsets,
+                          before=before, after=after)
     voice = os.path.join(sup_dir, "voice.wav")
     lead = F.LEAD_F / F.FPS
     parts = []
 
     def piece(name, src, a, n_f):
+        if n_f <= 0:
+            return
         p = os.path.join(sup_dir, f"voice_{name}.wav")
         n = n_f / F.FPS
         if src:
@@ -1852,19 +1875,52 @@ def showcase_supply(ctx, script, sup_dir, pk):
             subprocess.run([PX.FF, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-t", f"{n:.3f}", p], check=True, timeout=60)
         parts.append(p)
 
-    # the voice starts on frame LEAD_F: the split's picture at frame f shows hook[0] + f / FPS, so its sound starts there too
     piece("split", ex["file"], hook[0] + lead, mk["split"][1] - mk["lead_f"])
-    piece("studio", None, 0.0, mk["export"][0] - mk["split"][1])
-    piece("export", ex["file"], win[0], mk["export_voice"][1] - mk["export_voice"][0])     # under the website's arrival too
-    piece("site", None, 0.0, mk["dur_f"] - mk["export_voice"][1])
+    if before:
+        piece("before", rec["upload"]["file"], before[0], mk["before"][1] - mk["before"][0])
+    piece("studio_in", None, 0., mk["typing"][0] - mk["studio"][0])
+    piece("typed", read["wav"], 0., offsets[-1])
+    piece("send", None, 0., mk["studio"][1] - mk["typing"][0] - offsets[-1])
+    if after:
+        piece("after", ex["file"], after[0], mk["after"][1] - mk["after"][0])
+    piece("export", ex["file"], win[0], mk["stretch"][1] - mk["stretch"][0])
+    piece("site", None, 0., mk["site"][1] - mk["site"][0])
     lst = os.path.join(sup_dir, "voice.txt")
     open(lst, "w").write("".join(f"file '{p}'\n" for p in parts))
     subprocess.run([PX.FF, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-ac", "1", "-ar", "48000", voice], check=True, timeout=120)
+    upload_words_timed = words
     words = os.path.join(sup_dir, "words.json")
-    jsave(words, dict(voice="the recording", duration=round((mk["dur_f"] - mk["lead_f"]) / F.FPS, 3), words=[]))
+    cursor = 0.
+    export_words_timed = []
+    for lo, hi in edl.get("keep") or [[0., body]]:
+        for row in upload_words_timed:
+            if lo <= row["t0"] < hi:
+                export_words_timed.append(dict(w=row["w"], t0=cursor+row["t0"]-lo, t1=cursor+min(row["t1"], hi)-lo))
+        cursor += hi-lo
+    turns, clock_rows, voices = [], [], []
+    who = (script.get("idea_full") or {}).get("speaker") or "speaker"
+    for kind, window, timeline in (("split",hook,export_words_timed), ("before",before,upload_words_timed),
+                                   ("typing",None,spoken), ("after",after,export_words_timed), ("stretch",win,export_words_timed)):
+        a, b = mk[kind]
+        if b <= a:
+            continue
+        start = (a-mk["lead_f"])/F.FPS
+        if kind == "typing":
+            rows = [dict(w=row["w"], start=start+row["start"], end=start+row["end"]) for row in timeline]
+        elif window:
+            lo, hi = window
+            rows = [dict(w=row["w"], start=max(0., start+row["t0"]-lo), end=start+min(hi,row["t1"])-lo)
+                    for row in timeline if lo <= row["t0"] < hi and start+row["t1"]-lo > 0.]
+            voices.append(dict(person=who, role=kind, start=start, end=(b-mk["lead_f"])/F.FPS))
+        else:
+            continue
+        clock_rows.extend(dict(row, seg=len(turns)) for row in rows)
+        turns.append(dict(say=" ".join(row["w"] for row in rows), role=kind,
+                          print=typed_segment.get("print", {}) if kind=="typing" else {}))
+    jsave(words, dict(voice=read["voice"], duration=(mk["dur_f"] - mk["lead_f"]) / F.FPS, words=clock_rows))
     pack = dict(sid=ctx.sid, words=words, narration=voice, ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[], footage=[],
-                voices=[], work=os.path.join(sup_dir, "finish"), fit=[],
-                product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, over_s=over, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
+                voices=[], screen_voices=voices, programme_segments=turns, work=os.path.join(sup_dir, "finish"), fit=[],
+                product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, before=before, after=after, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
                              upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None,
                              caption_proof=caption, proof_at=proof_push_at(proof_span(visible, hook), hook)))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
@@ -1974,6 +2030,8 @@ def lay_recorded_titles(l1, clock, titles, reserved):
             start = math.ceil(t["src"][0] * fps - 1e-6) / fps
             end = min(until, on + math.floor((t["src"][1] - start) * F.FPS + 1e-6))
             for a, b in _minus(on, end, reserved):
+                if a != on:
+                    continue  # the recording at the addressed word already performs this title
                 src = [round(start + (f - on) / F.FPS, 5) for f in (a, b)]
                 layer = D.Layer(l1, {}, f"studio-title-{a}")
                 key = layer.P.video("studio-title-export", dict(ex, path=ex["file"], fps=fps))
@@ -2736,17 +2794,10 @@ def as_delivered(l1, product_paths, spans=None):
     the hook's landing, the whole upload: sealed spans) nothing is drawn over it: no flash, no finish, no look, and a
     caption word is trimmed to the frames outside the span, never deleted whole (20 Nov: all 83 narration words the
     reel built were deleted, even over the film's one photograph). Where the reel lays a product clip as a print on its
-    board (its items marked proof_board), the narration's captions stay (they sit on the board below the print), and no
-    flash, finish or look touches the print. The writer's display words stay on their spoken words over a sealed span
-    (20 Nov: TRASH CAN and BLACK HOLE were said over the recording and printed nowhere), lifted to
-    DISPLAY_OVER_RECORDING_Y, above the recording's own captions; a name super stays too, at NAME_OVER_RECORDING_Y; a
-    designed card's words are left off it.
+    board (its items marked proof_board), narration captions occupy the board below the print.
     spans: only these frame spans, sealed (a repaired window that now plays the recording), else every span the recording
     plays. Returns the sealed spans."""
     keys = {k for k, a in (l1.get("assets") or {}).items() if a.get("path") in product_paths}
-    # one move a landing: the large part sets it (voice dsp<f0>), its small line under it (dsps<f0>) moves with it
-    moves = {int(it["f"][0]): DISPLAY_OVER_RECORDING_Y - rest_y(it) for it in l1["items"]
-             if is_display_word(it) and it.get("v") == f"dsp{int(it['f'][0])}" and rest_y(it) is not None}
     mine = [it for it in l1["items"] if it.get("k") in ("shot", "card") and it.get("pic") in keys and it.get("z", 0) <= 1]
     if spans is not None:
         spans, boards = sorted(tuple(s) for s in spans), []
@@ -2773,12 +2824,6 @@ def as_delivered(l1, product_paths, spans=None):
         board = [s for s in boards if it["f"][0] < s[1] and it["f"][1] > s[0]]
         if not (over or board) or it.get("pic") in keys or it.get("proof_board") or it.get("keep_over_proof"):
             out.append(it)                                 # the product's crop drawn on its own upload stays with it
-            continue
-        if over and is_display_word(it):
-            out.append(lift(it, moves.get(int(it["f"][0]), 0.0)))
-            continue
-        if over and is_name_super(it) and rest_y(it) is not None:
-            out.append(lift(it, NAME_OVER_RECORDING_Y - rest_y(it)))     # its own seat, high, off the recording's captions
             continue
         if it["k"] == "word":
             if not over:
@@ -3604,7 +3649,7 @@ def showcase_score(ctx, script, pack):
     page = ui.get("site") or dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
     l1, beats = D.showcase(upload=upload, export=body, edl_b=edl, typed=typed_line(script["receipts"]), window=prod["window"], hook=prod["hook"],
                            ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"), proof_at=prod.get("proof_at"), caption_proof=prod.get("caption_proof"),
-                           over_s=float(prod["over_s"]) if prod.get("over_s") is not None else D.SITE_OVER_S)
+                           marks=prod.get("marks"), before=prod.get("before"), after=prod.get("after"))
     out = os.path.join(ctx.supply, "l1.json")
     jsave(out, l1)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")
@@ -3612,9 +3657,9 @@ def showcase_score(ctx, script, pack):
     jsave(os.path.join(ctx.supply, "beats.json"), beats)
     taste = dict(ok=True, problems=[], min_text_px=min(d["min_text_px"] for d in beats["devices"] if d.get("min_text_px")), sounds=len(l1["sound"]))
     devices = dict(device="studio", format="showcase", laid=beats["devices"], faults=[], typed_line="studio")
-    return dict(l1=out, l1_audio=l1_audio, turn_s=round(beats["reveal"][1] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
+    return dict(l1=out, l1_audio=l1_audio, payoff_s=round(beats["export"][0] / F.FPS, 3), story_turn_s=round(beats["studio"][0] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
                 taste=taste, frames=l1["dur_f"], items=len(l1["items"]), direction=dict(format="showcase"), pace=beats["pace"],
-                recording_spans=[beats["export"]], instruction_panel=dict(typed=typed_line(script["receipts"]), device="studio"), devices=devices,
+                recording_spans=[span for key in ("before", "after", "stretch") if (span := (beats.get("marks") or {}).get(key)) and span[0] < span[1]] or [beats["export"]], instruction_panel=dict(typed=typed_line(script["receipts"]), device="studio"), devices=devices,
                 picture_check=dict(model=None, rounds=[], misfits_left=[], note="showcase: every picture is the recording's own"), spend=[])
 
 
@@ -3636,9 +3681,9 @@ def scale_score(ctx, script, pack, upload):
     jsave(l1_audio, F.audio_scene(l1, pack))
     jsave(os.path.join(ctx.supply, "beats.json"), beats)
     taste = dict(ok=True, problems=[], min_text_px=min(d["min_text_px"] for d in beats["devices"] if d.get("min_text_px")), sounds=len(l1["sound"]))
-    return dict(l1=out, l1_audio=l1_audio, turn_s=round(beats["reveal"][1] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
+    return dict(l1=out, l1_audio=l1_audio, payoff_s=round(beats["export"][0] / F.FPS, 3), story_turn_s=round(beats["studio"][0] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
                 taste=taste, frames=l1["dur_f"], items=len(l1["items"]), direction=dict(format="showcase", variant="scale"), pace=beats["pace"],
-                recording_spans=[beats["export"]], instruction_panel=dict(typed=typed_line(script["receipts"]), device="studio"),
+                recording_spans=[span for key in ("before", "after", "stretch") if (span := (beats.get("marks") or {}).get(key)) and span[0] < span[1]] or [beats["export"]], instruction_panel=dict(typed=typed_line(script["receipts"]), device="studio"),
                 devices=dict(device="studio", format="showcase", variant="scale", laid=beats["devices"], faults=[], typed_line="studio"),
                 picture_check=dict(model=None, rounds=[], misfits_left=[], note="showcase: every picture is the recording's own"), spend=[])
 
@@ -3784,7 +3829,7 @@ def score(ctx, script):
         receipt_panel = (instruction_panel(l1, clock, sc, typed_line(script["receipts"])) if not devices.get("typed_line")
                          else dict(typed=typed_line(script["receipts"]), device=devices["typed_line"]))
         spans_dev = [d["frames"] for d in devices.get("laid") or []]
-        reserved = spans_dev + ([receipt_panel["frames"]] if receipt_panel.get("frames") else [])
+        reserved = list(spans) + spans_dev + ([receipt_panel["frames"]] if receipt_panel.get("frames") else [])
         title_shots = lay_recorded_titles(l1, clock, recorded_titles(script), reserved)
         devices["laid"].extend(title_shots)
         title_spans = [t["frames"] for t in title_shots]
@@ -3840,7 +3885,7 @@ def score(ctx, script):
     turn_s = round(float(payoff["start"]) + F.LEAD_F / F.FPS, 3) if payoff else (round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None)
     if beats.get("turn_by") == "landing" and beats.get("turn_f") is not None:
         turn_s = round(beats["turn_f"] / F.FPS, 3)         # the music's drop and the sound's turn on the same landing
-    return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k != "look"}, taste=taste,
+    return dict(l1=out, l1_audio=l1_audio, payoff_s=turn_s, beats={k: v for k, v in beats.items() if k != "look"}, taste=taste,
                 frames=l1["dur_f"], items=len(l1["items"]), direction=dict(knobs, drop=drop), pace=pace_rec, recording_spans=spans,
                 instruction_panel=receipt_panel, devices=devices,
                 picture_check=dict(model=CHECK_MODEL, effort="low", rounds=rounds, misfits_left=rounds[-1]["misfits"]), spend=spend)
