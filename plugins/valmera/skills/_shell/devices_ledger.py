@@ -1,5 +1,4 @@
-"""The devices ledger: which devices each delivered film laid, in order, so the next film's Director can see what was
-done lately and do something else (owner, 20 Nov 2026: maximum creativity, ever fresh, never one template).
+"""Measure which devices each delivered film laid, in programme order.
 
     /Users/masaoodi/Documents/Valmera/.valmera/workflow/devices.jsonl      (VALMERA_DEVICES_LEDGER overrides it)
 

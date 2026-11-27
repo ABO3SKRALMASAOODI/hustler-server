@@ -751,6 +751,26 @@ def cached_finish(ctx, programme, final, *, receipt=None, caption_scene=None, **
     return saved, False
 
 
+def payoff_time(ctx, sc):
+    # Old run descriptors stored the payoff under turn_s.
+    args = ctx.args or {}
+    return args.get("payoff_s", args.get("turn_s", sc.get("payoff_s", sc.get("turn_s"))))
+
+
+def story_music_brief(record):
+    script = record.get("script") or record
+    segments = script.get("segments") or []
+    lines = [s.get("say") or s.get("text") for s in segments]
+    beats = script.get("beats") or {}
+    payoff = beats.get("payoff")
+    landing = lines[payoff] if type(payoff) is int and 0 <= payoff < len(lines) else None
+    brief = dict(title=script.get("title") or record.get("title"), stakes=script.get("stakes"),
+                 chain=script.get("chain"), hook=script.get("hook_line") or record.get("hook_line"),
+                 payoff=landing or script.get("close_line") or record.get("close_line"), spoken=lines,
+                 direction=record.get("direction") or script.get("direction"))
+    return json.dumps({k: v for k, v in brief.items() if v}, ensure_ascii=False)
+
+
 def music_inputs(ctx, rd, sc, song=None):
     from shell import jload
     audio_scene = sc.get("l1_audio") or sc["l1"]
@@ -761,7 +781,7 @@ def music_inputs(ctx, rd, sc, song=None):
                   index=file_sha(os.path.join(ctx.supply, "index.json")), workflow=ctx.workflow,
                   script=file_sha(os.path.join(ctx.run_dir, "script.json")),
                   song=file_sha(song), vocals=file_sha((ctx.args or {}).get("song_vocals")),
-                  payoff=(ctx.args or {}).get("turn_s", sc.get("turn_s")),
+                  payoff=payoff_time(ctx, sc),
                   turn=sc.get("story_turn_s"), turn_drop=bool(sc.get("turn_drop")))
     if ctx.workflow == "wf3":
         repair = file_sha(os.path.join(ctx.supply, "render_repair.json"))
@@ -800,11 +820,7 @@ def music_version(ctx, rd, sc):
         brief = ""
         try:
             sj = json.load(open(os.path.join(ctx.run_dir, "script.json")))
-            # the whole direction: its music line is its last sentence (two Cuban shorts, 20 Nov 2026, lost it at 700)
-            brief = " ".join(str(sj.get(k) or "") for k in ("title", "hook_line", "direction"))[:1800]
-            names = [str(n.get("name") if isinstance(n, dict) else n) for n in (sj.get("names") or [])][:6]
-            if names:                                   # who the film is about: the music is chosen for the person too
-                brief = f"About: {', '.join(names)}. {brief}"
+            brief = story_music_brief(sj)
         except (OSError, ValueError):
             pass
         bf = os.path.join(ctx.supply, f"{tag}_brief.txt")
@@ -822,20 +838,13 @@ def music_version(ctx, rd, sc):
             cmd += f" --song '{song}'"
             if (ctx.args or {}).get("song_vocals"):
                 cmd += f" --vocals '{ctx.args['song_vocals']}'"
-        turn = (ctx.args or {}).get("turn_s", sc.get("turn_s"))       # the run's own word first, else the landing the score named: the drop goes on it
-        if turn is not None:
-            cmd += f" --payoff {float(turn):.3f}"
-        # the story's own turn before the payoff (a podcast short's direction names it): handed with the payoff, the
-        # music drops on it when the payoff sits too close to the last hit for a phrase after it (score.music.arrange)
-        story_turn = sc.get("story_turn_s") if turn is not None else None
-        if story_turn is not None and float(story_turn) < float(turn) - 1.0:
+        payoff = payoff_time(ctx, sc)
+        story_turn = sc.get("story_turn_s")
+        if payoff is not None:
+            cmd += f" --payoff {float(payoff):.3f}"
+        if story_turn is not None:
             cmd += f" --turn {float(story_turn):.3f}"
-        else:
-            story_turn = None
-        # the workflow's own opt-in (the podcast shorts: score() returns turn_drop with every payoff): a payoff with no
-        # room after it still drops, on the turn named here, else the one music_film reads from the lines, else on the
-        # payoff with the last hit moved into the film's tail. Without it the arrangement is today's.
-        turn_drop = bool(sc.get("turn_drop")) and turn is not None
+        turn_drop = bool(sc.get("turn_drop")) and payoff is not None
         if turn_drop:
             cmd += " --turn-drop"
         # films made together (a podcast's shorts) share a list of the tracks already taken, so no two play the same one:
@@ -858,7 +867,7 @@ def music_version(ctx, rd, sc):
                 aj, hp = os.path.join(ctx.supply, f"{tag}_args.json"), os.path.join(ctx.supply, f"{tag}_used.py")
                 json.dump(dict(l1=sc.get("l1_audio") or sc["l1"], work=ctx.supply, film=rd["film"], out=out + ".part.mp4", kind=SONG_KIND.get(ctx.workflow, "stories"),
                                cache=os.path.join(ctx.state_root, "music_cache"), report=pending_report, brief=brief, preferred_cid=prior,
-                               payoff=float(turn) if turn is not None else None, turn=float(story_turn) if story_turn is not None else None, turn_drop=turn_drop,
+                               payoff=float(payoff) if payoff is not None else None, turn=float(story_turn) if story_turn is not None else None, turn_drop=turn_drop,
                                used=used), open(aj, "w"), ensure_ascii=False)
                 open(hp, "w").write(MUSIC_USED)
                 cmd = cmd[:cmd.index(" -m music_film score ")] + f" '{hp}' '{aj}'"
@@ -868,7 +877,7 @@ def music_version(ctx, rd, sc):
                 aj = os.path.join(ctx.supply, f"{tag}_args.json")
                 json.dump(dict(l1=sc.get("l1_audio") or sc["l1"], work=ctx.supply, film=rd["film"], out=out + ".part.mp4",
                                kind=SONG_KIND.get(ctx.workflow, "stories"), cache=os.path.join(ctx.state_root, "music_cache"), report=pending_report, preferred_cid=prior,
-                               brief=brief, payoff=float(turn) if turn is not None else None, turn=float(story_turn) if story_turn is not None else None, turn_drop=turn_drop, used=used,
+                               brief=brief, payoff=float(payoff) if payoff is not None else None, turn=float(story_turn) if story_turn is not None else None, turn_drop=turn_drop, used=used,
                                song=song, vocals=(ctx.args or {}).get("song_vocals")), open(aj, "w"), ensure_ascii=False)
                 if adapter:
                     sh(ctx, ["zsh", adapter, aj], label=f"wf-{tag}-{ctx.run_id}",
