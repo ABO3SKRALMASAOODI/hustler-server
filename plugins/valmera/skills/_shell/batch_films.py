@@ -67,23 +67,6 @@ def start_worker(wf):
     warm_film_tools.enabled = wf == "wf3"
 
 
-def recorded_cut(engine, options, directory, batch):
-    """Cut the same Studio session in its native format when a narrated picture doesn't carry its words."""
-    state = shell.jload(directory / "run.json")
-    retry = batch / "recuts" / state["run_id"]
-    if not (retry / "run.json").exists():
-        checked = shell.jload(directory / "check.json")["checks"]
-        script = shell.jload(directory / "script.json")
-        replacement = engine.recorded_recut(script, checked)
-        if not replacement:
-            return
-        retry.mkdir(parents=True, exist_ok=True)
-        shell.jsave(str(retry / "ideas.json"), shell.jload(directory / "ideas.json"))
-        shell.jsave(str(retry / "script.json"), replacement)
-        shell.jsave(str(retry / "run.json"), dict(state, pid=None, done=["ideas", "script"]))
-    options.work_root = str(retry.parent)
-
-
 def finished(folder):
     return bool(shell.jload(Path(folder) / "film.json")["checks"]["ok"])
 
@@ -156,9 +139,6 @@ def edit_film(wf, root, batch, index, idea, until_script):
     else:
         state = shell.jload(state_path)
         if "script" not in state["done"] and not shell.alive(state.get("pid")):
-            if wf == "wf2" and (state.get("stopped") or {}).get("stage") == "script" and captured_session(directory, idea):
-                state["args"]["recover_recording_cut"] = state["stopped"]["error"]
-                shell.jsave(str(state_path), state)
             original = shell.jload(directory / "ideas.json")
             original["ideas"][0]["style"] = idea["style"]
             shell.jsave(str(directory / "ideas.json"), original)
@@ -168,22 +148,15 @@ def edit_film(wf, root, batch, index, idea, until_script):
                               out=str(out), engine=_ENGINE, until="script" if until_script else None)
     with (batch / (rid + ".log")).open("a", buffering=1) as log, redirect_stdout(log), redirect_stderr(log):
         for attempt in range(2):
-            if wf == "wf2" and not until_script:
-                options.work_root = str(directory.parent)
-                options.until = "check"
-                if "check" not in shell.jload(state_path)["done"] and shell.run(options):
-                    stopped = shell.jload(Path(options.work_root) / rid / "run.json")["stopped"]
-                    continue
-                recorded_cut(_ENGINE, options, directory, batch)
-                options.until = None
             if shell.run(options) == 0:
                 if until_script:
                     return None
                 return str(next(out.glob("*/film.json")).parent)
             stopped = shell.jload(Path(options.work_root) / rid / "run.json")["stopped"]
-            if attempt == 0 and stopped["stage"] == "script":
-                # A candidate whose facts or recording could not support the film gives way to a reserve.
-                break
+            if wf == "wf3" and stopped["stage"] == "script":
+                banks = [shell.jload(p) for p in directory.glob("spine[0-9]*.json")]
+                if banks and all(bank and bank.get("ok") is False for bank in banks):
+                    break
         raise RuntimeError(f"{rid} stopped in {stopped['stage']}: {stopped['error']}")
 
 

@@ -31,27 +31,6 @@ def test_parallel_recordings_start_one_stack_and_a_resume_reuses_it(tmp_path):
     assert calls == [2]
 
 
-def test_tutorial_recut_uses_the_same_checked_studio_session(tmp_path, monkeypatch):
-    import json
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).parent))
-    import proof
-    source = tmp_path / "record.json"
-    source.write_text(json.dumps(dict(sid="session-a", source=dict(t0=2, t1=12))))
-    monkeypatch.setattr(proof, "ui_shots", lambda record: {"typing": ["actual.png"]})
-    card = next(iter(proof.cards()))
-    receipts = dict(asks=[{"text": "show the two layouts"}], exports=[{"sha256": "original"}])
-    script = dict(record=str(source), receipts=receipts, script=dict(format="tutorial"),
-                  idea_full=dict(title="Show the two layouts"), style=dict(id=card), export_check=dict(ok=True))
-    checks = dict(ok=False, marketing=dict(picture_check=dict(misfits_left=["wrong picture"])))
-    recut = proof.recorded_recut(script, checks)
-    assert recut["record"] == str(source) and recut["receipts"] == receipts
-    assert recut["recut"]["recording"] == "session-a" and recut["script"]["format"] == "showcase"
-    assert proof.recorded_recut(recut, checks) is None
-    assert proof.recorded_recut(script, dict(ok=True)) is None
-
-
 def test_showcase_recut_shows_every_followup_and_the_original_send(tmp_path, monkeypatch):
     import proof
     ui = dict(dir=str(tmp_path), typing=["type_00_00.png"], sent="type_00_sent.png")
