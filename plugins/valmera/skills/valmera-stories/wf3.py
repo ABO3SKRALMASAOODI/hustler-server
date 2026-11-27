@@ -347,18 +347,15 @@ def from_spine(ctx, pick, card, spend, n, verified=()):
     if not bank["ok"]:
         return dict(ok=False, tried=tried)
     notes = ctx.args.get("notes")
-    fingerprint = hashlib.sha256(json.dumps([source_key, card, notes, writer.bank_facts(bank), writer.spine_view(bank)],
+    instructions = [story_chain.PITCH, writer.BANK_WRITE_RULES, writer.SUPPORT_SYSTEM,
+                    writer.REPEAT_SYSTEM, writer.SPINE_JUDGE_SYSTEM]
+    fingerprint = hashlib.sha256(json.dumps([source_key, card, notes, writer.bank_facts(bank),
+                                             writer.spine_view(bank), instructions],
                                             sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     stage = f"story-work{n}"
     state = chain_read(ctx, stage)
     if state.get("request") != fingerprint:
         state = {"request": fingerprint}
-        # Recover an interrupted earlier writer from its own exact sources and idea.
-        previous = chain_read(ctx, "script_draft")
-        if (previous.get("facts") == writer.bank_facts(bank) and isinstance(previous.get("chain"), str)
-                and previous.get("idea_point") == {k: pick[k] for k in ("hook","turn","payoff") if pick.get(k)}
-                and previous.get("beat_sheet") == chain_read(ctx, "beat_sheet") and not notes):
-            state.update(sheet=previous["beat_sheet"], draft=previous)
         chain_record(ctx, stage, state)
 
     if "sheet" not in state:
