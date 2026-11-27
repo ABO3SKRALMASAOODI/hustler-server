@@ -3,6 +3,9 @@ from pathlib import Path
 import argparse
 import hashlib
 import json
+import os
+import shutil
+import tempfile
 import sys
 import numpy as np
 
@@ -62,22 +65,43 @@ def line_of(at, segments):
     return len(segments)-1
 
 
-def measure(path, expected, cache, segments=None, judge=None):
-    import librosa
+def share_evidence(source, cache, fingerprint):
+    """Reuse the finishing pass only for the identical waveform and scripted words."""
+    stamp=source/'input.sha256'
+    if source==cache or not stamp.is_file() or stamp.read_text()!=fingerprint:
+        return
+    for name in ('heard.json','f0.npy','wer-spoken.json','equivalents.json'):
+        src,dst=source/name,cache/name
+        if src.is_file() and not dst.exists():
+            with tempfile.NamedTemporaryFile(dir=cache, delete=False) as tmp:
+                temp=Path(tmp.name)
+            try:
+                shutil.copyfile(src,temp)
+                if stamp.read_text()==fingerprint:
+                    os.replace(temp,dst)
+            finally:
+                temp.unlink(missing_ok=True)
+
+
+def measure(path, expected, cache, segments=None, judge=None, reuse=None):
     import soundfile as sf
     import narrate as N
     import measure as M
     import spoken
     cache=Path(cache); cache.mkdir(parents=True,exist_ok=True)
-    fingerprint=hashlib.sha256(Path(path).read_bytes()+expected.encode()).hexdigest()
+    with open(path,'rb') as stream: digest=hashlib.file_digest(stream,'sha256')
+    digest.update(expected.encode());fingerprint=digest.hexdigest()
     stamp=cache/'input.sha256'
     if not stamp.exists() or stamp.read_text()!=fingerprint:
         for name in ('heard.json','f0.npy','metrics.json'):
             (cache/name).unlink(missing_ok=True)
         stamp.write_text(fingerprint)
-    x,sr=sf.read(path,dtype='float32',always_2d=True); x=x.mean(1)
+    if reuse:share_evidence(Path(reuse),cache,fingerprint)
+    wp,fp=cache/'heard.json',cache/'f0.npy'
+    info=sf.info(path)
+    if not wp.is_file() or not fp.is_file():
+        x,sr=sf.read(path,dtype='float32',always_2d=True); x=x.mean(1)
     N.VOCAB[:]=[]
-    wp=cache/'heard.json'
     if wp.exists(): heard=json.loads(wp.read_text())
     else:
         text,words=N.listen_long(x,sr)
@@ -86,9 +110,9 @@ def measure(path, expected, cache, segments=None, judge=None):
     words=[w for w in heard['words'] if w['end']>w['start']]
     span=words[-1]['end']-words[0]['start']
     gaps=[b['start']-a['end'] for a,b in zip(words,words[1:]) if b['start']-a['end']>=0.15]
-    fp=cache/'f0.npy'
     if fp.exists(): f0=np.load(fp)
     else:
+        import librosa
         y=librosa.resample(x,orig_sr=sr,target_sr=16000)
         f0,v,_=librosa.pyin(y,fmin=60,fmax=400,sr=16000,frame_length=1024,hop_length=160)
         f0=np.where(v & np.isfinite(f0),f0,np.nan); np.save(fp,f0)
@@ -115,7 +139,7 @@ def measure(path, expected, cache, segments=None, judge=None):
             equivalent.append(d)
         gone=sum(max(len(d['script'].split()),len(d['heard'].split())) for d in equivalent)
         if gone:final=dict(final,wer=round(max(0,final['S']+final['D']+final['I']-gone)/max(final['ref_words'],1),4))
-    r=dict(seconds=len(x)/sr,words=len(words),wer=final['wer'],wer_raw=raw['wer'],errors=final,equivalent_spellings=equivalent,
+    r=dict(seconds=info.frames/info.samplerate,words=len(words),wer=final['wer'],wer_raw=raw['wer'],errors=final,equivalent_spellings=equivalent,
            pauses_per_min=round(len(gaps)/span*60,5),median_pause_s=round(float(np.median(gaps)),5) if gaps else None,
            pitch_range_st=float(np.nanpercentile(st,95)-np.nanpercentile(st,5)),
            method='unprompted whisper large-v3; gaps >=0.15s; pyin 60..400Hz, 10ms, voiced p95-p5; VO2 independent-check method')
@@ -128,6 +152,6 @@ def measure(path, expected, cache, segments=None, judge=None):
 
 
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('audio'); ap.add_argument('script'); ap.add_argument('cache')
+    ap=argparse.ArgumentParser(); ap.add_argument('audio'); ap.add_argument('script'); ap.add_argument('cache'); ap.add_argument('--reuse')
     a=ap.parse_args(); j=json.loads(Path(a.script).read_text())
-    print(json.dumps(measure(a.audio,' '.join(s.get('text',s.get('say','')) for s in j['segments']),a.cache)))
+    print(json.dumps(measure(a.audio,' '.join(s.get('text',s.get('say','')) for s in j['segments']),a.cache,reuse=a.reuse)))

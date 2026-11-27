@@ -43,6 +43,8 @@ def _run(monkeypatch, tmp_path, info):
 
     def make_proxy(src, dst, *a, **k):
         seen["proxy_from"] = os.path.basename(src)
+        if k.get("limit_s"):
+            seen["limit_s"] = k["limit_s"]
         open(dst, "wb").close()
     monkeypatch.setattr(indexer.media, "make_proxy", make_proxy)
     monkeypatch.setattr(indexer.media, "extract_wav", lambda *a, **k: None)
@@ -79,3 +81,16 @@ def test_a_light_clip_is_still_read_directly(monkeypatch, tmp_path):
                                         "height": 1920, "fps": 30.0,
                                         "has_audio": True, "vfr": False})
     assert seen == {"perceived": "src.mp4"}
+
+
+def test_a_clip_longer_than_the_limit_is_analysed_for_its_first_part(
+        monkeypatch, tmp_path):
+    """#396, 27 Nov 2026: a 4.04-hour attached recording (235 MB, under the
+    streaming threshold) was refused; it is now accepted and its first
+    MAX_DURATION_S are analysed through a proxy cut at the limit."""
+    monkeypatch.setattr(indexer.config, "MAX_DURATION_S", 3 * 3600.0)
+    seen = _run(monkeypatch, tmp_path, {"duration": 14543.0, "width": 1280,
+                                        "height": 720, "fps": 30.0,
+                                        "has_audio": True, "vfr": False})
+    assert seen == {"proxy_from": "src.mp4", "limit_s": 3 * 3600.0,
+                    "perceived": "proxy.mp4"}

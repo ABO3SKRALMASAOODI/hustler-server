@@ -53,9 +53,9 @@ def select(ctx, dest, segments, facts, previous):
         fid = design.get('fact')
         if design.get('kind') == 'document' and fid in facts:
             choices[i] = dict(fact=fid, mark=design.get('mark'), motion='')
-        else:
+        if i not in choices or seg.get('pictures'):
             undecided.append(dict(i=i, say=seg['say'], pictures=seg.get('pictures'), facts=seg.get('facts'),
-                                  staging=previous.get(i)))
+                                  staging=previous.get(i), authored=choices.get(i)))
     if not facts or not undecided:
         return choices
     material = dict(lines=undecided, authored=list(choices.values()), exhibits={k:{f:v[f] for f in ('title','subject','quote','url')} for k,v in facts.items()})
@@ -86,7 +86,10 @@ def select(ctx, dest, segments, facts, previous):
     for row in result.get('lines', []):
         e = facts.get(row.get('fact'))
         if row.get('i') in wanted and e and row.get('mark') and row['mark'] in e['quote']:
-            choices[row['i']] = row
+            if row['i'] in choices:
+                choices[row['i']]['motion'] = row.get('motion', '')
+            else:
+                choices[row['i']] = row
     return choices
 
 

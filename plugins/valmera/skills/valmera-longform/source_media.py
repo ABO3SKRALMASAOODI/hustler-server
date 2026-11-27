@@ -78,7 +78,7 @@ def restore(ctx, shots):
                     output=Path(tmp)/'finished.mp4'
                     from footage import cut
                     cut.finish(str(raw),str(output),clip['w'],clip['h'],clip.get('x',.5),
-                               clip.get('eq'),trim=clip.get('trim'))
+                               clip.get('eq'),trim=clip.get('trim'),preserve_source=True)
                     if not decoded(output,C.PX.FF):
                         raise ValueError('recut did not decode')
                     os.replace(output,path)

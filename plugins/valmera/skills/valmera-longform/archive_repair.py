@@ -336,7 +336,7 @@ def recover(root, base, edits, notes, dossier, catalogue, draft, *, previously_a
                              date=clip['source'].get('date'), visible=row['visible'],
                              limitations=row['limitations'], quote=[p.get('quote') for p in clip['source'].get('primary_context', [])])
     script = apply_edits(base, edits, usable, draft, evidence, documents) if edits else base
-    target = max(story.FORM['words'][0], story.writer.words_of(base))
+    target = max((dossier.get('runtime_words') or story.FORM['words'])[0], story.writer.words_of(base))
     audited = base if previously_audited else None
     why = (edits or {}).get('why', '')
     previous_attempts = []

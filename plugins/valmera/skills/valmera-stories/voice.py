@@ -262,7 +262,7 @@ class Read:
         base = int(job.get("takes") or LN.TAKES)
         for ln in job["lines"]:
             i = int(ln["id"][1:])
-            for k in range(int(ln.get("takes") or base)):
+            for k in range(ln.get("start_take", 0), int(ln.get("takes") or base)):
                 f = out / f"{ln['id']}_t{k}.wav"
                 if whole_take(f):
                     continue
@@ -858,6 +858,16 @@ def main():
         return
     os.chdir(NARR)
     if a.cmd == "render":
+        from read_cache import bounded_generation, cache_gate_listening, cache_take_analysis
+        if N.pick_engine(a, json.loads(Path(a.script).read_text())) == "phonon":
+            listener = N.CHECK_ASR
+            if os.environ.get("CODEX_PROXY_LOCAL") == "1":
+                from take_hearing import pool_or_local
+                N.listen_fast = pool_or_local(N)
+                listener = "factory-whisper-medium-or-unprompted-large-v3"
+            cache_take_analysis(a.out, listener)
+            cache_gate_listening(a.out, listener)
+            Read.generate_phonon = bounded_generation(Read.generate_phonon)
         render(a)  # callers of render() use its take count; a successful CLI run exits zero
         return
     if a.cmd == "finish":
