@@ -146,11 +146,13 @@ def sources_md(folder):
     sc = (rec.get("script") or {}).get("script") or {}
     from wf4_sources import story_sidecar
     script = rec.get("script") or {}
-    story_sidecar(folder, script, script.get("receipts") or
-                  ((rec.get("checks") or {}).get("marketing") or {}).get("receipts"))
+    arc = story_sidecar(folder, script, script.get("receipts") or
+                        ((rec.get("checks") or {}).get("marketing") or {}).get("receipts"))
     st = (rec.get("checks") or {}).get("stories") or {}
-    out = [f"# {sc.get('title') or rec.get('idea')}", "", f"Style: {(rec.get('style') or {}).get('name')}. Delivered {rec.get('delivered')}.", "",
-           "## Facts (each quote fetched and found on its page)", ""]
+    out = [f"# {sc.get('title') or rec.get('idea')}", "", f"Style: {(rec.get('style') or {}).get('name')}. Delivered {rec.get('delivered')}.", ""]
+    if arc:                         # the film's opening, turn and payoff, from its saved script and recording (STORY.md)
+        out += ["## Story", "", *arc, ""]
+    out += ["## Facts (each quote fetched and found on its page)", ""]
     for f in sc.get("facts") or []:
         out.append(f"- {f.get('claim')} - \"{f.get('quote')}\" - {f.get('url')}")
     out += ["", "## Pictures and footage (paste into the post's caption when publishing)", ""]

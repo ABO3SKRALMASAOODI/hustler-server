@@ -92,15 +92,15 @@ def test_scripts_continue_during_finishing_and_use_a_distinct_reserve(tmp_path, 
     run.mkdir()
     ideas = [dict(title=f"Film {i}", subject=f"Subject {i}", supply=dict(ok=True), style="archive") for i in range(8)]
     (run / "plan.json").write_text(json.dumps(dict(ideas=[ideas[0], *ideas], spend=[])))
-    started_third = Event()
+    writers_filled_collection = Event()
     def make(wf, root, batch_dir, index, idea, until_script=False):
         if until_script:
-            if index >= 2:
-                started_third.set()
+            if index >= 6:
+                writers_filled_collection.set()
             if index == 1:
                 raise RuntimeError("unavailable source")
             return None
-        assert started_third.wait(timeout=5)
+        assert writers_filled_collection.wait(timeout=5)
         folder = batch_dir / idea["title"]
         folder.mkdir()
         (folder / "film.json").write_text(json.dumps(dict(checks=dict(ok=index != 2), style=dict(id=idea["style"]))))
@@ -169,3 +169,74 @@ def test_restarted_coordinator_waits_for_the_existing_render(tmp_path, monkeypat
     monkeypatch.setattr(batch.time, "sleep", complete)
     batch.wait_for_editor(tmp_path, rid)
     assert len(waits) == 1
+
+
+def test_running_media_keeps_progress_and_cancels_an_idle_process(tmp_path):
+    import os
+    import sys
+    import subprocess
+    import pytest
+    import warm_film_tools as warm
+    command = [sys.executable, "-c", "import time,pathlib; p=pathlib.Path('take'); "
+               "p.touch(); time.sleep(.35); p.touch(); time.sleep(.35); p.touch(); time.sleep(.35)"]
+    options = dict(cwd=tmp_path, env=dict(os.environ), progress_root=tmp_path, timeout=.55)
+    assert warm.run_media(command, **options).returncode == 0
+    with pytest.raises(subprocess.TimeoutExpired):
+        warm.run_media([sys.executable, "-c", "import time; time.sleep(15)"], **options)
+
+
+def test_batch_hearing_falls_back_to_the_requested_worker_listener(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import batch_hearing as h
+    monkeypatch.setattr(h, "PYTHON", tmp_path / "python")
+    monkeypatch.setattr(h, "MODEL", tmp_path)
+    h.PYTHON.touch()
+    (tmp_path / "config.json").touch()
+    monkeypatch.setenv("VALMERA_BATCH_HEARING_LOCK", str(tmp_path / "hearing.lock"))
+    monkeypatch.delenv("FOOTAGE_HEAR_PROVIDER", raising=False)
+    def unavailable(*args):
+        raise RuntimeError("GPU unavailable")
+    monkeypatch.setattr(h, "read_local", unavailable)
+    listener = SimpleNamespace(transcribe=lambda path, dur, workers: (path, dur, workers))
+    h.install(listener)
+    h.install(listener)
+    assert listener.transcribe("source", 5, 2) == ("source", 5, 2)
+
+
+def test_resume_recovers_only_complete_sources_with_original_provenance(tmp_path, monkeypatch):
+    import chain
+    root = tmp_path / "footage-test/src"
+    for url, n in (("source-a", 1), ("source-a", 2), ("truncated", 3)):
+        folder = root / str(n)
+        folder.mkdir(parents=True)
+        (folder / "whole.mp4").write_bytes(b"x")
+        (folder / "meta.info.json").write_text(json.dumps(dict(webpage_url=url, duration=20 if n == 3 else 30)))
+    monkeypatch.setattr(chain.subprocess, "check_output", lambda *a, **kw:
+                        json.dumps(dict(streams=[dict(codec_type="video")], format=dict(duration="30.1"))).encode())
+    rows = list(chain.resumed_sources(tmp_path, set()))
+    assert [row["url"] for row in rows] == ["source-a"]
+
+
+def test_the_collection_carries_each_films_opening_turn_and_payoff(tmp_path, monkeypatch):
+    """26 Nov, Marketing 5 Shorts: every film had its STORY.md, but the collection's shorts.json and README held no arc."""
+    out = tmp_path / "Marketing Films"
+    monkeypatch.setenv("VALMERA_DELIVERY_ROOTS", str(out))
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "started").write_text(str(time.time()))
+    (run / "plan.json").write_text('{"ideas":[{}]}')
+    film = run / "0"
+    film.mkdir()
+    rec = dict(workflow="wf2", run_id="r0", checks=dict(ok=True), style=dict(id="pinboard"),
+               script=dict(title="Build the checklist as he speaks", idea_full=dict(pain="p")), no_repeat=dict(checked=1))
+    (film / "film.json").write_text(json.dumps(rec))
+    (film / "film.mp4").write_bytes(b"\x00\x01")
+    (film / "SOURCES.md").write_text("Credits")
+    (film / "STORY.md").write_text("- **Setup** — Three questions pass by.\n- **Turn** — Make a vertical short and build a checklist.\n"
+                                   "- **Payoff** — CAN IT SCALE?, WILL IT CLICK? and CAN IT BE PROTECTED? stay on screen.\n")
+    from pathlib import Path
+    final = Path(batch.handoff("wf2", run, [film], out, lambda folder: None, None)["delivered"])
+    arc = json.loads((final / "shorts.json").read_text())["shorts"][0]["arc"]
+    assert list(arc) == ["setup", "turn", "payoff"] and arc["payoff"].startswith("CAN IT SCALE?")
+    readme = (final / "README.md").read_text()
+    assert "**Turn** — Make a vertical short and build a checklist." in readme

@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 
-CONTRACT=7
+CONTRACT=8
 # Source kept after the close's last word: the breath the short holds before its end card. The 28 reference reels'
 # sound ends 1.17 s after the last word (p50); the brand finish falls the sound over that breath and the card's
 # 0.3 s join lands after it, never over the word (19 Nov rating: the card dissolved over 'really bad.', 'wrong.',
@@ -291,7 +291,8 @@ Use the closest matching passage in episode time (window_start + hearing time). 
 compensate for an interior ASR difference. The draft close is a candidate. If the heard take has a complete
 decision or emotional resolution followed by an independent aside, end on the resolution and give close_first,
 the first hearing ID of its complete closing sentence. Preserve all qualifications on that thought and the
-18–55 second programme. Otherwise keep the draft close. Keep a genuinely spoken, useful lead-in.
+18–55 second programme. Keep the draft close when it completes the thought. When it trails into a new
+sentence or an unfinished clause, choose the nearest complete spoken resolution in the hearing. Keep a genuinely spoken, useful lead-in.
 
 When the hearing begins with a complete thought and the rough hook prefixes it with an abandoned start,
 OPEN ON THE COMPLETE THOUGHT. Leave the abandoned words out of BOTH the cut and captions, even when the

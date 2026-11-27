@@ -9,12 +9,17 @@ import html
 import json
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 KEY = "anthropic_wallet"
 STATE_KEY = "anthropic_wallet_monitor"
 THRESHOLD = 1.0
 KIND = "anthropic_wallet_low"
+# Owner, 27 Nov 2026: never run out. The $1 warning comes too late to top up,
+# so one earlier email per episode says how many days are left at last week's
+# pace (armed only by a confirmed balance above it, like the $1 warning).
+RUNWAY_USD = 25.0
+RUNWAY_KIND = "anthropic_wallet_runway"
 
 
 def _row(row, key):
@@ -90,9 +95,11 @@ def confirm_balance(conn, balance):
         _put(cur, KEY, value)
         if balance > THRESHOLD:
             # Preserve an audit record, but stop retrying an obsolete warning.
+            kinds = (KIND, RUNWAY_KIND) if balance > RUNWAY_USD else (KIND,)
             cur.execute("""UPDATE trial_alerts SET status='failed',attempt_count=8,
                            last_error='Superseded by a new confirmed balance'
-                           WHERE kind=%s AND sent_at IS NULL AND status IN ('pending','failed')""", (KIND,))
+                           WHERE kind = ANY(%s) AND sent_at IS NULL
+                             AND status IN ('pending','failed')""", (list(kinds),))
     return value
 
 
@@ -111,8 +118,10 @@ def scan(conn, now=None):
             return 0
         remaining = estimate(config, _spend(cur))
         _put(cur, STATE_KEY, {"checked_at": now.isoformat(), "estimated_remaining_usd": remaining})
-        if remaining is None or remaining > THRESHOLD:
+        if remaining is None:
             return 0
+        if remaining > THRESHOLD:
+            return _runway(cur, config, remaining, now)
         subject = f"Valmera: Anthropic credit estimated at ${max(remaining,0):.2f} — $1 warning"
         body = (f"<h2>Anthropic credit: estimated ${max(remaining,0):.2f} remaining</h2>"
                 f"<p>Your $1 warning has been reached. The last confirmed balance was "
@@ -126,6 +135,32 @@ def scan(conn, now=None):
                        VALUES (%s,%s,%s,%s) ON CONFLICT(dedupe_key) DO NOTHING""",
                     (f"wallet_low:{config['episode']}", KIND, subject, body))
         return cur.rowcount
+
+
+def _runway(cur, config, remaining, now):
+    """One early warning per episode once the estimate falls to RUNWAY_USD."""
+    if remaining > RUNWAY_USD or float(config.get("confirmed_balance_usd") or 0) <= RUNWAY_USD:
+        return 0
+    since = (now - timedelta(days=7)).date()
+    cur.execute("""SELECT COALESCE(SUM(GREATEST(spent_usd-extras_usd,0)+paid_usd),0) AS usd
+                   FROM trial_budget_days WHERE day >= %s""", (since,))
+    daily = float(_row(cur.fetchone(), "usd")) / 7.0
+    days = f"about {remaining / daily:.0f} days" if daily > 0.01 else "many days"
+    subject = (f"Valmera: Anthropic credit estimated at ${remaining:.2f} "
+               f"({days} at last week's pace)")
+    body = (f"<h2>Anthropic credit: estimated ${remaining:.2f} remaining</h2>"
+            f"<p>Customers spent about ${daily:.2f} a day over the last 7 days, so this lasts "
+            f"{days}. The free trial is already paced to the wallet: it admits fewer new "
+            "accounts a day and keeps the rest for paying subscribers until the credit refills.</p>"
+            f"<p>The last confirmed balance was ${config['confirmed_balance_usd']:.2f} at "
+            f"{html.escape(config['confirmed_at'])}. This is a server-side estimate; it cannot "
+            "see other organization spending, new credits or credit expiry.</p>"
+            '<p><a href="https://platform.claude.com/settings/billing">Check Anthropic billing</a> · '
+            '<a href="https://valmera.io/admin">Update the confirmed balance in Valmera Admin</a></p>')
+    cur.execute("""INSERT INTO trial_alerts(dedupe_key,kind,subject,html_content)
+                   VALUES (%s,%s,%s,%s) ON CONFLICT(dedupe_key) DO NOTHING""",
+                (f"wallet_runway:{config['episode']}", RUNWAY_KIND, subject, body))
+    return cur.rowcount
 
 
 def tick():

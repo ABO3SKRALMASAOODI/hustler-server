@@ -117,8 +117,12 @@ def narrate(nscript, out, band="03", label="narrate", env=None, timeout=5400, re
         with open(NARRATE_LOCK, "a") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             extra = os.environ.get("NARRATE_RENDER_ARGS", "").split()      # e.g. "--takes 1" on a loaded Mac
-            r = subprocess.run(["zsh", HEAVY, label, NARRATE_PY, reader or NARRATE, "render", sp, "--out", out, "--band", band] + ([] if reader else extra),
-                               cwd=os.path.dirname(NARRATE), capture_output=True, text=True, timeout=timeout, env=env)
+            command = ["zsh", HEAVY, label, NARRATE_PY, reader or NARRATE, "render", sp, "--out", out, "--band", band] + ([] if reader else extra)
+            if env.get("VALMERA_FILM_BATCH"):
+                from warm_film_tools import run_media
+                r = run_media(command, cwd=os.path.dirname(NARRATE), timeout=timeout, env=env, progress_root=out)
+            else:
+                r = subprocess.run(command, cwd=os.path.dirname(NARRATE), capture_output=True, text=True, timeout=timeout, env=env)
         if r.returncode != 0 or not os.path.exists(os.path.join(out, "words.json")):
             raise RuntimeError(f"narrate failed ({r.returncode}): {(r.stderr or r.stdout)[-800:]}")
     if not os.path.exists(os.path.join(out, "check.json")):

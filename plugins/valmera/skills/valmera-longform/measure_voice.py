@@ -14,7 +14,55 @@ PITCH_BAND=tuple(json.loads((Path(__file__).resolve().parent.parent/'_shell'/'na
                  ['band']['04']['f0_range_st'][k] for k in ('p10','p90'))
 
 
-def measure(path, expected, cache):
+JUDGE_SYSTEM=("You check a narration's word errors. Each item has the scripted words, the words a speech recogniser wrote "
+              "for the same place, and the sentence around it. Say which items are the scripted words written another way: "
+              "a spelling of a name or a term, an initialism or number written differently, a hyphen, space or apostrophe, "
+              "a possessive written without its apostrophe. A different word, another ending or tense ('clearly' for 'clear', "
+              "'use' for 'used'), or a dropped or added word is a real error and is not on the list. Answer JSON only: "
+              "{\"same\": [the item numbers]}")
+
+
+def judged_equivalents(details, expected, cache, judge=None):
+    """The word errors a model reads as the scripted word written another way (the listener's spelling, not a misread).
+    {item index: True}; asked once per distinct list of errors (kept beside the measurement), and an unanswered
+    question leaves every error standing."""
+    if not details:
+        return set()
+    cache=Path(cache);memo=cache/'equivalents.json'
+    key=hashlib.sha256(json.dumps(details,sort_keys=True).encode()).hexdigest()
+    if memo.exists():
+        saved=json.loads(memo.read_text())
+        if saved.get('key')==key:return set(saved['same'])
+    words=expected.split()
+    items=[]
+    for i,d in enumerate(details):
+        around=' '.join(words[max(0,d['at']-6):d['at']+8])
+        items.append(f"{i}. scripted: {d['script'] or '(nothing)'} | heard: {d['heard'] or '(nothing)'} | around: {around}")
+    try:
+        if judge is None:
+            import spoken
+            r=spoken._call(JUDGE_SYSTEM,"\n".join(items),spoken.MODEL)
+            text="".join(c.get('text','') for it in r.get('output') or [] if it.get('type')=='message'
+                         for c in it.get('content') or [] if c.get('type')=='output_text')
+        else:text=judge(JUDGE_SYSTEM,"\n".join(items))
+        same={int(i) for i in json.loads(text[text.index('{'):text.rindex('}')+1])['same'] if 0<=int(i)<len(details)}
+    except Exception:
+        return set()
+    memo.write_text(json.dumps(dict(key=key,same=sorted(same))))
+    return same
+
+
+def line_of(at, segments):
+    """The script line holding the normalised word at index `at`."""
+    import measure as M
+    n=0
+    for i,s in enumerate(segments):
+        n+=len(M.norm_words(s['text']))
+        if at<n:return i
+    return len(segments)-1
+
+
+def measure(path, expected, cache, segments=None, judge=None):
     import librosa
     import soundfile as sf
     import narrate as N
@@ -46,12 +94,28 @@ def measure(path, expected, cache):
         f0=np.where(v & np.isfinite(f0),f0,np.nan); np.save(fp,f0)
     st=12*np.log2(f0/100)
     raw=M.wer(expected,heard['text'])
-    normalized=spoken.spoken_form(heard['text'],expected,[])
+    sp=cache/'wer-spoken.json'
+    asked=hashlib.sha256(json.dumps([heard['text'],expected]).encode()).hexdigest()
+    normalized=None
+    if sp.exists():
+        # the same heard words against the same script were already written in spoken form: read it back, no call
+        saved=json.loads(sp.read_text())
+        if saved.get('ok') and saved.get('asked')==asked:normalized=saved
+    if normalized is None:normalized=dict(spoken.spoken_form(heard['text'],expected,[]),asked=asked)
     # Keep the exact normalization and its letter-preservation guard for the
     # independent reviewer; raw WER stays visible beside the spoken-form WER.
     (cache/'wer-spoken.json').write_text(json.dumps(normalized,indent=1))
     final=M.wer(expected,normalized['text']) if normalized.get('ok') else raw
-    r=dict(seconds=len(x)/sr,words=len(words),wer=final['wer'],wer_raw=raw['wer'],errors=final,
+    equivalent=[]
+    if final['wer']>=0.01:
+        # Past the gate: ask a model which of these words are the scripted word spelled another way by the listener.
+        details=M.wer_detail(expected,normalized['text'] if normalized.get('ok') else heard['text'])
+        for i in sorted(judged_equivalents(details,expected,cache,judge)):
+            d=details[i];d['line']=line_of(d['at'],segments) if segments else None
+            equivalent.append(d)
+        gone=sum(max(len(d['script'].split()),len(d['heard'].split())) for d in equivalent)
+        if gone:final=dict(final,wer=round(max(0,final['S']+final['D']+final['I']-gone)/max(final['ref_words'],1),4))
+    r=dict(seconds=len(x)/sr,words=len(words),wer=final['wer'],wer_raw=raw['wer'],errors=final,equivalent_spellings=equivalent,
            pauses_per_min=round(len(gaps)/span*60,5),median_pause_s=round(float(np.median(gaps)),5) if gaps else None,
            pitch_range_st=float(np.nanpercentile(st,95)-np.nanpercentile(st,5)),
            method='unprompted whisper large-v3; gaps >=0.15s; pyin 60..400Hz, 10ms, voiced p95-p5; VO2 independent-check method')

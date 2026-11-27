@@ -176,7 +176,7 @@ def recorded_edit_ready(ctx,script,ft):
     stage=nd/'read-stage.json';gate=nd/'check.json'
     if not stage.exists() or not gate.exists():return False
     if C.read(stage).get('script')!=C.wf4.story.narration_script(script['script']):return False
-    if not C.read(gate).get('gate',{}).get('pass'):return False
+    if not C.read(gate).get('gate',{}).get('pass') and not (nd/'gate-carried.json').exists():return False
     clock=nd/'words_narrator.json'
     if not clock.exists():clock=nd/'words.json'
     if not clock.exists():return False

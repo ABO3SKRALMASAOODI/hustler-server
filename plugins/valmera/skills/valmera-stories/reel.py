@@ -907,7 +907,7 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
         return None
 
     def again(line, n):
-        """A played take of this line once more (after its cards): its unplayed seconds inside the take, else its most
+        """A played take of this line once more, using a different framing: its unplayed seconds inside the take, else its most
         moving window; another take before the one just shown, and the one just shown only on the other framing (a punch
         in, or back out from one). A repeat, counted as one. (c, ti, take, t0, t1, punch) or None."""
         prev = out[-1][4] if out else {}
@@ -1117,8 +1117,11 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                 rp = replay(line, n, pos, last) if ci is None and rf is None and pf is None else None
                 x = fallback = ra = None
                 if ci is None and rf is None and pf is None and rp is None:
-                    x, fallback = designed_text(line)
-                    ra = again(line, fill_n) if x is None else None
+                    ra = again(line, fill_n)
+                    # A related take with real motion can carry the spoken figure under its super.
+                    # A static source still gives way to an authored diagram or figure.
+                    if ra is None or not moving(dict(ra[0], src=[ra[3], ra[4]])):
+                        x, fallback = designed_text(line)
                 if ci is not None or rf is not None or pf is not None:
                     pass
                 elif rp is not None and rp[0] == "clip":
@@ -2555,7 +2558,7 @@ def build(script, sup, style_id, direction=None):
                             roles_skip=("name",) if fit_on else (), anchored_only=fit_on, cap_floor_px=CAP_FLOOR_PX if fit_on else None) \
         if d.get("display", True) else []
     if fit_on and d.get("display", True):
-        supers = name_supers(P, clock, sc, timeline, st, pal, f_voice_end, shown, dropped, cards=card_type, bound=sourced)
+        supers = name_supers(P, clock, sc, timeline, st, pal, f_voice_end, shown, dropped, cards=card_type, bound=True)
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=f_voice_end + 8, hold=[(a - 1, b) for a, b, _ in (shown + supers if sourced else shown)] +
                             [(a, b) for a, b, _, _, r in timeline if r.get("depicted_name")], z=5,
                             script=sc if fit_on else None, ink_lag_s=CAPTION_LAG_S if fit_on else None)

@@ -69,7 +69,7 @@ def test_visible_cases_switch_on_the_second_clause(composed):
                                (round(words[-1]["start"]*30)+3,"Possible response","Possible cause")]:
         ink = " ".join(i["t"] for i in visible(scene,frame) if i.get("role")=="graphic")
         assert case in ink and other not in ink
-    assert "Early discovery" in ink
+        assert "Early discovery" not in ink                  # the research stage stays in the record
 
 
 def test_the_setup_and_both_gestures_share_one_contained_view(composed):

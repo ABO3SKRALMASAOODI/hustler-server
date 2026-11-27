@@ -109,7 +109,11 @@ def supply_clip(ctx, exhibit, mark):
         except ValueError:
             pass
     source_url = url + (f"#page={e['page']}&search=" if is_pdf else '#:~:text=') + escape(mark, safe='')
-    asset = root/(key(json.dumps([e, mark], sort_keys=True))+'-highlight.png')
+    identity = [e, mark]
+    if not is_pdf:
+        face=design.face_for(e['quote'],'InstrumentSerif-Regular.ttf')
+        if face!=design.font('InstrumentSerif-Regular.ttf',24).path:identity.append(Path(face).name)
+    asset = root/(key(json.dumps(identity, sort_keys=True))+'-highlight.png')
     if not asset.exists():
         with TemporaryDirectory(dir=root) as tmp:
             out = Path(tmp)/'marked.png'
@@ -141,6 +145,23 @@ def supply_clip(ctx, exhibit, mark):
     return dict(path=str(asset), kind='image', document=True, primary_passage=True, mark=mark,
                 source=source, shows=e['quote'], w=w, h=h, seconds=7.8, time_range=[0,7.8],
                 content_hash=C.digest(asset), editorial_label=label, source_label=label)
+
+
+def retained_design(ctx,fact,mark):
+    """Use the already-read primary bytes for a final design, including raw verification logs."""
+    if not getattr(ctx,'run_dir',None):return None
+    root=Path(ctx.run_dir)/'idea-originals'
+    path=root/key(fact['url'])
+    if not path.is_file():return None
+    pages,_,kind=read_source(path,fact['url'])
+    quote=' '.join(fact['quote'].split())
+    page=next((i for i,body in enumerate(pages) if quote in ' '.join(body.split())),None)
+    if page is None:return None
+    exhibit=dict(url=fact['url'],title=fact.get('title') or urlsplit(fact['url']).hostname,
+                 author=fact.get('author'),date=fact.get('date'),kind=kind,quote=quote,page=page+1)
+    c=supply_clip(ctx,exhibit,mark)
+    attribution=' · '.join(filter(None,(c['source']['presentation'],c['source_label'])))
+    return dict(c,kind='original',supplied_passage=True,attribution=attribution)
 
 
 def place(ctx, script, segments, dest, previous):

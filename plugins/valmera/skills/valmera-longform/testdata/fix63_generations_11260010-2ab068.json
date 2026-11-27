@@ -1,0 +1,1024 @@
+{
+ "title": "Who Checked the Riemann Proof?",
+ "voice": "sage",
+ "band": "04",
+ "pace": "steady",
+ "energy": "mid",
+ "names": [
+  "Levent Alpöge",
+  "Claude",
+  "Claude Code",
+  "Riemann Hypothesis",
+  "Riemann zeta function",
+  "Clay Mathematics Institute",
+  "Lean",
+  "Google DeepMind",
+  "Signal",
+  "Triple Ratchet",
+  "OpenAI",
+  "Mathlib",
+  "Andrew Sutherland",
+  "MIT",
+  "Comparator",
+  "con-leche",
+  "nanoda",
+  "Lean FRO",
+  "Mathlib Initiative"
+ ],
+ "segments": [
+  {
+   "text": "Levent Alpöge puts his proof online. Can his peers establish that he and Claude have proved the Riemann Hypothesis?",
+   "emphasis": [
+    "proved"
+   ],
+   "pause_after": 0.22,
+   "beat": "hook",
+   "members": [
+    0
+   ],
+   "pace": "steady",
+   "melody": "rising",
+   "direction": "Easton reads at a natural pace and reaches the end of the question within ten seconds. Open directly on the marked claim."
+  },
+  {
+   "text": "He's put his own name on the claim, and his peers have to decide whether they can build their work on it. To build on the result, another mathematician needs to know exactly what the theorem says and have grounds to trust its proof.",
+   "emphasis": [
+    "name",
+    "build"
+   ],
+   "pause_after": 0.4,
+   "beat": "promise",
+   "members": [
+    1
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Hold on the marked release-note excerpt while Easton explains what another mathematician needs to know before relying on the result."
+  },
+  {
+   "text": "The date is November twentieth, and what Alpöge is putting into other hands is a Lean library, seventeen million lines of code.",
+   "emphasis": [
+    "seventeen",
+    "million"
+   ],
+   "pause_after": 0.22,
+   "beat": "turn",
+   "members": [
+    2
+   ],
+   "pace": "steady",
+   "melody": "wide",
+   "direction": "Use the attributed release card. Let the number arrive at the end of the breath."
+  },
+  {
+   "text": "The footnote gives the first and last addresses for the archive, part one and part fourteen.",
+   "emphasis": [
+    "addresses"
+   ],
+   "pause_after": 0.22,
+   "beat": "turn",
+   "members": [
+    3
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Use the footnote once. Keep both addresses and the ellipsis between them readable in the same frame."
+  },
+  {
+   "text": "The problem in that note reaches into the prime numbers, which you can meet by trying to break a whole number into smaller factors.",
+   "emphasis": [
+    "prime"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    4
+   ],
+   "pace": "steady",
+   "melody": "level",
+   "direction": "Show the inspected sources at their spoken anchors, in order: alpo.ge · remark.pdf · Original PDF passage / alpo.ge · remark.pdf · Marked original PDF."
+  },
+  {
+   "text": "Count the primes up to a chosen number and you get one total, then move the boundary and watch how the count grows, one prime at a time.",
+   "emphasis": [
+    "count",
+    "grows"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    5
+   ],
+   "pace": "brisk",
+   "melody": "wide",
+   "direction": "Show the inspected sources at their spoken anchors, in order: alpo.ge · remark.pdf · Original PDF passage / Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card."
+  },
+  {
+   "text": "There’s an average pattern to compare it with, and what the Riemann Hypothesis tells you is how the distribution of primes deviates from that average.",
+   "emphasis": [
+    "deviates"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    6
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Show the inspected sources at their spoken anchors, in order: alpo.ge · remark.pdf · Original PDF passage / Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card. Present the cited design separately from the archive."
+  },
+  {
+   "text": "If you're trying to prove something else about primes, a reliable bound on that difference can give you a step you can use, and carry into your own result.",
+   "emphasis": [
+    "bound",
+    "own"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    7
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card / Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card."
+  },
+  {
+   "text": "Alpöge gives his peers the work in Lean, a language precise enough to write down a theorem and the steps that are meant to establish it.",
+   "emphasis": [
+    "steps"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    8
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card / Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card."
+  },
+  {
+   "text": "A reader can take a claim in a paper back to the author and ask for the missing step, and with this release the reader has another place to take it.",
+   "emphasis": [
+    "missing",
+    "another"
+   ],
+   "pause_after": 0.22,
+   "beat": "loop",
+   "members": [
+    9
+   ],
+   "pace": "steady",
+   "melody": "rising",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card / alpo.ge · remark.pdf · Marked original PDF."
+  },
+  {
+   "text": "A paper dated November tenth, before Alpöge’s release, describes how a gatekeeper agent decides whether to accept a proposed proof about Signal’s messaging software.",
+   "emphasis": [
+    "gatekeeper",
+    "Signal’s"
+   ],
+   "pause_after": 0.22,
+   "beat": "close",
+   "members": [
+    10
+   ],
+   "pace": "steady",
+   "melody": "rising",
+   "direction": "Begin with the Signal paper’s gatekeeper workflow excerpt. Cut to the marked excerpt on the scope of the proofs at the mention of Signal’s messaging software."
+  },
+  {
+   "text": "The gatekeeper agent accepts a proposed proof only if Lean’s kernel checks it and Lean’s comparator confirms that it proves exactly the held-out specification.",
+   "emphasis": [
+    "only",
+    "kernel"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    11
+   ],
+   "pace": "steady",
+   "melody": "wide",
+   "direction": "Introduce the gatekeeper on the paper excerpt. Show the marked kernel check on the first condition and the marked comparator check on the second."
+  },
+  {
+   "text": "In a paper dated November tenth, twenty twenty six, and hosted by Google DeepMind, the authors describe proofs about two parts of Signal’s messaging software.",
+   "emphasis": [
+    "two"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    12
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Overlay the supplied paper title and November 10, 2026 date on the PDF excerpt. Identify Google DeepMind as the host."
+  },
+  {
+   "text": "One is the handshake that starts a secure exchange, and the other is the piece the paper calls the Triple Ratchet.",
+   "emphasis": [
+    "handshake",
+    "Ratchet"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    13
+   ],
+   "pace": "steady",
+   "melody": "level",
+   "direction": "Show the marked paper excerpt as Easton names the two components."
+  },
+  {
+   "text": "Against classical attackers, the authors report message confidentiality and authenticity for the compiled binary they studied.",
+   "emphasis": [
+    "compiled",
+    "binary"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    14
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Use the marked primary passage. Let the reference to the compiled binary take the emphasis."
+  },
+  {
+   "text": "For a future quantum attacker, the result the authors establish is the secrecy of the handshake within the study’s symbolic model.",
+   "emphasis": [
+    "handshake",
+    "model"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    15
+   ],
+   "pace": "slow",
+   "melody": "falling",
+   "direction": "Show the marked paper excerpt and let the phrase “symbolic model” carry the scope of the result."
+  },
+  {
+   "text": "To accept the proposed proof, the gatekeeper requires a check by the Lean kernel, the core of the software that checks whether the reasoning follows its rules.",
+   "emphasis": [
+    "kernel",
+    "rules"
+   ],
+   "pause_after": 0.4,
+   "beat": "setup",
+   "members": [
+    16
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Show the marked kernel-check passage first. Continue with the paper’s workflow excerpt while Easton explains the kernel’s role."
+  },
+  {
+   "text": "The gatekeeper uses Lean’s comparator to check that the proof delivers exactly what a held-out copy of the specification asks for. That comparison gives the gatekeeper a way to catch a proof of a different claim, even if every step passes the kernel check.",
+   "emphasis": [
+    "exactly"
+   ],
+   "pause_after": 0.22,
+   "beat": "turn",
+   "members": [
+    17
+   ],
+   "pace": "steady",
+   "melody": "wide",
+   "direction": "Hold on the phrase marking the held-out specification, then cut to the paper’s workflow excerpt as Easton explains why the gatekeeper needs the comparison."
+  },
+  {
+   "text": "The results rely on the security of the cryptographic primitives and on the contracts of some routines the executable calls.",
+   "emphasis": [
+    "rely",
+    "contracts"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    18
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Use the marked paper passage once. Keep the source attribution on screen."
+  },
+  {
+   "text": "On November eighteenth, Open Ay Eye reports internal measurements of coding-agent use, including what happened when agents carried out particular jobs autonomously.",
+   "emphasis": [
+    "particular"
+   ],
+   "pause_after": 0.4,
+   "beat": "setup",
+   "members": [
+    19
+   ],
+   "pace": "steady",
+   "melody": "level",
+   "direction": "Hold the date and source credit, then switch to the names of the two tasks used in the comparison."
+  },
+  {
+   "text": "Estimated autonomous success was seventy nine percent for monitoring training runs, and thirty five percent for launching them.",
+   "emphasis": [
+    "monitoring",
+    "launching"
+   ],
+   "pause_after": 0.22,
+   "beat": "turn",
+   "members": [
+    20
+   ],
+   "pace": "steady",
+   "melody": "wide",
+   "direction": "Show the monitoring and launching estimates together on the task-rate card. Let the difference between the two tasks register before moving to the authors’ interpretation."
+  },
+  {
+   "text": "Start with tasks estimated to take two to four hours of human work. In March, the estimated success rate for agents working autonomously was twenty three percent. By October, the estimate for that same group of tasks had risen to forty six percent. The authors say that changes over time within the report’s task-duration groups may reflect better agent capabilities and changes in when and how researchers use agents.",
+   "emphasis": [
+    "when",
+    "how"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    21
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Hold the duration-group quotation card through the October figure. Emphasize that the two-to-four-hour duration is itself an estimate. Cut to the authors’ interpretation card on “The authors say.”"
+  },
+  {
+   "text": "In his release note, Alpöge describes how he steered the collaboration and the simpler case that helped him see where to go.",
+   "emphasis": [
+    "steered",
+    "simpler"
+   ],
+   "pause_after": 0.22,
+   "beat": "close",
+   "members": [
+    22
+   ],
+   "pace": "slow",
+   "melody": "rising",
+   "direction": "Start with the release-note passage and cut to the marked phrase at the mention of the simpler case."
+  },
+  {
+   "text": "Alpöge writes that he guided the collaboration to a situation analogous to the simpler problem he already had in mind.",
+   "emphasis": [
+    "guided",
+    "analogous"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    23
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Go straight to the marked sentence in the note, with the focus on Alpöge’s own verb."
+  },
+  {
+   "text": "In a simpler case you can see a relationship clearly, then look for a place where that same relationship holds in the problem you're trying to solve.",
+   "emphasis": [
+    "relationship",
+    "holds"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    24
+   ],
+   "pace": "steady",
+   "melody": "wide",
+   "direction": "Use the marked and unmarked release-note crops as context for Easton’s explanation of how a simpler case can guide the work."
+  },
+  {
+   "text": "Getting the work to that point is the role he claims for himself, and he writes that what Claude did next left him in awe.",
+   "emphasis": [
+    "awe"
+   ],
+   "pause_after": 0.4,
+   "beat": "loop",
+   "members": [
+    25
+   ],
+   "pace": "steady",
+   "melody": "rising",
+   "direction": "Hold on Alpöge’s marked account of guiding the work. Keep the sentence about Claude readable through the end of the narration."
+  },
+  {
+   "text": "They'd had months of working together, he writes, but this time Claude far outpaced him near the finish line.",
+   "emphasis": [
+    "outpaced"
+   ],
+   "pause_after": 0.4,
+   "beat": "turn",
+   "members": [
+    26
+   ],
+   "pace": "slow",
+   "melody": "falling",
+   "direction": "Let the author’s line carry the scene. Read it in Easton’s voice as attributed narration."
+  },
+  {
+   "text": "In the release note, Alpöge says the formalization is finished. He intends to understand the argument and its simplifications, explain them to others, speak about them and write them up properly.",
+   "emphasis": [
+    "finished",
+    "understand"
+   ],
+   "pause_after": 0.4,
+   "beat": "low",
+   "members": [
+    27
+   ],
+   "pace": "slow",
+   "melody": "falling",
+   "direction": "Show the release-note passage on the completed formalization. Cut to the marked passage on the work he intends to do."
+  },
+  {
+   "text": "He makes the formal work available first, which means someone who has never met him can take it onto a machine of their own.",
+   "emphasis": [
+    "own"
+   ],
+   "pause_after": 0.22,
+   "beat": "turn",
+   "members": [
+    28
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Use the footnote as source context. Render a separate transfer diagram with the numbered archive moving from the public link to a reader’s machine."
+  },
+  {
+   "text": "The first practical job is to build the library, to get the pieces Alpöge released to fit together under Lean.",
+   "emphasis": [
+    "together"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    29
+   ],
+   "pace": "steady",
+   "melody": "level",
+   "direction": "Introduce Sutherland’s November 21 sandbox rebuild as a documented example of building the library. Hold on the attributed quotation card as the narration explains the practical job of getting the released pieces to build together under Lean."
+  },
+  {
+   "text": "The submission draws directly on one other library, Mathlib, where the Lean community keeps mathematics that formal proofs can use.",
+   "emphasis": [
+    "Mathlib"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    30
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card. Present the cited design separately from the archive."
+  },
+  {
+   "text": "At Em Eye Tee, Andrew Sutherland keeps a record of the verification work and credits Claude Code in running the checks.",
+   "emphasis": [
+    "Sutherland"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    31
+   ],
+   "pace": "steady",
+   "melody": "level",
+   "direction": "Introduce Sutherland with the credited record. Keep the page-update stamp in the source context."
+  },
+  {
+   "text": "Sutherland records zero errors in that first build. It finished on November twentieth at sixteen forty three and twenty one seconds, Coordinated Universal Time.",
+   "emphasis": [
+    "zero"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    32
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Use the MIT archive card briefly for Sutherland’s credit. Bring up the separate attributed f22 document design on “zero errors” and hold it through the November 20 finish time. The design displays “zero errors; finished 16:43:21 UTC on 20 November.”"
+  },
+  {
+   "text": "With the pieces built together, there’s an export, a file holding the formal proof in a form that can be passed to someone else and checked.",
+   "emphasis": [
+    "export"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    33
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Use the joint statement’s inert-export quotation to introduce the file. Render a simple handoff diagram from the build to the exported file and then to a checker. Use Sutherland’s sandbox excerpt as a separately credited example of an export produced by a rebuild."
+  },
+  {
+   "text": "Dozens of people report building the library for themselves and reproducing that export, so the checking can start from a file other people know how to get.",
+   "emphasis": [
+    "dozens",
+    "reproducing"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    34
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card / Andrew Sutherland (MIT), checks run with Claude Code. · RH Lean proof: verification files · Attributed quotation card. Present the cited design separately from the archive."
+  },
+  {
+   "text": "Sutherland also documents a November twenty first rebuild on a separate machine, with the network off and the source files locked against changes. The record gives the result in two ways. The build exits successfully, and the error count is zero.",
+   "emphasis": [
+    "separate",
+    "locked"
+   ],
+   "pause_after": 0.4,
+   "beat": "loop",
+   "members": [
+    35
+   ],
+   "pace": "steady",
+   "melody": "level",
+   "direction": "Hold the marked verification-table excerpt on the separate machine, disabled network, and read-only source. Use the second quotation card from the same record for the successful exit and zero-error result."
+  },
+  {
+   "text": "That machine also produces a proof export, and when Sutherland sets it beside the published proof export, there's a byte for byte match. The verification table puts the size of that file at more than sixty one billion bytes. The timeline records the matching SHA two fifty six digest.",
+   "emphasis": [
+    "match"
+   ],
+   "pause_after": 0.22,
+   "beat": "turn",
+   "members": [
+    36
+   ],
+   "pace": "slow",
+   "melody": "falling",
+   "direction": "Hold the verification-table excerpt on the matching proof export and its byte count. At the timeline sentence, use the export-comparison crop as context and present the exact sandbox-timeline quotation as a separately attributed design."
+  },
+  {
+   "text": "There’s a separate question about the theorem named in Alpöge’s submission. What, exactly, does it say?",
+   "emphasis": [
+    "theorem",
+    "exactly"
+   ],
+   "pause_after": 0.22,
+   "beat": "loop",
+   "members": [
+    37
+   ],
+   "pace": "steady",
+   "melody": "rising",
+   "direction": "Hold on the theorem identifier in Sutherland’s audit excerpt. Carry the sound across the chapter boundary."
+  },
+  {
+   "text": "What a number theorist can claim on the strength of that sentence depends on every condition in it, so the reviewers need a reference of their own.",
+   "emphasis": [
+    "every",
+    "reference"
+   ],
+   "pause_after": 0.22,
+   "beat": "close",
+   "members": [
+    38
+   ],
+   "pace": "slow",
+   "melody": "rising",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card / Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card."
+  },
+  {
+   "text": "The reviewers turn to a declaration in Mathlib, which experts in Lean and number theory have already vetted as the classical statement.",
+   "emphasis": [
+    "vetted"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    39
+   ],
+   "pace": "slow",
+   "melody": "falling",
+   "direction": "Allow time for the viewer to read who vetted the reference and what they vetted."
+  },
+  {
+   "text": "The Lean community adds a file that isolates the reference statement and imports only Mathlib, so the comparison starts from a statement outside Alpöge’s submission.",
+   "emphasis": [
+    "only",
+    "outside"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    40
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Start with the joint-statement quotation on the isolated file. At “imports only Mathlib,” cut to the marked joint-statement crop that begins with the import clause."
+  },
+  {
+   "text": "Read the declaration with the reviewers, and the first thing you're given is a number that can sit anywhere on a plane. That opening symbol means for every. The declaration ranges over all the points on the plane before it asks which of them meet its conditions.",
+   "emphasis": [
+    "plane"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    41
+   ],
+   "pace": "slow",
+   "melody": "level",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card / Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card. Present the cited design separately from the archive."
+  },
+  {
+   "text": "The horizontal coordinate is the real part of that number, and the vertical coordinate tells you how far up or down it sits.",
+   "emphasis": [
+    "horizontal",
+    "vertical"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    42
+   ],
+   "pace": "steady",
+   "melody": "level",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card."
+  },
+  {
+   "text": "Put that number into the Riemann zeta function, and the next condition in the declaration asks whether the value that comes out is zero. A point goes in and a value comes out. When that value is zero, the point you put in is what mathematicians call a zero of the function.",
+   "emphasis": [
+    "zero"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    43
+   ],
+   "pace": "slow",
+   "melody": "falling",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card / Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card. Present the cited design separately from the archive."
+  },
+  {
+   "text": "Some zeros already have simple addresses, at minus two, minus four, and on through the negative even integers. The declaration sets those aside, and leaves out the input one.",
+   "emphasis": [
+    "negative",
+    "even",
+    "one"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    44,
+    45
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card."
+  },
+  {
+   "text": "For every zero that meets those conditions, the declaration makes a claim about the horizontal coordinate, and it gives that coordinate a single value. It has to be one half.",
+   "emphasis": [
+    "every",
+    "single",
+    "half"
+   ],
+   "pause_after": 0.22,
+   "beat": "loop",
+   "members": [
+    46,
+    47
+   ],
+   "pace": "slow",
+   "melody": "falling",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card / Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card."
+  },
+  {
+   "text": "Draw a vertical line there, and every zero covered by the claim has to land on it, however high or low.",
+   "emphasis": [
+    "vertical",
+    "every"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    48
+   ],
+   "pace": "slow",
+   "melody": "wide",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card."
+  },
+  {
+   "text": "Suppose a proof covered only the zeros below some chosen height, then a mathematician using it would have to carry that limit into their own work. A later proof that needs to cover a point above that line would still need a reason the conclusion holds there.",
+   "emphasis": [
+    "limit"
+   ],
+   "pause_after": 0.22,
+   "beat": "loop",
+   "members": [
+    49
+   ],
+   "pace": "steady",
+   "melody": "wide",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card / Lean FRO and Mathlib Initiative · Lean verification of the Riemann Hypothesis · Attributed quotation card."
+  },
+  {
+   "text": "So the reviewers take the theorem named in Alpöge’s main file and put it against that precise statement, with the full range of inputs still in place.",
+   "emphasis": [
+    "precise",
+    "full"
+   ],
+   "pause_after": 0.22,
+   "beat": "loop",
+   "members": [
+    50
+   ],
+   "pace": "steady",
+   "melody": "level",
+   "direction": "Show the theorem identifier as an excerpt from the audit. Then cut to the joint statement’s account of the comparison."
+  },
+  {
+   "text": "They use two independent tools for the comparison, Comparator and con leche, with con leche running in its mode for comparing a solution with a challenge. Sutherland’s record also documents a con leche comparison on November twentieth.",
+   "emphasis": [
+    "independent",
+    "challenge"
+   ],
+   "pause_after": 0.4,
+   "beat": "setup",
+   "members": [
+    51
+   ],
+   "pace": "steady",
+   "melody": "level",
+   "direction": "Say con LEH-cheh. Introduce the tools on the joint statement, then cut to Sutherland’s con-leche comparison log. Label November 20 as the run date and the visible November 24 timestamp as the source-index update."
+  },
+  {
+   "text": "The joint statement reports that both tools confirm the match. Alpöge’s theorem is exactly the statement the experts vetted in Mathlib.",
+   "emphasis": [
+    "both",
+    "exactly"
+   ],
+   "pause_after": 0.22,
+   "beat": "turn",
+   "members": [
+    52
+   ],
+   "pace": "slow",
+   "melody": "falling",
+   "direction": "Let the first sentence land. Bring the score down enough that the second can carry the result on its own."
+  },
+  {
+   "text": "The reviewers report a match for the theorem a number theorist would need. For the proof itself, the joint statement says the checks ran on an inert export.",
+   "emphasis": [
+    "match",
+    "inert"
+   ],
+   "pause_after": 0.22,
+   "beat": "close",
+   "members": [
+    53
+   ],
+   "pace": "steady",
+   "melody": "rising",
+   "direction": "Hold the reported match for the first sentence and cut to the joint statement’s inert-export excerpt as the narration turns to the proof."
+  },
+  {
+   "text": "A checker takes up the inert export, and what it has in front of it is a set of declarations it can read as data.",
+   "emphasis": [
+    "data"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    54
+   ],
+   "pace": "steady",
+   "melody": "level",
+   "direction": "Open on the joint statement’s quotation card as the narration introduces the inert export. Fade the card out as the narration turns to declarations."
+  },
+  {
+   "text": "The audit excerpt gives the theorem’s name and type. A definition gives a term meaning. The type specifies what the proof must establish.",
+   "emphasis": [
+    "proof"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    55
+   ],
+   "pace": "steady",
+   "melody": "level",
+   "direction": "From word zero, place the separately typeset definition excerpt over the audit card. Keep the theorem name and type legible on the card."
+  },
+  {
+   "text": "The excerpt mentions the reference file’s Mathlib import. When a proof cites an earlier library theorem, the checker can read what it establishes.",
+   "emphasis": [],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    56
+   ],
+   "pace": "steady",
+   "melody": "wide",
+   "direction": "From word zero, keep the joint statement’s line about the Mathlib import readable behind the separate quotation from Mathlib’s documentation. The foreground quotation gives the trivial zeros as an example of a library result."
+  },
+  {
+   "text": "The community’s excerpt names Mathlib’s statement. The definition’s “for every” lets the checker apply the rule once the proof shows a particular number qualifies.",
+   "emphasis": [],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    57
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "From word zero, show the joint statement excerpt with the separately typeset opening of the definition over it. Keep the declaration name readable on the card and set the quantifier large enough to read."
+  },
+  {
+   "text": "An axiom is a starting assumption the proof can use, and the reviewers can ask which of those assumptions lie underneath Alpöge’s theorem.",
+   "emphasis": [
+    "assumptions"
+   ],
+   "pause_after": 0.4,
+   "beat": "loop",
+   "members": [
+    58
+   ],
+   "pace": "slow",
+   "melody": "rising",
+   "direction": "Show the inspected sources at their spoken anchors, in order: Andrew Sutherland (MIT), checks run with Claude Code. · audit.log · Attributed quotation card / Andrew Sutherland (MIT), checks run with Claude Code. · audit.log · Attributed quotation card."
+  },
+  {
+   "text": "If one of the assumptions supplied the conclusion on its own, every step could follow the rules and the argument would still depend on being given the result.",
+   "emphasis": [
+    "given"
+   ],
+   "pause_after": 0.22,
+   "beat": "low",
+   "members": [
+    59
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Use the Signal paper crop and its attributed quotation as a brief callback to what a reader must trust. Then clear the source excerpt and set the spoken example in separate production typography headed “Hypothetical,” with “Assume the conclusion” followed by “Derive the conclusion.”"
+  },
+  {
+   "text": "For Alpöge’s theorem, Sutherland’s audit identifies just three axioms, and it gives their names so a reader can see where the proof starts.",
+   "emphasis": [
+    "three",
+    "names"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    60
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Lead the eye directly to the axiom list. Keep the card under the picture cap and leave the formal identifiers for the viewer to read."
+  },
+  {
+   "text": "On November twentieth, Lean’s own kernel replays the modules from the build, and the number of rejections in Sutherland’s record is zero.",
+   "emphasis": [
+    "replays",
+    "zero"
+   ],
+   "pause_after": 0.22,
+   "beat": "setup",
+   "members": [
+    61
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Bring the dated replay result in cleanly and put the stress at the end of the sentence."
+  },
+  {
+   "text": "An independently written checker gives the reviewers a second implementation of the rules, so they can see what happens when the same proof goes through different software.",
+   "emphasis": [
+    "different"
+   ],
+   "pause_after": 0.4,
+   "beat": "loop",
+   "members": [
+    62
+   ],
+   "pace": "steady",
+   "melody": "rising",
+   "direction": "Render a two-path schematic, first sending the build’s modules to Lean’s kernel for replay, then sending the full export to the independent nanoda kernel. Use the November 20 replay and nanoda result excerpts as source insets at their respective stages."
+  },
+  {
+   "text": "The record has another row, for the independent kernel nanoda. It takes the full export as input, and the record shows it accepted the proof.",
+   "emphasis": [
+    "whole",
+    "successful"
+   ],
+   "pause_after": 0.22,
+   "beat": "turn",
+   "members": [
+    63
+   ],
+   "pace": "steady",
+   "melody": "falling",
+   "direction": "Place the checker name and “November 20 full-export check” beside the attributed successful-exit excerpt. Keep the sounds of the run abstract and in the score."
+  },
+  {
+   "text": "Con leche has another job here, reading the full export in verified mode, where the result in the log is a count of declarations accepted.",
+   "emphasis": [
+    "verified",
+    "accepted"
+   ],
+   "pause_after": 0.4,
+   "beat": "loop",
+   "members": [
+    64
+   ],
+   "pace": "steady",
+   "melody": "rising",
+   "direction": "Use Sutherland’s verification-table crops for the November 20 full-export run. At the reference to the log, present the exact master-log line in the separately attributed quotation design."
+  },
+  {
+   "text": "It accepts one million four hundred sixty eight thousand four hundred eighteen declarations, and Sutherland records that the run ends successfully on November twentieth.",
+   "emphasis": [
+    "accepts",
+    "successfully"
+   ],
+   "pause_after": 0.22,
+   "beat": "turn",
+   "members": [
+    65
+   ],
+   "pace": "slow",
+   "melody": "falling",
+   "direction": "Cut from the attributed master-log quotation design to Sutherland’s verification-table excerpt, which puts the declaration count beside the November 20 successful exit."
+  },
+  {
+   "text": "A reader who wants to use the theorem can find the full-export checker results in Sutherland’s record. The joint statement reports the match between the submitted theorem and Mathlib’s statement.",
+   "emphasis": [
+    "checker",
+    "match"
+   ],
+   "pause_after": 0.4,
+   "beat": "close",
+   "members": [
+    66
+   ],
+   "pace": "steady",
+   "melody": "rising",
+   "direction": "Show the full-export run card for checker acceptance. Cut to the joint statement’s match card for the theorem comparison and carry the tone into its certification."
+  },
+  {
+   "text": "The Lean Eff Are Oh and the Mathlib Initiative put their names on a joint statement, dated November twenty first.",
+   "emphasis": [
+    "joint"
+   ],
+   "pause_after": 0.22,
+   "beat": "turn",
+   "members": [
+    67
+   ],
+   "pace": "slow",
+   "melody": "level",
+   "direction": "Give each issuer equal weight on the attributed quotation card. Emphasize the displayed calendar date, November 21, 2026. Cut to the separate certification quotation design for the next sentence."
+  },
+  {
+   "text": "This excerpt reports the Mathlib comparison. The reviewers write, “We hereby certify that both the statement and the proof of the Riemann Hypothesis are correct.” For Alpöge, there’s still the work he set himself in the release note, to understand the argument well enough to speak about it and write it properly. He includes the argument's simplifications in that work. His note puts understanding it himself alongside helping other people understand it.",
+   "emphasis": [
+    "both",
+    "correct",
+    "understand",
+    "properly"
+   ],
+   "pause_after": 0.22,
+   "beat": "turn",
+   "members": [
+    68,
+    69
+   ],
+   "pace": "slow",
+   "melody": "falling",
+   "direction": "Keep the Mathlib comparison excerpt visible behind the separate certification design throughout the row. Show the exact certification sentence and both issuers’ names from word zero and hold them through “correct.”"
+  },
+  {
+   "text": "He put a proof online, and now he wants to put the argument within reach.",
+   "emphasis": [
+    "within",
+    "reach"
+   ],
+   "pause_after": 0.0,
+   "beat": "close",
+   "members": [
+    70
+   ],
+   "pace": "slow",
+   "melody": "falling",
+   "direction": "Hold the marked release-note excerpt on Alpöge’s intention to understand the argument and help others understand it. Leave the last line dry."
+  }
+ ]
+}

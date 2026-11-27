@@ -102,5 +102,10 @@ def allocate(ctx,script,ft,failure,words=None):
             candidate=selected_candidate(i)
             selected.append(candidate);by[gap['seg']]['clips'].append(candidate)
         if selected:assigned.append(dict(seg=gap['seg'],anchors=[anchor(clock,gap[k]) for k in ('start','end')],candidates=selected))
-    editorial['assignments']=assigned
+    slots=editorial.setdefault('assignments',[])
+    for new in assigned:
+        old=next((a for a in slots if a['seg']==new['seg'] and a['anchors']==new['anchors']),None)
+        if old is None:slots.append(new)
+        else:
+            old['candidates']=new['candidates']+[c for c in old['candidates'] if c not in new['candidates']]
     ft['lines']=list(by.values())

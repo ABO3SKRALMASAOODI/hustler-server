@@ -58,13 +58,16 @@ def test_compose_attributes_the_two_halves_of_one_recollection(tmp_path, monkeyp
                                                                 for i in (0,1)])
     scene,beats=film.build(script,pack,"window",dict(coverage_final=True,display_facts=[page],caption_ends=[6,9,14,17]))
     rows=[it for it in scene["items"] if it.get("k")=="word"]
-    assert any("Interview recollection" in it["t"] for it in rows)
-    assert any(it["t"]=="Some unused" for it in rows)
-    assert all("could not find" not in it["t"] for it in rows)
-    for row in beats["display_facts"]:
-        at=sum(row["f"])//2
-        assert any(i.get("k") in ("shot","card") and i.get("pic")!="plate" and i["f"][0]<=at<i["f"][1]
-                   for i in scene["items"])
+    # Both halves are attributed in the record; the screen keeps the live founder and his timed words.
+    halves = [p for p in beats["research_facts"] if p["facts"][0].get("chain")]
+    assert [p["facts"][0]["chain"]["speaker"] for p in halves] == ["Founder","Founder"]
+    assert {p["facts"][0]["chain"].get("label") for p in halves} == {"Budget set aside","Some unused"}
+    assert all("recollection" not in it["t"].lower() and "could not find" not in it["t"] for it in rows)
+    for w in words[3:15]:
+        at = round((w["start"]+w["end"])/2*30)+3
+        assert any(i.get("k")=="shot" and i.get("pic")!="plate" and i["f"][0]<=at<i["f"][1] for i in scene["items"])
+        assert any(i.get("role")=="cap" and w["w"].strip(".,").lower() in i["t"].lower() and i["f"][0]<=at<i["f"][1]
+                   for i in scene["items"]), w["w"]
 
 
 def test_checked_window_selects_its_release_sentence_without_another_search(tmp_path, monkeypatch):

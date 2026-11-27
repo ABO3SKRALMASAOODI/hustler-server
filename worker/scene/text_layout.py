@@ -26,7 +26,43 @@ def proof_bounds(card, frame, width, height):
     return project(card["proof_line"]) if page[3] - page[1] > .74 else page
 
 
+def share_display_copy(items):
+    """Give identical lettering one owner per frame across caption, display and palette layers."""
+    used = defaultdict(dict)
+    # A grouped device (a counter's steps, a typewriter's states, a reading card's rows) is one performance: its own
+    # lettering is never hidden here, and an ungrouped display copy of the same text gives way to it on the frames
+    # it shows (26 Nov: a counter and a display row of the same figure were both on screen). The caption keeps its
+    # seat: the palette hands it off on the device's own clock.
+    grouped = defaultdict(set)
+    for it in items:
+        if it.get("k") == "word" and it.get("t") and it.get("text_group"):
+            lo, hi = it["f"]
+            alpha = it.get("op", 1)
+            grouped[" ".join(it["t"].split()).casefold()].update(
+                f for f in range(max(lo, it.get("on", lo)), hi) if A(alpha, f, lo) > .01)
+    words = [it for it in items if it.get("k") == "word" and it.get("t") and not it.get("text_group")]
+    # The caption already belongs to its sentence. Retain it in that seat when a second
+    # type device happens to request exactly the same word or figure.
+    for it in sorted(words, key=lambda row: (row.get("role") != "cap", -row.get("z", 0))):
+        text = " ".join(it["t"].split()).casefold()
+        origin = it.get("v"), it.get("role")
+        lo, hi = it["f"]
+        alpha = it.get("op", 1)
+        changed = None
+        for f in range(max(lo, it.get("on",lo)), hi):
+            if A(alpha,f,lo) <= .01:
+                continue
+            owner = used[text].setdefault(f, origin)
+            if (owner != origin and not (owner[1] == origin[1] == "cap")) or (f in grouped[text] and origin[1] != "cap"):
+                if changed is None:
+                    changed = [A(alpha,q,lo) for q in range(lo,hi)]
+                changed[f-lo] = 0
+        if changed is not None:
+            it["op"] = changed
+
+
 def resolve(scene):
+    share_display_copy(scene["items"])
     width, height = scene["frame"]
     voices = scene["voices"]
     occupied = defaultdict(list)

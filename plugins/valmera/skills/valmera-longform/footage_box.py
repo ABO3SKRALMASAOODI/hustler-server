@@ -482,6 +482,8 @@ def fetch(payload, out, log=print, _port=None):
         if payload.get('verification_owner'):
             result['verification_owner']=payload['verification_owner']
             result['research_candidates_only']=True
+        if payload.get('interval_targets'):
+            result['interval_targets']=payload['interval_targets']
         if payload.get('narration_context'):
             result['narration_context']=payload['narration_context']
         pending = rec.with_suffix('.tmp')

@@ -2002,10 +2002,11 @@ def sparse_speech(index, duration):
 
 
 def kept_share_restore(keep, duration, picked=None):
-    """The keep list to restore when a short source's cut kept too little
-    for no reason the footage gives, else None: a source up to
-    FIRST_CUT_SHORT_SOURCE_S whose cut keeps under KEPT_SHARE_FLOOR (and
-    more than 6 s less than the source) gets its whole take back. A montage
+    """The keep list to restore when a cut kept too little for no reason the
+    footage gives, else None: a source up to FIRST_CUT_SHORT_SOURCE_S whose
+    cut keeps under KEPT_SHARE_FLOOR (and more than 6 s less than the
+    source) gets its whole take back; a longer source's picked moment
+    (picked start_s/end_s) cut the same way gets that moment back. A montage
     pick (how == 'motion') is a designed cut and is left alone."""
     if not keep:
         return None          # the keep is unknown: nothing to judge
@@ -2014,10 +2015,25 @@ def kept_share_restore(keep, duration, picked=None):
         kept = sum(max(0.0, float(e) - float(s)) for s, e in keep)
     except (TypeError, ValueError):
         return None
-    if duration <= 0 or duration > config.FIRST_CUT_SHORT_SOURCE_S:
+    if duration <= 0:
         return None
     if (picked or {}).get("how") in ("motion", "continuous"):
         return None
+    if duration > config.FIRST_CUT_SHORT_SOURCE_S:
+        # A long source's best-moment pick is its own short take: the pause
+        # cuts never leave it a fragment (ticket #1931, p6357: 11 words in a
+        # 447 s store walk; the 0-45 s pick held none of them, cut_silences
+        # treated all of it as pause and left 0.08 s, an export of two black
+        # frames). The pick comes back whole.
+        try:
+            start = float((picked or {}).get("start_s"))
+            end = float((picked or {}).get("end_s"))
+        except (TypeError, ValueError):
+            return None
+        span = end - start
+        if span <= 0 or kept >= KEPT_SHARE_FLOOR * span or span - kept <= 6.0:
+            return None
+        return [[round(start, 2), round(end, 2)]]
     if kept >= KEPT_SHARE_FLOOR * duration or duration - kept <= 6.0:
         return None
     return [[0.0, round(duration, 2)]]
@@ -2385,7 +2401,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                     {"segments": restore, "snap_to_words": False}, started)):
             applied = [a for a in applied if a not in (
                 "a clean opening and ending", "pauses trimmed")]
-            applied.append("kept whole (trimming would have cut most of it)")
+            applied.append("kept whole (trimming would have cut most of it)"
+                           if duration <= config.FIRST_CUT_SHORT_SOURCE_S else
+                           "the picked moment kept whole (its pauses were "
+                           "most of it)")
     if drop_app_cards(ctx, steps, started, duration):
         applied.append("the app's end card left out")
     faces = _faces(ctx.index)

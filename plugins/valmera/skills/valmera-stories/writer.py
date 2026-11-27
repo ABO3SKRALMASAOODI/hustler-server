@@ -1437,7 +1437,15 @@ def _script_lines(segs):
                      for k, s in enumerate(segs))
 
 
-def rewrite_without(script, bad, ask=None, targets=None, why=None, style=None):
+REPAIR_NOTE = ("# Repair (these core lines said more than the checked quotes state)\nRestate each of them as EXACTLY what the checked "
+               "quotes state, and keep the job the line has in the story: the hook stops the viewer with the story's collision, the "
+               "turn is where it changes, the payoff lands the result, the close reframes the hook. Cut every cause, purpose, motive, "
+               "order, number or consequence the quotes do not hold, and keep the facts they do hold at their sharpest. Name only "
+               "whom the quotes name. Answering null is not an option here: there is always a true thing the quotes say for this "
+               "line; say it. Cite the checked facts you use.")
+
+
+def rewrite_without(script, bad, ask=None, targets=None, why=None, style=None, repair=False):
     """(script, info, usage): segments rewritten on the checked facts alone, or dropped, by one call (RESEARCH_MODEL on
     OpenAI, no web). The segments are those citing an unverifiable fact in `bad` (which leave the script), plus
     `targets` (indices) with `why` ({index: the reason it must change}: a claim no quote states, a repeat). Structure
@@ -1468,8 +1476,9 @@ def rewrite_without(script, bad, ask=None, targets=None, why=None, style=None):
                    f"\n\n# Unchecked facts (the film must not say them)\n{json.dumps([dict(id=f.get('id'), claim=f.get('claim')) for f in sc.get('facts') or [] if f.get('id') in bad], ensure_ascii=False)}"
                    f"\n\n# Rewrite or drop these segments\n{targets}"
                    f"\n\n# Why each must change\n{json.dumps({str(k): why.get(k, '') for k in targets}, ensure_ascii=False)}" +
-                   (f"\n\n# Core segments (the hook, the turn, the payoff): never drop these; restate each on the checked facts "
-                    f"only when they still carry its point, else answer say null for it\n{[k for k in targets if k in core]}"
+                   ((f"\n\n{REPAIR_NOTE}\n{[k for k in targets if k in core]}" if repair else
+                     f"\n\n# Core segments (the hook, the turn, the payoff): never drop these; restate each on the checked facts "
+                     f"only when they still carry its point, else answer say null for it\n{[k for k in targets if k in core]}")
                     if any(k in core for k in targets) else "") +
                    (f"\n\n# The point each core segment must carry (the story's spine, with the checked facts that state it): "
                     f"restate the segment so it says that point as sharply, in words those facts support\n"
@@ -1636,11 +1645,63 @@ def uncite(seg, verdict, qb, info, stage):
         seg["facts"] = keep
 
 
-def check_lines(sc, info, spend, log, ask_judge=None, ask_rewrite=None, rounds=SUPPORT_ROUNDS, style=None, stage="settle"):
+CORE_REPAIRS = 2                       # a core line that outran its quotes is restated as what they state, judged, at most twice
+
+
+def repair_core_lines(sc, ks, why, info, spend, log, ask_judge=None, ask_rewrite=None, style=None, stage="settle"):
+    """(script, {sid: why it still fails}): 27 Nov (factory fix 64). A core line (hook, turn, payoff, close) that says
+    more than its quotes state is not a reason to stop the story: it is restated as EXACTLY what the checked quotes state
+    (rewrite_without repair=True: the beat's job is kept, null is not an answer) and judged for support again; at most
+    CORE_REPAIRS times. The lines that stand leave the script repaired (info["core_repaired"] says what was said before
+    and after); the callers' point checks (the spine, the final point) read the new words next. A line no quote can
+    stand is returned with the judge's last reason: only then does the story fail."""
+    ks, why = list(ks), dict(why)
+    left = {k: why.get(k) or "it says more than its quotes state" for k in ks}
+    for attempt in range(CORE_REPAIRS):
+        if not left:
+            break
+        segs = sc["segments"]
+        reasons = {k: f"{w} (checked because {str(segs[k].get('_check') or 'it was judged').strip()})" for k, w in left.items()}
+        before = {k: segs[k].get("say") for k in left}
+        sids = {k: segs[k].get("_sid") for k in left}
+        sc2, ri, use = rewrite_without(sc, (), ask=ask_rewrite, targets=sorted(left), why=reasons, style=style, repair=True)
+        if use:
+            spend.append(use)
+        if ri["core_failed"] or not ri["rewritten"]:
+            info.setdefault("core_repair_failed", []).append(dict(stage=stage, attempt=attempt, lines=sorted(sids.values()),
+                                                                  why={str(k): v for k, v in (ri.get("answer") or {}).items()}))
+            break
+        qb = _verified_quotes(sc2)
+        idx = list(ri["rewritten"])
+        verdicts, use = judge_support(sc2, idx, ask=ask_judge, quotes_by_id=qb)
+        if use:
+            spend.append(use)
+        segs2 = sc2["segments"]
+        info["lines_checked"] += [dict(stage=stage + "-core-repair", round=attempt, line=k, sid=segs2[k].get("_sid"), say=segs2[k].get("say"),
+                                       why_checked="a core line restated as what its quotes state", ok=verdicts[k]["ok"],
+                                       why=verdicts[k]["why"], speech=[]) for k in idx]
+        sc = sc2
+        for k in idx:
+            if verdicts[k]["ok"]:
+                segs2[k].pop("_check", None)
+                uncite(segs2[k], verdicts[k], qb, info, stage)
+                info.setdefault("core_repaired", []).append(dict(stage=stage, sid=sids[k], before=before[k], after=segs2[k].get("say"),
+                                                                 why=left[k]))
+                log(f"core repair: line {k} restated as what its quotes state: {before[k]!r} -> {segs2[k].get('say')!r}"[:400])
+                left.pop(k)
+            else:
+                left[k] = verdicts[k]["why"]
+    if sc.get("segments"):
+        sc["hook_line"], sc["close_line"] = sc["segments"][0].get("say"), sc["segments"][-1].get("say")
+    return sc, {sc["segments"][k].get("_sid"): w for k, w in left.items()}
+
+
+def check_lines(sc, info, spend, log, ask_judge=None, ask_rewrite=None, rounds=SUPPORT_ROUNDS, style=None, stage="settle", repair=True):
     """(script, core_failed {sid: why}): every segment marked `_check` (it cites a fact whose quote was replaced, it was
     rewritten, or it declares quoted speech no verified quote holds) is judged for support; an unsupported line is
     rewritten on the verified quotes and judged again, at most `rounds` times, then dropped. A core line that
-    cannot be restated on its quotes is returned in core_failed (the story cannot stand)."""
+    still cannot stand after that is restated as exactly what its quotes state (repair_core_lines, `repair`); only a
+    core line no quote can stand is returned in core_failed (the story cannot stand)."""
     core_failed = {}
     for rnd in range(rounds + 1):
         idx = [k for k, s in enumerate(sc.get("segments") or []) if s.get("_check")]
@@ -1669,9 +1730,15 @@ def check_lines(sc, info, spend, log, ask_judge=None, ask_rewrite=None, rounds=S
         log(f"line support (round {rnd}): unsupported {[(k, w[:80]) for k, w in bad.items()]}"[:600])
         core = core_segments(sc)
         if rnd == rounds:
-            for k in bad:
-                if k in core:
-                    core_failed[segs[k].get("_sid")] = bad[k]
+            bad_core = {k: bad[k] for k in bad if k in core}
+            if bad_core and repair:
+                sc, still = repair_core_lines(sc, sorted(bad_core), bad_core, info, spend, log, ask_judge=ask_judge,
+                                              ask_rewrite=ask_rewrite, style=style, stage=stage)
+                segs = sc["segments"]
+                bad = {k: w for k, w in bad.items() if k not in bad_core or segs[k].get("_sid") in still}
+                bad_core = {k: w for k, w in bad_core.items() if k in bad}
+            for k in bad_core:
+                core_failed[segs[k].get("_sid")] = bad[k]
             drop = {k for k in bad if k not in core}
             info["support_dropped"] += [dict(say=segs[k].get("say"), why=bad[k]) for k in sorted(drop)]
             sc["segments"] = [s for k, s in enumerate(segs) if k not in drop]
@@ -1682,6 +1749,15 @@ def check_lines(sc, info, spend, log, ask_judge=None, ask_rewrite=None, rounds=S
         if use:
             spend.append(use)
         if ri["core_failed"]:
+            if repair:
+                sc, still = repair_core_lines(sc, sorted(ri["core_failed"]), {k: bad[k] for k in ri["core_failed"]}, info, spend, log,
+                                              ask_judge=ask_judge, ask_rewrite=ask_rewrite, style=style, stage=stage)
+                for k in ri["core_failed"]:
+                    if sids[k] in still:
+                        core_failed[sids[k]] = still[sids[k]]
+                if not core_failed:
+                    continue                                   # repaired: the other lines still unsupported go on to the next round
+                break
             for k in ri["core_failed"]:
                 core_failed[sids[k]] = bad[k]
             break
@@ -1720,7 +1796,7 @@ def check_repeats(sc, changed, info, spend, log, ask_judge=None, ask_rewrite=Non
         sc2 = before                           # a core line that cannot be said otherwise keeps its words
     info["repeat_rewritten"] += [segs[k].get("_sid") for k in ri["rewritten"]]
     info["repeat_dropped"] += [dict(say=segs[k].get("say"), why=why[k]) for k in ri["dropped"]]
-    sc2, failed = check_lines(sc2, info, spend, log, ask_judge=ask_judge, rounds=0, stage=stage)     # rewritten once: judged, never again
+    sc2, failed = check_lines(sc2, info, spend, log, ask_judge=ask_judge, rounds=0, stage=stage, repair=False)     # rewritten once: judged, never again
     if failed:
         sc2 = before                           # the core line's new words do not stand: its last supported words do
         for s in sc2["segments"]:
@@ -2423,8 +2499,75 @@ def judge_spine(sc, ask=None):
     return out, use
 
 
+REGEN_SYSTEM = """You are the writer of a narrated documentary film of about a minute and a half. Its spine (hook, turn, payoff, close) was researched and verified before it was written: the bank below holds every quote that was checked on its page, word for word. Some beats were written but do not carry the point their claim gives them, and restating the old line did not win it back. Write each of those beats again, from the bank, from scratch.
+
+For every beat you get: the point it must carry (its claim, as the verified quotes state it), why its current line lost it, the bank quotes that state that claim, and the line now. Say the point itself in the beat's first sentence, in the quotes' own terms: the collision, the price, the irony, who did what to whom, as sharply as the quotes allow. The film may say only what the bank's quotes state: name whom they name, add no cause, purpose or order they do not hold. The close reframes the hook: the hook's collision said again, resolved, in new words, never a moral and never the hook's own words again. Keep the narrator's voice and the length of the line it replaces (a little longer is fine when the point needs it), never say what another line already says, and cite the bank facts you use in "facts" (at least one).
+
+"say" is spoken: numbers and years written as words the way they are said, no digits, no abbreviations, no symbols. "show": at most two display items in the same form as the script's, digits only when the same figure stands in a cited quote; or []. "quotes": every span of "say" that presents someone's own words, copied word for word from a cited quote and from that person; or [].
+
+Answer with one JSON object only: {"beats": [{"beat": "hook" | "turn" | "payoff" | "close", "say": the new words, "show": [...], "facts": [bank fact ids], "quotes": [{"words": the span exactly as in say, "who": whose words, "fact": the fact id whose quote holds them}]}]}"""
+REGEN_ROUNDS = 2                       # the lost beats are written again from the bank at most twice before the idea is let go
+
+
+def regenerate_beats(sc, bank, lost, ask=None, style=None):
+    """(script, [beats written again], usage): 27 Nov (factory fix 64). The beats of `lost` ({beat: {"lost": why, ...}}) are
+    written again from the verified bank by one call (RESEARCH_MODEL, no web), the point stated back to the writer:
+    the claim, why the line lost it, the quotes that state it. Only those lines change; each cites bank facts only (they join
+    the script's facts) and is marked `_check` for the support judgement, which the caller runs."""
+    ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=12000, what="regenerate beats",
+                                                     model=RESEARCH_MODEL))
+    sc = json.loads(json.dumps(sc))
+    segs = sc["segments"]
+    lines, points = spine_lines(sc), spine_points(sc)
+    qb = {f["id"]: f for f in bank.get("facts") or []}
+    rows = []
+    for b, v in lost.items():
+        k = lines.get(b)
+        if k is None:
+            continue
+        pts = [p for p in points.get(k, []) if p["beat"] == b]
+        ids = list(dict.fromkeys(i for p in pts for i in p["by"] if i in qb))
+        rows.append(dict(beat=b, line=k, point=[p["claim"] for p in pts], lost=v.get("lost") or "the point is flat", now=segs[k].get("say"),
+                         states_it=[dict(id=i, quote=qb[i]["quote"]) for i in ids]))
+    if not rows:
+        return sc, [], None
+    dict_show = any(isinstance(x, dict) for s_ in segs for x in s_.get("show") or [])
+    roles = ROLES if dict_show else ()
+    content = ("# The whole script now\n" + "\n".join(f"{k}. {s_.get('say')}" for k, s_ in enumerate(segs)) +
+               f"\n\n# The bank: every verified quote\n{json.dumps([dict(id=i, quote=f['quote']) for i, f in qb.items()], ensure_ascii=False)}"
+               f"\n\n# The beats to write again, each with the point it must carry\n{json.dumps(rows, ensure_ascii=False, indent=1)}" +
+               (f"\n\n# Display roles\n{list(roles)}" if roles else "") +
+               (f"\n\n# The spoken style to keep\n{style}" if style else ""))
+    text, use = ask(REGEN_SYSTEM, content)
+    ans = json_block(text)
+    got = {g.get("beat"): g for g in (ans.get("beats") if isinstance(ans, dict) else None) or [] if isinstance(g, dict)}
+    have = {f.get("id") for f in sc.get("facts") or []}
+    done = []
+    for r in rows:
+        g = got.get(r["beat"]) or {}
+        say, facts = g.get("say"), g.get("facts")
+        if not (isinstance(say, str) and say.strip() and isinstance(facts, list) and facts and set(facts) <= set(qb) | have):
+            continue
+        seg = segs[r["line"]]
+        seg.setdefault("say_first", seg.get("say"))
+        seg["say"] = " ".join(say.split())
+        if isinstance(seg.get("emphasis"), list):
+            seg["emphasis"] = [e for e in seg["emphasis"] if has_words(seg["say"], e)]
+        seg["facts"] = list(dict.fromkeys(facts))
+        seg["show"] = _norm_show(g.get("show"), roles)
+        seg["quotes"] = _norm_quotes(g.get("quotes"), set(facts))
+        seg["rewritten"] = True
+        seg["_check"] = f"written again from the bank to carry the {r['beat']}'s point: {r['lost']}"
+        done.append(r["beat"])
+    sc["facts"] = list(sc.get("facts") or []) + [f for f in bank_facts(bank) if f["id"] not in have and any(
+        f["id"] in (segs[lines[b]].get("facts") or []) for b in done)]
+    if segs:
+        sc["hook_line"], sc["close_line"] = segs[0].get("say"), segs[-1].get("say")
+    return sc, done, use
+
+
 def hold_spine(script, bank, idea=None, log=print, ask_judge=None, ask_rewrite=None, ask_repeats=None, ask_point=None,
-               again=None, style=None):
+               again=None, style=None, ask_regen=None):
     """(script, report, spend, bank): the script written from the bank, held to its spine before the ear.
       1. every line is judged on the quotes it cites (check_lines: an unsupported line is rewritten on the bank, at most
          twice, else dropped; a core line, the close included, is restated or the script fails); a supported line keeps
@@ -2432,7 +2575,9 @@ def hold_spine(script, bank, idea=None, log=print, ask_judge=None, ask_rewrite=N
       2. the line of each spine beat is judged for its point (judge_spine). A beat that lost it is rewritten on the bank
          to carry the point; when that does not carry it, its claims go back to step 1 (`again`: one more search round,
          new queries) and the line is rewritten on the grown bank; still lost after that, the report is not ok and the
-         caller writes again or takes the next idea. A flat line is never kept as the spine.
+         caller writes again or takes the next idea. A flat line is never kept as the spine;
+      3. beats still lost are written again from the verified bank (regenerate_beats, REGEN_ROUNDS), the point stated back
+         to the writer, each judged for support and the spine judged again, before the idea is let go.
     The words that hold the spine become every line's `say_first`: the later point checks (writer.final_support) compare
     with them."""
     original = json.loads(json.dumps(script))
@@ -2522,7 +2667,7 @@ def hold_spine(script, bank, idea=None, log=print, ask_judge=None, ask_rewrite=N
                                      for k, b in targets.items()]
             continue
         n0 = len(info["lines_checked"])
-        sc2, failed = check_lines(sc2, info, spend, log, ask_judge=ask_judge, rounds=0, style=style, stage="spine")
+        sc2, failed = check_lines(sc2, info, spend, log, ask_judge=ask_judge, rounds=0, style=style, stage="spine", repair=False)
         if failed or len(sc2["segments"]) != len(before["segments"]):
             judged = {r.get("sid"): r for r in info["lines_checked"][n0:]}
             info["spine_failed"] += [dict(step=step, beat=b, line=k, why="its new words do not stand on their quotes: " +
@@ -2534,6 +2679,36 @@ def hold_spine(script, bank, idea=None, log=print, ask_judge=None, ask_rewrite=N
             continue
         info["spine_rewritten"] += [sc2["segments"][k]["_sid"] for k in ri["rewritten"]]
         sc = sc2
+    for attempt in range(REGEN_ROUNDS if lost else 0):
+        # the beats still lost are written again from the verified bank, the point stated back (factory fix 64)
+        try:
+            sc2, wrote, use = regenerate_beats(sc, bank, lost, ask=ask_regen if ask_regen is not None else ask_rewrite, style=style)
+        except Exception as exc:  # noqa: BLE001 - a failed call is one attempt; the report says why
+            info["spine_failed"].append(dict(step=f"regen{attempt}", beats=sorted(lost), why=f"the regeneration call failed: {exc!r}"[:200]))
+            continue
+        if use:
+            spend.append(use)
+        if not wrote:
+            info["spine_failed"].append(dict(step=f"regen{attempt}", beats=sorted(lost), why="the regeneration gave no usable line"))
+            continue
+        sc2, failed = check_lines(sc2, info, spend, log, ask_judge=ask_judge, rounds=1, style=style, stage="spine-regen")
+        if failed or len(sc2["segments"]) != len(sc["segments"]):
+            info["spine_failed"].append(dict(step=f"regen{attempt}", beats=wrote, why="its new words do not stand on their quotes"))
+            continue
+        pv, use = judge_spine(sc2, ask=ask_point)
+        if use:
+            spend.append(use)
+        segs2 = sc2["segments"]
+        info["spine"].append(dict(step=f"regen{attempt}", beats={b: dict(v, say=segs2[v["line"]].get("say") if v["line"] is not None else None)
+                                                                for b, v in pv.items()}))
+        lost2 = {b: v for b, v in pv.items() if not v["carried"]}
+        log(f"spine (regenerated {wrote}): lost {[(b, v['lost'][:80]) for b, v in lost2.items()]}"[:400])
+        if len(lost2) < len(lost):
+            info.setdefault("spine_regenerated", []).append(dict(beats=wrote, attempt=attempt,
+                                                                 lines={b: segs2[v["line"]].get("say") for b, v in pv.items() if b in wrote}))
+            sc, lost = sc2, lost2
+        if not lost:
+            return done(sc, True)
     return done(sc, False, "the spine's point is not carried: " + "; ".join(f"{b}: {v['lost']}" for b, v in lost.items()))
 
 
@@ -2665,7 +2840,7 @@ def final_support(script, log=print, ask_judge=None, ask_rewrite=None, ask_repea
                     if isinstance(t.get("emphasis"), list):
                         t["emphasis"] = [e for e in t["emphasis"] if has_words(t["say"], e)]
                     t["_check"] = "the held line restored: the point rewrite was not kept"
-                trial2, bad = check_lines(trial, info, spend, log, ask_judge=ask_judge, rounds=0, stage="final-restore")
+                trial2, bad = check_lines(trial, info, spend, log, ask_judge=ask_judge, rounds=0, stage="final-restore", repair=False)
                 if bad or len(trial2["segments"]) != len(trial["segments"]):
                     log("final support: the held line does not stand either: the supported line stays")
                     return sc_
@@ -2677,7 +2852,7 @@ def final_support(script, log=print, ask_judge=None, ask_rewrite=None, ask_repea
                 sc = restore_held(before)
             else:
                 n0 = len(info["lines_checked"])
-                sc2, failed = check_lines(sc2, info, spend, log, ask_judge=ask_judge, rounds=0, stage="final-point")
+                sc2, failed = check_lines(sc2, info, spend, log, ask_judge=ask_judge, rounds=0, stage="final-point", repair=False)
                 if failed or len(sc2["segments"]) != len(before["segments"]):
                     judged = {r.get("sid"): r for r in info["lines_checked"][n0:]}
                     refused(lambda k: (f"its new words do not stand on their quotes: {(judged.get(segs[k]['_sid']) or {}).get('why')}"
@@ -2719,7 +2894,8 @@ def final_support(script, log=print, ask_judge=None, ask_rewrite=None, ask_repea
         log(f"final support: lines without a supported judgement on their final words: {unjudged}")
         return done(sc, False, f"lines without a supported judgement: {unjudged}")
     log(f"final support: {len(sc['segments'])} lines stand on their quotes; restated {len(info['support_rewritten'])}, "
-        f"dropped {len(info['support_dropped']) + len(info['repeat_dropped'])}, point rewritten {len(info['point_rewritten'])}")
+        f"dropped {len(info['support_dropped']) + len(info['repeat_dropped'])}, point rewritten {len(info['point_rewritten'])}, "
+        f"core repaired {len(info.get('core_repaired') or [])}")
     return done(sc, True)
 
 

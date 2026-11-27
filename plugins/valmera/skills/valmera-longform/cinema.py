@@ -369,6 +369,8 @@ def narrated(ctx, ns, nd, reader):
     report=nd/'longform_voice.json'
     stage=nd/'read-stage.json'
     same_read=stage.exists() and read(stage).get('script')==ns
+    if same_read and (nd/'gate-carried.json').is_file() and all((nd/f).is_file() for f in ('check.json','words.json','narration.wav')):
+        return PX.narrate(ns,str(nd),'04',f'wf4-{ctx.run_id}',dict(os.environ),18000,reader)
     try:
         if not same_read or not report.exists() or not (read(report)['after']['ok'] or read(report).get('accepted')):
             guarded_voice(ctx,[PX.NARRATE_PY,reader,'render',str(nd/'narration_script.json'),
@@ -402,6 +404,40 @@ def narrated(ctx, ns, nd, reader):
         raise
 
 
+def interval_requests(sc,gaps):
+    """The footage engine indexes by line ID. Two holes in one sentence are two jobs."""
+    lines=[];targets={};seen=set()
+    for j,g in enumerate(gaps):
+        i=g['seg'];seg=sc['segments'][i]
+        key=i if i not in seen else len(sc['segments'])+j
+        seen.add(i)
+        lines.append(dict(i=key,say=g.get('heard') or g['words'],pictures=seg.get('pictures',[]),
+                          dur=g['seconds']+2,visual='Find evidence for only these heard words. Surrounding narration: '+seg['say']))
+        targets[str(key)]=dict(seg=i,start=g['start'],end=g['end'])
+    return lines,targets
+
+
+def attach_intervals(ft,extra,dest,targets,clock):
+    """Map the engine IDs back to word anchors; retain alternatives on the same slot."""
+    from timeline_repair import anchor,identity
+    import copy
+    extra=copy.deepcopy(extra)
+    slots=ft.setdefault('editorial',dict(pins=[],bank=[],rejected=[])).setdefault('assignments',[])
+    for row in extra['lines']:
+        target=targets[str(row['i'])];row['i']=target['seg']
+        if not row['clips']:continue
+        anchors=[anchor(clock,target[k]) for k in ('start','end')]
+        slot=next((s for s in slots if s['seg']==row['i'] and s['anchors']==anchors),None)
+        if slot is None:
+            slot=dict(seg=row['i'],anchors=anchors,candidates=[]);slots.append(slot)
+        for c in row['clips']:
+            c.update(path=str(dest/c['file']),w=W,h=H,interval_anchors=anchors)
+            if not any(identity(other)==identity(c) for other in slot['candidates']):slot['candidates'].append(c)
+    for credit in extra.get('credits',[]):
+        if str(credit.get('line')) in targets:credit['line']=targets[str(credit['line'])]['seg']
+    add_footage(ft,extra,dest)
+
+
 def add_footage(ft,extra,dest):
     by={ln['i']:ln for ln in ft['lines']}
     for ln in extra['lines']:
@@ -421,6 +457,17 @@ def witness_voices(ctx,script,ft,additional=False,chapter=None):
     """
     digest_script=dict(lines=[s['say'] for s in script['script']['segments']],
                                 purpose=script['script'].get('testimony_purpose'),chapter=chapter)
+    # The approved edit may already deliver the witnesses' written testimony.
+    # Give the existing researcher the actual on-screen passages, not just a bin of video URLs.
+    written={}
+    for pin in ft.get('editorial',{}).get('pins',[]):
+        c=pin['clip'];source=c['source']
+        for item in source.get('primary_context',[]):
+            quote=item.get('quote')
+            if quote:
+                url=source['url'].partition('#')[0]
+                written[url,quote]=dict(url=url,author=source.get('credit'),quote=quote[:450])
+    if written:digest_script['written_in_edit']=list(written.values())
     signature=hashlib.sha256(json.dumps(digest_script,sort_keys=True).encode()).hexdigest()[:12]
     root=Path(ctx.supply)/'footage'/('witnesses-additional' if additional else 'witnesses')/signature
     root.mkdir(parents=True,exist_ok=True)
@@ -438,11 +485,12 @@ def witness_voices(ctx,script,ft,additional=False,chapter=None):
                 'Use the canonical person name. must_show is ONLY a simple identity requirement, not a demand that a video title prove an exact incident. '
                 'Put the narrative purpose in purpose. Include concise broad interview searches and focused archive searches, each at most ten words. '
                 'Read unsuccessful research evidence and broaden or change the sources; never repeat failed queries. Known archive films may carry interviews between their narration. '
-                'No impersonation, AI voice or narrator quotes. If no recorded witness could exist, return an empty list.',
+                'Honor the authored testimony purpose. If written records spoken by the narrator already deliver the testimony, '
+                'return an empty list unless a particular additional recording adds consequential firsthand evidence. No impersonation or AI voice.',
                 json.dumps(dict(title=script['title'],named=script['dossier']['named'],lines=lines,known_sources=known,prior=history,
-                                already_selected=ft['voices'],story_purpose=script['script'].get('testimony_purpose'),
+                                already_selected=ft['voices'],written_in_edit=list(written.values()),story_purpose=script['script'].get('testimony_purpose'),
                                 chapter=chapter,
-                                purpose='Add consequential first-person testimony which is missing from these existing inserts; no repetition. Prefer a complete account of what the witness did or experienced, not general praise or motivation.' if additional else 'Find the subject speaking.')),
+                                purpose='Add consequential first-person testimony which is missing from these existing inserts; no repetition. Prefer a complete account of what the witness did or experienced, not general praise or motivation.' if additional else 'Complete the authored testimony purpose. If these attributed passages already deliver it, return no people. Seek an interview only for a specific missing account.')),
                 effort='high',max_tokens=3000,what='WF4 witness research')
             research=wf4.story.writer.json_block(text);research['usage']=use;save(job,research)
         if not research['people']:return
@@ -539,7 +587,9 @@ def video_search_counts(root,expected=None):
         result=read(path)
         if not footage_box.completed_research(result):continue
         context=result.get('narration_context',{})
-        for i in {r['i'] for r in result.get('lines',[]) if expected is None or context.get(str(r['i']),r.get('say'))==expected.get(r['i'])}:
+        targets=result.get('interval_targets',{})
+        def segment(row):return targets.get(str(row['i']),{}).get('seg',row['i'])
+        for i in {segment(r) for r in result.get('lines',[]) if expected is None or context.get(str(r['i']),r.get('say'))==expected.get(segment(r))}:
             counts[i]=counts.get(i,0)+1
     return counts
 
@@ -599,6 +649,41 @@ def supply(ctx, script):
     coverage_words=str(clean_words if clean_words.exists() else nd/'words.json')
     wj=read(coverage_words)
     expected={i:s['say'] for i,s in enumerate(sc['segments'])}
+    allocation=Path(ctx.supply)/'evidence-allocation'
+    if 'assignments' in ft.get('editorial',{}) and any(allocation.glob('*.json')):
+        shots,clock=verified_pictures(ctx,script,ft,coverage_words)
+    else:
+        shots,clock=research_pictures(ctx,script,ft,coverage_words,wj,expected)
+    from timeline_repair import retain
+    report=source_review(ctx,shots)
+    retain(ft,shots,clock,report)
+    from moving_picture import improve
+    improve(ctx,script,ft,coverage_words,shots)
+    shots,clock,_=schedule(sc,coverage_words,ft)
+    save(Path(ctx.supply)/'footage/footage.json',ft)
+    still=sum((r['f'][1]-r['f'][0])/FPS for r in shots if r['clip'].get('kind')=='image')
+    if not ft['voices']:witness_voices(ctx,script,ft)
+    # Firsthand testimony follows the story's purpose, not a chapter quota.
+    # A chapter about unfilmed hardware need not trigger another interview
+    # search once consequential, verified witness inserts are already found.
+    # Original on-camera testimony is picture time too. This is only a supply
+    # check; actual motion and the final >=50% gate remain mandatory below.
+    with_testimony=clock.dur+sum(v['seconds'] for v in ft['voices'])
+    if still/with_testimony>.5:
+        ctx.log(f'evidence photos on {still/with_testimony:.0%} of the picture time (recorded; the film goes on)')
+        save(Path(ctx.supply)/'still-share.json',dict(still_s=round(still,1),picture_s=round(with_testimony,1)))
+    if ft['voices']:
+        splice_voices(ctx,nd,ft['voices'],Path(ctx.supply)/'footage')
+    return finish_supply(ctx,script,ft,nar,nd)
+
+
+def verified_pictures(ctx,script,ft,words):
+    from interval_evidence import reviewed_edit
+    return reviewed_edit(ctx,script,ft,words)
+
+
+def research_pictures(ctx,script,ft,coverage_words,wj,expected):
+    sc=script['script']
     if ft.get('editorial',{}).get('pins'):
         prune_unchecked_photos(ft,Path(ctx.supply)/'evidence-photos')
         save(Path(ctx.supply)/'footage'/'footage.json',ft)
@@ -632,20 +717,24 @@ def supply(ctx, script):
             avoid += [dict(url=v['source']['url'],time_range=v['time_range']) for v in ft['voices']]
             ctx.log(f"footage repair {attempt+1}: {len(gaps)} gaps, {sum(g['seconds'] for g in gaps):.1f}s; {len(research_gaps)} require more video research")
             for ch in sc['chapters']:
-                lines=[dict(i=g['seg'],say=g.get('heard') or g.get('words') or sc['segments'][g['seg']]['say'],
-                            pictures=sc['segments'][g['seg']].get('pictures',[]),dur=g['seconds']+2,
-                            visual='Find a picture for only this missing spoken interval. Surrounding narration: '+sc['segments'][g['seg']]['say']+
-                            '\nPreserve the exact mission, hardware and repair state; source attribution and truthful context labels must be supported by evidence.')
-                       for g in research_gaps if sc['segments'][g['seg']]['chapter']==ch['id']]
+                lines,targets=interval_requests(sc,[g for g in research_gaps if sc['segments'][g['seg']]['chapter']==ch['id']])
                 if not lines:continue
                 verifier='wf4-source-and-encoded-picture-check'
-                context={str(r['i']):sc['segments'][r['i']]['say'] for r in lines}
-                request_id=hashlib.sha256(json.dumps(dict(lines=lines,verification_owner=verifier),sort_keys=True).encode()).hexdigest()[:12]
-                dest=Path(ctx.supply)/'footage'/f"repair-{attempt+1}-{ch['id']}-{request_id}"
+                context={k:sc['segments'][t['seg']]['say'] for k,t in targets.items()}
+                request_id=hashlib.sha256(json.dumps(dict(lines=lines,targets=targets,verification_owner=verifier),sort_keys=True).encode()).hexdigest()[:12]
+                dest=Path(ctx.supply)/'footage'/f"repair-{ch['id']}-{request_id}"
                 known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips']}.values())
-                extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title'],avoid=avoid,known_sources=known,
-                                            want_voices=False,verification_owner=verifier,narration_context=context),dest,ctx.log)
-                add_footage(ft,extra,dest)
+                receipt=dest/'footage.json'
+                extra=read(receipt) if receipt.exists() else None
+                if not extra or not footage_box.completed_research(extra):
+                    extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title'],
+                        avoid=avoid,known_sources=known,want_voices=False,verification_owner=verifier,
+                        narration_context=context,interval_targets=targets),dest,ctx.log)
+                merged=ft.setdefault('interval_research',[])
+                if dest.name not in merged:
+                    attach_intervals(ft,extra,dest,targets,F.Clock(coverage_words,sc))
+                    merged.append(dest.name)
+                    save(Path(ctx.supply)/'footage/footage.json',ft)
                 avoid.extend(dict(url=c['source']['url'],time_range=c['time_range']) for ln in extra['lines'] for c in ln['clips'])
                 avoid.extend(dict(url=v['source']['url'],time_range=v['time_range']) for v in extra.get('voices',[]))
             save(Path(ctx.supply)/'footage'/'footage.json',ft)
@@ -666,29 +755,9 @@ def supply(ctx, script):
                 from evidence_allocate import allocate
                 allocate(ctx,script,ft,tail,coverage_words)
                 save(Path(ctx.supply)/'footage/footage.json',ft)
-                shots,clock,_=schedule(sc,coverage_words,ft)
-    from timeline_repair import repair as repair_timeline,retain,smooth
-    shots,clock=repair_timeline(ctx,script,ft,coverage_words)
-    report=source_review(ctx,shots)
-    retain(ft,shots,clock,report)
-    from moving_picture import improve
-    improve(ctx,script,ft,coverage_words,shots)
-    shots,clock,_=schedule(sc,coverage_words,ft)
-    save(Path(ctx.supply)/'footage/footage.json',ft)
-    still=sum((r['f'][1]-r['f'][0])/FPS for r in shots if r['clip'].get('kind')=='image')
-    if not ft['voices']:witness_voices(ctx,script,ft)
-    # Firsthand testimony follows the story's purpose, not a chapter quota.
-    # A chapter about unfilmed hardware need not trigger another interview
-    # search once consequential, verified witness inserts are already found.
-    # Original on-camera testimony is picture time too. This is only a supply
-    # check; actual motion and the final >=50% gate remain mandatory below.
-    with_testimony=clock.dur+sum(v['seconds'] for v in ft['voices'])
-    if still/with_testimony>.5:
-        ctx.log(f'evidence photos on {still/with_testimony:.0%} of the picture time (recorded; the film goes on)')
-        save(Path(ctx.supply)/'still-share.json',dict(still_s=round(still,1),picture_s=round(with_testimony,1)))
-    if ft['voices']:
-        splice_voices(ctx,nd,ft['voices'],Path(ctx.supply)/'footage')
-    return finish_supply(ctx,script,ft,nar,nd)
+                return verified_pictures(ctx,script,ft,coverage_words)
+    from timeline_repair import repair
+    return repair(ctx,script,ft,coverage_words)
 
 
 def finish_supply(ctx,script,ft,nar,nd):
@@ -714,9 +783,14 @@ def finish_supply(ctx,script,ft,nar,nd):
     return record
 
 
+def source_key(c):
+    # A diagram has its own drawn frames. Its citation still points to the original.
+    return 'diagram:'+c['graphic_id'] if c.get('kind')=='diagram' else c['source']['url']
+
+
 def reserve(used, c, seconds):
     """Non-overlapping ranges on original source URLs, even across downloaded files."""
-    url=c['source']['url']; a,b=map(float,c['time_range'])
+    url=source_key(c); a,b=map(float,c['time_range'])
     if c.get('kind')=='image':
         identity='image:'+c['content_hash']
         if used.get(url) or used.get(identity):return None
@@ -742,7 +816,7 @@ class CoverageError(ValueError):
 
 def unused_seconds(used,c):
     """A partly reserved archive cut can still contain genuinely unseen frames."""
-    url=c['source']['url'];a,b=map(float,c['time_range'])
+    url=source_key(c);a,b=map(float,c['time_range'])
     if c.get('kind')=='image':
         return 0 if used.get(url) or used.get('image:'+c['content_hash']) else float(c['seconds'])
     b=min(b,a+float(c['seconds']));cur=a;longest=0.
@@ -794,11 +868,18 @@ def encoded_durations(ft):
     for line in ft['lines']+extra:
         for c in line['clips']:
             if c.get('kind')=='image' or not c.get('file'):continue
-            path=Path(c['path']);stat=path.stat();stamp=[stat.st_size,stat.st_mtime_ns]
+            path=Path(c['path'])
+            if not path.is_file():continue  # Restore the recorded interval when it is selected.
+            stat=path.stat();stamp=[stat.st_size,stat.st_mtime_ns]
             rec=seen.get(str(path)) or c.get('encoded')
             if not rec or rec['file']!=stamp:
-                probe=json.loads(subprocess.check_output([PX.FP,'-v','error','-select_streams','v:0',
-                    '-show_entries','stream=duration,nb_frames,avg_frame_rate','-of','json',str(path)]))['streams'][0]
+                try:
+                    streams=json.loads(subprocess.check_output([PX.FP,'-v','error','-select_streams','v:0',
+                        '-show_entries','stream=duration,nb_frames,avg_frame_rate','-of','json',str(path)],stderr=subprocess.PIPE))['streams']
+                    if not streams:continue
+                    probe=streams[0]
+                except (subprocess.CalledProcessError,ValueError,KeyError):
+                    continue
                 num,den=map(float,probe['avg_frame_rate'].split('/'))
                 duration=float(probe['nb_frames'])*den/num if probe.get('nb_frames','N/A')!='N/A' and num else float(probe['duration'])
                 rec=dict(file=stamp,seconds=duration)
@@ -838,7 +919,7 @@ def schedule(sc, words, ft):
         if any(min(b,hi)>max(a,lo) for lo,hi in voice_spans):continue
         offset=pin['src'][0];seconds=(b-a)/FPS
         if offset+seconds>c['seconds']+.025:continue
-        url=c['source']['url'];lo=c['time_range'][0]+offset;hi=lo+seconds
+        url=source_key(c);lo=c['time_range'][0]+offset;hi=lo+seconds
         if c.get('kind')=='image':
             if reserve(used,c,seconds) is None:continue
         else:
@@ -872,11 +953,12 @@ def schedule(sc, words, ft):
             intervals=cut
         clips=[c for c in by.get(i,{}).get('clips',[]) if (i,identity(c)) not in rejected]
         for a,b in intervals:
-            interval_clips=clips
+            interval_clips=[c for c in clips if not c.get('interval_anchors') or
+                            (round(resolve(clock,c['interval_anchors'][0])*FPS)<=a and round(resolve(clock,c['interval_anchors'][1])*FPS)>=b)]
             active=[beat for f,beat in beat_frames if f<=a]
             if active:
                 ids=active[-1]['archive_ids'];order={key:k for k,key in enumerate(ids)}
-                interval_clips=sorted((c for c in clips if not c.get('catalogue_id') or c['catalogue_id'] in order),
+                interval_clips=sorted((c for c in interval_clips if not c.get('catalogue_id') or c['catalogue_id'] in order),
                                       key=lambda c:order.get(c.get('catalogue_id'),len(order)))
                 interval_clips=[dict(c) for c in interval_clips]
                 for c in interval_clips:
@@ -886,8 +968,8 @@ def schedule(sc, words, ft):
             for slot in ft.get('editorial',{}).get('assignments',[]):
                 if slot['seg']!=i:continue
                 sa,sb=[round(resolve(clock,t)*FPS) for t in slot['anchors']]
-                if abs(sa-a)<=1 and abs(sb-b)<=1:
-                    interval_clips=slot['candidates'];break
+                if sa<=a+1 and sb>=b-1:
+                    if slot['candidates']:interval_clips=slot['candidates']
             # Allocate scarce evidence first. Chronological greed can spend a
             # unique image on a well-covered line and starve the only other
             # line it illustrates. Output chronology is restored below.
@@ -990,20 +1072,56 @@ def still_fill(c):
         return None
 
 
+def marked_detail(clip):
+    """Find the actual underline painted by cited_page or design.document."""
+    import cv2
+    import numpy as np
+    from PIL import Image
+    with Image.open(clip['path']) as im:
+        im.thumbnail((900,1000))
+        rgb=np.asarray(im.convert('RGB'),dtype=np.int16)
+    h,w=rgb.shape[:2]
+    mask=np.zeros((h,w),np.uint8)
+    for ink in ((170,67,42),(200,55,45)):
+        mask |= (np.max(np.abs(rgb-ink),axis=2)<18).astype(np.uint8)
+    strokes=cv2.morphologyEx(mask,cv2.MORPH_OPEN,np.ones((1,max(12,w//45)),np.uint8))
+    ys=np.nonzero(strokes)[0]
+    if not ys.size:return None
+    top=max(0,float(ys.min())/h-.13);bottom=min(1,float(ys.max()+1)/h+.065)
+    # A figure already framed on the complete marked passage needs no second crop.
+    return [0,top,1,bottom] if bottom-top<.72 else None
+
+
 def document_shot(plan, span, key, clip):
     plan.page(span,'#14161A',grain=.005)
-    frames = span[1]-span[0]
-    growth = .12 if frames>240 else .025
-    ratio = clip['w']/clip['h']
-    height = min(.66,.70/(1+growth),.84*W/H/ratio)
-    width = height*ratio/(W/H)
-    progress = [q/max(frames-1,1) for q in range(frames)]
-    move = dict(s=[1+growth*t for t in progress])
-    if clip.get('mark'):
-        move['y'] = [.47-.04*t for t in progress]
-    plan.card(span,key,[.5-width/2,.45-height/2,.5+width/2,.45+height/2],**move)
+    frames=span[1]-span[0]
+    detail=marked_detail(clip) if frames>=120 and clip.get('primary_passage') and clip.get('mark') else None
+    cut=span[0]+min(48,frames//3) if detail else span[1]
+    views=[([span[0],cut],[0,0,1,1])]
+    if detail:views.append(([cut,span[1]],detail))
+    for interval,crop in views:
+        n=interval[1]-interval[0]
+        ratio=clip['w']*(crop[2]-crop[0])/(clip['h']*(crop[3]-crop[1]))
+        height=min(.66,.84*W/H/ratio)
+        width=height*ratio/(W/H)
+        growth=.035 if detail else (.12 if frames>240 else .025)
+        plan.card(interval,key,[.5-width/2,.45-height/2,.5+width/2,.45+height/2],
+                  crop=crop,s=[1+growth*q/max(n-1,1) for q in range(n)])
     label = clip.get('source_label') or archive_label(clip,lambda t:plan.R.width('source',t))
     plan.word(span,label,'source',.055,.84,note=False,z=3)
+
+
+def design_window(a,b,shots):
+    """Keep a secondary design off the verified explanation and its source text."""
+    open_spans=[]
+    cursor=a
+    for row in shots:
+        lo,hi=row['f']
+        if hi<=a or lo>=b or row['clip'].get('kind')!='diagram':continue
+        if cursor<lo:open_spans.append((cursor,lo))
+        cursor=max(cursor,hi)
+    if cursor<b:open_spans.append((cursor,b))
+    return max(open_spans,key=lambda span:span[1]-span[0],default=(b,b))
 
 
 def build(sc,pack):
@@ -1024,7 +1142,7 @@ def build(sc,pack):
             else:
                 n=row['f'][1]-row['f'][0]
                 ratio=c['w']/c['h']
-                if ratio>=BLEED_RATIO and c['w']>=960:
+                if BLEED_RATIO <= ratio <= (W/H)/.84 and c['w'] >= 960:
                     # A landscape photograph fills the frame and the camera
                     # pushes in; its cover crop keeps at least 84% of it.
                     P.shot(row['f'],key,F.push(F.cover_crop(c['w'],c['h'],W/H,(.5,.45),(.5,.45)),n,.10 if n>240 else .07,(.5,.45)))
@@ -1040,7 +1158,7 @@ def build(sc,pack):
                     else:
                         P.page(row['f'],'#14161A',grain=.005)
                     growth=.12 if n>240 else .06
-                    height=min(.70,.80/(1+growth),.88*W/H/ratio);width=height*ratio/(W/H)
+                    height=min(.70,.80/(1+growth),.88*W/H/(ratio*(1+growth)));width=height*ratio/(W/H)
                     P.card(row['f'],key,[.5-width/2,.45-height/2,.5+width/2,.45+height/2],
                            s=[1+growth*q/max(n-1,1) for q in range(n)])
         else:
@@ -1062,6 +1180,7 @@ def build(sc,pack):
     for sid,rec in pack.get('designs',{}).items():
         si=int(sid); a=round(clock.segs[si][0]*FPS)
         b=min(round(clock.segs[si][1]*FPS),a+150)
+        a,b=design_window(a,b,shots)
         if b<=a: continue
         d=sc['segments'][si].get('design') or {}
         if rec['kind']=='number':
@@ -1110,6 +1229,19 @@ def score(ctx,script):
 
 def source_review(ctx,shots,required=True):
     """Catch wrong archive material before spending a full-film render."""
+    from source_media import restore
+    unavailable=restore(ctx,shots)
+    if unavailable:
+        available=[i for i,r in enumerate(shots) if r['clip']['path'] not in unavailable]
+        report=source_review(ctx,[shots[i] for i in available],required=False)
+        evidence={available[int(i)]:dict(v,i=available[int(i)]) for i,v in report['evidence'].items()}
+        for i,r in enumerate(shots):
+            if r['clip']['path'] in unavailable:
+                evidence[i]=dict(i=i,matches=False,real_moving_footage=False,reason='Original interval unavailable: '+unavailable[r['clip']['path']])
+        report=dict(report,ok=False,evidence=evidence,total=len(shots),checked=len(evidence),
+                    missing=[available[i] for i in report['missing']],rejected=[i for i,v in evidence.items() if not v['matches']])
+        if required:raise ValueError('source pictures require repair: '+str(list(unavailable)))
+        return report
     from picture_check import check
     from review_cache import checker_bytes
     from document_context import enrich
@@ -1117,7 +1249,7 @@ def source_review(ctx,shots,required=True):
     from caption_context import enrich as captions
     captions(ctx,[r['clip'] for r in shots])
     cache=Path(ctx.supply)/'source-evidence'/'checked-shots'
-    signatures=[];digests={}
+    signatures=[];legacy=[];digests={};checker=checker_bytes()
     for row in shots:
         file=row['clip']['path']
         if file not in digests:digests[file]=digest(file)
@@ -1125,12 +1257,23 @@ def source_review(ctx,shots,required=True):
         # Words, context, label, source provenance, bytes or checker changes do.
         material={k:v for k,v in row.items() if k!='f'}
         material.update(seconds=(row['f'][1]-row['f'][0])/FPS,bytes_sha256=digests[file])
-        signatures.append(hashlib.sha256(json.dumps(material,sort_keys=True).encode()+checker_bytes()).hexdigest())
+        legacy.append(hashlib.sha256(json.dumps(material,sort_keys=True).encode()+checker).hexdigest())
+        # Pinning changes bookkeeping and paths can move on resume. Bind the visible
+        # samples, exact words and provenance instead of re-reviewing identical evidence.
+        clip=row['clip']
+        visible=dict(bytes=digests[file],frames=row['f'][1]-row['f'][0],src=[round(float(x),8) for x in row['src']],
+                     kind=clip.get('kind'),source=clip['source'],document=clip.get('document'),
+                     label=clip.get('editorial_label'),source_label=clip.get('source_label'),
+                     words=row['say'],context=row.get('context',row['say']))
+        signatures.append(hashlib.sha256(json.dumps(visible,sort_keys=True).encode()+checker).hexdigest())
     key=hashlib.sha256(json.dumps(dict(shots=shots,signatures=signatures),sort_keys=True).encode()).hexdigest()[:16]
     folder=Path(ctx.supply)/'source-evidence'/key;report=folder/'report.json'
     if report.exists():result=read(report)
     else:
-        cached={i:read(cache/(signature+'.json')) for i,signature in enumerate(signatures) if (cache/(signature+'.json')).exists()}
+        cached={}
+        for i,pair in enumerate(zip(signatures,legacy)):
+            match=next((cache/(s+'.json') for s in pair if (cache/(s+'.json')).is_file()),None)
+            if match:cached[i]=read(match)
         missing=[i for i in range(len(shots)) if i not in cached]
         fresh=check(None,[shots[i] for i in missing],folder/'new',PX.FF,source=True) if missing else dict(evidence={},spend_usd=0)
         evidence={i:dict(row['verdict'],i=i) for i,row in cached.items()}
@@ -1185,7 +1328,7 @@ def render(ctx,script,sc):
 def duplicate_ranges(shots):
     seen={}; repeats=[]
     for i,r in enumerate(shots):
-        c=r['clip'];url=c['source']['url']
+        c=r['clip'];url=source_key(c)
         a=c['time_range'][0]+r['src'][0]; b=c['time_range'][0]+r['src'][1]
         for j,lo,hi in seen.get(url,[]):
             if min(hi,b)-max(lo,a)>0.04: repeats.append([j,i])

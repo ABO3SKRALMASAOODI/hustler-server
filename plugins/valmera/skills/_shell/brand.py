@@ -30,19 +30,48 @@ BIN = f"{V}/audit/subscriber-reliability-20260908/bin-arm"
 FF, FP = os.environ.get("SHELL_FFMPEG", BIN + "/ffmpeg"), os.environ.get("SHELL_FFPROBE", BIN + "/ffprobe")
 
 
+ENGINE_FILES = ("renderer.py", "scene/run.py", "footage/run.py", "music_film.py")
+
+
+def _engines(w):
+    return all(os.path.exists(os.path.join(w, n)) for n in ENGINE_FILES)
+
+
+def _current(w):
+    """True when the worker is on the workflow line the skills are built against (claude/cr-worker-1120, the
+    factory's worker): its scene engine has the shared source-credit runs that wf1_film imports. Main's own worker
+    trails that line, and a film built on it stopped with an ImportError (26 Nov)."""
+    try:
+        with open(os.path.join(w, "scene", "text_layout.py")) as f:
+            return "def shared_source_credits" in f.read()
+    except OSError:
+        return False
+
+
 def worker_dir():
     """The worker these films are made with: one that holds this week's engines (the scene engine, the footage
-    engine, the film's music). The checkout beside this plugin when it has them; else the synced main checkout
-    (.valmera/sync_skill.sh keeps worktrees/skill-main at main). The installed copy under hustler-server sits beside
-    an older worker without the engines, and the Codex cache has no worker beside it: both reach the synced one."""
+    engine, the film's music). In order: VALMERA_WORKER (the factory sets its own); the checkout beside this plugin
+    when it is on the workflow line; worktrees/skill-worker, which .valmera/sync_skill.sh keeps at the workflow
+    worker branch, so a film started by hand (the installed copy under hustler-server, or Codex's cache, which has
+    no worker beside it) gets the same engines as the factory's; then the checkout beside this plugin with the
+    engine files (CI); last the synced main checkout, worktrees/skill-main."""
     if os.environ.get("VALMERA_WORKER"):
         return os.environ["VALMERA_WORKER"]
+    beside = []
     d = HERE
     for _ in range(6):
         d = os.path.dirname(d)
         w = os.path.join(d, "worker")
-        if all(os.path.exists(os.path.join(w, n)) for n in ("renderer.py", "scene/run.py", "footage/run.py", "music_film.py")):
+        if _engines(w):
+            beside.append(w)
+    for w in beside:
+        if _current(w):
             return w
+    synced = f"{V}/worktrees/skill-worker/worker"
+    if _engines(synced):
+        return synced
+    if beside:
+        return beside[0]
     return f"{V}/worktrees/skill-main/worker"
 
 
@@ -408,17 +437,42 @@ def last_word(l1_path, work=None):
         return None
 
 
-def card_music(card_bed, overlap, n_out, ref):
-    """Continue the chosen edit across the card at the normal closing level."""
+CARD_RAMP_S = 0.25          # the card's continuation of the film's recording rises over this long where it takes over
+
+
+def card_level_db(ref):
+    """The level (K, LUFS-like) the card's continuation of the film's recording sits at."""
+    return min(-24., ref - 9.)
+
+
+def card_music(card_bed, overlap, n_out, ref, ramp=None):
+    """Continue the chosen edit across the card at the normal closing level, laid from `overlap` samples before the card
+    (on the recording's own clock) and rising over its first `ramp` samples (all of `overlap` when not given). Its gain
+    is read on the card's own stretch, so an earlier entry leaves the card's level as it was."""
     import numpy as np
     tempo = float(card_bed["tempo"])
     start = max(0, card_bed["at_s"] - overlap/SR*tempo)
     from score.music import card_phrase
     music = card_phrase(card_bed["path"], start, tempo, overlap+n_out, card_bed.get("bar_s"), ffmpeg=FF)
-    target_db = min(-24., ref-9.)
-    gain = min(10**((target_db-_k_db(music))/20), .35/max(np.max(np.abs(music)),1e-6))
-    env = np.interp(np.arange(len(music)), [0, overlap, len(music)-.12*SR, len(music)-1], [0,1,1,0])
+    target_db = card_level_db(ref)
+    basis = music[max(0, min(overlap - round(.20 * SR), len(music) - 1)):]
+    gain = min(10**((target_db-_k_db(basis))/20), .35/max(np.max(np.abs(music)),1e-6))
+    ramp = overlap if ramp is None else max(1, min(int(ramp), overlap))
+    env = np.interp(np.arange(len(music)), [0, ramp, len(music)-.12*SR, len(music)-1], [0,1,1,0])
     return music * (gain*env[:,None])
+
+
+def card_handover(closing, level_db, block_s=0.05):
+    """Samples into `closing` (the programme's closing sound as the finish lays it) after which it stays under
+    `level_db`, the card's continuation level: where that continuation has to be sounding already, so the film's
+    recording never falls silent between the programme's ring and the card (27 Nov, Marketing film 03: the score's end
+    hit rang out at 21.4 s, the programme fell to -78 dBFS at 22.0 s and the card's phrase only rose from 22.17 s).
+    len(closing) when it is louder to its last block."""
+    n = max(1, int(round(block_s * SR)))
+    k = len(closing)
+    while k - n >= 0 and _k_db(closing[k - n:k]) < level_db:
+        k -= n
+    return k
 
 
 def card_voice_duck(frames, at, end, gain=.25):
@@ -470,8 +524,13 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
     out = np.zeros((n_tail, 2), np.float64)
     out[:len(dry)] = mono_low(dry, ramp) * g[:, None]
     if card_bed:
-        overlap = min(len(dry), round(.20 * SR))
-        out[len(dry)-overlap:] += card_music(card_bed, overlap, n_out, ref)
+        # the card's continuation of the film's recording is sounding wherever the programme's close has fallen under
+        # its level, rising over CARD_RAMP_S as it takes over: the film's soundtrack carries on through the join
+        ramp = round(CARD_RAMP_S * SR)
+        k = card_handover(out[:len(dry)], card_level_db(ref))
+        overlap = min(len(dry), max(round(.20 * SR), len(dry) - k + ramp))
+        out[len(dry)-overlap:] += card_music(card_bed, overlap, n_out, ref, ramp=ramp if overlap > round(.20 * SR) else None)
+        info["card_from_s"] = round((cut + len(dry) - overlap) / SR, 3)
     acc = np.zeros((n_tail, 2), np.float64)
     info["ref_lufs"] = round(ref, 1)
     st = pick_sting(used) if sting else None

@@ -11,6 +11,7 @@ prints its quote, its year, its value); nothing here writes copy.
 The look is one paper desk (cream, ink, one red), in the line of The Sudden Theory (`sYSIyYjC3dg`). Images are written
 at the size the engine draws them; the engine adds the shadow, the motion and the grain.
 """
+from functools import lru_cache
 import math
 import os
 import random
@@ -41,6 +42,26 @@ def font(name, px):
         path = path or os.path.join("/Users/masaoodi/Documents/Valmera/worktrees/skill-main/worker/fonts", name)
         FONTS[k] = ImageFont.truetype(path, int(px))
     return FONTS[k]
+
+
+@lru_cache(maxsize=16)
+def glyphs(path):
+    from fontTools.ttLib import TTFont
+    with TTFont(path,fontNumber=0) as face:return frozenset(face.getBestCmap())
+
+
+@lru_cache(maxsize=512)
+def face_for(text,family='InterDisplay-Bold.ttf'):
+    base=font(family,24).path
+    needed={ord(c) for c in text if not c.isspace()}
+    for candidate in (base,'/System/Library/Fonts/Supplemental/STIXGeneral.otf',
+                      '/System/Library/Fonts/Supplemental/Arial Unicode.ttf','DejaVuSans.ttf'):
+        try:
+            path=ImageFont.truetype(candidate,24).path
+            if needed<=glyphs(path):return path
+        except OSError:
+            continue
+    return base
 
 
 def paper(w, h, seed=1, base=PAPER, dark=False):
@@ -115,7 +136,7 @@ def document(quote, title, url, mark=None, date=None, out="doc.png", seed=1):
     room = H_ - 170 - y
     px = 92
     while True:
-        qf = font("InstrumentSerif-Regular.ttf", px)
+        qf = ImageFont.truetype(face_for(str(quote),"InstrumentSerif-Regular.ttf"), px)
         lines = wrap("“" + str(quote).strip() + "”", qf, W_ - 180)
         if len(lines) * px * 1.22 <= room or px <= 36:
             break

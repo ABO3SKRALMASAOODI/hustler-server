@@ -192,6 +192,22 @@ def test_a_short_source_never_loses_most_of_it_without_a_reason():
     assert first_cut.kept_share_restore([[100, 160]], 600.0) is None
 
 
+def test_p6357_a_long_sources_pick_never_shrinks_to_a_fragment():
+    # ticket #1931: 447 s store walk, 11 words, the 0-45.12 s pick held no
+    # speech and the pause cuts left 0.08 s (a two-frame black export)
+    pick = {"start_s": 0.0, "end_s": 45.12, "how": "scout"}
+    assert first_cut.kept_share_restore([[0.0, 0.08]], 447.467, pick) \
+        == [[0.0, 45.12]]
+    # a pick that kept most of itself after its pauses stays cut
+    assert first_cut.kept_share_restore([[0, 20], [21, 44]], 447.467, pick) is None
+    # a later pick comes back as that pick, never the whole long source
+    assert first_cut.kept_share_restore(
+        [[120.0, 121.0]], 600.0, {"start_s": 118.0, "end_s": 160.0}) \
+        == [[118.0, 160.0]]
+    # no pick known: nothing to restore to
+    assert first_cut.kept_share_restore([[100, 101]], 600.0) is None
+
+
 def test_the_hook_is_never_the_first_words_of_a_longer_sentence():
     rows = [{"text": "Seem like they will do feel a bit alive"}]
     assert first_cut._opening_hook(rows) is None

@@ -421,3 +421,28 @@ def test_story_brand_line_keeps_room_already_present_in_its_bed(tmp_path):
     rest = bed[3*SR:4*SR]
     assert brand._k_db(speech) <= info["voice"]["target_lufs"] - 8.
     assert brand._k_db(speech) > brand._k_db(rest) - 3.
+
+
+def test_the_cards_continuation_carries_the_score_through_the_join_when_the_programme_rings_out_early(tmp_path):
+    # 27 Nov 2026, Marketing film 03 (show both sides of the same page): the score's end hit rang out at 21.4 s of a
+    # 22.367 s programme, the finish's tail fell after the last word (20.71 s) and the card's continuation of the same
+    # recording only rose over the last 0.2 s, so the full mix fell to -62.8 and -77.5 dBFS at 21.9-22.1 s. Scaled here:
+    # the last word at 4.3 s, the bed ringing out by 5.0 s of a 6 s programme, the same recording continuing on the card.
+    time = np.arange(12 * SR) / SR
+    track = str(tmp_path / "groove.wav")
+    from scipy.io.wavfile import write
+    write(track, SR, (.12 * np.sin(2*np.pi*220*time)).astype(np.float32))
+    t = time[:6*SR]
+    voice = .16 * np.sin(2*np.pi*181*t) * (t < 4.3)
+    bed = .05 * np.sin(2*np.pi*220*t) * np.clip((5.0 - t) / .6, 0, 1)
+    programme = make_programme(tmp_path / "scored.mp4", voice + bed)
+    args = dict(prog_s=6, fps=30, j=9, outro_s=5, sting=False, last_word_s=4.3)
+    wav, cut, info = brand.accent_tail(programme, str(tmp_path), **args, card_bed=dict(path=track, at_s=6.0, tempo=1., bar_s=2.))
+    mix = brand._pcm(wav).astype(np.float64)
+    seam = mix[round(4.3*SR) - cut:round(7.0*SR) - cut]
+    db = 10*np.log10(np.maximum(1e-12, np.mean(seam[:len(seam)//(SR//10)*(SR//10)].reshape(-1, SR//10, 2)**2, axis=(1, 2))))
+    assert db.min() > -45, db.round(1)                  # no hole between the programme's ring and the card
+    assert info["card_from_s"] < 5.9                    # the continuation enters where the programme falls under it
+    plain, _, _ = brand.accent_tail(programme, str(tmp_path), **args)
+    stem = (mix - brand._pcm(plain))[9*SR - cut:10*SR - cut]                  # the card's bed, after its spoken mark
+    assert abs(brand._k_db(stem) - brand.card_level_db(info["ref_lufs"])) < 3  # at the card's own level, as before
