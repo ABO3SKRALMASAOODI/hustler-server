@@ -262,7 +262,10 @@ def _coerce(name, key, p, v, strict):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
     if t == "color":
-        from schemas import coerce_hex
+        try:
+            from schemas import coerce_hex
+        except ImportError:   # the backend loads worker/schemas.py by path as worker_schemas
+            from worker_schemas import coerce_hex
         got = coerce_hex(v)
         if got is None:
             raise ValueError(f"{where} '{v}' is not a colour; use #RRGGBB")

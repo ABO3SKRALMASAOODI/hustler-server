@@ -164,7 +164,8 @@
         "screen_frame": null,
         "frame_shifts": null,
         "custom": null,
-        "picture_cards": null
+        "picture_cards": null,
+        "key": null
       },
       "overlays": [],
       "texts": [],
