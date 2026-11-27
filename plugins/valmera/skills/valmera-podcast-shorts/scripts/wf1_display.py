@@ -2,7 +2,6 @@
 import math
 import string
 
-import wf1_principle
 
 
 WRITING = """Write for a stranger following these captions, planned pictures and story beats.
@@ -208,7 +207,10 @@ def viewer_text(rows, words):
         if type(start) is int and type(end) is int and 0 <= start <= end < len(words) and isinstance(text, str) and text.strip():
             seg = words[start]["seg"]
             if words[end]["seg"] == seg:
-                chosen.setdefault(seg, dict(row, seg=seg, text=text.strip()))
+                entry = dict(first=start, last=end, seg=seg, text=text.strip())
+                if row.get("picture"):
+                    entry["picture"] = row["picture"]
+                chosen.setdefault(seg, entry)
     return list(chosen.values())
 
 

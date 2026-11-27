@@ -926,29 +926,11 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             if turn is not None:
                 source_rows.append([turn,row[1],*row[2:4],dict(rec, presenter_result=True)])
                 row[1] = turn
-    for page in d.get("demo_notes") or []:
-        fig = page.get("figure")
-        if not fig:
-            continue
-        a = word_frame(page["first"])
-        b = min(Clock.f(clock.words[page["last"]]["t1"]), word_frame(page["last"]+1) or f_end,
-                a+int(fig["seconds"]*FPS),f_end)
-        same_view = any((r.get("origin") or r.get("path")) == fig["path"] and r.get("f") == [a,b]
-                        for r in d.get("reject") or [])
-        if b <= a or same_view:
-            continue
-        fact = page["facts"][0]
-        source = fact["source"]
-        rec = dict(fig,provider="publisher-demo",src=[0,(b-a)/FPS],name=page["demo_note"],
-                   source=dict(url=source["url"],channel=source["publisher"],title=page["demo_note"],figure_url=fig["figure_url"]),
-                   claim=fact["value"],clause=" ".join(w["w"] for w in clock.words[page["first"]:page["last"]+1]))
-        source_rows.append([a,b,"clip",page["demo_note"],rec])
     source_rows.sort(key=lambda row:row[0])
     source_spans = [r[:2] for r in source_rows]
     def on_evidence(a,b):
         return a is not None and b is not None and any(a < end and start < b for start,end in source_spans)
 
-    import wf1_display
     returns = []
 
     def seg_span(i):
@@ -1221,8 +1203,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     from scene.motion import fit_panel
                     box = fit_panel([0,0,1,1], (take["w"],take["h"]), (W,H), [0,.13,1,.47])
                     P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],crop=[0,0,1,1],caption_baseline=.88)
-                wf1_display.reading_card(P,[fa,fb],entry["speaker"],"Speaking off camera","",pal,
-                                         centre=.62 if entry["reaction"] else .45, group="incoming-voice")
+                P.word([fa,fb], entry["speaker"], "lab", .5, .62 if entry["reaction"] else .45,
+                       pal["ink"], align="c", role="name")
                 continue
             close_crop = next((crop for lo,hi,crop in closing if lo <= fa < hi), None)
             if close_crop and not any(lo <= fa < hi for lo,hi in reactions):
@@ -1730,7 +1712,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         hit = (clock.words[first]["t0"], 1) if addressed else F.said_at(clock, seg, text)
         if hit is None:
             continue
-        a = max(Clock.f(hit[0]) - 1, 1)
+        a = max(Clock.f(hit[0]), 0)
         if any(abs(a - x) < 2.0 * FPS for x, _, _ in shown) or a >= f_voice_end - 12:
             continue
         b = int(min(a + 1.15 * FPS, f_end, Clock.f(clock.segs[seg][1]) + 10))

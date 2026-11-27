@@ -910,7 +910,7 @@ def direction_of(ctx, script, pack):
                              upper=st.get("upper")) if st else None,
                   workflow="podcast short", dur_s=dur, title=(script or {}).get("title"), hook=(script or {}).get("hook_line"),
                   payoff=(script or {}).get("close_line"), editorial=editorial, ask=llm.ask, log=getattr(ctx, "log", None))
-    d["display"] = wf1_display.viewer_text(d["viewer_text"], rows) if d.get("viewer_text") else d.get("display", [])
+    d["display"] = wf1_display.viewer_text(d["viewer_text"], rows) if "viewer_text" in d else d.get("display", [])
     for row in d["display"]:
         if row.get("picture") in ids:
             row["picture_path"] = ids[row["picture"]]
@@ -2035,7 +2035,8 @@ def retained_cuts(supply, coverage):
 def recompose(ctx, script, sc):
     """Render repairs inherit the scored words, direction and checked source stock."""
     from wf1_coverage import story_context
-    if sc.get("direction") and os.path.isfile(os.path.join(ctx.supply, "pack.json")):
+    if (sc.get("direction") and (sc.get("beats") or {}).get("caption_contract") == wf1_film.CAPTION_CONTRACT
+            and os.path.isfile(os.path.join(ctx.supply, "pack.json"))):
         pack = wf3.load_pack(ctx)
         if (pack.get("coverage", {}).get("story") == story_context(script)
                 and not pack.get("platform_walled")
@@ -2373,7 +2374,7 @@ def check(ctx, rd, sc):
     if not r.get("final_music") and (ctx.args or {}).get("music_ledger"):
         # The parent has the branded take and measured cuts after supply is pruned.
         # Keep the two authored score positions that it cannot read from those bytes.
-        r["checks"]["music_cues"] = dict(turn_s=sc.get("story_turn_s"), payoff_s=sc.get("turn_s"))
+        r["checks"]["music_cues"] = dict(turn_s=sc.get("story_turn_s"), payoff_s=sc.get("payoff_s", sc.get("turn_s")))
     history = [dict(b["rendered_check"], frames="the render review's composed frames; the delivered programme is the same")] \
         if b.get("rendered_check") else []
     if history:
