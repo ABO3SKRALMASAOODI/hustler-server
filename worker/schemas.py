@@ -3122,6 +3122,7 @@ class EDL(BaseModel):
     stem_mix: Optional[StemMix] = None
     # EDIT-CORE A3: the original sound with its background noise cleaned
     # (NoiseClean). Audio-only, like stem_mix.
+    source_pitch_semitones: Optional[float] = Field(default=None, ge=-48, le=48, allow_inf_nan=False)
     noise_clean: Optional[NoiseClean] = None
     # round 37 — PROGRAM-time windows where burned captions are suppressed.
     # Captions were all-or-nothing before this: a full-frame effect or a title

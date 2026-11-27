@@ -75,3 +75,29 @@ def test_continuation_picks_an_unattempted_write_and_persists_the_choice():
     ctx = SimpleNamespace(ask_ledger={"asks": asks}, turn_tool_outcomes=[{"tool": "add_text"}])
     assert "add_voiceover" in agent_loop._next_ask_write(ctx)
     assert agent_loop._next_ask_write(ctx) == ""
+
+
+def test_relative_pitch_leaves_the_timelapse_clock_alone(tmp_path):
+    import subprocess
+    import renderer
+    edl = schemas.default_edl(6)
+    edl.update(speed=[{"id": "sp1", "start": 0, "end": 6, "factor": 6}],
+               source_pitch_semitones=6)
+    edl = schemas.validate_edl(edl, 6).model_dump()
+    clock = timeline.Timeline(edl["keep"], [], edl["speed"])
+    assert clock.out_duration == 1
+    src = tmp_path / "source.mkv"
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                    "color=s=64x64:r=30:d=6", "-f", "lavfi", "-i",
+                    "sine=frequency=440:duration=6", "-c:a", "pcm_s16le", "-c:v",
+                    "ffv1", str(src)], check=True)
+    graph = renderer.build_filtergraph(edl, 6, True, clock, None, [], {}, False,
+                                      W=64, H=64, fps=30, src_w=64, src_h=64)
+    raw = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(src),
+                  "-filter_complex", graph + ";[vout]nullsink", "-map", "[aout]",
+                  "-f", "f32le", "-ac", "1", "-ar", "24000", "-"])
+    samples = np.frombuffer(raw, np.float32)
+    assert abs(len(samples) / 24000 - 1) < .08
+    middle = samples[4800:19200]
+    freq = np.argmax(np.abs(np.fft.rfft(middle * np.hanning(len(middle))))) * 24000 / len(middle)
+    assert abs(freq - 440 * 2 ** .5) < 6
