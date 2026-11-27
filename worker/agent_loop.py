@@ -2820,6 +2820,24 @@ def _restore_tighten(ctx, cont):
 # Director on the full upload, a Patch on named items, or this loop), and before the reply checks
 # every ask on the rendered film. Checks cover typed requests by default; routing is opt-in.
 
+def _next_ask_write(ctx):
+    """Resume the remaining creative work at a concrete, untried tool."""
+    ledger = getattr(ctx, "ask_ledger", None) or {}
+    attempted = {r.get("tool") for r in getattr(ctx, "turn_tool_outcomes", [])}
+    offered = ledger.get("dispatched_asks", [])
+    verdict = getattr(ctx, "ask_verdict", None) or {}
+    done = {r.get("id") for r in verdict.get("asks") or [] if r.get("state") == "done"}
+    for ask in ledger.get("asks") or []:
+        name = ask.get("write_tool")
+        if (name in agent_tools.WRITE_TOOLS and name not in attempted and
+                ask["id"] not in done and ask["id"] not in offered):
+            ledger.setdefault("dispatched_asks", []).append(ask["id"])
+            return (f"Build this outstanding part next: {ask['want']}. Use {name} "
+                    "with the actual content and timing. Combine independent writes "
+                    "before rendering the updated film.")
+    return ""
+
+
 def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     """The ledger, and the route it picks, before the loop. Returns the editor's note. A slice
     resumed after a boundary carries its ledger; nothing here runs twice. Never raises."""
@@ -2832,7 +2850,7 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         ctx.ask_verdict = cont.get("ask_verdict")
         ctx.ask_model = (ctx.ask_ledger.get("cfg") or {}).get("model")
         ctx.ask_check_required = (ctx.ask_ledger.get("cfg") or {}).get("check", True)
-        return ""
+        return ctx.ask_ledger.pop("resume_write", "")
     if cont:
         return ""
     try:
@@ -2853,6 +2871,9 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         return ""
     ledger["cfg"] = {k: cfg.get(k) for k in ("check", "model", "check_model")}
     ctx.ask_ledger = ledger
+    names = {a.get("write_tool") for a in ledger.get("asks") or []}
+    ctx._loaded_tool_names = set(getattr(ctx, "_loaded_tool_names", ())) | (
+        names & agent_tools.WRITE_TOOLS)
     if not ledger["asks"]:
         return ""
     import required_broll
@@ -2863,7 +2884,9 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         print(f"[asks] picture obligations unavailable: {type(exc).__name__}", flush=True)
     done_by = None
     reset_note = _typed_start_from_upload(ctx, ledger, job)
-    if ledger["route"] == "film" and cfg["director"]:
+    on_first_cut = (getattr(ctx, "request_edit_origin", None) or {}).get("made_by") == "automatic_first_cut"
+    if ledger["route"] == "film" and cfg["director"] and not (
+            on_first_cut and ledger["start"] == "current"):
         got = asks.direct_film(ctx, worker_db, job, session_id, cfg)
         ledger["routed"] = {"to": "director", **{k: got.get(k) for k in ("version", "fell", "applied", "s")}}
         if got.get("version"):
@@ -3250,15 +3273,9 @@ def _asks_settle(ctx, final, outcome):
             verdict = None
     except Exception:  # noqa: BLE001
         verdict = None
-    final = edit_scope.disclose(ctx, final)
-    # The check corrects only what the rendered film contradicts, and the
-    # checker's unmet-ask lines are kept after it (brands replay lost the
-    # unfinished ending while the new picture changes were summarized).
+    edit_scope.disclose(ctx, final)
     if verdict:
         final = asks.true_reply(ctx, ledger, verdict, final or "")
-        block = asks.reply_block(ledger, verdict)
-        if block and not all(r.get("line") in final for r in asks.open_asks(verdict) if r.get("line")):
-            final = (final or "") + block
     return final, asks.outcome(ledger, verdict, outcome)
 
 
@@ -6714,6 +6731,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # Those slices are not billed (studio project 2592, 22 Oct 2026:
             # 111 credits, most of them three slices circling one finding);
             # the work before them is metered as usual.
+            next_write = _next_ask_write(ctx)
+            if next_write:
+                ctx.ask_ledger["resume_write"] = next_write
+                return _durable_continuation("build outstanding request",
+                                             progress_frontier=resolution["frontier"],
+                                             stagnant=True)
             unbilled = _stagnant_job_ids(_cont, job["id"], True)
             detail = "; ".join(str(row) for row in unresolved if row)
             blocker = ("I stopped because the edit was no longer making progress"
@@ -7416,6 +7439,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             ask_repair = _asks_check(
                 ctx, draft, allow_repair=turn_deadline - time.monotonic() > 150)
             if ask_repair:
+                next_write = _next_ask_write(ctx)
+                if next_write:
+                    ask_repair += "\n" + next_write
                 print(f"[job {job['id']}] ask check: open asks on "
                       f"v{latest['version']}, repair pass "
                       f"{ctx.ask_ledger.get('repairs')}", flush=True)

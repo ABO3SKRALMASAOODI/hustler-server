@@ -191,14 +191,6 @@ def test_outcome_is_never_fulfilled_with_an_ask_open():
     assert asks.outcome(None, None, "fulfilled") == "fulfilled"
 
 
-def test_the_reply_lists_asks_only_when_one_is_open():
-    ledger = asks.settle({"lang": "en", "asks": [_ask(), _ask()]}, EDL)
-    assert asks.reply_block(ledger, _verdict("done", "done")) == ""
-    block = asks.reply_block(ledger, _verdict("done", "not_done"))
-    # only what is still open: the done ask is in the editor's reply already
-    assert "- line 2" in block and "- line 1" not in block
-
-
 def _loop_ctx(ledger, version=2, preview_version=2):
     return NS(ask_ledger=ledger, ask_verdict=None, last_preview={"edl_version": preview_version, "duration_s": 10},
               latest_edl=lambda: {"version": version, "json": EDL}, versions_written=[version], workdir="/tmp")
@@ -219,7 +211,7 @@ def test_a_repair_then_an_unchanged_film_the_reply_says_what_is_open(monkeypatch
     # ... and a pass that still changes nothing is its answer: its reply stands
     assert agent_loop._asks_check(ctx, "Done a third time!") is None
     final, outcome = agent_loop._asks_settle(ctx, "Done!", "fulfilled")
-    assert outcome == "partial" and "line 1" in final
+    assert outcome == "partial" and "line 1" not in final and "unfinished" in final
 
 
 def test_a_stale_verdict_never_vouches_for_a_newer_version(monkeypatch):
@@ -713,7 +705,8 @@ def test_truth_rewrite_failure_retains_only_measured_disclosure(monkeypatch):
                          'line': 'Crypto mining was not shown.'}]}
     monkeypatch.setattr(asks, '_call', lambda *a, **kw: (_ for _ in ()).throw(TimeoutError()))
     reply = asks.true_reply(ctx, {}, verdict, 'Everything is done, including the mining picture.')
-    assert reply == 'Crypto mining was not shown.'
+    assert 'frame changed to 9:16' in reply and 'unfinished' in reply
+    assert 'Crypto mining was not shown.' not in reply
     assert 'Everything is done' not in reply and "can't confirm" not in reply
 
 

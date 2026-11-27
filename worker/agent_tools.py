@@ -142,7 +142,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      TRANSITION_MAX_S, TRANSITION_SCOPES,
                      TRANSITION_SCOPES_PUBLIC,
                      OVERLAY_ANIMS, OVERLAY_SCALE_MIN,
-                     OVERLAY_SCALE_MAX, SPEED_FACTOR_MIN, SPEED_FACTOR_MAX,
+                     OVERLAY_SCALE_MAX, speed_factor,
                      STYLIZE_KINDS, TEXT_ANIMS, TEXT_FONTS, TEXT_TEMPLATES,
                      VECTOR_KINDS,
                      ZOOM_STRENGTH_MIN, ZOOM_STRENGTH_MAX,
@@ -13139,7 +13139,7 @@ def find_burned_text(ctx, scope="all", start=None, end=None):
            "exact):\n" + "\n".join(lines))
     if covered < len(regions):
         out += ("\nPass one of these rectangles to erase_region to repaint "
-                "it out, or call erase_burned_text to erase every caption "
+                "it out. For a spelling correction inspect the words at the source time, then pass replacement with the corrected wording and the visible start/end. Or call erase_burned_text to erase every caption "
                 "band in one pass.")
     if covered:
         out += ("\nNOTE: this scan reads the RAW source pixels, so an "
@@ -13340,6 +13340,9 @@ def _apply_patches(ctx, new_items, what, drop=None):
         after = stats.get("after") or []
         metric = stats.get("metric") or ["ink"] * len(before)
         for r, b, a, how in zip(members, before, after, metric):
+            if r.get("replacement"):
+                lines.append(f"[{r['id']}] replaced source lettering with {r['replacement']!r}")
+                continue
             gone = (b <= 0.5) or (a <= max(1.5, b * 0.35))
             measured = (f"keeps {a:g}% of the box's original picture"
                         if how == "pattern" else f"ink {b:g} -> {a:g}")
@@ -13549,7 +13552,7 @@ def _subsumed_by(old, new):
 
 
 def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
-                 fill="text", regions=None):
+                 fill="text", regions=None, replacement=None):
     """Repaint rectangle(s) out of the source pixels — several marks in ONE
     repaint pass when `regions` is used.
 
@@ -13602,6 +13605,10 @@ def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
         if isinstance(item, str):
             return item
         new_items = [item]
+    for row, spec in zip(new_items, regions or [{"replacement": replacement}]):
+        wording = str(spec.get("replacement") or "").strip()
+        if wording:
+            row["replacement"] = wording
     # Patches keep faces whole (face_guard, 14 Nov 2026): a rectangle on a
     # face is never repainted; the others in the call go ahead.
     import face_guard
@@ -14816,11 +14823,34 @@ def _resolve_audio_upload(ctx, asset_key):
     return asset, None, err
 
 
-def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
-                  duck_others=True, source_offset_s=None, duration_s=None):
-    asset, extract_note, err = _resolve_audio_upload(ctx, asset_key)
-    if err:
-        return err
+def _narration_asset(ctx, script, locale, voice):
+    import narration
+    digest = hashlib.sha256(json.dumps([script, locale, voice], ensure_ascii=False).encode()).hexdigest()
+    key = f"music/{ctx.project_id}/narration-{digest}.wav"
+    existing = ctx.db.run(dbx.asset_by_key, ctx.project_id, key)
+    if existing:
+        return existing
+    with tempfile.TemporaryDirectory(dir=ctx.workdir) as tmp:
+        path, name, language = narration.synthesize(script, locale, voice, tmp)
+        duration = media.probe_audio_duration(path)
+        meta = {"filename": f"Narration ({name}, {language}).wav", "narrator": name,
+                "locale": language, "generated_narration": True}
+        storage.upload_file(path, key, "audio/wav")
+        aid = ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
+                         duration_s=duration, meta=meta)
+    return {"id": aid, "kind": "music", "storage_key": key, "duration_s": duration, "meta": meta}
+
+
+def add_voiceover(ctx, asset_key=None, start_output_s=0.0, gain_db=0.0,
+                  duck_others=True, source_offset_s=None, duration_s=None,
+                  script=None, locale="en-US", voice=None):
+    if script and str(script).strip() and not asset_key:
+        asset = _narration_asset(ctx, str(script).strip(), locale, voice)
+        extract_note = "Synthesized the supplied script with " + asset["meta"]["filename"]
+    else:
+        asset, extract_note, err = _resolve_audio_upload(ctx, asset_key)
+        if err:
+            return err
     asset_key = asset["storage_key"]        # a video resolves to its audio
     edl = dict(ctx.latest_edl()["json"])
     prog = program_duration(edl)
@@ -14856,6 +14886,9 @@ def add_voiceover(ctx, asset_key, start_output_s=0.0, gain_db=0.0,
         item["source_offset_s"] = off
     if duration is not None:
         item["duration_s"] = duration
+    if script and any(all(v.get(k) == value for k, value in item.items() if k != "id")
+                      for v in vos):
+        return f"Narration already placed at {start:g}s: {asset['meta']['filename']}."
     edl["voiceover"] = vos + [item]
     name = (asset.get("meta") or {}).get("filename") or \
         os.path.basename(asset_key)
@@ -14949,10 +14982,9 @@ def set_speed(ctx, start, end, factor, motion_motif=None):
     if e - s < 0.2:
         return "REJECTED: a speed span needs at least 0.2s of source footage."
     try:
-        f = round(min(max(float(factor), SPEED_FACTOR_MIN),
-                      SPEED_FACTOR_MAX), 3)
+        f = speed_factor(factor)
     except (TypeError, ValueError):
-        return ("REJECTED: factor must be a number 0.25-4.0 (2.0 = double "
+        return ("REJECTED: factor must be a finite number from 0.25 upward (2.0 = double "
                 "speed, 0.5 = half speed; audio keeps its pitch).")
     if abs(f - 1.0) < 0.01:
         return ("REJECTED: factor 1.0 is normal speed — nothing to write. "
@@ -30242,7 +30274,7 @@ LOOKS = {
     "cinematic_doc": {
         "system": True,
         "summary": ("clean sentence-case captions that rise in word by word, "
-                    "warm teal/orange cinematic grade, vignette + fine grain, "
+                    "warm teal/orange cinematic grade and fine grain, "
                     "unhurried dips to black"),
         "captions": {"motion_look": "clean", "preset": "documentary",
                      "color": "#F4F1EC", "highlight_color": "#E9C46A",
@@ -30252,7 +30284,7 @@ LOOKS = {
                          "highlights": -0.08},
         # No halation by default: at full resolution its blur pass added
         # ~55% to a measured 1080x1920 render for a barely visible bloom.
-        "stylize": (("vignette", 0.35), ("grain", 0.12)),
+        "stylize": (("grain", 0.12),),
         "transition": ("dip_black", 0.45),
         "transition_sfx": (("whoosh_soft", "swoosh_up"), -9.0),
         "fade_in_s": 0.0, "fade_out_s": 0.0,
@@ -34000,6 +34032,7 @@ TOOLS = {
                       "w": {"type": "number"}, "h": {"type": "number"},
                       "start": {"type": "number"},
                       "end": {"type": "number"},
+                      "replacement": {"type": "string", "description": "Corrected wording to draw inside the repainted source rectangle."},
                       "fill": {"type": "string", "enum": ["text", "box"]},
                       "regions": {"type": "array", "items": {
                           "type": "object", "properties": {
@@ -34007,6 +34040,7 @@ TOOLS = {
                               "y": {"type": "number"},
                               "w": {"type": "number"},
                               "h": {"type": "number"},
+                              "replacement": {"type": "string"},
                               "fill": {"type": "string",
                                        "enum": ["text", "box"]},
                               "start": {"type": "number"},
@@ -34024,7 +34058,7 @@ TOOLS = {
                      "window-patch erases; legacy whole-file erases rebuild "
                      "from the untouched original.",
                      {"id": {"type": "string"}}),
-    "add_voiceover": (add_voiceover, "Lay an uploaded audio file OVER the "
+    "add_voiceover": (add_voiceover, "Generate a narrator from script and locale (e.g. en-ZA), or lay an uploaded audio file OVER the "
                       "whole program from start_output_s (a position in the "
                       "FINAL edited video, default 0). duck_others (default "
                       "true) lowers all other audio 12dB while it plays. "
@@ -34039,6 +34073,9 @@ TOOLS = {
                       "time as start_output_s. Otherwise use a storage_key "
                       "from list_assets(kind='music').",
                       {"asset_key": {"type": "string"},
+                       "script": {"type": "string", "description": "Words to speak. Omit asset_key when generating."},
+                       "locale": {"type": "string", "description": "BCP 47 language and region."},
+                       "voice": {"type": "string", "description": "Optional installed voice name."},
                        "start_output_s": {"type": "number"},
                        "source_offset_s": {"type": "number"},
                        "duration_s": {"type": "number"},
@@ -34050,7 +34087,7 @@ TOOLS = {
                   "the main video (like set_volume, start/end are SOURCE "
                   "seconds — the ramp stays on its footage through later "
                   "cuts, and music/overlays/zooms/sfx are re-anchored "
-                  "automatically). factor 0.25-4.0: 2.0 = double speed, "
+                  "automatically). factor >= 0.25, including 6x, 10x and 50x timelapse. A relative speed request multiplies the current factor. Report the saved factor. 2.0 = double speed, "
                   "0.5 = half; audio keeps its pitch. Slow motion below "
                   "0.6x visibly steps (frames are duplicated, not "
                   "synthesized) — the tool warns; prefer 0.6-0.8x. A span "
@@ -35320,7 +35357,7 @@ REQUIRED_ARGS = {
     "set_transitions": ["style"],
     "blur_region": ["x", "y", "w", "h"],
     "erase_region": [],
-    "add_voiceover": ["asset_key"],
+    "add_voiceover": [],
     "remove_voiceover": ["id"],
     "set_speed": ["start", "end", "factor"],
     "remove_speed": ["id"],

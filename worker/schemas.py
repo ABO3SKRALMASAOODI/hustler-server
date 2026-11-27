@@ -2687,7 +2687,11 @@ def subject_matte_geom(frame):
 # (atempo). Slow motion duplicates frames (no synthetic interpolation on
 # this hardware) — the tools say so below 0.6x.
 SPEED_FACTOR_MIN = 0.25
-SPEED_FACTOR_MAX = 4.0
+def speed_factor(value):
+    factor = float(value)
+    if not math.isfinite(factor):
+        raise ValueError("speed factor must be finite")
+    return round(max(factor, SPEED_FACTOR_MIN), 3)
 
 
 class SpeedSpan(BaseModel):
@@ -2946,6 +2950,7 @@ def patch_fingerprint(src_sha, regions, window):
         {"w": [round(float(window[0]), 2), round(float(window[1]), 2)],
          "r": [{k: r.get(k) for k in
                 ("x", "y", "w", "h", "start", "end", "fill")}
+               | ({"replacement": r["replacement"]} if r.get("replacement") else {})
                for r in (regions or [])]}, sort_keys=True)
     return hashlib.sha1(f"{src_sha}|patch|{payload}".encode()).hexdigest()
 
@@ -3034,6 +3039,7 @@ class CleanRegion(BaseModel):
     start: Optional[float] = None
     end: Optional[float] = None
     fill: Literal["text", "box"] = "text"
+    replacement: Optional[str] = None
     kind: Optional[str] = None          # what the detector called it
 
 
@@ -3612,9 +3618,7 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 sp.end = _check_span(f"speed[{i}]", sp.start, sp.end,
                                      duration, min_len=0.01 if render_fragment else 0.2,
                                      clamp_slack=0.75)
-                sp.factor = round(min(max(float(sp.factor),
-                                          SPEED_FACTOR_MIN),
-                                      SPEED_FACTOR_MAX), 3)
+                sp.factor = speed_factor(sp.factor)
                 if abs(sp.factor - 1.0) < 0.01:
                     raise EDLValidationError(
                         f"speed[{i}].factor {sp.factor} is 1.0 — that is no "

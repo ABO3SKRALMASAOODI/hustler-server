@@ -38,7 +38,7 @@ HTML_SPEC = {
     "title": "Authored HTML motion graphic",
     "category": "custom",
     "description": ("Your own HTML/CSS/JS composition on the deterministic MG runtime. "
-                    "Use when no library template expresses the idea."),
+                    "Use MG.W and MG.H for responsive geometry. Use when no library template expresses the idea."),
     "params": {},
     "duration": 3.0,
     "layer": "above_captions",
@@ -447,6 +447,22 @@ def build_job(item, out_w, out_h, fps, asset_locals=None, plate=None,
         else:
             params[key] = None
     body = item.get("html") if name == "html" else motion_engine.template_body(name)
+    if name == "html":
+        # Fit a fixed-size authored artboard into the actual design viewport.
+        # CSS scale is independent of the transform animated by the author.
+        body += """<script>(() => {
+          for (const el of document.body.children) {
+            if (!(el instanceof HTMLElement) || !el.offsetWidth || !el.offsetHeight) continue;
+            const css = getComputedStyle(el);
+            if (css.position !== 'absolute' || el.offsetLeft !== 0 || el.offsetTop !== 0) continue;
+            const scale = Math.min(1, MG.W / el.offsetWidth, MG.H / el.offsetHeight);
+            if (scale >= 1) continue;
+            el.style.transformOrigin = '0 0';
+            el.style.scale = String(scale);
+            el.style.left = ((MG.W - el.offsetWidth * scale) / 2) + 'px';
+            el.style.top = ((MG.H - el.offsetHeight * scale) / 2) + 'px';
+          }
+        })()</script>"""
     html = motion_engine.build_document(body, params=params, duration=full, fps=fps,
                                         design_w=dw, design_h=dh, plate=plate,
                                         yields=yields)

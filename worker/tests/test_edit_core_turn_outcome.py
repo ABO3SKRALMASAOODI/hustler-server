@@ -339,7 +339,7 @@ def test_no_reply_is_replaced_by_a_hedge():
     import edit_scope
     import reply_truth
     assert "_call(" not in inspect.getsource(edit_scope.disclose)      # no rewrite model
-    assert asks.checked_reply(None, None) == ""
+    assert asks.true_reply(object(), None, None, "My reply.") == "My reply."
     assert reply_truth._unverified({}, "My reply.") == "My reply."
 
 

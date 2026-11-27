@@ -40,6 +40,7 @@ drop-in replacement for the source, which is exactly how the renderer uses it.
 """
 import math
 import os
+import shutil
 import subprocess
 import warnings
 
@@ -317,6 +318,10 @@ class _Region:
             max(0, min(H - 2, int(round(float(spec["y"]) * H)))),
             int(round((float(spec["x"]) + float(spec["w"])) * W)),
             int(round((float(spec["y"]) + float(spec["h"])) * H)))
+        self.replacement = spec.get("replacement")
+        self.text_box = (self.bx0, self.by0, self.bx1, self.by1)
+        self.text_alpha = None
+        self.ink = None
         self.start = spec.get("start")
         self.end = spec.get("end")
         # 'text' repaints only the glyphs (keeps the picture behind them);
@@ -350,6 +355,33 @@ class _Region:
         self.x1, self.y1 = min(W, self.bx1 + pad_x), min(H, self.by1 + pad_y)
         self.ix0, self.iy0 = self.bx0 - self.x0, self.by0 - self.y0
         self.ix1, self.iy1 = self.bx1 - self.x0, self.by1 - self.y0
+
+    def draw_replacement(self, frame):
+        if not self.replacement:
+            return
+        from PIL import Image, ImageDraw, ImageFont
+        x, y, right, bottom = self.text_box
+        box = frame[y:bottom, x:right]
+        height, width = box.shape[:2]
+        if self.text_alpha is None:
+            font_path = os.path.join(os.path.dirname(__file__), "fonts", "InterDisplay-Bold.ttf")
+            if not self.replacement.isascii() and shutil.which("fc-match"):
+                charset = " ".join(f"{ord(c):x}" for c in set(self.replacement) if not c.isspace())
+                match = subprocess.check_output(
+                    ["fc-match", "-f", "%{file}", "sans:charset=" + charset], text=True).strip()
+                if os.path.isfile(match):
+                    font_path = match
+            font = ImageFont.truetype(font_path, height)
+            left, top, r, b = font.getbbox(self.replacement)
+            scale = min(width / max(1, r - left), height / max(1, b - top))
+            font = ImageFont.truetype(font_path, max(1, int(height * scale * 0.96)))
+            left, top, r, b = font.getbbox(self.replacement)
+            alpha = Image.new("L", (width, height))
+            ImageDraw.Draw(alpha).text(((width - r - left) / 2, (height - b - top) / 2),
+                                       self.replacement, font=font, fill=255)
+            self.text_alpha = np.asarray(alpha, dtype=np.float32)[:, :, None] / 255
+            self.ink = 245 if float(np.median(box)) < 128 else 20
+        box[:] = box * (1 - self.text_alpha) + self.ink * self.text_alpha
 
     def active(self, t):
         if self.start is None:
@@ -827,6 +859,7 @@ def clean_video(src, regions, out_full, out_proxy=None, *, progress_cb=None,
                     if mask.any():
                         frame[r.y0:r.y1, r.x0:r.x1] = _repaint(band, mask, r)
                         touched += 1
+                    r.draw_replacement(frame)
                 out = (frame.tobytes() if frame.flags["C_CONTIGUOUS"]
                        else np.ascontiguousarray(frame).tobytes())
             else:
@@ -985,6 +1018,7 @@ def build_patch(src, regions, window, out_path, *, crf=23, preset="veryfast",
                     if mask.any():
                         frame[r.y0:r.y1, r.x0:r.x1] = _repaint(band, mask, r)
                         touched += 1
+                    r.draw_replacement(frame)
                 out = (frame.tobytes() if frame.flags["C_CONTIGUOUS"]
                        else np.ascontiguousarray(frame).tobytes())
             else:
