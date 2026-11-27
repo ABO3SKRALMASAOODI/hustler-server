@@ -1059,6 +1059,12 @@ def picture_tone(path):
     return out
 
 
+# Caption-contrast geometry for the measured ink bounds on the underlying picture.
+POOL_EDGE_Q = 0.4
+POOL_PAD_X = 0.06
+POOL_TONE = (0.45, 0.65)
+
+
 def pool_need(tone):
     """How much of the pool a caption needs over a picture of this tone: 0 on a dark or mid plate, 1 on a bright one,
     1 when the tone is unknown."""

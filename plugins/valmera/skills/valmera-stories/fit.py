@@ -521,7 +521,10 @@ def verdicts(cands, sc, cache_path=None, ask=None, work=None, log=print, id_cach
         it = items[k_]
         for ln in it["lines"]:
             if it.get("kind") == "clip" and slots[ln][0] == it.get("line"):
-                table[it["path"]][it["take_i"]][ln] = dict(unjudged=True, grade=0)
+                identity = it.get("identity") or {}
+                verdict = {field: identity[field] for field in ("live_action", "speaking_on_camera")
+                           if isinstance(identity.get(field), bool)}
+                table[it["path"]][it["take_i"]][ln] = dict(verdict, unjudged=True, grade=0)
                 kept += 1
     if kept:
         log(f"fit: {kept} takes no model answered for stay on the lines they were found for, unjudged")
