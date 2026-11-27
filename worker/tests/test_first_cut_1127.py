@@ -97,17 +97,23 @@ def test_preview_uses_existing_main_input_for_its_own_insert(tmp_path):
     assert renderer._render_asset_source_impl(key, "insert", 0, str(tmp_path), {key:str(source)}) == str(source)
 
 
-def test_reindex_with_original_audio_refreshes_full_size_player():
+@pytest.mark.parametrize("has_audio", [True, False])
+def test_reindex_refreshes_full_size_player_once(monkeypatch, has_audio):
     import db, indexer
+    from unittest.mock import MagicMock
+    conn = MagicMock()
+    cur = conn.cursor.return_value.__enter__.return_value
+    cur.fetchone.side_effect = [{"id": 3}, None]
+    monkeypatch.setattr(db, "latest_edl", lambda c, pid: {"version": 8})
     calls = []
-    def run(fn, *args):
-        calls.append((fn,args))
-        return {"version":8} if fn is db.latest_edl else None
-    indexer._finish_proxy_audio(NS(run=run), dict(payload={"repair_proxy_audio":True},project_id=1,user_id=7),
-                                {"id":3}, False, {"has_audio":True})
-    assert calls[-1][0] is db.get_or_enqueue_preview_job
-    payload = calls[-1][1][-1]
+    monkeypatch.setattr(db, "get_or_enqueue_preview_job", lambda c, pid, uid, body: calls.append(body))
+    worker_db = NS(run=lambda fn, *args: fn(conn, *args))
+    job = dict(payload={"repair_proxy_audio": True}, project_id=1, user_id=7)
+    for _ in range(2):
+        indexer._finish_proxy_audio(worker_db, job, {"id": 3}, False, {"has_audio": has_audio})
+    payload, = calls
     assert payload["edl_version"] == 8 and payload["quality"] == "approval" and payload["force"]
+    assert payload["first_cut_original"] and payload["render_dependency_key"] == "landed_original:3"
 
 
 def test_reply_only_uses_facts_of_delivered_file():
@@ -178,6 +184,43 @@ def test_encoded_mix_makes_space_for_the_attack(tmp_path, monkeypatch):
     assert result[1] > result[0] + 4
 
 
+def test_scene_render_dips_the_source_at_two_overlapping_cues(monkeypatch, tmp_path):
+    import numpy as np
+    from scene import audio
+    from score.music import _Plan
+    sr = audio.SR
+    (tmp_path / "cue.flac").touch()
+    monkeypatch.setattr(audio, "SOUNDS", str(tmp_path))
+    monkeypatch.setattr(audio, "_filter", lambda: NS(swap=lambda item, root: (item, False)))
+    monkeypatch.setattr(audio, "pcm", lambda path: np.full((sr*2, 2), .25, dtype=np.float32))
+    cues = [dict(file="cue.flac", start_s=1., event_f=30, source_duck_db=depth) for depth in (7., 11.)]
+    plan = _Plan(dict(fps=30, dur_f=60, spine=[{"f":[0, 60], "src":[0., 2.]}], sound=cues), "source")
+    source, sounds, report = audio.split_audio(plan)
+    assert report["sounds"] == 2 and sounds[sr, 0] == pytest.approx(.5)
+    assert source[sr, 0] == pytest.approx(.25 * 10**(-11/20))
+    assert source[sr//2, 0] == source[sr*3//2, 0] == .25
+
+
+def test_arranged_music_makes_room_without_lowering_speech(monkeypatch):
+    import numpy as np
+    import first_film_sound
+    from scene import audio
+    from score import sound
+    time = np.arange(2 * sound.AR) / sound.AR
+    music = .55 * np.sin(2*np.pi*600*time)
+    cue = (.22 * np.sin(2*np.pi*1600*time) * np.exp(-time*110)).astype("float32")
+    monkeypatch.setattr(sound, "library", lambda: {"cue": {}})
+    monkeypatch.setattr(sound, "sample_pcm", lambda sid: cue)
+    sounds, _ = first_film_sound.level([dict(s="cue", db=-20, tier="hero", event_f=30)],
+                                        music*.1, 30, speaks=True, bed=music)
+    hit, = sounds
+    assert "source_duck_db" not in hit and hit["music_duck_db"] > 4
+    song = np.ones((2*audio.SR, 2), np.float32)
+    audio.make_cue_space(song, [(1., hit["music_duck_db"])])
+    assert song[audio.SR, 0] == pytest.approx(10**(-hit["music_duck_db"]/20))
+    assert song[audio.SR//2, 0] == 1.
+
+
 def test_landed_original_repair_keeps_original_raster(monkeypatch):
     import renderer
     monkeypatch.setattr(renderer.config,"APPROVAL_MAX_LONG_EDGE",1280)
@@ -204,3 +247,32 @@ def test_phrase_push_pins_the_speakers_eyes_on_the_retained_source_clock(monkeyp
     result = []
     visual.cut_ins(ctx,[],0,lambda c,s,tool,args,st:result.append(args) or "EDL v3",[],(.5,.6),0)
     assert [result[0]["cx"],result[0]["cy"]] == pytest.approx([.3,.26])
+
+
+def test_explicit_screen_fit_keeps_the_page_even_without_a_static_slide_measure(monkeypatch):
+    import agent_tools
+    ctx = NS(index={"_first_film_source_guard":True,"video":{"width":1920,"height":1080}})
+    written = []
+    monkeypatch.setattr(agent_tools,"set_frame",lambda c,ratio,mode,**kw:written.append((ratio,mode)) or "EDL v3")
+    assert agent_tools._auto_reframe(ctx,"9:16","pad_blur") == "EDL v3"
+    assert written == [("9:16","pad_blur")]
+
+
+def test_screen_film_reaches_composition_and_player_with_unchanged_timeline(monkeypatch):
+    from contextlib import nullcontext
+    import first_cut, first_cut_spelling, first_cut_visual
+    edl = {"frame": {"ratio": "9:16", "mode": "pad_blur"}, "keep": [[0, 5]]}
+    ctx = NS(versions_written=0, latest_edl=lambda: {"json": edl}, first_cut_started=1.,
+             index={"video": {"width": 1920, "height": 1080}}, first_cut_screen_label="Open the conversation",
+             first_cut_spend={})
+    tools = []
+    monkeypatch.setattr(first_cut, "_text_wider_than_crop", lambda c: True)
+    monkeypatch.setattr(first_cut, "_run", lambda c, s, tool, body, start: tools.append((tool, body)))
+    monkeypatch.setattr(first_cut_visual, "screen_follow", lambda *args: tools.append(("screen_follow", {})))
+    monkeypatch.setattr(first_cut_spelling, "persist", lambda c: None)
+    monkeypatch.setattr(first_cut, "_clear_corner_mark", lambda *args: False)
+    monkeypatch.setattr(first_cut, "_timed", lambda *args: nullcontext())
+    monkeypatch.setattr(first_cut.agent_tools, "execute", lambda c, tool, body: tools.append((tool, body)) or "rendered")
+    assert first_cut._render_cut(ctx, [], {"how": "director"}) == "rendered"
+    assert [tool for tool, _ in tools] == ["add_text", "screen_follow", "render_preview"]
+    assert tools[0][1]["text"] == "Open the conversation"

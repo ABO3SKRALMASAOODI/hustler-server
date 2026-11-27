@@ -443,13 +443,8 @@ def _claude_trial_indexed(worker_db, job, scope):
 def _finish_proxy_audio(worker_db, job, asset, from_client_proxy, info):
     if from_client_proxy and not info.get("has_audio"):
         worker_db.run(dbx.repair_proxy_audio_on_arrival, job["project_id"], job["user_id"], asset["id"])
-    elif job["payload"].get("repair_proxy_audio") and info.get("has_audio"):
-        row = worker_db.run(dbx.latest_edl, job["project_id"])
-        if row and row["version"] > 1:
-            worker_db.run(dbx.get_or_enqueue_preview_job, job["project_id"], job["user_id"],
-                          {"source": "original_audio_restored", "quality": "approval", "audio_model_review": False,
-                           "edl_version": row["version"], "first_cut_original": True, "force": True,
-                           "render_dependency_key": f"landed_original:{asset['id']}"})
+    elif not from_client_proxy and job["payload"].get("repair_proxy_audio"):
+        worker_db.run(dbx.refresh_original_preview, job["project_id"], job["user_id"], asset["id"])
 
 
 def _refuse_unfinished_source(asset):

@@ -151,6 +151,29 @@ def _filter():
     return _sf["m"]
 
 
+def make_cue_space(track, hits):
+    """Dip a stereo track only in the audible attack windows (seconds, dB)."""
+    stop = 0
+    for at, depth in sorted(hits):
+        a = max(0, round((at - .09) * SR))
+        b = min(len(track), round((at + .18) * SR))
+        if b <= a:
+            continue
+        t = np.arange(a, b) / SR - at
+        env = np.minimum(np.clip(1 + t/.09, 0, 1), np.clip(2 - t/.09, 0, 1))
+        gain = (10 ** (-depth * env / 20)).astype(np.float32)
+        if a < stop:
+            # Two sounds on one cut share the deeper dip.
+            overlap = min(stop, b) - a
+            prior = previous[a-start:a-start+overlap]
+            gain[:overlap] = np.minimum(prior, gain[:overlap])
+            track[a:a+overlap] *= (gain[:overlap] / prior)[:, None]
+            track[a+overlap:b] *= gain[overlap:, None]
+        else:
+            track[a:b] *= gain[:, None]
+        start, stop, previous = a, b, gain
+
+
 def split_audio(plan):
     """(voice, sounds, report): the spine, and every placed sound on its own track, so the master levels the
     voice before the sounds are laid on it."""
@@ -180,6 +203,7 @@ def split_audio(plan):
     dry = mix.copy()
     voice, mix = mix, np.zeros((n, 2), np.float32)
     ducks = []
+    source_hits = []
     for s in plan.doc.get("sound") or []:
         if s.get("s") in ("echo", "swell"):
             at, smp = voice_layer(dry, s, plan.fps)
@@ -214,8 +238,11 @@ def split_audio(plan):
         smp = smp[:n - at] * (10 ** (float(s.get("db", 0)) / 20))
         mix[at:at + len(smp)] += smp
         report["sounds"] += 1
+        if s.get("source_duck_db") and s.get("event_f") is not None:
+            source_hits.append((float(s["event_f"]) / plan.fps, float(s["source_duck_db"])))
         if s.get("duck_db") and s.get("event_f") is not None:
             ducks.append((int(round((float(s["event_f"]) / plan.fps - 0.013) * SR)), float(s["duck_db"])))
+    make_cue_space(voice, source_hits)
     fx = mix.view(Sounds)
     fx.own, fx.ducks = mix.copy(), ducks
     return voice, fx, report

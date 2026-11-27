@@ -4161,16 +4161,17 @@ def _compose_reading_screen(ctx, steps):
 def _render_cut(ctx, steps, picked):
     """The First cut's preview render (the chain's or the Director's film)."""
     keep_whole = bool(picked and picked.get("how") in {"finished_piece", "continuous"})
-    if not ctx.versions_written and not keep_whole:
+    index = getattr(ctx, "index", {}) or {}
+    readable_screen = bool(index) and (_text_wider_than_crop(ctx) or _screen_like(index))
+    if not (ctx.versions_written or keep_whole or readable_screen):
         return None
     # Also covers early returns such as a finished-piece selection. Never
     # publish a landscape file with the vertical-first-film promise.
     row = ctx.latest_edl() or {}
     frame = (row.get("json") or {}).get("frame") or {}
     ratio = frame.get("ratio", "source")
-    index = getattr(ctx, "index", {}) or {}
-    readable_screen = _text_wider_than_crop(ctx) or _screen_like(index)
-    fit = readable_screen and frame.get("mode") not in ("pad", "pad_blur")
+    fit = readable_screen and (frame.get("mode") not in ("pad", "pad_blur") or
+                               any(s.get("mode") == "crop" for s in frame.get("focus_track") or []))
     if fit or (ratio != "9:16" and not (ratio == "source" and _orientation(index) == "vertical")):
         result = agent_tools.execute(ctx, "auto_reframe",
                                      {"ratio": "9:16", "mode": "pad_blur" if readable_screen else "crop"})
@@ -4197,7 +4198,7 @@ def _render_cut(ctx, steps, picked):
             steps.append({"tool": "first_film_sound", "ok": False,
                           "note": f"{type(exc).__name__}: {str(exc)[:120]}"})
     render = None
-    if ctx.versions_written or keep_whole:
+    if ctx.versions_written or keep_whole or readable_screen:
         _say(ctx, "render", "Rendering your preview")
         if config.FIRST_CUT_DRAFT_FIRST and getattr(ctx, "first_cut_q1", False) and not getattr(ctx, "first_cut_original_audio", False):
             render = _render_draft_first(ctx, steps)

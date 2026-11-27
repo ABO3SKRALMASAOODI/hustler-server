@@ -2944,6 +2944,22 @@ def repair_proxy_audio_on_arrival(conn, project_id, user_id, asset_id):
                            {"asset_id": asset_id, "reindex": True, "repair_proxy_audio": True})
 
 
+def refresh_original_preview(conn, project_id, user_id, asset_id):
+    """Adopt an indexed original once, even if the index executor restarts."""
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE assets SET meta = meta || '{"proxy_audio_repair":"indexed"}'::jsonb
+                        WHERE id=%s AND project_id=%s AND meta->>'proxy_audio_repair'='queued'
+                        RETURNING id""", (asset_id, project_id))
+        if cur.fetchone() is None:
+            return
+    row = latest_edl(conn, project_id)
+    if row and row["version"] > 1:
+        return get_or_enqueue_preview_job(conn, project_id, user_id, {
+            "source": "indexed_original", "quality": "approval", "audio_model_review": False,
+            "edl_version": row["version"], "first_cut_original": True, "force": True,
+            "render_dependency_key": f"landed_original:{asset_id}"})
+
+
 def update_asset_probe(conn, asset_id, duration_s, width, height, fps, sha256):
     with conn.cursor() as cur:
         cur.execute("""UPDATE assets

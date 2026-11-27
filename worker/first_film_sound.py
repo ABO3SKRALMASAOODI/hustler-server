@@ -108,15 +108,21 @@ def level(sounds, voice, fps, shift_db=0.0, *, speaks=True, bed=None):
         # Matching a body cue below that source makes it disappear. Likewise
         # account for a separately arranged bed on talking films. Keep the
         # hero/body/tick hierarchy; this is component gain, never a count.
+        h = int(hit * sound.AR)
+        attack = slice(max(0, h - sound.AR//10), h + sound.AR//5)
         background = 0.0
+        it.pop("source_duck_db", None)
+        it.pop("music_duck_db", None)
         if not speaks:
             # Masking is local to the attack. A loud beat on this frame
             # disappears in a three-second median of a quieter passage.
-            h = int(hit * sound.AR)
-            local = v[max(0, h - sound.AR//10):h + sound.AR//5]
-            background += max(background_power(v[a:b], sound.AR), peak_power(local, sound.AR, .05))
+            background += max(background_power(v[a:b], sound.AR), peak_power(v[attack], sound.AR, .05))
+        bed_power = 0.
         if bed is not None:
-            background += background_power(np.asarray(bed)[a:max(a, int((hit+1.5)*sound.AR))], sound.AR)
+            song = np.asarray(bed)
+            bed_power = max(background_power(song[a:max(a, int((hit+1.5)*sound.AR))], sound.AR),
+                            peak_power(song[attack], sound.AR, .05))
+            background += bed_power
         background_db = 10 * math.log10(background) if background > 1e-8 else None
         if background_db is not None:
             target = max(target, background_db + BACKGROUND_DB.get(it.get('tier'), 7.0))
@@ -132,11 +138,15 @@ def level(sounds, voice, fps, shift_db=0.0, *, speaks=True, bed=None):
         # the automatic hierarchy. All generated body/tick cues are levelled.
         if it.get('tier'):
             it['db'] = gain
-        if not speaks and background_db is not None:
+        if background_db is not None:
             actual = 10 * math.log10(sp) + float(it["db"])
             room = max(0., background_db + BACKGROUND_DB.get(it.get("tier"), 7.) - actual)
             if room > .5:
-                it["source_duck_db"] = round(min(room, 14.), 1)
+                depth = round(min(room, 14.), 1)
+                if not speaks and background > bed_power:
+                    it["source_duck_db"] = depth
+                if bed_power:
+                    it["music_duck_db"] = depth
         evidence.append({'id': it.get('id'), 'gain_db': it.get('db'),
                          'peak50_over_voice400_db': round(10 * math.log10(sp) + float(it['db']) - voice_db, 1),
                          'target_over_voice_db': RELATIVE_DB.get(it.get('tier'), -3.0),

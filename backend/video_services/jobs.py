@@ -37,6 +37,22 @@ def enqueue(cur, project_id, user_id, job_type, payload):
         existing = cur.fetchone()
         if existing:
             return existing["id"]
+        # The player can retry an editor's exact version between a failed
+        # proof and its recovery. The running First cut still owns the reply.
+        cur.execute("""SELECT parent.id AS parent_id, child.payload AS render_payload
+                         FROM video_jobs child JOIN video_jobs parent ON
+                              parent.project_id = child.project_id
+                              AND child.payload->>'agent_job_id' = parent.id::text
+                        WHERE child.project_id = %s AND child.type IN ('preview','preview_check')
+                          AND child.payload->>'edl_version' = %s
+                          AND parent.state = 'running' AND parent.payload->>'first_cut' = 'true'
+                        ORDER BY child.id DESC LIMIT 1""", (project_id, str(version)))
+        owner = cur.fetchone()
+        if owner:
+            stamped.update(source="agent_preview", agent_job_id=owner["parent_id"],
+                           first_film=True, quality="approval", audio_model_review=False)
+            if (owner["render_payload"] or {}).get("first_cut_original"):
+                stamped["first_cut_original"] = True
     cur.execute(
         """INSERT INTO video_jobs (project_id, user_id, type, payload)
            VALUES (%s, %s, %s, %s) RETURNING id""",

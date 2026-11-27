@@ -11046,6 +11046,8 @@ def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
                 "or 'pad_blur' (fit the WHOLE picture into the new frame).")
     from score import source_guard
     index = getattr(ctx, "index", None) or {}
+    if index.get("_first_film_source_guard") and mode in ("pad", "pad_blur"):
+        return set_frame(ctx, ratio, mode, _measured=True)
     if index.get("_first_film_source_guard"):
         # The legacy first-cut chain shares the same indexed measurements
         # as the Director. A static slide must not lose its printed words
