@@ -1057,7 +1057,7 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
             # Read as fields of effects it wrote nothing and came back as NO
             # CHANGE, and p5520's editor redid four zooms one call at a time.
             near_ops.append(_patch_effects_row(edl, op["id"], op["value"]))
-        elif action == "upsert" and layer not in ITEM_LAYERS \
+        elif action == "upsert" and layer not in ID_LAYERS \
                 and isinstance(edl.get(layer) or {}, dict) \
                 and isinstance(op.get("value"), dict):
             # upsert on a layer that is one object patches its fields, the

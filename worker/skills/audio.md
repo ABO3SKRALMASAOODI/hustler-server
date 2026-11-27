@@ -69,7 +69,7 @@ FOUR DISTINCT LAYERS — never confuse them:
    OUTPUT-timeline positions.
 3. SOUND EFFECTS: `add_sfx` at a POINT in output time. A cue fires once,
    never loops, never ducks. Retime with `move_sfx`, delete with `remove_sfx`.
-4. VOICEOVER: `add_voiceover` lays uploaded narration over the program,
+4. VOICEOVER: `add_voiceover` speaks a supplied script (use locale for language and accent) or lays uploaded narration over the program,
    ducking everything else.
 - To change music/sfx/voiceover level use `set_audio_gain` (kind 'music',
   'sfx' or 'voiceover') — never `set_volume`, which changes the speaker.

@@ -2507,6 +2507,16 @@ def _shot_at(shots, t):
 _JUNCTION_EPS = 0.04
 
 
+def same_shot_gap(index, outgoing_end, incoming_start):
+    """A removed interval wholly inside one indexed take."""
+    if incoming_start <= outgoing_end + 0.02:
+        return False
+    return any(isinstance(shot, dict) and shot.get("end") is not None and
+               float(shot.get("start", 0)) < outgoing_end and
+               incoming_start < float(shot["end"])
+               for shot in (index or {}).get("shots") or [])
+
+
 def transition_junctions(edl, index, n_blocks=None):
     """Which junctions a transition should land on.
 
@@ -2616,6 +2626,10 @@ def transition_junctions(edl, index, n_blocks=None):
                 and is_hold_insert(ins_sorted[j]):
             protected.add(k)
 
+    if transition.get("style") == "dissolve":
+        for k, ((ak, ai), (bk, bi)) in enumerate(zip(blocks, blocks[1:])):
+            if ak == bk == "seg" and same_shot_gap(index, keep[ai][1], keep[bi][0]):
+                protected.add(k)
     if scope == "every_cut":
         return selected(set(range(n_junctions)) - protected)
     if scope == "media":

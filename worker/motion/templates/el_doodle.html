@@ -1,7 +1,8 @@
 <!--MG-SPEC {"title": "Doodle", "category": "element", "also": ["callout"],
- "description": "A hand-drawn mark that draws itself on and keeps a hand-animated boil: arrow, underline, circle, scribble, burst, star, check, cross, bracket, spiral. Attach it (world verbs) to a tracked point, a fingertip or a face and it rides the footage. Use one to point at the thing the line is about, or to underline a word; marker colour, never more than one at a time.",
+ "description": "A hand-drawn mark that draws itself on and keeps a hand-animated boil: arrow, underline, circle, scribble, burst, star, check, cross, bracket, spiral. Attach it (world verbs) to a tracked point, a fingertip or a face and it rides the footage. Use one to point at the thing the line is about, or to underline a word; choose a pencil line, wax crayon, broad marker or clean doodle. For edge marks, position the box along the edge.",
  "duration": 2.0, "layer": "above_captions", "mutes_captions": false,
  "params": {
+  "medium": {"type": "enum", "values": ["doodle", "pencil", "crayon", "marker"], "default": "doodle"},
   "kind": {"type": "enum", "values": ["arrow", "underline", "circle", "scribble", "burst", "star", "check", "cross", "bracket", "spiral"], "default": "arrow"},
   "box": {"type": "list", "default": [], "max_items": 4, "hint": "[x0, y0, x1, y1] frame fractions the mark fills (an arrow runs from (x0, y0) to its head at (x1, y1))"},
   "colour": {"type": "color", "default": "#FFE14D"},
@@ -38,8 +39,27 @@
       else if (P.exit === 'undraw') prog = 1 - k;
     }
     ctx.globalAlpha = MG.clamp(alpha);
-    MG.doodle.stroke(ctx, MG.doodle.path(P.kind || 'arrow', box, P.seed || 5, boil),
-      { colour: P.colour || '#FFE14D', width, progress: prog, shadow: 'rgba(0,0,0,0.35)' });
+    const path = MG.doodle.path(P.kind || 'arrow', box, P.seed || 5, boil);
+    const ink = {colour: P.colour || '#FFE14D', width, progress: prog};
+    if (P.medium === 'crayon' || P.medium === 'pencil') {
+      // Parallel broken filaments leave the underlying footage showing
+      // through the tooth of the paper. The grain persists across frames.
+      const wax = P.medium === 'crayon';
+      const random = MG.rand(P.seed || 5);
+      const spread = width * (wax ? 1.35 : 0.42);
+      const strands = wax ? 14 : 5;
+      ctx.globalAlpha *= wax ? 0.56 : 0.48;
+      for (let i = 0; i < strands; i++) {
+        ctx.save();
+        ctx.translate((random() - 0.5) * spread, (random() - 0.5) * spread);
+        ctx.setLineDash([1 + random() * width, 1 + random() * width * 0.45]);
+        MG.doodle.stroke(ctx, path, {...ink, width: Math.max(0.7, spread / 9)});
+        ctx.restore();
+      }
+    } else {
+      if (P.medium === 'marker') ctx.globalAlpha *= 0.8;
+      MG.doodle.stroke(ctx, path, {...ink, width: P.medium === 'marker' ? width * 1.7 : width});
+    }
     ctx.globalAlpha = 1;
   });
 })();

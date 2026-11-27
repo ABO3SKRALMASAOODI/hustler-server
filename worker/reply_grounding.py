@@ -169,7 +169,7 @@ def edl_changes(before, after):
     for key, layer, word in (("music", "music", "music track"), ("sfx", "sfx", "sound effect"),
                              ("voiceover", "voiceover", "voiceover"), ("inserts", "broll", "insert"),
                              ("overlays", "broll", "overlay"), ("texts", "text", "title"),
-                             ("vectors", "text", "graphic"), ("speed", "speed", "speed change")):
+                             ("vectors", "text", "graphic"),):
         nb, na = _count(before.get(key)), _count(after.get(key))
         if na > nb:
             add(layer, f"added {_plural(na - nb, word)}")
@@ -177,6 +177,10 @@ def edl_changes(before, after):
             add(layer, f"removed {_plural(nb - na, word)}")
         elif not _same(before.get(key), after.get(key)):
             add(layer, f"changed the {word}s")
+    if not _same(before.get("speed"), after.get("speed")):
+        factors = sorted({float(span["factor"]) for span in after.get("speed") or []})
+        add("speed", "set playback speed to " + ", ".join(f"{f:g}x" for f in factors)
+            if factors else "restored normal playback speed")
     if not _same(before.get("frame"), after.get("frame")) or not _same(before.get("canvas"), after.get("canvas")):
         f = after.get("frame") if isinstance(after.get("frame"), dict) else {}
         add("frame", f"set the frame to {f.get('ratio')}" if f.get("ratio") else "changed the frame")

@@ -812,7 +812,18 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
         JUNCTION_DURATION.get(style, 0.4)
     d = min(max(d, 0.04), 2.0)
     items = []
+    jumps = set()
+    if style == "dissolve":
+        import timeline
+        blocks = timeline.program_blocks(edl)
+        jumps = {round(a["out_end"], 3) for a, b in zip(blocks, blocks[1:])
+                 if a["kind"] == b["kind"] == "footage" and timeline.same_shot_gap(
+                     getattr(ctx, "index", {}), a["src_end"], b["src_start"])}
+    jump_count = 0
     for t, _s, bind in targets:
+        if round(t, 3) in jumps:
+            jump_count += 1
+            continue
         item = {"id": _new_id(edl, "jn", taken), "type": "junction",
                 "stage": "junction", "at": round(t, 2), "style": style,
                 "duration_s": round(d, 3), "device": JUNCTION_CARDS[style],
@@ -845,13 +856,15 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
     removed = [i for i in removed if i not in kept]
     ops = [w.remove_fx(i) for i in removed]
     if not items and not ops and not keep_ops:
+        if jump_count:
+            return f"Kept {jump_count} same-shot junction(s) as clean jump cuts."
         return (f"NO CHANGE: {style} is already on those cuts. If a preview "
                 "is rendering, wait for it. Do NOT tell the user you changed "
                 "anything.")
     # the cuts that flash (hit_flash, box_steps, and matte_cut, whose
     # substitute is a flash on the cut) are kept as written; past the
     # photosensitivity limit the result says how fast the film flashes
-    note = ""
+    note = f"; {jump_count} same-shot junction(s) play as jump cuts" if jump_count else ""
     if style in ("hit_flash", "box_steps", "matte_cut"):
         note = _flash_note(ctx, edl, items, replaced=removed)
     ops = keep_ops + ops + [w.upsert_fx(it) for it in items]
