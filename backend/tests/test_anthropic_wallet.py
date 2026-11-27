@@ -81,6 +81,22 @@ def test_threshold_is_durable_deduplicated_and_rearmed_only_by_recharge(db):
     assert len(alerts(db)) == 2
 
 
+def test_runway_warning_comes_once_before_the_dollar_warning(db):
+    now = datetime.now(timezone.utc)
+    wallet.confirm_balance(db, 60)
+    assert wallet.scan(db, now) == 0
+    spend(db, 36)                                 # 24 left: under the runway line
+    assert wallet.scan(db, now + timedelta(minutes=2)) == 1
+    assert wallet.scan(db, now + timedelta(minutes=4)) == 0   # once per episode
+    row = alerts(db)[0]
+    assert row["kind"] == wallet.RUNWAY_KIND and "days" in row["subject"]
+    spend(db, 23.5)                               # 0.50 left: the $1 warning too
+    assert wallet.scan(db, now + timedelta(minutes=6)) == 1
+    assert [a["kind"] for a in alerts(db)] == [wallet.RUNWAY_KIND, wallet.KIND]
+    wallet.confirm_balance(db, 100)               # a recharge retires both
+    assert {a["status"] for a in alerts(db)} == {"failed"}
+
+
 def test_month_rollover_and_non_anthropic_extras_do_not_refill_or_drain_wallet(db):
     wallet.confirm_balance(db, 2)
     with db.cursor() as cur:
