@@ -370,3 +370,17 @@ def test_followup_rebuilds_if_a_previously_loaded_tool_is_unavailable():
     assert edit_session_history.join(current, previous, 1, {}) is None
     assert edit_session_history.join(current, previous, 1, {"inspect_cut": schema})["input"] == (
         previous["input"] + current["input"][1:])
+
+
+def test_large_answers_retain_sol_usage_in_inspector_rows(monkeypatch):
+    import db
+    monkeypatch.setattr(db, "LLM_PAYLOAD_CAP", 256)
+    response = {"content": "x" * 1000, "cached_in": 718, "uncached_in": 95,
+                "provider_cost_usd": 0.02, "provider": "openai",
+                "prompt_cache": {"key": "valmera:edit:17:42", "cached_tokens": 718,
+                                 "boundaries": [{"prefix_sha256": "a" * 64}] * 20}}
+    saved = db._capped_payload(response, preserve_usage=True)
+    assert saved["_truncated"]
+    assert saved["cached_in"] == saved["prompt_cache"]["cached_tokens"] == 718
+    assert saved["provider_cost_usd"] == .02
+    assert "cached_in" not in db._capped_payload(response)
