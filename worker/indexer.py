@@ -1219,14 +1219,41 @@ def _run_clip_index(worker_db, job, asset):
         streamed_source = config.index_source_should_stream(
             asset["kind"], asset.get("bytes"))
         proxy_kbps = None
-        if streamed_source:
-            src, sha, info, proxy_kbps = _stream_index_source(
-                worker_db, job, asset, workdir)
-        else:
-            src = os.path.join(workdir,
-                               "src" + os.path.splitext(asset["storage_key"])[1])
-            storage.download_to(asset["storage_key"], src)
+        local_src = os.path.join(
+            workdir, "src" + os.path.splitext(asset["storage_key"])[1])
+        try:
+            if streamed_source:
+                src, sha, info, proxy_kbps = _stream_index_source(
+                    worker_db, job, asset, workdir)
+            else:
+                src = local_src
+                storage.download_to(asset["storage_key"], src)
+                sha = media.sha256_file(src)
+                if not is_music:
+                    # A clip longer than MAX_DURATION_S is analysed for its
+                    # first MAX_DURATION_S, like the main video (#396).
+                    info = clamp_to_duration_limit(media.probe(src))
+        except media.MediaError as exc:
+            if is_music or not _no_picture(exc):
+                raise
+            # Sound but no picture (p6336, 27 Nov 2026: a music mix saved
+            # as .mp4 and uploaded as a clip). It is a sound: index it the
+            # way a music upload is indexed (transcript, silences), record
+            # that it has no picture, and the upload lands. The renderer
+            # plays such a file as sound wherever it is placed.
+            print(f"[index {job_id}] clip has sound but no picture: "
+                  "indexed as sound", flush=True)
+            is_music, streamed_source = True, False
+            if not os.path.isfile(local_src):
+                storage.download_to(asset["storage_key"], local_src)
+            src = local_src
             sha = media.sha256_file(src)
+            try:
+                worker_db.run(dbx.update_asset_meta, asset["id"],
+                              {"no_video": True})
+            except Exception as meta_exc:  # noqa: BLE001 - index stands
+                print(f"[index {job_id}] no_video not recorded: "
+                      f"{str(meta_exc)[:120]}", flush=True)
         _set_progress(worker_db, job_id, 10)
         _mark("download_s")
         if is_music:
@@ -1234,8 +1261,6 @@ def _run_clip_index(worker_db, job, asset):
             info = {"duration": dur or (asset.get("duration_s") or 0.0),
                     "width": 0, "height": 0, "fps": 0.0, "has_audio": True,
                     "vfr": False}
-        elif not streamed_source:
-            info = media.probe(src)
         worker_db.run(dbx.update_asset_probe, asset["id"], info["duration"],
                       info["width"], info["height"], info["fps"], sha)
         _set_progress(worker_db, job_id, 20)
@@ -1251,9 +1276,17 @@ def _run_clip_index(worker_db, job, asset):
                     "timings": timings}
 
         warnings = []
+        limit_s = None if is_music else info.get("limit_s")
+        if limit_s:
+            warnings.append(
+                f"this clip is {info['source_duration'] / 3600:.1f} hours; "
+                f"the first {limit_s / 3600:.0f} hours were analysed "
+                "and can be edited")
         heavy = not is_music and not streamed_source and \
             perception_is_heavy(info)
-        if streamed_source or heavy:
+        # A clamped clip always reads a proxy cut at the limit, so every sense
+        # (audio, shots, tiles) covers only the analysed span.
+        if streamed_source or heavy or limit_s:
             # Clip perception seeks repeatedly. Give it one local proxy while
             # retaining the original's hash, geometry and clock in the index.
             # A heavy or long clip gets one too (#555): shots, tiles, faces,
@@ -1267,7 +1300,7 @@ def _run_clip_index(worker_db, job, asset):
                 duration=info["duration"],
                 progress_cb=_stage_progress(worker_db, job_id, 20, 25),
                 cancelled_cb=lambda: _cancelled(worker_db),
-                maxrate_kbps=proxy_kbps)
+                maxrate_kbps=proxy_kbps, limit_s=limit_s)
             src = proxy
             timings["perception_proxy_s"] = round(time.monotonic() - t_proxy, 2)
             timings["perception_proxy"] = "heavy" if heavy else "streamed"

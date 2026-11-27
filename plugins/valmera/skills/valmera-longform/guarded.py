@@ -9,6 +9,7 @@ the next read comes after a bounded back-off. Only the ceiling, measured on a
 verified sample of an owned process, or the guard itself being stopped, ends the
 owned process group.
 """
+from contextlib import ExitStack
 import argparse,fcntl,json,os,signal,subprocess,time
 from pathlib import Path
 
@@ -133,7 +134,7 @@ def _write(path,data):
         pass
 
 
-def run(command,out,label,ceiling=6_000_000_000):
+def run(command,out,label,ceiling=6_000_000_000,*,measure_only=False):
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     tmp=out/'tmp';tmp.mkdir(exist_ok=True)
     env=dict(os.environ,TMPDIR=str(tmp),MallocLargeCache='0')
@@ -154,8 +155,10 @@ def run(command,out,label,ceiling=6_000_000_000):
         try:p.wait(timeout=15)
         except subprocess.TimeoutExpired:os.killpg(p.pid,signal.SIGKILL);p.wait()
     state=tmp/'footprint.json'
-    with open(ROOT/'.valmera/week-1106/.narrate.lock','a') as lock:
-        fcntl.flock(lock,fcntl.LOCK_EX)
+    with ExitStack() as resources:
+        if not measure_only:
+            lock=resources.enter_context(open(ROOT/'.valmera/week-1106/.narrate.lock','a'))
+            fcntl.flock(lock,fcntl.LOCK_EX)
         with open(out/'run.log','w') as log:
             p=subprocess.Popen(['zsh',str(ROOT/'.valmera/week-1106/heavy.sh'),label,*TIME,*command],env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             started=last_ok=time.time();interval=INTERVAL;ids={p.pid}
@@ -206,6 +209,6 @@ def run(command,out,label,ceiling=6_000_000_000):
     return 6 if stopped else code
 
 if __name__=='__main__':
-    a=argparse.ArgumentParser();a.add_argument('--out',required=True);a.add_argument('--label',default='wf4-narration');a.add_argument('command',nargs=argparse.REMAINDER);ns=a.parse_args()
+    a=argparse.ArgumentParser();a.add_argument('--measure-only',action='store_true');a.add_argument('--out',required=True);a.add_argument('--label',default='wf4-narration');a.add_argument('command',nargs=argparse.REMAINDER);ns=a.parse_args()
     command=ns.command[1:] if ns.command[:1]==['--'] else ns.command
-    raise SystemExit(run(command,ns.out,ns.label))
+    raise SystemExit(run(command,ns.out,ns.label,measure_only=ns.measure_only))

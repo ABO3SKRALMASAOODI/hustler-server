@@ -106,6 +106,10 @@ def media_units(supply, score, segments):
         image = clip.get("kind") == "image"
         parts = ["Image" if image else "Footage", f"segment {shot['seg'] + 1}",
                  f"frames {shot['f'][0]}–{shot['f'][1]}", credit(source)]
+        if clip.get("kind") == "diagram":
+            parts[0] = "Original explanatory diagram"
+        if shot.get("companion_source"):
+            parts.append("Companion excerpt · " + credit(shot["companion_source"]))
         if shot.get("real_voice"):
             parts.append(shot["real_voice"])
         if clip.get("editorial_label"):
@@ -140,6 +144,7 @@ def media_units(supply, score, segments):
 
 def write(folder, supply, results):
     script = results["script"]
+    (Path(folder) / "STORY.md").write_text("\n".join(story_arc(script)) + "\n", encoding="utf-8")
     lines = [f"# {script.get('title') or 'Documentary'}", "", "## Story arc", "",
              *story_arc(script), "", "## Cited claims", "", *citations(script), "## On-screen sources", ""]
     segments = (script.get("script") or {}).get("segments") or []

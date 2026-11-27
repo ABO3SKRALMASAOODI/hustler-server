@@ -48,10 +48,24 @@ def test_published_declaration_glyphs_survive_the_evidence_panel():
     assert {ord(c) for c in text if not c.isspace()} <= glyphs(face_for(text))
 
 
-def test_long_marked_page_cuts_to_the_printed_detail(tmp_path):
+def test_second_two_keeps_the_complete_pre_cropped_proof(tmp_path):
     from PIL import Image,ImageDraw
-    image=Image.new('RGB',(600,800),'white')
-    ImageDraw.Draw(image).line((70,545,420,545),fill=(200,55,45),width=5)
-    path=tmp_path/'source.png';image.save(path)
-    crop=C.marked_detail(dict(path=path))
-    assert 0<crop[1]<545/800<crop[3]<1
+    from film_long import Plan
+    image=Image.new('RGB',(1485,292),'white')
+    ImageDraw.Draw(image).line((400,150,685,150),fill=(170,67,42),width=5)
+    path=tmp_path/'source.png'
+    image.save(path)
+    clip=dict(path=str(path),w=1485,h=292,primary_passage=True,mark='discovered a proof',
+              source_label='Release note',shows='A complete statement.',
+              source=dict(primary_context=[dict(quote='A complete statement.')]))
+    plan=Plan({'source':dict(px=28,font='InterDisplay-Bold.ttf'),
+               'excerpt':dict(px=43,font='InterDisplay-Bold.ttf')},{})
+    C.document_shot(plan,[0,234],'doc',clip)
+    assert all(i.get('crop',[0,0,1,1])==[0,0,1,1] for i in plan.items if i['k']=='card')
+    assert any(i.get('t')==clip['shows'] for i in plan.items)
+
+
+def test_289s_second_document_has_no_overlay_on_source_text():
+    shots=[dict(f=[8640,8730],clip=dict(kind='image',document=True))]
+    start,end=C.design_window(8640,8730,shots)
+    assert start==end
