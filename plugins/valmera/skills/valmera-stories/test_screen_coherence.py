@@ -82,3 +82,12 @@ def test_era_finish_keeps_contemporary_shot_in_colour():
 
 def test_section_changes_at_the_cut():
     assert [r["frames"] for r in sections()] == [[0,30],[30,60],[60,90]]
+
+def test_composed_fallback_keeps_recorded_after_whole():
+    director.palette_module()
+    original = dict(items=[dict(id="raw", k="shot", f=[0,12], src=[0.,.4])])
+    laid = dict(items=[dict(id="new", k="shot", f=[0,12], src=[0.,.4]),
+                       dict(id="type", k="word", f=[2,10], t="TITLE", op=list(range(8)))])
+    scene = director.compose_owned(original, laid, [dict(frames=[5,8],device="after")])
+    assert [(it["id"], it["f"]) for it in scene["items"] if it["f"][0] < 8 and 5 < it["f"][1]] == [("raw~5",[5,8])]
+    assert [it["op"] for it in scene["items"] if it["k"]=="word"] == [[0,1,2],[6,7]]

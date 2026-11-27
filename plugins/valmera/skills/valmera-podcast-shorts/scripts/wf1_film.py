@@ -830,7 +830,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         """The programme frame a spoken word (numbered in order) starts on; the first word's is the film's first frame."""
         if not (0 <= int(w) < len(clock.words)):
             return None
-        return 0 if int(w) == 0 else max(Clock.f(clock.words[int(w)]["t0"]) - 1, 0)
+        return max(Clock.f(clock.words[int(w)]["t0"]), 0)
 
     # Bind source pictures to the very same spread word clock used by captions.
     reading = coverage.get('source_reading') or {}

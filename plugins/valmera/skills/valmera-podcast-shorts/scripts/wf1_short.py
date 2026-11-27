@@ -887,7 +887,7 @@ def direction_of(ctx, script, pack):
         word["screen"] = dict(voice=speaker or "speaker", text=[word["w"]],
                               picture=window.get("must_show") or window.get("name") or "interview",
                               role="speaker" if on_take else "planned cutaway",
-                              faces=take.get("faces") if on_take and isinstance(take.get("faces"), int) else None,
+                              faces=take.get("faces") if on_take else None,
                               **{k:window[k] for k in ("meaning_box","identity_year","version","printed_text") if k in window})
     coverage_contract = (pack.get("coverage") or {}).get("contract")
     intent = hashlib.sha256(json.dumps([DR.CONTRACT, coverage_contract, editorial,rows,stress,st,script.get("title"),script.get("direction"),
@@ -1773,29 +1773,6 @@ def repair_options(pack, wanted):
     return options
 
 
-def restore_publisher_reading(ctx, sc, pages):
-    """Recover an older score's reading from its original inputs without a new study."""
-    import wf1_publisher_reading as reading
-    beats = sc.setdefault("beats", {})
-    if isinstance(beats.get("publisher_reading"), dict):
-        return
-    override = ((getattr(ctx, "args", {}) or {}).get("direction") or {}).get("publisher_reading")
-    if isinstance(override, dict):
-        plan = override
-    elif sc.get("publisher_read") and (reading.sources_of(pages) or sc.get("scoped_read")):
-        pack = wf3.load_pack(ctx)
-        coverage = pack["coverage"]
-        pages = reading.material(pages, coverage)
-        plan, _ = reading.read(pages, coverage, ctx.supply, None, pack.get("pictures"), cached_only=True)
-    else:
-        plan = {}
-    if not plan and not isinstance(override, dict):
-        # A copied score may retain the placed excerpt even when its study cache is gone.
-        excerpts = [page["publisher_excerpt"] for page in beats.get("display_facts") or []
-                    if isinstance(page.get("publisher_excerpt"), dict)]
-        if excerpts:
-            plan = dict(readings=excerpts)
-    beats["publisher_reading"] = plan
 
 
 def render(ctx, script, sc):
