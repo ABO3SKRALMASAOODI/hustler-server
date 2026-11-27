@@ -401,7 +401,14 @@ def placed_evidence(plan, span, key, rec, box, clean=None, size=None):
     geo = evidence_frame(rec,box,clean,size)
     kw = {"src":list(rec["src"])} if rec.get("src") else {}
     if geo["mode"]=="bleed":
-        plan.shot(span,key,geo["crop"],**kw)
+        crop = geo["crop"]
+        if not kw and not rec.get("document_fact"):
+            target = geo["meaning_box"]
+            centre = ((target[0]+target[2])/2,(target[1]+target[3])/2)
+            trail = push(crop,span[1]-span[0],.035,centre)
+            if all(trail[-1][j] <= target[j] for j in (0,1)) and all(trail[-1][j] >= target[j] for j in (2,3)):
+                crop = trail
+        plan.shot(span,key,crop,**kw)
     else:
         plan.page(span,"#171B20",grain=.008)
         if not kw:

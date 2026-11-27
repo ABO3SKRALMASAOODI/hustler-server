@@ -116,7 +116,7 @@ before the thought turns. A name shared by two beats does not make them the same
 Supply exact event, role, action and version. For the introduction of a person any identifiable
 portrait works unless the words name an age. For evidence use the actual recording, object or page.
 When a question needs research, ask what visible evidence establishes this beat. Include that
-scope_question in the window and use it to guide depiction searches. Use the synchronized speaker
+scope_question in the window and use it to guide depiction searches. Use the original synchronous interview
 where the thought belongs to the person telling it. For a returning episode excerpt identify the earlier
 view that depicts the words. Return JSON {entities:[{name,is,must_show,word_ids}],
 windows:[{first,last,name,external:true,must_show,why,scope_question,video_searches,
@@ -810,8 +810,45 @@ def action_holds(rows, coverage, fps=30, lead=3, detail=None):
     return sorted(out, key=lambda r:r[0])
 
 
+def publisher_recovery(coverage, missing, pictures, work):
+    """Use the primary research for the exact missing beat when video transport or fit fails."""
+    import publisher_pictures
+    refs = coverage["research_context"].get("references") or []
+    facts, segments, subjects = {}, [], []
+    for i, window in enumerate(coverage["windows"]):
+        ids = []
+        for ref in refs:
+            if i not in (ref.get("windows") or []):
+                continue
+            for source in ref.get("sources") or []:
+                url = source.get("url")
+                if not url:
+                    continue
+                facts[url] = dict(id=url, url=url, title=ref.get("referent"), quote=source.get("supports"),
+                                  publisher=source.get("publisher"))
+                ids.append(url)
+        segments.append(dict(say=window["say"], facts=ids))
+        if i in missing:
+            subjects.append(dict(name=window["name"], search_for=i, must_show=window["must_show"],
+                                 moment=window["say"], search_round=2,
+                                 searches=window.get("photo_searches") or window.get("video_searches")))
+    fresh = {}
+    reports, spend = publisher_pictures.supply(dict(segments=segments,facts=list(facts.values())),
+                                               subjects, fresh, str(work), per=4)
+    added = 0
+    for name, rows in fresh.items():
+        existing = pictures.setdefault(name, [])
+        known = {r["path"] for r in existing}
+        for row in rows:
+            if row["path"] not in known:
+                existing.append(row)
+                known.add(row["path"])
+                added += 1
+    return reports, spend, added
+
+
 def checked_proposals(coverage, footage, pictures, duration, checker, composed_stills=(), rejected=None,
-                      originals=None, cut_dir=None, ffmpeg=None):
+                      originals=None, cut_dir=None, ffmpeg=None, _publisher_pass=True):
     """The picture check chooses among the local candidates before any acquisition; prior motion never approves a new
     placement. Its ranking (fit) orders each window's candidates, its subject_x recentres a clip's phone slice, and a
     contradiction gives that window's slot to the next-ranked candidate. rejected: (window, path) pairs the composed
@@ -852,8 +889,23 @@ def checked_proposals(coverage, footage, pictures, duration, checker, composed_s
         # The next proposal follows the check's ranking; when it is the one just checked (nothing rejected, the order
         # already the ranking) the choice is made. A re-proposal reuses every verdict it already has.
         ins=proposals(coverage,footage,pictures,rejected=rejected,fits=fits,**fresh)
-    return accepted,dict(report,attempts=attempts,spend=[s for a in attempts for s in a['spend']],
-                         rejected_paths=sorted({p for _,p in rejected if p is not None}))
+    uses = [s for attempt in attempts for s in attempt['spend']]
+    placed = {row[4]["window"] for row in accepted}
+    missing = [i for i, w in enumerate(coverage["windows"]) if i not in placed and
+               not (w.get("on_take") or w.get("publisher_camera"))]
+    if _publisher_pass and missing and cut_dir and coverage.get("research_context"):
+        reports, spend, added = publisher_recovery(coverage, missing, pictures, Path(cut_dir).parent/"press-stills")
+        uses.extend(spend)
+        if added:
+            accepted, retry = checked_proposals(coverage, footage, pictures, duration, checker, composed_stills,
+                                                rejected, originals, cut_dir, ffmpeg, _publisher_pass=False)
+            attempts.extend(retry["attempts"])
+            uses.extend(retry["spend"])
+            report = retry
+        report["publisher_searches"] = reports
+    return accepted,dict(report,attempts=attempts,spend=uses,
+                         rejected_paths=sorted(set(report.get("rejected_paths") or []) |
+                                               {p for _,p in rejected if p is not None}))
 
 
 def repair_requirements(coverage, wanted, evidence, llm):
@@ -864,7 +916,8 @@ that explains those words. Use the hook and the local turn to resolve pronouns. 
 for any corrected referent. If catalogued material already shows this beat, identify that excerpt.
 If the picture was unreadable, retain its subject and locate the detail. If sources depict the
 wrong role or action, widen acquisition to primary archives, original publications, catalogues,
-official media and contemporaneous photographs. Give concrete queries suited to recorded footage
+official media and contemporaneous photographs. Earlier filmed appearances of the speaker can establish
+the event being recalled. Keep the current interview take as the synchronous source. Give concrete queries suited to recorded footage
 and a question about what visible material would establish the claim. Keep the window's word
 boundaries. Return JSON {windows:[{i,name,referent_evidence,must_show,scope_question,video_searches,
 reuse_id:optional catalogue index}]}."""

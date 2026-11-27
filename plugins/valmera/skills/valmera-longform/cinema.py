@@ -1134,9 +1134,12 @@ def frame_programme(sc, pack, shots, clock, end):
                 if (design.get('supplied_passage') and c.get('fact') not in seg.get('facts', [])
                         and (seg.get('design') or {}).get('fact') in seg.get('facts', [])
                         and urldefrag(design['source']['url']).url == urldefrag(c['source']['url']).url):
+                    # The pack retains the actual excerpt for this clause, sometimes on a different page
+                    # of the same publication. Show those pixels in place of the neighbouring passage.
                     companion = design
                     row['companion_source'] = design['source']
-                document_shot(P, row['f'], key, c, companion)
+                    key = P.image(f'evidence-passage-{j}', companion)
+                document_shot(P, row['f'], key, companion or c)
             else:
                 n=row['f'][1]-row['f'][0]
                 ratio=c['w']/c['h']

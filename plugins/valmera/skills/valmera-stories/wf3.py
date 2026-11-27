@@ -2788,7 +2788,13 @@ def topup_from_score(ctx, script_rec, pack, lines, windows=None, remaining=None)
     if windows == []:
         cached = ctx.out("score") if hasattr(ctx,"out") else None
         plan = ((cached or {}).get("beats") or {}).get("measured",{}).get("phrase_plan") or {}
-        windows = [p for p in plan.get("phrases",[]) if p["line"] in lines and p.get("pictures")==0] or None
+        windows = [p for p in plan.get("phrases",[]) if p["line"] in lines and p.get("pictures")==0]
+        if not windows:
+            clock = F.Clock(words,script_rec["script"])
+            missing = {(row["i"],brief.get("word_i",0)) for row in (pack.get("fit_report") or {}).get("lines",[])
+                       if row["i"] in lines for brief in row.get("missing") or []}
+            windows = [dict(line=i,word_i=wi,f=[a,b]) for i,wi,a,b,brief in
+                       R.phrase_slots(script_rec["script"],clock,F.Clock.f(words["duration"])) if (i,wi) in missing] or None
     if windows is not None:
         windows = [p for p in windows if p.get("line") in lines and p.get("f")]
         if remaining and windows:

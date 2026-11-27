@@ -718,6 +718,12 @@ def _merge_ann(sc, got):
                 texts.append(given[-1]["text"])
             else:
                 problems.append(f"segment {k}: added item {y.get('text')!r} needs a role in {list(ROLES)} and a word_i 0..{n - 1}")
+        for brief in see:
+            label = brief.get("display_word")
+            wi = brief["word_i"]
+            if brief.get("kind") == "metaphor" and isinstance(label,str) and label.strip():
+                if not any(x.get("word_i")==wi and str(x.get("text")).casefold()==label.casefold() for x in given):
+                    given.append(dict(text=label.strip(),role="key",word_i=wi,added=True))
         s["show"] = given
         ph = s.get("phrases") if isinstance(s.get("phrases"), list) and s["phrases"] and \
             all(isinstance(q, list) and len(q) == 2 for q in s["phrases"]) else None

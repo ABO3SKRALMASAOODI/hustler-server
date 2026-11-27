@@ -650,6 +650,30 @@ def phrase_slots(script, clock, f_end):
     return slots
 
 
+def slot_edges(start, end, capacities):
+    """Share held time among the pictures. A short moving source plays at native speed first."""
+    total = end-start
+    lengths = [0] * len(capacities)
+    remaining = total
+    pending = list(range(len(capacities)))
+    while pending:
+        limited = [i for i in pending if capacities[i]*len(pending)<=remaining]
+        if not limited:
+            break
+        for i in limited:
+            lengths[i] = capacities[i]
+            remaining -= lengths[i]
+            pending.remove(i)
+    # With only short takes left, the renderer stretches their source intervals continuously.
+    holders = pending or list(range(len(capacities)))
+    for j,i in enumerate(holders):
+        lengths[i] += remaining*(j+1)//len(holders) - remaining*j//len(holders)
+    edges = [start]
+    for length in lengths:
+        edges.append(edges[-1]+length)
+    return edges
+
+
 def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer_new=False, proof_fill=()):
     """Assign distinct fitting pictures to their spoken phrases before choosing their durations."""
     import fit
@@ -709,7 +733,7 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
     order = sorted(ranks, key=lambda i: (len(ranks[i]), i))
     def reserve(index):
         line, wi, lo, hi, brief = slots[index]
-        if brief.get("kind") == "card" or (brief.get("kind") == "callback" and script["segments"][line].get("pays")):
+        if brief.get("kind") == "card" and script["segments"][line].get("job") in ("time_jump","reveal"):
             return False
         for grade, motion, path, ti in ranks[index]:
             key = sp.group.get(path,path), ti
@@ -735,12 +759,27 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
             return True
         return False
 
+    def threads(value):
+        return value if isinstance(value,list) else [value] if isinstance(value,str) else []
+
+    def has_plant(index):
+        line, _, _, _, brief = slots[index]
+        if brief.get("kind") != "callback":
+            return False
+        pays = set(threads(script["segments"][line].get("pays")))
+        return any(assigned[j] and pays.intersection(threads(script["segments"][slots[j][0]].get("plant")))
+                   for j in range(index))
+
     for index in order:
-        reserve(index)
+        if slots[index][4].get("kind") != "callback":
+            reserve(index)
+    for index in order:
+        if slots[index][4].get("kind") == "callback" and not has_plant(index):
+            reserve(index)
     for index in order:
         line, wi, lo, hi, brief = slots[index]
         # A list's named item and a portrait each occupy their whole spoken slot.
-        if script["segments"][line].get("job") == "list" or any(
+        if has_plant(index) or script["segments"][line].get("job") == "list" or brief.get("portrait_of") or any(
                 x.get("role") == "name" and x.get("word_i") == wi for x in script["segments"][line].get("show") or [] if isinstance(x,dict)):
             continue
         while len(assigned[index]) < hi-lo and reserve(index):
@@ -751,12 +790,11 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
     for index,(line,wi,lo,hi,brief) in enumerate(slots):
         seg = script["segments"][line]
         selected = assigned[index]
-        def thread(value):
-            return value[0] if isinstance(value, list) and value else value
-        pays, plant = thread(seg.get("pays")), thread(seg.get("plant"))
-        callback = brief.get("kind") == "callback" and isinstance(pays,str) and pays in plants
+        pays = next((key for key in threads(seg.get("pays")) if key in plants),None)
+        callback = brief.get("kind") == "callback" and pays is not None
         if callback:
-            selected = [plants[pays]]
+            planted, treatment = plants[pays]
+            selected = [planted]
         card = brief.get("kind") == "card" and seg.get("job") in ("time_jump","reveal")
         if card or not selected:
             # Record exhausted research on the actual words so score_search can acquire the missing slot.
@@ -766,9 +804,14 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
             out.append([lo,hi,"designed",None,dict(path=f"spoken:{line}:{wi}",text=text,role="key",
                        tier="card" if card else "missing",fallback=not card,pick_line=line,word_i=wi)])
         else:
+            capacity = []
+            for _,path,ti in selected:
+                kind,_,_,bounds = catalogue[path,ti]
+                start,end = reserved_room.get((path,ti),bounds)
+                capacity.append(max(1,round((end-start)*FPS)) if kind=="clip" else hi-lo)
+            edges = slot_edges(lo,hi,capacity)
             for j,(grade,path,ti) in enumerate(selected):
-                a = lo + round((hi-lo)*j/len(selected))
-                b = lo + round((hi-lo)*(j+1)/len(selected))
+                a,b = edges[j:j+2]
                 if a >= b:
                     continue
                 kind,name,original,bounds = catalogue[path,ti]
@@ -780,16 +823,20 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                     identity = dict(identity,meaning_box=phrase["meaning_box"])
                 rec = dict(original, passages=phrase.get("passages") or [], pick_line=line, word_i=wi, grade=grade, identity=identity, use=2 if callback else 1,
                            keep_full_frame=brief.get("keep_full_frame"), tier="callback" if callback else kind)
+                if callback:
+                    rec.update(treatment)
                 if kind == "clip":
-                    room = reserved_room.get((path,ti),bounds)
-                    rec.update(src=list(Takes.best(rec,room,(b-a)/FPS)),take_i=ti,take=list(bounds))
+                    room = treatment["src"] if callback else reserved_room.get((path,ti),bounds)
+                    interval = (room[0], min(room[1],room[0]+(b-a)/FPS)) if callback else Takes.best(rec,room,(b-a)/FPS)
+                    rec.update(src=list(interval),take_i=ti,take=list(bounds))
                     sp.take_clip(rec,*rec["src"],a)
                     sp.use_take(path,ti)
                 else:
                     sp.take_photo(rec,a)
                 out.append([a,b,kind,name,rec])
-                if isinstance(plant,str):
-                    plants.setdefault(plant, (grade,path,ti))
+                for plant in threads(seg.get("plant")):
+                    treatment = {k:rec[k] for k in ("identity","keep_full_frame","src") if k in rec}
+                    plants.setdefault(plant, ((grade,path,ti),treatment))
         sp.plan["phrases"].append(dict(line=line,word_i=wi,f=[lo,hi],pictures=len(selected),brief=brief))
     return out
 
@@ -1642,8 +1689,17 @@ def build(script, sup, style_id, direction=None):
         identity = rec.get("identity") or {}
         area = identity.get("clean_crop") or [0,0,1,1]
         if rec.get("portrait_repair"):
-            P.shot([f0,f1], key, push_crop(rec,f1-f0,k=.035))
+            faces = [face["box"] for face in rec.get("faces") or []]
+            face = max(faces,key=lambda b:(b[2]-b[0])*(b[3]-b[1]),default=identity.get("meaning_box"))
+            if face:
+                center = ((face[0]+face[2])/2,(face[1]+face[3])/2)
+                crop = F.cover_crop(rec["w"],rec["h"],W/H,center,(.48,.46))
+                P.shot([f0,f1],key,F.push(crop,f1-f0,.035,center))
+            else:
+                crop = push_crop(rec,f1-f0,k=.035)
+                P.shot([f0,f1],key,crop)
             note(f0,f1,kind,name,rec,"portrait")
+            P.pictures[-1].update(crop=crop,meaning_box=face)
             return
         box = identity.get("meaning_box") or area
         geo = F.placed_evidence(P,[f0,f1],key,rec,box,area,(W,H))
@@ -1925,7 +1981,11 @@ def build(script, sup, style_id, direction=None):
     board = set(d.get("board_paths") or []) - full_frame
     def needs_native(row):
         a, _, kind, name, rec = row
-        if not sourced or kind not in ("photo", "clip") or rec.get("voice"):
+        if kind not in ("photo", "clip") or rec.get("voice"):
+            return False
+        if (rec.get("identity") or {}).get("clean_crop"):
+            return True
+        if not sourced:
             return False
         briefs = script["segments"][seg_at(a)].get("see") or []
         aspect = (rec.get("w") or W) / (rec.get("h") or H) / (W / H)

@@ -57,6 +57,7 @@ def place(script, clock, timeline, supply, identities):
                 continue
             a = max(0,F.Clock.f(words[wi]["t0"])-1)
             b = min(max(r[1] for r in timeline), a + round(1.5*F.FPS))
+            a = min(a,max(0,b-round(1.2*F.FPS)))
             photo,identity = max(portraits,key=lambda pair:supply.grade(pair[0]["path"],0,line))
             rec = dict(photo, pick_line=line, word_i=wi, tier="identity", depicted_name=name, identity=identity)
             if (os.path.basename(photo["path"]),line) in supply.deny:
