@@ -882,8 +882,11 @@ def encoded_durations(ft):
                     continue
                 num,den=map(float,probe['avg_frame_rate'].split('/'))
                 duration=float(probe['nb_frames'])*den/num if probe.get('nb_frames','N/A')!='N/A' and num else float(probe['duration'])
-                rec=dict(file=stamp,seconds=duration,w=probe['width'],h=probe['height'])
-            c.update(w=rec['w'],h=rec['h'])
+                rec=dict(file=stamp,seconds=duration)
+                if probe.get('width') and probe.get('height'):
+                    rec.update(w=probe['width'],h=probe['height'])
+            if 'w' in rec and 'h' in rec:
+                c.update(w=rec['w'],h=rec['h'])
             seen[str(path)]=rec;c['encoded']=rec;c['seconds']=min(c['seconds'],rec['seconds'])
 
 

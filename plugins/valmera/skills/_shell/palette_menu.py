@@ -18,7 +18,7 @@ REPLACES = ("counter", "staircase", "name", "ladder", "brackets", "typewriter", 
 # devices that act on the row as set (a marker behind it, a flip on its hit) or beside it (a box on the face, fine print,
 # the caption line read along, an analogy's dial whose needle moves on the spoken change): they draw none of the row's
 # words, so the row and its caption keep them
-DECORATES = ("highlight", "flip", "track", "fineprint", "donut", "bar", "readalong")
+DECORATES = ("highlight", "flip", "track", "fineprint", "donut", "bar", "readalong", "analogy_dial")
 # decorations that live as long as the row they mark; the others live to the end of the row's sentence
 ON_THE_ROW = ("highlight", "flip", "donut", "bar")
 # a figure device draws the whole row: the row is the figure and its unit, set by the device's own format
