@@ -291,21 +291,20 @@ def test_the_showcase_is_split_then_the_real_studio_then_the_edit_then_the_websi
     assert abs(shot["src"][0] - (window[0] + (shot["f"][0] - mk["push"][0]) / FPS)) < 1e-3
     assert shot["f"][1] == mk["site"][0] and abs(shot["src"][1] - (window[0] + (mk["site"][0] - mk["push"][0]) / FPS)) < 1e-3
     assert mk["export_voice"] == [mk["push"][0], mk["push"][0] + 557] and mk["site"][0] == mk["export_voice"][1]   # his whole line stays on his picture
-    # the website: the real front page under its name, the largest line
+    # The real front page fills the short dissolve into the brand card.
     page = next(it for it in l1["items"] if it["id"] == "ct.page")
     assert l1["assets"][page["pic"]]["path"] == "/x/ui/site.png"
-    url = next(t for t in beats["devices"][2]["texts"] if t["t"] == "valmera.io")
-    assert url["px"] >= 140 and url["px"] == max(t["px"] for d in beats["devices"] for t in d["texts"])
+    assert page["f"] == mk["site"] and beats["devices"][-1]["brand_join"]
+    assert beats["devices"][-1]["texts"] == []
     text = " ".join(it.get("t", "") for it in l1["items"] if it["k"] == "word").lower()
     assert "free" not in text and "$" not in text and "plan" not in text
     for d in beats["devices"]:
         for t in d["texts"]:
             assert (t["x"] + t["w"] < D.MARK[0] or D.MARK[3] < t["y"] - t["cap_px"] / 1920) and t["y"] < 0.8
-    # every frame has one base picture; every sound lands on something that moves
-    for f in range(l1["dur_f"]):
+    for f in range(mk["site"][0]):
         assert sum(1 for it in l1["items"] if it["k"] == "shot" and it["f"][0] <= f < it["f"][1]) == 1, f
     events = {"studio": mk["studio"][0], "typing": mk["type_frames"][0], "send": mk["send"],
-              "push": mk["push"][0] + D.SEAT_F, "site": mk["site"][0]}
+              "push": mk["push"][0] + D.SEAT_F}
     assert sorted(s["event_f"] for s in l1["sound"]) == sorted(events.values())
 
 
@@ -608,10 +607,10 @@ def test_showcase_supply_plays_the_checked_caption_on_both_recorded_clocks(tmp_p
     P.jsave(str(tmp_path / "record.json"), rec)
     (tmp_path / "edl").mkdir()
     P.jsave(str(tmp_path / "edl/v003.json"), edl)
-    script = dict(record=str(tmp_path / "record.json"), receipts=dict(visible=visible, typed=TYPED))
+    spans = dict(split=[9.,12.], before=[0.,7.68], after=[12.,15.], stretch=[7.8,29.])
+    script = dict(record=str(tmp_path / "record.json"), receipts=dict(visible=visible, typed=TYPED),
+                  script=dict(proof=dict(spans=spans)))
     monkeypatch.setattr(P, "cut", lambda *args: None)
-    monkeypatch.setattr(P, "pauses", lambda *args, **kwargs: [])
-    monkeypatch.setattr(P, "quiet_snap", lambda path, t, **kwargs: t)
     monkeypatch.setattr(P.subprocess, "run", lambda *args, **kwargs: None)
     monkeypatch.setattr(P.PX, "sound_facts", lambda *args: {})
     out = P.showcase_supply(SimpleNamespace(sid="caption"), script, str(tmp_path), str(tmp_path / "pack.json"))
@@ -671,17 +670,17 @@ def test_grade_showcase_continues_the_same_thought_after_send(tmp_path, monkeypa
     P.jsave(str(tmp_path / "record.json"), rec)
     (tmp_path / "edl").mkdir()
     P.jsave(str(tmp_path / "edl/v006.json"), edl)
+    spans = dict(split=[1.,128/30], before=[0.,1.], after=[128/30,6.], stretch=[6.,11.1])
     script = dict(record=str(tmp_path / "record.json"), receipts=dict(typed=TYPED),
-                  export_check=dict(spoken_thought=[1., 11.1]))
+                  script=dict(proof=dict(spans=spans)))
     monkeypatch.setattr(P, "cut", lambda *args: None)
-    monkeypatch.setattr(P, "pauses", lambda path, a, b, **kw: [(3.98, 4.54)] if a < 3.98 < b else [])
-    monkeypatch.setattr(P, "quiet_snap", lambda path, t, **kw: t)
+    monkeypatch.setattr(P, "hear_clock", lambda *args: [dict(w="Ends.", t0=10.9, t1=11.)])
     monkeypatch.setattr(P.subprocess, "run", lambda *args, **kw: None)
     monkeypatch.setattr(P.PX, "sound_facts", lambda *args: {})
     result = P.showcase_supply(SimpleNamespace(sid="grade"), script, str(tmp_path), str(tmp_path / "pack.json"))
     product = result["product"]
     assert product["hook"] == [1., 128/30]
-    assert product["window"] == [128/30, 11.1]
+    assert product["after"] == [128/30, 6.] and product["window"] == [6., 11.1]
     assert product["marks"]["site"][0] == product["marks"]["export_voice"][1]
 
 def test_recorded_site_occupies_the_brand_join_after_the_last_spoken_frame():
