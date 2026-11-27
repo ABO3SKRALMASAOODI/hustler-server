@@ -358,3 +358,15 @@ def test_sol_new_job_rebuilds_changed_project_state_behind_real_previous_wire(mo
     assert sessions.previous("different session", 18, 5000) is None
     assert sessions.previous(key, 17, 5000) is None
     assert sessions.previous(key, 18, 50) is None
+
+
+def test_followup_rebuilds_if_a_previously_loaded_tool_is_unavailable():
+    import edit_session_history
+    schema = {"type": "function", "name": "inspect_cut", "parameters": {"type": "object"}}
+    kernel = [{"role": "developer", "content": "stable"}]
+    common = {"model": "gpt-6.2-sol", "tools": [], "reasoning": {"effort": "high"}}
+    previous = dict(common, input=kernel + [{"type": "additional_tools", "tools": [schema]}])
+    current = dict(common, input=kernel + [{"role": "user", "content": "follow up"}])
+    assert edit_session_history.join(current, previous, 1, {}) is None
+    assert edit_session_history.join(current, previous, 1, {"inspect_cut": schema})["input"] == (
+        previous["input"] + current["input"][1:])

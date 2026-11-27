@@ -373,7 +373,10 @@ def request_body(model, messages, tools=None, max_tokens=None, effort=None, tool
                 cut -= 1
             else:
                 shortened.append(item)
-        joined = edit_session_history.join(dict(result, input=shortened), prior, count)
+        if "wire_catalog" not in tool_plan:
+            tool_plan["wire_catalog"] = {t["name"]: t for t in responses_tools(tool_plan["catalog"])}
+        joined = edit_session_history.join(dict(result, input=shortened), prior, count,
+                                           tool_plan["wire_catalog"])
         if joined is not None:
             return joined
     return result
@@ -482,6 +485,18 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
     fallback(model) makes the same call on the Anthropic lane with that model. Raises only what
     the fallback raises."""
     import claude_trial
+    def answered(body, data, started):
+        result = _completion(model, data)
+        import openai_cache
+        result.usage.prompt_cache = dict(openai_cache.describe(body),
+                                        cached_tokens=result.usage.cache_read_input_tokens)
+        result.usage.latency_s = round(time.monotonic() - started, 2)
+        result.usage.answered_model = model
+        if tool_plan is not None and model == "gpt-6.2-sol":
+            tool_plan["last_body"] = body
+            tool_plan["last_input_tokens"] = result.usage.prompt_tokens
+        return result
+
     why = None
     if turn_fell_back():
         why = "turn already on the fallback: " + str(turn_fell_back())
@@ -500,10 +515,7 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
             body = request_body(model, messages, tools, max_tokens, effort, tool_choice, tool_plan)
             data = _post(body, min(float(timeout or config.EDIT_RUNG_TIMEOUT_S),
                                    float(config.EDIT_RUNG_TIMEOUT_S)))
-            result = _completion(model, data)
-            import openai_cache
-            result.usage.prompt_cache = dict(openai_cache.describe(body),
-                cached_tokens=result.usage.cache_read_input_tokens)
+            result = answered(body, data, t0)
         except RungFailed as exc:
             why = str(exc)
             if exc.wallet:
@@ -519,11 +531,6 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
             openai_budget.propagate(exc)
             why = f"{type(exc).__name__}: {str(exc)[:200]}"
         else:
-            result.usage.latency_s = round(time.monotonic() - t0, 2)
-            result.usage.answered_model = model
-            if tool_plan is not None and model == "gpt-6.2-sol":
-                tool_plan["last_body"] = body
-                tool_plan["last_input_tokens"] = result.usage.prompt_tokens
             _meter(model, result)
             return result
         _mark_turn(why)
@@ -552,15 +559,10 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
             body = request_body(model, messages, tools, max_tokens, effort, tool_choice, tool_plan)
             data = _post(body, min(float(timeout or config.EDIT_RUNG_TIMEOUT_S),
                                    float(config.EDIT_RUNG_TIMEOUT_S)))
-            result = _completion(model, data)
+            result = answered(body, data, t0)
         except Exception as again:  # noqa: BLE001 - both lanes failed: the turn's recovery owns it
             print(f"[edit-rung] {model} failed again: {str(again)[:200]}", flush=True)
             raise exc from again
-        import openai_cache
-        result.usage.prompt_cache = dict(openai_cache.describe(body),
-                cached_tokens=result.usage.cache_read_input_tokens)
-        result.usage.latency_s = round(time.monotonic() - t0, 2)
-        result.usage.answered_model = model
         _meter(model, result)
         return result
 

@@ -44,7 +44,7 @@ def previous(key, message_id, token_room):
     return json.loads(payload)
 
 
-def join(body, previous_body, static_count):
+def join(body, previous_body, static_count, catalog):
     """Continue the exact stored wire history when its instructions and tools still apply."""
     if any(previous_body.get(k) != body.get(k) for k in ("model", "tools", "reasoning", "prompt_cache_key")):
         return None
@@ -60,6 +60,8 @@ def join(body, previous_body, static_count):
             loaded.update({tool["name"]: tool for tool in item["tools"]})
         elif item.get("type") == "configuration_update":
             last_effort = item["reasoning"]["effort"]
+    if any(catalog.get(name) != schema for name, schema in loaded.items()):
+        return None
     tail = []
     if last_effort != body["reasoning"]["effort"]:
         tail.append({"type": "configuration_update", "reasoning": body["reasoning"]})

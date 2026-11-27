@@ -595,12 +595,14 @@ def _mark_cache(system, msgs, tools, model="", cache_policy=None, prefix_ttl=Non
     # runs multi-step paid edits. Only the caller that actually switches
     # planners may opt out of caching the unique project payload; shared
     # instructions still earn cache reads.
-    if cache_policy == "shared_only" or _one_shot(msgs, tools):
+    if cache_policy in ("shared_only", "trial_planner") or _one_shot(msgs, tools):
         # A critic's unique frames are one-shot.
         if tools:
             tools[-1] = dict(tools[-1], cache_control={"type": "ephemeral", "ttl": "1h"})
         if system:
-            stable = min(1, len(system) - 1) if cache_policy == "shared_only" else 0
+            # The trial planner gets kernel, capabilities and the fixed trial note.
+            shared = {"trial_planner": 3, "shared_only": 2}.get(cache_policy, 1)
+            stable = min(shared, len(system)) - 1
             system[stable] = dict(system[stable], cache_control={"type": "ephemeral", "ttl": "1h"})
         return
     # A large batch of images/observations can put the previous request's
@@ -609,13 +611,15 @@ def _mark_cache(system, msgs, tools, model="", cache_policy=None, prefix_ttl=Non
     anchor = _released_pixels_anchor(msgs) or _previous_cache_anchor(msgs)
     if prefix_ttl:
         # Paid Opus edits can wait on a render or a preview between tool calls.
-        stable = {"type": "ephemeral", "ttl": prefix_ttl}
+        stable = {"type": "ephemeral", "ttl": "1h"}
         last = next((i for i in reversed(range(len(tools))) if not tools[i].get("defer_loading")), None)
-        if last is not None:
+        if last is not None and anchor is None:
             tools[last] = dict(tools[last], cache_control=stable)
         if system:
             shared = min(1, len(system) - 1)
             system[shared] = dict(system[shared], cache_control=stable)
+            if len(system) - 1 != shared:
+                system[-1] = dict(system[-1], cache_control={"type": "ephemeral", "ttl": prefix_ttl})
     else:
         if tools and anchor is None:
             last = max((i for i, tool in enumerate(tools)
@@ -929,15 +933,25 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
         long_prefix = bool(active and model.startswith("claude-opus-5-5"))
         volatile = [m for m in messages if long_prefix and m.get("role") == "system"
                     and m.get("content") == active.get("volatile_system")]
-        history = [m for m in messages if m not in volatile]
+        # The state assembled for the turn is identical on most steps. Keep
+        # its first version in place; only a newly observed version belongs
+        # past the existing conversation. A resumed slice gets its own plan.
+        history = messages
+        if volatile:
+            state = volatile[-1]["content"]
+            initial = active.setdefault("initial_state", state)
+            history = [dict(m, content=initial) if m in volatile else m for m in messages]
+            events = active.setdefault("state_updates", [])
+            if state != (events[-1][1] if events else initial):
+                events.append((len(messages), state))
+            for at, update in reversed(events):
+                history.insert(min(at, len(messages)), {"role": "system", "content": update})
         system, msgs, tool_defs = to_anthropic(
             history, None if active else tools, model, active["refs"] if active else None)
         if active:
             tool_defs = _plan_tools(active, model)
         _mark_cache(system, msgs, tool_defs, model, cache_policy,
                     active.get("prefix_ttl", "1h") if long_prefix else None)
-        for note in volatile:
-            msgs.append({"role": "system", "content": note["content"]})
         body = {"model": model, "max_tokens": int(max_tokens or 8000),
                 "messages": msgs}
         if system:

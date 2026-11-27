@@ -6901,7 +6901,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 active_kw["tool_choice"] = "none"
             if claude_lane.is_claude_model(active_model):
                 if iteration == 0 and call_model != model:
-                    active_kw["cache_policy"] = "shared_only"
+                    active_kw["cache_policy"] = "trial_planner"
                 elif active_model == model and claude_lane.plan_usable(
                         tool_plan, active_model):
                     claude_lane.surface_tools(tool_plan, messages, tools)

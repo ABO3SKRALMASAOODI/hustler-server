@@ -716,3 +716,12 @@ def test_forced_single_reviews_do_not_write_the_customer_payload(name):
     claude_lane._mark_cache(system, msgs, tools, "claude-haiku-5-5")
     assert system[0]["cache_control"]["ttl"] == "1h"
     assert not any("cache_control" in b for b in msgs[0]["content"])
+
+
+def test_trial_planner_reuses_fixed_trial_instructions_across_projects():
+    for project in ("state one", "state two"):
+        system = [{"type": "text", "text": text}
+                  for text in ("kernel", "capabilities", "trial instructions", project)]
+        claude_lane._mark_cache(system, [], [], "claude-opus-5-5", "trial_planner")
+        assert [i for i, block in enumerate(system) if "cache_control" in block] == [2]
+        assert system[2]["cache_control"]["ttl"] == "1h"
