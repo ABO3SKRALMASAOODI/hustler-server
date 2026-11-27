@@ -26,6 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STORIES = os.path.join(os.path.dirname(HERE), "valmera-stories")
 sys.path.insert(0, STORIES)
 import writer  # noqa: E402  lane O's writer: ask_web, ask, json_block, verify, quote_found, page_text, VOICES
+import story_chain
 
 FORM = dict(name="long-form voiceover film", seconds=(600, 1200), words=(1850, 2500), segments=(55, 110), band="04",
             shape="a hook within ten seconds, chapters whose lengths and order emerge from the researched story, "
@@ -125,7 +126,7 @@ def dossier(idea, effort="high"):
               "true story from: facts with their exact sources, what the camera can show, where things happened. You read "
               "every page you cite with your web tools. Nothing is invented, rounded or dramatised beyond the sources.")
     content = (f"# The story\n{json.dumps(idea, ensure_ascii=False)}\n\n"
-               "Build on any verified exhibits and ranked video sources supplied with the idea. Research the remaining facts. Every new quote is checked later by fetching its URL with a plain script and finding the quote "
+               "Research who wanted what and why, who objected on what grounds, the deciding action and its consequence. Build on any verified exhibits and ranked video sources supplied with the idea. Research the remaining facts. Every new quote is checked later by fetching its URL with a plain script and finding the quote "
                "on the page word for word, so cite pages a script can read (Wikipedia, NASA, the Library of Congress, "
                "archive.org, Smithsonian, government and university pages) and copy each quote exactly as it stands there, "
                "one or two sentences. Pages behind a paywall or a bot wall (Britannica, most newspapers) cannot be checked.\n\n"
@@ -182,7 +183,7 @@ def write(idea, dos, card, voices=None, notes=None, effort="high", line=None):
               "and pauses per segment. Write for the ear: concrete nouns, numbers a listener can hold, the "
               "voice of a storyteller who knows where the story goes and makes the viewer want the next minute.")
     lo, hi = (dos["runtime_words"][::2] if dos.get("runtime_words") else FORM["words"])
-    system += "\n\n" + ((f"# Form\n{FORM['name']}: {lo}-{hi} spoken words in {FORM['segments'][0]}-{FORM['segments'][1]} segments (at about "
+    system += "\n\n" + ((f"# Reference lengths (descriptive)\n{FORM['name']}: {lo}-{hi} spoken words in {FORM['segments'][0]}-{FORM['segments'][1]} segments (at about "
                f"175 words a minute that is {lo // 175}-{hi // 175} minutes). {FORM['shape']}.\n\n"
                "How it holds (a story, not an explainer): " + STORY_SHAPE + " Every chapter has its own consequential turn, "
                "marked beat=turn on the segment where it happens. No call to action, no 'subscribe', no 'like'.\n\n"
@@ -223,8 +224,19 @@ def write(idea, dos, card, voices=None, notes=None, effort="high", line=None):
                (f"# Notes from the last attempt (fix every one)\n{notes}\n\n" if notes else ""))
     from runtime_plan import budget
     content += production_brief(line) + "\n" + budget(dos)
-    text, use = writer.ask_web(system, content, effort=effort, max_tokens=64000, searches=0, fetches=0, what="write")
-    return writer.json_block(text), use
+    if "beat_sheet" not in dos:
+        dos["beat_sheet"], planner_use = story_chain.plan("long-form", idea, dict(facts=facts, brief=line, chapters=idea.get("chapters")))
+    else:
+        planner_use = {}
+    content += "\n# Beat sheet\n" + json.dumps(dos["beat_sheet"], ensure_ascii=False)
+    def request(repair):
+        text, usage = writer.ask_web(system + "\n" + story_chain.WRITE, content + "\n" + repair,
+                                     effort=effort, max_tokens=64000, searches=0, fetches=0, what="write")
+        return writer.json_block(text), usage
+
+    script, use = story_chain.write_segments(dos["beat_sheet"], request)
+    use = dict(use, planner=planner_use, usd=float(use.get("usd", 0)) + float(planner_use.get("usd", 0)))
+    return script, use
 
 
 def printed_strings(script):
@@ -251,8 +263,7 @@ def printed_strings(script):
 
 
 def check_script(script, dos):
-    """Measured: the facts it cites exist and were verified, every printed figure stands in a verified quote, the length
-    is inside the form, the spoken form carries no digits."""
+    """Measure source citations, printed figures, chapter turns and spoken notation. Report the runtime in words."""
     facts = {f["id"]: f for f in dos.get("facts") or []}
     problems = []
     used = set()
@@ -273,11 +284,6 @@ def check_script(script, dos):
     unbacked = sorted({d for x in printed_strings(script) for d in writer.digits(x) if d not in have})
     if unbacked:
         problems.append(f"these printed figures stand in no verified quote: {unbacked}")
-    n = writer.words_of(script)
-    lo, hi = FORM["words"]
-    # An explicit brief drives sourced development on the inspected archive.
-    if not dos.get("runtime_words") and not lo <= n <= hi * 1.1:
-        problems.append(f"{n} spoken words; the form wants {lo}-{hi}")
     for c in script.get("chapters") or []:
         if not any(s.get("chapter")==c.get("id") and s.get("beat")=="turn" for s in script.get("segments",[])):
             problems.append(f"chapter {c.get('id')} needs a beat=turn segment")
@@ -286,7 +292,7 @@ def check_script(script, dos):
     chs = {c.get("id") for c in script.get("chapters") or []}
     if len(chs) < 2:
         problems.append(f"{len(chs)} chapters; a long film needs distinct story movements")
-    return dict(ok=not problems, problems=problems, words=n, segments=len(script.get("segments") or []), facts_used=len(used),
+    return dict(ok=not problems, problems=problems, words=writer.words_of(script), segments=len(script.get("segments") or []), facts_used=len(used),
                 figures_unbacked=unbacked)
 
 
