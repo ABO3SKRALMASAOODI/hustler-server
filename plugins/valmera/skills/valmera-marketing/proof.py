@@ -211,6 +211,31 @@ def podcast_clock(media, lo, hi):
     return []
 
 
+def source_sentences(ctx, media, tag, lo, hi):
+    """Prefer the podcast's completed transcript. Its timed fragments end at real word edges."""
+    from pathlib import Path
+    segments = jload(Path(media).parent / "valmera-segments.json")
+    if isinstance(segments, list) and segments:
+        fragments = []
+        for row in segments:
+            if not isinstance(row, dict) or not {"text", "start", "end"} <= row.keys():
+                break
+            words = row["text"].split()
+            if not words:
+                continue
+            fragments.append(dict(w=row["text"], t0=float(row["start"]), t1=float(row["end"])))
+        else:
+            # When a timestamped fragment contains an interior sentence end, a fresh word clock
+            # supplies that internal edge. Never interpolate a word time from character positions.
+            rows = [r for r in numbered_sentences(fragments) if r["t1"] >= lo and r["t0"] <= hi]
+            if rows and not any(w.rstrip('”’"').endswith((".", "!", "?"))
+                                for f in fragments if rows[0]["t0"] <= f["t0"] <= rows[-1]["t1"]
+                                for w in f["w"].split()[:-1]):
+                return [dict(r, i=i) for i, r in enumerate(rows)], fragments
+    words = podcast_clock(media, lo, hi) or hear_clock(ctx, media, tag, lo, hi)
+    return numbered_sentences(words), words
+
+
 def hear_clock(ctx, media, tag, lo=0.0, hi=None):
     """The actual file's punctuation and both word edges, on its own clock. Cache only in the run."""
     import tempfile
@@ -513,10 +538,11 @@ def idea_frames(menu, files, per=IDEA_FRAMES, w=384):
     them, each labelled with its clip and second. [] when no frame can be read."""
     out = []
     for m in menu:
-        wins = m.get("windows") or []
+        wins = m.get("sentences") or m.get("windows") or []
         if not wins or not files.get(m["id"]):
             continue
-        pick = [wins[round(k * (len(wins) - 1) / max(per - 1, 1))] for k in range(min(per, len(wins)))]
+        count = min(per, len(wins))
+        pick = [wins[round(k * (len(wins) - 1) / max(count - 1, 1))] for k in range(count)]
         for win in pick:
             t = (float(win["t0"]) + float(win["t1"])) / 2
             b = frames(files[m["id"]], [t], w)[0]
@@ -536,16 +562,21 @@ def ideas(ctx):
         srcs = [src for src in srcs if src["id"] == old["source"]]
     if not srcs:
         raise FileNotFoundError(f"source video unavailable under {SRC_ROOT}")
+    recordings = recorded_pool(srcs) if not old else {}
     clocks, sentences, menu = {}, {}, []
     for src in srcs:
-        dur = probe_wh(src["file"])[2]
+        info = probe_wh(src["file"])
+        if not info:
+            continue
+        dur = info[2]
         lo, hi = (max(0, old["t0"]-45), min(dur, old["t1"]+45)) if old else (0., dur)
-        words = podcast_clock(src["file"], lo, hi) or hear_clock(ctx, src["file"], src["id"], lo, hi)
-        rows = numbered_sentences(words)
+        rows, words = source_sentences(ctx, src["file"], src["id"], lo, hi)
+        if not rows:
+            continue
         clocks[src["id"]], sentences[src["id"]] = words, rows
         # A partial first/last sentence at an excerpt edge is context for the model.
         menu.append(dict(id=src["id"], title=src["title"], seconds=dur, sentences=rows,
-                         excerpt_edges=[lo, hi]))
+                         excerpt_edges=[lo, hi], picture=look_line(source_look(src["file"], lo, hi))))
     system = """Read the numbered, punctuated speech first. Find one complete thought from one speaker.
 Name who speaks and the actual claim. Then derive an editor's concrete problem and an edit that lets the
 viewer hear and see the whole claim. The ask must cover its entire spoken unit, including a list's last item.
@@ -553,21 +584,55 @@ Choose inclusive first_sentence and last_sentence indices; include setup and res
 excerpt edges. For a remake preserve the supplied idea, source, style and requested format while expanding the ask
 to cover the complete claim. Return JSON {"ideas":[{"title","speaker","claim","pain","technique","source",
 "first_sentence","last_sentence","asks":[the actual sentence to type],"must_see":[[visible proof]],
-"style","format","device"}]}. Use the source title and words to attribute the speech."""
+"style","format","device"}]}. Use the source title and words to attribute the speech. The selected picture should look premium at phone size: consider the supplied crop, sharpness and burned-in graphics."""
     content = dict(clips=menu, remake=old, count=1 if old else ctx.args.get("batch_candidates", 3),
                    brief=ctx.args.get("line"), formats=FORMAT_MENU, devices=DEVICE_MENU,
                    styles=[c["id"] for c in able], previous=ctx.args.get("batch_previous", []))
+    if recordings:
+        content["recordings"] = recordings
+        system += " When choosing an existing recording, include its recording_id, exact typed ask, and source thought."
     if not old:
         content["delivered"] = DL.prompt_block(ctx.workflow)
-    got, use = ask(system, json.dumps(content, ensure_ascii=False), what="ideas on spoken claims", effort="high")
     by = {src["id"]: src for src in srcs}
+    pictures = idea_frames(menu, {key: src["file"] for key, src in by.items()})
+    prompt = json.dumps(content, ensure_ascii=False)
+    repair = ""
+    for attempt in range(3):
+        got, use = ask(system, [dict(type="text", text=prompt+repair), *pictures],
+                       what="ideas on spoken claims", effort="high")
+        try:
+            choices = got["ideas"]
+            if not choices:
+                raise ValueError("return one complete thought from the supplied transcript")
+            for item in choices:
+                rows = sentences[item["source"]]
+                first, last = item["first_sentence"], item["last_sentence"]
+                if type(first) is not int or type(last) is not int or not 0 <= first <= last < len(rows):
+                    raise ValueError(f"return inclusive indexes between 0 and {len(rows)-1}")
+                if not item.get("asks"):
+                    raise ValueError("include the actual typed sentence")
+            break
+        except (KeyError, TypeError, ValueError) as exc:
+            if attempt == 2:
+                raise
+            repair = f"\nComplete the idea record using the supplied fields and sources: {exc}"
     ideas_out = []
-    for item in got["ideas"]:
+    styles = {card["id"] for card in able}
+    for item in choices:
         src = by[item["source"]]
         choice = [item["first_sentence"], item["last_sentence"]]
         rows = sentences[src["id"]]
         duration = next(m["seconds"] for m in menu if m["id"] == src["id"])
         a, b = snap_window(rows, choice, src["file"], duration, clock=clocks[src["id"]])
+        prior = recordings.get(item.get("recording_id"))
+        if prior and prior["source"] == item["source"] and prior["t0"] <= rows[choice[0]]["t0"] and prior["t1"] >= rows[choice[1]]["t1"]:
+            previous = rows[choice[0]-1]["t1"] if choice[0] else 0
+            following = rows[choice[1]+1]["t0"] if choice[1]+1 < len(rows) else duration
+            if previous <= prior["t0"] and prior["t1"] <= following:
+                item.update(recording=prior["record"], asks=[prior["typed"]])
+                a, b = prior["t0"], prior["t1"]
+        if item.get("style") not in styles:
+            item["style"] = able[0]["id"]
         selected = rows[choice[0]:choice[1]+1]
         idea = dict(item, file=src["file"], source_title=src["title"], t0=a, t1=b, sentences=selected,
                     source_sentence_range=choice)
@@ -582,8 +647,7 @@ def restore_window(ctx, idea):
     src = idea["file"]
     duration = probe_wh(src)[2]
     lo, hi = max(0, idea["t0"]-45), min(duration, idea["t1"]+45)
-    words = podcast_clock(src, lo, hi) or hear_clock(ctx, src, "prior-idea", lo, hi)
-    rows = numbered_sentences(words)
+    rows, words = source_sentences(ctx, src, "prior-idea", lo, hi)
     got, _ = ask("Locate the complete claim for this existing edit in the numbered sentences. "
                  "Give first_sentence,last_sentence,speaker and ask. Preserve the editing idea and cover the "
                  "whole claim in its typed ask.", json.dumps(dict(idea=idea, sentences=rows)),
