@@ -40,7 +40,7 @@ for _p in (os.path.join(SKILLS, "_shell"), os.path.join(SKILLS, "valmera-stories
 import film as F  # noqa: E402
 
 FPS, W, H, LEAD_F = F.FPS, F.W, F.H, F.LEAD_F
-CAPTION_CONTRACT = 15        # 26 Nov: research pages left the reading intervals; captions yield only to laid copy
+CAPTION_CONTRACT = 16        # 26 Nov: research pages left the reading intervals; captions yield only to laid copy
 Clock, r4, smooth = F.Clock, F.r4, F.smooth
 
 WALL = "YouTube is refusing this Mac as a bot"       # the words a short stops with when its footage could not be fetched for that reason
@@ -729,17 +729,6 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     coverage = sup.get("coverage")
     if not coverage:
         raise RuntimeError("podcast supply needs a word-addressed documentary coverage plan; refresh supply")
-    import wf1_record
-    record = coverage.get("record_example")
-    thought = d.get("thought_experiment") or {}
-    if thought:
-        from wf1_experiment import local_windows
-        coverage = dict(coverage, windows=local_windows(coverage, thought),
-                        comparisons=[row for row in coverage.get("comparisons", [])
-                                     if not (thought["first"] <= row["first"] and row["last"] <= thought["last"])])
-        # Reuse the passing director’s speech units. A copy without phrase breaks
-        # can take them from the reading of the same numbered words.
-        d["caption_ends"] = d.get("caption_ends") or thought["caption_ends"]
     if d.get("archive_views"):
         coverage = dict(coverage, windows=[dict(w, archive_views=d["archive_views"].get(str(w["first"]), []))
                                            for w in coverage["windows"]])
@@ -841,15 +830,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         """The programme frame a spoken word (numbered in order) starts on; the first word's is the film's first frame."""
         if not (0 <= int(w) < len(clock.words)):
             return None
-        return 0 if int(w) == 0 else max(Clock.f(clock.words[int(w)]["t0"]) - 1, 0)
+        return max(Clock.f(clock.words[int(w)]["t0"]), 0)
 
-    from wf1_publication import argument_of, compose_notes
-    argument = argument_of(coverage.get("publication_argument"),len(clock.words))
-    if argument:
-        copy = d.get("publication_copy") or {}
-        argument = dict(argument, **{k:copy[k].strip() for k in ("present","question")
-                                     if isinstance(copy.get(k),str) and copy[k].strip()})
-    argument_end = (word_frame(argument["last"]+1) or f_end) if argument else None
     # Bind source pictures to the very same spread word clock used by captions.
     reading = coverage.get('source_reading') or {}
     from wf1_source_frame import shared_presenter_region
@@ -944,425 +926,22 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             if turn is not None:
                 source_rows.append([turn,row[1],*row[2:4],dict(rec, presenter_result=True)])
                 row[1] = turn
-    for page in d.get("demo_notes") or []:
-        fig = page.get("figure")
-        if not fig:
-            continue
-        a = word_frame(page["first"])
-        b = min(Clock.f(clock.words[page["last"]]["t1"]), word_frame(page["last"]+1) or f_end,
-                a+int(fig["seconds"]*FPS),f_end)
-        same_view = any((r.get("origin") or r.get("path")) == fig["path"] and r.get("f") == [a,b]
-                        for r in d.get("reject") or [])
-        if b <= a or same_view:
-            continue
-        fact = page["facts"][0]
-        source = fact["source"]
-        rec = dict(fig,provider="publisher-demo",src=[0,(b-a)/FPS],name=page["demo_note"],
-                   source=dict(url=source["url"],channel=source["publisher"],title=page["demo_note"],figure_url=fig["figure_url"]),
-                   claim=fact["value"],clause=" ".join(w["w"] for w in clock.words[page["first"]:page["last"]+1]))
-        source_rows.append([a,b,"clip",page["demo_note"],rec])
     source_rows.sort(key=lambda row:row[0])
     source_spans = [r[:2] for r in source_rows]
     def on_evidence(a,b):
         return a is not None and b is not None and any(a < end and start < b for start,end in source_spans)
 
-    import wf1_display
-    reading_spans = []
-    timed_facts = []
-    import wf1_publisher_reading
-    reading_plan = wf1_publisher_reading.plan_of(d.get("publisher_reading"))
-    coverage = wf1_publisher_reading.local_coverage(coverage, reading_plan)
-    originals = d.get("display_facts") or []
-    readings = reading_plan.get("readings") or []
-    retired = set(reading_plan.get("camera_pages") or []) | {r["page"] for r in readings}
-    pages = wf1_display.episode_pages([p for i,p in enumerate(originals) if i not in retired],
-        dict(coverage, interview_cues=[dict(c,interview=script.get("source_url")) for c in coverage.get("interview_cues") or []
-                                      if isinstance(c,dict)]), clock.words)
-    pages = wf1_record.pages(pages, record, coverage["words"],
-                             dict(url=script.get("source_url"), publisher=script.get("source_credit")),
-                             script.get("source_start", 0), dr.get("beats") or [], d.get("caption_ends") or [])
-    for r in readings:
-        facts = originals[r["page"]]["facts"]
-        if r.get("evidence"):
-            facts = [dict(facts[0], value=r["body"],statement=r["body"],credit=r["credit"],
-                          source=dict(r["source"],supports=[r["evidence"]]))]
-        pages.append(dict(first=r["first"],last=r["last"],publisher_excerpt=r,facts=facts))
-    tenure = reading_plan.get("comparison")
-    tenure_span = None
-    if tenure:
-        cue = next((c for c in coverage.get("interview_cues",[]) if c["first"] <= tenure["first"] <= c["last"]
-                    and c.get("speaker") == tenure["speaker"]), {})
-        tenure_span = (word_frame(cue.get("first",tenure["first"])),word_frame(tenure["last"]+1) or f_end)
-    record_span = (word_frame(record["first"]), word_frame(record["last"]+1) or f_end) if record else None
-    thought_spans = []
-    if thought:
-        first, cite, turn = (word_frame(thought[k]) for k in ("first","citation","turn"))
-        # A dated print can cease to be the subject before the first quantity is spoken.
-        # Return to the live transition as soon as the named edition has been introduced.
-        cited_ends = [word_frame(w["last"]+1) for w in coverage["windows"]
-                      if w.get("name") == thought["title"] and thought["citation"] <= w["last"] < thought["turn"]]
-        if cited_ends:
-            turn = min(turn,max(cited_ends))
-        pages = [p for p in pages if p["last"] < thought["first"] or p["first"] > thought["last"]
-                 or any(f.get("source",{}).get("url") not in (thought["source"]["url"],script.get("source_url"))
-                        for f in p["facts"])]
-        thought_spans = [(first,cite,"definition"), (cite,turn,"citation")]
-        for example in thought["examples"]:
-            a = word_frame(example["first"])
-            b = word_frame(example["last"] + 1) or f_end
-            role = example["kind"]
-            if example["first"] <= thought["setup"] < thought["accent"] <= example["last"]:
-                setup, landing = word_frame(thought["setup"]),word_frame(thought["accent"])
-                thought_spans.extend([(a,setup,"premise"),(setup,landing,"scale"),(landing,b,"landing")])
-            elif role == "alternative":
-                # Introduce the independent example, then release its credit on
-                # the next sentence so the actual comparison can land in speech.
-                seg = clock.words[example["first"]]["seg"]
-                change = next((i for i in range(example["first"]+1,example["last"]+1)
-                               if clock.words[i]["seg"] != seg), None)
-                release = word_frame(change) if change is not None else b
-                thought_spans.extend([(a,release,role),(release,b,"alternative_detail")])
-            else:
-                if role == "payoff" and clock.words[example["last"]]["seg"] == clock.words[-1]["seg"]:
-                    b = f_end
-                thought_spans.append((a,b,role))
-    # A scenario on the same words as a sourced explanation shares its reading
-    # surface. Give independent scenario steps their own remaining word interval.
-    evidence = [p for p in pages if any(f.get("perspective") or f.get("excerpt") for f in p["facts"])]
-    for page in list(pages):
-        if not page.get("sequence") or page.get("sequence_kind") == "handoff":
-            continue
-        overlaps = [p for p in evidence if p["first"] <= page["last"] and page["first"] <= p["last"]]
-        if not overlaps:
-            continue
-        pages.remove(page)
-        edges = sorted({page["first"], page["last"]+1, *(max(page["first"],p["first"]) for p in overlaps),
-                        *(min(page["last"],p["last"])+1 for p in overlaps)})
-        for lo, hi in zip(edges, edges[1:]):
-            steps = [step for step in page["sequence"] if lo <= step["at"] < hi]
-            if len(steps) >= 2 and all(lo > p["last"] or hi <= p["first"] for p in overlaps):
-                pages.append(dict(page, first=steps[0]["at"], last=hi-1, sequence=steps))
-    # Hold the final dated record long enough to read into the same founder's
-    # closing memory, then return to their face without repeating the byline.
-    for history in list(pages):
-        if history.get("sequence_kind") != "history":
-            continue
-        owner = history["facts"][0]
-        steps = history["sequence"]
-        if steps[-1]["source"] == owner["source"] or not any(s["source"] == owner["source"] for s in steps):
-            continue
-        tail = next((p for p in pages if p["first"] == history["last"] + 1
-                     and p["last"] == len(clock.words) - 1 and len(p["facts"]) == 1
-                     and (p["facts"][0].get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS
-                     and p["facts"][0].get("attribution") == owner.get("attribution")), None)
-        if not tail or any(p is not tail and p["last"] >= tail["first"] for p in pages):
-            continue
-        release = clock.words[steps[-1]["at"]]["t0"] + 2.0
-        end = next((i for i in range(history["last"], tail["last"]) if clock.words[i]["t1"] >= release), None)
-        if end is not None:
-            pages[pages.index(history)] = dict(history, last=end)
-            pages.remove(tail)
-    # The attributed scenario identifies its speaker throughout its visible interval.
-    # Keep any part of the separate byline still needed on an adjacent clause.
-    credits = [(p, p["facts"][0].get("attribution")) for p in pages if p.get("sequence")]
-    credits.extend((p, f["perspective"]["speaker"]) for p in evidence for f in p["facts"] if f.get("perspective"))
-    credits.extend((p, f["attribution"]) for p in pages for f in p["facts"]
-                   if f.get("attribution") and (f.get("chain") or {}).get("stance") in wf1_display.ESTIMATE_LABELS)
-    for page in list(pages):
-        facts = page["facts"]
-        if len(facts) != 1 or (facts[0].get("chain") or {}).get("stance") not in wf1_display.OPINION_LABELS:
-            continue
-        spans = [(page["first"], page["last"])]
-        for panel, owner in credits:
-            if facts[0].get("attribution") == owner:
-                spans = [(a,b) for lo,hi in spans for a,b in
-                         ((lo,min(hi,panel["first"]-1)),(max(lo,panel["last"]+1),hi)) if a<=b]
-        if spans != [(page["first"], page["last"])]:
-            pages.remove(page)
-            pages.extend(dict(page,first=a,last=b) for a,b in spans
-                         if clock.words[b]["t1"] - clock.words[a]["t0"] >= .45)
-    # After the last documented event, the founder can deliver the resolution in their own voice.
-    # Leave a closing state up when it brings additional evidence or explains a hypothetical.
-    for n,page in enumerate(pages):
-        if page.get("sequence_kind") != "history" or page["last"] != len(clock.words)-1:
-            continue
-        steps = page["sequence"]
-        interview = page["facts"][0]["source"]
-        if len(steps)>1 and steps[-1]["source"] == interview and any(s["source"] != interview for s in steps[:-1]):
-            pages[n] = dict(page, last=steps[-1]["at"]-1, sequence=steps[:-1])
-    pages.sort(key=lambda p: p["first"])
-    story = coverage.get("story") or {}
-    projects = wf1_display.research_phases(story, clock.words,
-                  dict(url=script.get("source_url"), publisher=script.get("source_credit")))
-    research_views = []
-    instrument_scenes = []
-    case_payoffs = []
-    dial_asks = [ask for ask in dr.get("asks", []) if ask["dev"] == "analogy_dial"]
-    for comparison in coverage.get("comparisons") or []:
-        first, last = comparison["first"], comparison["last"]
-        dial = next((ask for ask in dial_asks if first <= ask["at"]["w"] <= last), None)
-        if dial:
-            from wf1_principle import outside
-            pages = [part for page in pages for part in outside(page, first, last)]
-            instrument_scenes.append((word_frame(first), word_frame(last+1) or f_end, dial))
-            continue
-        episode = story.get("episode_start", 0) + coverage["words"][first]["end"]
-        project = next((p for p in projects if p["last"] < first and
-                        all(type(p["claim"].get(k)) in (int,float) for k in ("example_start","example_end"))
-                        and p["claim"]["example_start"] <= episode <= p["claim"]["example_end"]), None)
-        cases = wf1_display.research_comparison(comparison, project, clock.words) if project else None
-        if cases:
-            from wf1_principle import outside
-            pages = [part for page in pages for part in outside(page, first, last)] + cases
-            research_views.append((word_frame(project["last"]+1), word_frame(last+1) or f_end, comparison))
-        elif not reading_plan:
-            pages = wf1_display.comparison_pages(pages, comparison, clock.words)
-            if comparison.get("application"):
-                # Widen on the consequence to keep the original performance and
-                # its return to the real situation on one continuous camera.
-                case_payoffs.append((Clock.f(clock.words[comparison["reveal"]]["t0"]),
-                                     word_frame(last+1) or f_end))
-    import wf1_principle
-    principle = d.get("principle_example")
-    pages = wf1_principle.pages(pages, principle, clock.words)
-    phases = sorted([*(d.get("model_phases") or []), *projects], key=lambda p: p["first"])
-    model_spans = [(word_frame(wf1_display.model_claim_start(pages, p)), word_frame(p["last"]+1) or f_end)
-                   for p in phases]
-    pages = wf1_display.model_pages(pages, phases)
-    if demo:
-        # These words are one presentation. A retained broad explainer, or a
-        # device on its opening, must not cover the camera or pre-empt the answer.
-        notes = d.get("demo_notes") or []
-        keep = [p for p in pages if p["last"] < demo["first"] or p["first"] > demo["last"]]
-        if not notes:
-            for page in pages:
-                if page.get("gloss") and demo["first"] <= page["first"] < demo["cue"]:
-                    term = demo.get("term_word")
-                    first = term if type(term) is int and demo["first"] <= term < demo["cue"] else page["first"]
-                    chain = page["facts"][0].get("chain") or {}
-                    last = min(demo["cue"]-1, max(first,chain.get("last",page["last"])))
-                    keep.append(dict(page,first=first,last=last,demo_note=chain.get("term") or "Definition"))
-                    break
-        pages = keep + notes
-    if argument:
-        # This reading supplies the speaker's interpretation and leaves their personal
-        # reaction in the recorded voice. Preserve independent sources and excerpts.
-        pages = [p for p in pages if not (argument["reaction"] <= p["first"] <= p["last"] <= argument["last"]
-                 and all((f.get("chain") or {}).get("speaker") == argument["speaker"] and not f.get("excerpt")
-                         for f in p["facts"]))]
-    import wf1_reporting
-    reporting = wf1_reporting.example(d.get("reporting_example"), len(clock.words), coverage.get("interview_cues", []))
-    reporting_span = None
-    if reporting:
-        first, last = reporting["first"], reporting["last"]
-        reporting_span = (word_frame(first), word_frame(last+1) or f_end)
-        pages = [part for page in pages for part in wf1_principle.outside(page, first, last)]
-    import wf1_approval
-    approval = wf1_approval.example(d.get("approval_example"), len(clock.words))
-    approval_span = None
-    if approval:
-        first, last = approval["first"], approval["last"]
-        approval_span = (word_frame(first), word_frame(last+1) or f_end)
-        pages = [part for page in pages for part in wf1_principle.outside(page, first, last)]
-    import wf1_acted_contrast as acted
-    contrast = acted.reading(d.get("acted_contrast", reading.get("acted_contrast")), len(clock.words))
-    contrast_span = None
-    contrast_entries = []
-    if contrast:
-        first, last = contrast["first"], contrast["last"]
-        contrast_span = word_frame(first), word_frame(last+1) or f_end
-        for lo,hi in acted.spans(contrast):
-            pages = [part for page in pages for part in wf1_principle.outside(page,lo,hi)]
-        # The incoming voice owns one cue while the source camera holds the smile.
-        # The example returns with the speaker's own picture at the source cut.
-        callback = word_frame(contrast["return_at"])
-        for row in reading.get("voice_entries", []):
-            lo, hi = row["shot"]
-            if lo*FPS+LEAD_F <= callback < hi*FPS+LEAD_F and row.get("reaction"):
-                contrast_entries.append((word_frame(row["first"]), round(hi*FPS)+LEAD_F, row))
-        entries = [entry for entry in entries if entry not in contrast_entries]
-        contrast_return = max([callback]+[hi for _,hi,_ in contrast_entries])
-    # The take reader already located speakers in ordinary camera shots.
-    # Screen-share presenter tiles are only one of the possible live returns.
-    live_spans = [(round(sp["t0"]*FPS)+LEAD_F, round(sp["t1"]*FPS)+LEAD_F)
-                  for shot in tshots for sp in shot.get("spans", []) if sp["who"] == "speaker"]
-    personal_accounts = []
-    research_pages = []
-    for page in pages:
-        a = word_frame(page["first"])
-        b = min(f_end, Clock.f(clock.words[page["last"]]["t1"]))
-        next_word = word_frame(page["last"] + 1)
-        if next_word is not None:
-            b = min(b, next_word)
-        witness = page["facts"][0].get("chain") or {}
-        if witness.get("witness") == "characterization":
-            origin = script.get("source_start", 0)
-            onset = clock.words[page["first"]]["t0"] + origin - LEAD_F/FPS
-            claim = next((c for c in coverage.get("claims", []) if c.get("speaker") == witness["speaker"]
-                          and isinstance(c.get("start"),(int,float)) and isinstance(c.get("end"),(int,float))
-                          and c["start"] <= onset <= c["end"]), None)
-            if claim:
-                a = min(a,max([Clock.f(claim["start"]-origin)+LEAD_F]+[end for _,end,_ in timed_facts if end<=a]))
-        if page.get("analogy_step"):
-            a = Clock.f(clock.words[page["first"]]["t0"])
-            b = Clock.f(clock.words[page["last"]+1]["t0"]) if next_word is not None else f_end
-            if page.get("research_stage") and next_word is not None and not any(
-                    q.get("research_stage") and q["first"] == page["last"]+1 for q in pages):
-                b = next_word
-        if page.get("case_phase") == "application" and page["last"] == len(clock.words)-1:
-            b = caption_handoff
-        if page.get("principle_plate") and page["last"] == len(clock.words)-1:
-            b = f_end
-        facts = page["facts"]
-        if page.get("sequence") and facts[0].get("callback_source") and page["last"] == len(clock.words)-1:
-            b = f_end
-        # A speaker-led explanation already carries its report in voice and captions.
-        # A quotation from an original or a qualified estimate has its own evidentiary work.
-        qualified = page.get("estimate_landing") is not None or page.get("model_phase") or page.get("principle_plate") or page.get("sequence") or page.get("scope_cue") or any((f.get("chain") or {}).get("stance") in wf1_display.CONTEXT_LABELS or f.get("perspective") or (f.get("chain") or {}).get("stance") in wf1_display.OPINION_LABELS or
-                        (f.get("chain") or {}).get("stance") in wf1_display.ESTIMATE_LABELS or
-                        (f.get("chain") or {}).get("original") for f in facts)
-        narrated = all(f.get("chain") and not f.get("relation") for f in facts)
-        on_presenter = (any(lo <= a and b <= hi for lo,hi,_ in speakers)
-                        or any(lo < b and a < hi for lo,hi in live_spans))
-        # A summary of the speaker's own interview supplies provenance. Reserving
-        # a reading surface for it displaced both the live camera and its timed words.
-        if (narrated and not qualified and not page.get("demo_note") and
-                all(wf1_display.personal_summary(f, script.get("source_url")) for f in facts)):
-            personal_accounts.append(page)
-            continue
-        spoken_label = page.get("record_role") in ("inference", "memory") and F.norm_word(facts[0]["value"]) in F.norm_word(
-            " ".join(w["w"] for w in clock.words[page["first"]:page["last"]+1]))
-        if not wf1_display.audience_page(page) or spoken_label:
-            # A research claim supplies the record only; the live picture and timed words keep the frame. So does a
-            # record role whose label the speaker already says: its card would hold only research labels.
-            research_pages.append(page)
-            continue
-        if page.get("viewer_line"):
-            # The authored line is a short annotation over the live picture. Its interval is the annotation's own,
-            # never the clause's: a clause-long reading layout left the speaker letterboxed over an empty dark frame
-            # once the line had gone (26 Nov).
-            if b > a:
-                timed_facts.append((a, min(b, a + VIEWER_LINE_F), page))
-            continue
-        own_account = d.get("caption_ends") and all(
-            f.get("chain") and f["chain"].get("speaker") == f["chain"].get("subject") for f in facts)
-        if b > a and (page.get("demo_note") or qualified or not (on_evidence(a,b) or ((on_presenter or own_account) and narrated))):
-            timed_facts.append((a,b,page))
-    # Retained directions can predate the claims chain. A dense attributed block
-    # still gets a reading interval, with all its authored copy and provenance.
-    def opinion_byline(facts):
-        if len(facts) != 1:
-            return False
-        stance = (facts[0].get("chain") or {}).get("stance")
-        return stance in wf1_display.OPINION_LABELS or (
-            stance == "personal_estimate" and facts[0]["source"].get("url") == script.get("source_url")
-            and not facts[0].get("excerpt"))
-
-    def needs_reading_page(facts):
-        if opinion_byline(facts):
-            return facts[0]["chain"].get("stance") == "observation" or bool(facts[0]["chain"].get("witness"))
-        if any(f.get("excerpt") or f.get("chain") or wf1_display.source_statement(f, script.get("source_url")) for f in facts):
-            return True
-        if not any(f.get("attribution") for f in facts):
-            return False
-        rows = wf1_display.typeset(facts, P.R, DISPLAY_W * W, str.upper if st["upper"] else str)
-        return len(rows) > 4
-
-    report_spans = [(a, b) for a, b, page in timed_facts if not page.get("viewer_line") and (page.get("analogy_step") or page.get("model_phase") or page.get("principle_plate") or page.get("record_role") or page.get("scope_cue") or page.get("sequence") or page.get("episode_example") or needs_reading_page(page["facts"]))]
-
-    # A remembered figure or reversal can live in the spoken cue and the show's own
-    # shot. Release the timeline on the authored word, preserving the entire source frame.
-    live_beats = {}
-    for a,b,page in timed_facts:
-        steps = page.get("sequence") or []
-        for i,step in enumerate(steps):
-            if step.get("beat") in ("figure", "turn"):
-                start = word_frame(step["at"])
-                end = word_frame(steps[i+1]["at"]) if i+1 < len(steps) else b
-                if a <= start < end <= b:
-                    live_beats[start] = (end,step["beat"],step["at"])
-    publisher_spans = {(a,b) for a,b,p in timed_facts if p.get("publisher_excerpt")}
-    credited_spans = {(a,b) for a,b,p in timed_facts if (p.get("publisher_excerpt") or {}).get("credit")}
-    phase_spans = [(a,b) for a,b,p in timed_facts if p.get("model_phase") and not p.get("viewer_line")]
-    source_pages = phase_spans + [(a,b) for a,b,p in timed_facts if not p.get("viewer_line")
-                                  and any(f.get("excerpt") or f.get("perspective") for f in p["facts"])]
-    for span in (reporting_span, approval_span):
-        if span:
-            source_pages.append(span)
-            report_spans.append(span)
-    if source_pages:
-        coverage = dict(coverage, windows=[
-            dict(w, on_take=True) if not w.get("publisher_camera") and any(lo <= round(w["t0"]*FPS)+LEAD_F+1 and
-                round(w["t1"]*FPS)+LEAD_F <= hi+1 for lo,hi in source_pages) else w
-            for w in coverage["windows"]])
-    # A retained Director can predate the source reading. The original takes its word's
-    # visual slot, while continuous rhythm direction still spans the film.
-    comparison_spans = [(word_frame(c["first"]), Clock.f(clock.words[c["last"]]["t1"]))
-                        for c in (coverage.get("comparisons") or []) + (coverage.get("speaker_claims") or [])]
-    comparison_spans.extend((word_frame(e["first"]), Clock.f(clock.words[e["last"]]["t1"]))
-                            for e in coverage.get("episode_examples") or [])
-    if thought:
-        comparison_spans.append((word_frame(thought["first"]),word_frame(thought["last"]+1) or f_end))
-    comparison_spans.extend((a,b) for a,b,p in timed_facts if p.get("scope_cue"))
-    # A first-person conclusion after the route has its own treatment: the original
-    # voice, camera and exact captions. Distinct sourced claims retain their pages.
-    return_voices = {word_frame(c["first"]):c["speaker"] for c in d.get("claims") or []
-               if c.get("speaker") == c.get("subject") and not c.get("stance")
-               and c.get("last") == len(clock.words)-1 and any(
-                   r["speaker"] == c["speaker"] and r["last"] < c["first"] for r in coverage.get("handoffs") or [])
-               and not any(w["last"] >= c["first"] for w in coverage["windows"] if not w.get("on_take"))}
-    returns = [(frame,f_end) for frame in return_voices]
-    if record_span:
-        comparison_spans.append(record_span)
-    if principle:
-        if principle.get("film_sources") or principle.get("film_source"):
-            comparison_spans.extend((word_frame(p["first"]),word_frame(p["last"]+1) or f_end)
-                                    for p in d.get("display_facts") or []
-                                    if p["first"] < principle["setup"] and any(
-                                        (f.get("chain") or {}).get("stance") == "framework" for f in p["facts"]))
-        comparison_spans.append((word_frame(principle["setup"]),word_frame(principle["last"]+1) or f_end))
-    comparison_spans.extend(model_spans)
-    for window in coverage["windows"]:
-        review = (window.get("example") or {}).get("review")
-        if review:
-            comparison_spans.append((word_frame(review["intro_first"]),word_frame(review["last"]+1) or f_end))
-    comparison_spans.extend(returns)
-    if demo_span:
-        comparison_spans.append(demo_span)
-    if tenure_span:
-        comparison_spans.append(tenure_span)
-    comparison_spans.extend(source_pages)
-    if contrast:
-        # These are live pictures with type outside them. The original camera
-        # and its palette moves still own the reaction and the spoken snap.
-        live_example = [(contrast_span[0],word_frame(contrast.get("example_at",contrast["gesture"]))),
-                        (word_frame(contrast["gesture"]),word_frame(contrast["after"])),
-                        (contrast_return,contrast_span[1])]
-        source_pages.extend(live_example)
-        report_spans.extend(live_example)
-    comparison_spans.extend((a,b) for a,b,page in timed_facts if page.get("sequence"))
-    if (source_rows or comparison_spans) and dr:
-        def separate_ask(ask):
-            a = word_frame(ask['at']['w'])
-            b = (word_frame((ask.get('until') or ask['at'])['w']) or a or 0) + 1
-            if a is None:
-                return False
-            if any(ask is dial for _, _, dial in instrument_scenes):
-                return True
-            return (not any(a < hi and lo < b for lo,hi in comparison_spans)
-                    and (ask['dev'] == 'contour' or not on_evidence(a,b)))
-        dr = dict(dr,asks=[ask for ask in dr.get('asks',[]) if separate_ask(ask)])
+    returns = []
 
     def seg_span(i):
         return (seg_f[i], min(Clock.f(clock.segs[i][1]) + 6, f_end)) if 0 <= i < nseg else (None, None)
-    secs = []                                            # the Director's sections as frame ranges: (f0, f1, section)
-    if dr:
-        for s_ in dr.get("sections") or []:
-            a_, b_ = _director().section_frames(s_, word_frame, seg_span, f_end)
-            if a_ is not None and b_ is not None and b_ > a_:
-                secs.append((int(a_), int(b_), s_))
-        if secs:
-            secs[-1] = (secs[-1][0], max(secs[-1][1], f_end), secs[-1][2])
+    # Plan layouts on the source shot clock. At placement the actual cutaways also supply their eras.
+    source_shots = [dict(f=[max(0,round(row[k]*FPS)+LEAD_F) for k in ("t0","t1")]) for row in tshots]
+    def sections_for(pictures):
+        sections = _director().shot_sections(dict(dr, past_segs=d.get("past_segs", [])), pictures,
+                                             word_frame, seg_span, script["segments"], f_end)
+        return [(r["frames"][0], r["frames"][1], r) for r in sections]
+    secs = sections_for(source_shots) if dr else []
 
     def section_at(f):
         return next((s_ for a_, b_, s_ in secs if a_ <= f < b_), None)
@@ -1372,7 +951,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         s_ = section_at(f)
         return LAYOUT_AS.get((s_ or {}).get("layout"), st["layout"]) if s_ else st["layout"]
     # ---- the payoff is his face: the film's turn lands on the first word of the sentence the caller named (else the last)
-    ts = d.get("turn_seg")
+    ts = d.get("payoff_seg", d.get("turn_seg"))
     ts = int(ts) if isinstance(ts, int) and 0 < ts < nseg else (nseg - 1 if nseg > 1 else None)
     turn_f = max(seg_f[ts] - 1, 0) if ts is not None else None
     if turn_f is not None and f_voice_end - turn_f > 9 * FPS and nseg > 1:      # a payoff longer than nine seconds would leave the close bare
@@ -1437,8 +1016,6 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         # A previously checked tutorial may still be present in a retained score.
         # Re-seat just the words now covered by the demonstrator and their own UI.
         ins, _ = _director().hold_take(ins,[demo_span],min_f=1,fps=FPS)
-    from wf1_scoped_reading import represented_excerpt
-    ins = [row for row in ins if not represented_excerpt(row,readings,originals,coverage)]
     ins = action_holds(ins, coverage, FPS, LEAD_F, detail)
     for row in ins:
         if row[2] == "clip" and row[4].get("reframe") and "action_end" not in row[4]:
@@ -1462,26 +1039,6 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 if rec.get("provider") == "primary-document":
                     from wf1_documents import uncropped_image
                     row[4] = uncropped_image(row[4])
-    if principle:
-        from wf1_documents import uncropped_image
-        kept = []
-        film_seen = False
-        film_sources = set(principle.get("film_sources") or [])
-        if principle.get("film_source"):
-            film_sources.add(principle["film_source"])
-        for row in ins:
-            rec = row[4]
-            if rec.get("page") and rec["page"] == principle.get("cover_source"):
-                row = [*row[:4], dict(uncropped_image(rec),reframe=True)]
-            elif row[2] == "clip" and (
-                    (rec.get("source") or {}).get("url") or rec.get("page")) in film_sources:
-                if film_seen:
-                    continue
-                film_seen = True
-                row = [row[0], min(row[1],row[0]+2*FPS), *row[2:]]
-                row[4] = dict(rec,film_example=principle.get("film_label") or row[3])
-            kept.append(row)
-        ins = kept
     for row in ins:                                      # a clip the check cut clear of another editor's text is a new file
         if row[4]["path"] not in keys:
             keys[row[4]["path"]] = (P.video if row[2] == "clip" else P.image)(asset_id("v" if row[2]=="clip" else "p",row[4]), row[4])
@@ -1490,29 +1047,22 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             # (worker/score/sound_screen.py)
             P.assets[keys[row[4]["path"]]]["foley"] = str(row[4]["foley"])
     coverage_report = require_coverage(ins, coverage, f_end/FPS, final=archive is not None or bool(d.get('coverage_final')))
+    if dr:
+        placed = [dict(rec, f=[lo, hi], seg=seg_at(lo)) for lo,hi,_,_,rec in ins]
+        take_edges = sorted({0, f_end, *(f for r in placed + source_shots for f in r["f"] if 0 < f < f_end)})
+        on_take = [dict(f=[lo,hi]) for lo,hi in zip(take_edges,take_edges[1:])
+                   if not any(r["f"][0] <= lo < r["f"][1] for r in placed)]
+        secs = sections_for(placed + on_take)
+        dr = dict(dr, sections=[section for _,_,section in secs])
     past = {int(i) for i in d.get("past_segs") or [] if isinstance(i, int)}
     cut_pts, drive_ids, mono_spans, bright = [], set(), [], []
     # Match inserts locally in bleed(); the interview anchors the programme-wide grade.
     look_pics = [take["still"]] if take.get("still") else []
     tcuts = [pc["f"][0] for pc in pieces[1:]]          # the take's own cuts and its cuts between speakers, in film frames
     from wf1_coverage import speaker_moves, move_frame
-    composed_spans = [r[:2] for r in ins] + [[lo,hi] for lo,hi,_ in speakers] + [list(span) for span in source_pages]
+    composed_spans = [r[:2] for r in ins] + [[lo,hi] for lo,hi,_ in speakers]
     composed_spans.extend([a,b] for a,b in returns)
-    composed_spans.extend([a,b] for a,b,p in timed_facts if p.get("scope_cue") or p.get("sequence_kind") == "handoff")
-    # A short establishing cut plus a source reading already accounts for the whole cue.
-    # Reuse the Director's camera moves where every other window has a live return.
-    established = set()
-    if any(r.get("original") for r in readings):
-        for a,b,_,_,rec in ins:
-            i = rec.get("window")
-            if type(i) is int and 0 <= i < len(coverage["windows"]):
-                w = coverage["windows"][i]
-                if a <= round(w["t0"]*FPS)+LEAD_F and b >= round(w["t1"]*FPS)+LEAD_F:
-                    established.add(i)
-    covered_reading = reading_plan and all(i in established or w.get("publisher_camera") or w.get("on_take")
-                                           for i,w in enumerate(coverage["windows"]))
-    if (reporting_span == (0,f_end)) or (demo and demo["first"] == 0 and demo["last"] == len(clock.words)-1 and not coverage["windows"]) or covered_reading or (record and not coverage["windows"]) or (thought and all(w.get("on_take") for w in coverage["windows"])) or (coverage.get("episode_examples") and not coverage["windows"]) or (coverage.get("callback") and not coverage.get("windows") and not rejected_pairs
-            and any(r[4].get("episode_excerpt") for r in ins)):
+    if (demo and demo["first"] == 0 and demo["last"] == len(clock.words)-1 and not coverage["windows"]):
         # Both the local demo and the remaining camera passages landed on their directed words.
         resolved_moves,move_spend = coverage.get("moves", []), []
     else:
@@ -1554,117 +1104,6 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         coverage_report["authored_pages"]=dict(spans=pages,cleared_f=cleared)
     # A short program citation can share the live closing interview. Longer verbatim
     # excerpts retain their dedicated reading surface.
-    live_citations = {(a,b) for a,b,p in timed_facts if p["last"] == len(clock.words)-1
-                      and all(f.get("perspective") and (f.get("program_entry") or not f.get("excerpt")) for f in p["facts"])}
-    live_citations.update((a,b) for a,b,p in timed_facts if len(p["facts"]) == 1
-                          and p["facts"][0].get("perspective", {}).get("stance") == "concern"
-                          and p["facts"][0].get("excerpt"))
-    gestures = [(a,b,p["analogy_step"]) for a,b,p in timed_facts if (p.get("analogy_step") or {}).get("gesture")]
-    # In one camera shot, establish the demonstrator’s framing during the lead-in
-    # so a hand already in motion is visible before its next verbal label.
-    for a,b,page in timed_facts:
-        if page.get("analogy_step") and not page["analogy_step"].get("gesture"):
-            next_gesture = next((step for lo,hi,step in gestures if lo == b), None)
-            if next_gesture:
-                shot = next((s for s in tshots if s["t0"] <= (b-LEAD_F)/FPS < s["t1"]), None)
-                if shot:
-                    gestures.append((max(a,round(shot["t0"]*FPS)+LEAD_F),b,next_gesture))
-    # Fit all visible gesture extents from this source shot once, including its setup.
-    # A definition or independent reading can still use its approved seat on the same words.
-    study_seats = []
-    for lo, hi, comparison in research_views:
-        for shot in tshots:
-            start = round(shot["t0"] * FPS) + LEAD_F
-            end = round(shot["t1"] * FPS) + LEAD_F
-            regions = [step["box"] for step in comparison.get("steps", []) if step.get("gesture")
-                       and step.get("box") and start <= word_frame(step["at"])+1 < end]
-            if regions:
-                from scene.motion import gesture_region
-                crop = gesture_region(regions, [face["box"] for face in shot.get("faces", [])])
-                study_seats.append((max(lo,start), min(hi,end), crop))
-    dated_spans = {(a,b) for a,b,p in timed_facts if any(f.get("record") for f in p["facts"])}
-    live_citations.update(phase_spans)
-    live_citations.update(publisher_spans)
-    live_citations.update(dated_spans)
-    comparison_landings = {word_frame(p["sequence"][-1]["at"]): b for a,b,p in timed_facts
-                           if p.get("sequence_kind") == "comparison"}
-    hypotheticals = [w["interview_hypothetical"] for w in coverage["windows"] if w.get("interview_hypothetical")]
-    closing_estimates = {word_frame(p["estimate_landing"]): f_end for _,_,p in timed_facts
-                         if p.get("estimate_landing") is not None}
-    comparison_landings.update({a:b for a,b,p in timed_facts if p.get("analogy_step")})
-    if source_pages:
-        pinned = [row for row in ins if row[4].get("approved_crop") and
-                  any(lo < row[1] and row[0] < hi for lo,hi in publisher_spans)]
-        ins, _ = _director().hold_take([row for row in ins if row not in pinned], source_pages, min_f=1, fps=FPS)
-        ins = sorted(ins+pinned, key=lambda row:row[0])
-    import wf1_evidence_reading
-    references = (sup.get("referent_research") or coverage.get("research_context") or {}).get("references", [])
-    ins = wf1_evidence_reading.seat(ins, coverage, references, word_frame, len(clock.words), f_end)
-    readings = [(a,b,r) for a,b,_,_,r in ins if r.get("spoken_reading")]
-    for lo,hi,rec in readings:
-        window = coverage["windows"][rec["window"]]
-        remaining = []
-        for a,b,page in timed_facts:
-            facts = page["facts"]
-            if (len(facts) == 1 and facts[0].get("example") and facts[0]["source"].get("url") == rec.get("page")
-                    and window["first"] <= page["first"] <= page["last"] <= window["last"]):
-                continue
-            if opinion_byline(facts) and a < hi and lo < b:
-                remaining.extend((x,y,page) for x,y in ((a,min(b,lo)),(max(a,hi),b)) if x < y)
-            else:
-                remaining.append((a,b,page))
-        timed_facts = remaining
-    # Bind the compact editorial reading to the selected source slices, after device holds.
-    # On a rebuilt edit only a change in those pixels, words or claims needs another reading.
-    import wf1_field_report
-    account = wf1_field_report.account(d)
-    report = {}
-    report_cards = []
-    if account and read_report:
-        report, cost = read_report(account, clock.words, ins)
-        placement_report["spend"].extend(cost)
-    if report:
-        recall = account["recall"]
-        scope = account["estimate"]
-        turn, outcome = word_frame(report["workflow_at"]), word_frame(report["outcome_at"])
-        end = min(f_end, Clock.f(clock.words[recall["last"]]["t1"]))
-        credit = scope["speaker"] + "’s conversations with " + scope["subject"]
-        question_start = word_frame(account["question"]["first"])
-        report_cards.extend([(question_start,turn,"",credit,""),
-                             (turn,outcome,report["workflow"],"Core workflow · Illustration",""),
-                             (outcome,end,"",credit,"")])
-        evidence_spans = []
-        retained = []
-        report["illustrated"] = []
-        for i,(a,b,kind,name,rec) in enumerate(ins):
-            illustration = report["pictures"].get(i)
-            if not illustration:
-                retained.append([a,b,kind,name,rec])
-                continue
-            evidence_spans.append((a,b))
-            if illustration["kind"] == "illustration":
-                report["illustrated"].append(dict(window=rec.get("window"), f=[a,b], title=illustration["title"]))
-                report_cards.append((a,b,illustration["body"],"Illustration · "+illustration["title"],""))
-            else:
-                retained.append([a,b,kind,name,dict(rec, field_example=illustration)])
-        ins = retained
-        def carries_other_evidence(a,b,page):
-            facts = page["facts"]
-            if len(facts) != 1:
-                return True
-            fact = facts[0]
-            if (fact.get("chain") or {}).get("stance") == "recollection" and fact.get("attribution") == recall["speaker"] and page["first"] == recall["first"]:
-                return False
-            if fact.get("source",{}).get("url") != script.get("source_url") or fact.get("chain"):
-                return True
-            # A verbatim slice can be read in its original timed caption over the example.
-            value = [F.norm_word(w) for w in str(fact.get("value","")).split()]
-            spoken = [F.norm_word(w["w"]) for w in clock.words[page["first"]:page["last"]+1]]
-            repeats = value and any(spoken[i:i+len(value)] == value for i in range(len(spoken)))
-            return not (repeats and any(lo < b and a < hi for lo,hi in evidence_spans))
-        timed_facts = [(a,b,page) for a,b,page in timed_facts if carries_other_evidence(a,b,page)]
-        report_spans.extend((a,b) for a,b,*_ in report_cards)
-    # Reserve picture space for actual multi-line performances on the speaker.
     # Read the same hold and word clock as the palette, including its implicit exit.
     said = [[w["w"], Clock.f(w["t0"])-1, Clock.f(w["t1"]), int(w["seg"])] for w in clock.words]
     stacks = []
@@ -1678,54 +1117,6 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         entry = min(line["at"] for line in lines) if all(isinstance(line.get("at"), int) for line in lines) else first
         stacks.append((max(0, max(first,entry)-8), min(f_end,end+8), ask["id"]))
 
-    def quote_panel(fa, fb, clock_start):
-        # The original camera can cut to a listener halfway through one speaker's account.
-        # The preceding complete sentence takes its own cited reading interval.
-        complete = [i for i,(_,end) in enumerate(clock.segs) if end <= clock_start+.12]
-        if not script.get("source_credit"):
-            return False
-        segment = complete[-1] if complete else 0
-        if segment not in (reading.get('quote_segments') or []):
-            return False
-        claim = next((c for c in d.get("claims") or [] if clock.words[c["first"]]["seg"] <= segment
-                      <= clock.words[c["last"]]["seg"]), None)
-        line = claim["report"] if claim else str(script["segments"][segment]["say"]).strip()
-        if not complete:
-            # Open a listener shot on the attributed words being heard, until
-            # the interview cuts to the actual speaker. Use the whole off-camera
-            # phrase even when a finish divides that source shot into two pieces.
-            off = next((r for r in coverage.get("off_camera", []) if r["first"] == 0), None)
-            if not off:
-                return False
-            claim = None
-            phrase = [w["w"] for w in clock.words[:off["last"]+1]]
-            punctuated = [i+1 for i,w in enumerate(phrase) if w.endswith((",", ".", "?", "!", ";"))]
-            line = " ".join(phrase[:punctuated[-1]] if punctuated else phrase).rstrip(",;")
-        if not line:
-            return False
-        P.page([fa,fb],"#171B23","#0D1015",grain=.018)
-        source_time = script.get("source_start", 0) + clock.segs[segment][0] - LEAD_F/FPS
-        stamp = int(source_time)
-        citation = f'{script["source_credit"]}  ·  {stamp//60}:{stamp%60:02d}'
-        if claim:
-            label = wf1_display.ESTIMATE_LABELS.get(claim.get("stance"))
-            byline = f'{claim["speaker"]} · {label}' if label else f'{claim["speaker"]} reports'
-        else:
-            byline = next((s.get("speaker") for s in script.get("speaking_turns", [])
-                           if all(type(s.get(k)) in (int,float) for k in ("start","end"))
-                           and s["start"] < script.get("source_start",0)+clock.segs[segment][1] and source_time < s["end"]), "") or ""
-        credit = "  ·  ".join(filter(None,(byline,citation)))
-        # The quotation reaches the screen; its byline, stance and citation stay in the record (quoted_source).
-        wf1_display.reading_card(P,(fa,fb),line if claim else "“"+line+"”","","",pal,centre=.46)
-        # A short opening quotation hands the rest of the sentence back to
-        # the ordinary timed captions, even while the quotation stays up.
-        quoted_end = fb if complete else min(fb, Clock.f(clock.words[(punctuated[-1] if punctuated else len(phrase))-1]["t1"]))
-        if quoted_end > fa:
-            reading_spans.append((fa,quoted_end))
-        record = dict(report=line, chain=claim) if claim else dict(quote=line)
-        coverage_report.setdefault("quoted_source", []).append(dict(record, f=[fa,fb], credit=credit,
-                                                                      url=script.get("source_url")))
-        return True
 
     from functools import lru_cache
     @lru_cache(maxsize=8)
@@ -1741,14 +1132,6 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             return cv2.resize(frame,(320,180)) if ok else None
         finally:
             capture.release()
-
-    interview_camera = None
-    if personal_accounts and not timed_facts and reading.get("authored_shots") and not reading.get("inserts"):
-        from wf1_interview_frame import interview_cameras, place
-        interview_camera = interview_cameras(take["path"], tuple(tuple(s) for s in reading["authored_shots"]))
-
-    def on_study_reading(frame):
-        return any(lo <= frame < hi and not page.get("analogy_step") for lo,hi,page in timed_facts)
 
     def take_shot(a, b):
         """The take between pictures: each framing on the one who speaks it, cut where the show cut and where the
@@ -1782,35 +1165,12 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         reactions = [(word_frame(r["first"]), Clock.f(clock.words[r["last"]]["t1"]))
                      for r in reading.get("reactions", [])]
         layout_edges = [round(t*FPS)+LEAD_F for shot in authored for t in shot]
-        if argument:
-            layout_edges.extend([word_frame(argument["first"]), word_frame(argument["close"]), argument_end])
-        if record_span:
-            layout_edges.extend((*record_span, word_frame(record["question"][0])))
-        layout_edges.extend(f for start,end,_ in thought_spans for f in (start,end))
         layout_edges.extend(f for span in reactions+returns for f in span)
         layout_edges.extend(f for lo,hi,_ in entries+closing for f in (lo,hi))
         if demo_span:
             layout_edges.extend(demo_span)
         layout_edges.append(turn_f if turn_f is not None else f_last)
-        layout_edges.extend(f for span in report_spans for f in span)
-        layout_edges.extend(f for lo,hi,_ in gestures for f in (lo,hi))
-        if contrast:
-            layout_edges.extend(word_frame(contrast[k]) for k in ("item_at","gesture","after"))
-            layout_edges.append(contrast_return)
-            detail = contrast.get("detail")
-            if detail:
-                layout_edges.extend((word_frame(detail["first"]), word_frame(detail["last"]+1) or f_end))
-        layout_edges.extend(f for lo,hi,_ in study_seats for f in (lo,hi))
-        for start, end, dial in instrument_scenes:
-            layout_edges.extend((start, end, word_frame(dial["at"]["w"]),
-                                 word_frame((dial.get("until") or dial["at"])["w"]+1) or end))
         layout_edges.extend(end for _,end in depth_spans)
-        layout_edges.extend(frame for span in case_payoffs for frame in span)
-        layout_edges.extend(comparison_landings)
-        if tenure_span:
-            layout_edges.extend(tenure_span)
-        layout_edges.extend(closing_estimates)
-        layout_edges.extend(f for start,(end,_,_) in live_beats.items() for f in (start,end))
         layout_edges.extend(f for lo,hi,_ in speakers for f in (lo,hi))
         # Only follow the closing presenter while their tracked face is still on camera.
         tail_frame = None
@@ -1826,82 +1186,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         for fa, fb in zip(edges, edges[1:]):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
-            if argument and word_frame(argument["first"]) <= fa < argument_end:
-                from scene.motion import fit_panel
-                caveat = fa >= word_frame(argument["close"])
-                rail = dict(source_ink=[[.12,.625,.88,.65]],caption_baseline=.88) if caveat else {}
-                P.page([fa,fb],"#14171B",grain=0,**rail)
-                if not caveat:
-                    full = [0,0,1,1]
-                    box = fit_panel(full,(take["w"],take["h"]),(W,H),[0,.12,1,.50])
-                    P.card([fa,fb],pieces[k]["key"],box,crop=full,src=[t0,t1],speaker_panel=True,
-                           source_ink=[box],caption_baseline=.88)
-                cut_pts.append(fa)
-                continue
-            if tenure_span and tenure_span[0] <= fa < tenure_span[1]:
-                from scene.motion import fit_panel
-                full = [0.,0.,1.,1.]
-                box = fit_panel(full,(take["w"],take["h"]),(W,H),[0,.09,1,.55])
-                P.page([fa,fb],"#14171B",grain=0)
-                P.card([fa,fb],pieces[k]["key"],box,crop=full,src=[t0,t1],source_ink=[box],
-                       speaker_panel=True,caption_baseline=.89)
-                cut_pts.append(fa)
-                continue
-            if (any(start <= fa < word_frame(p["estimate_landing"]) for start,_,p in timed_facts
-                    if p.get("estimate_landing") is not None) and pieces[k]["who"] == "speaker"):
-                face = max(meta[pieces[k]["key"]].get("faces",[]),key=lambda r:r[2]*r[3],default=None)
-                if face:
-                    from scene.motion import fit_panel
-                    crop = F.cover_crop(take["w"],take["h"],1.02,(face[0]+face[2]/2,.5),(.5,.5))
-                    box = fit_panel(crop,(take["w"],take["h"]),(W,H),[0,.065,1,.63])
-                    P.page([fa,fb],"#14171B",grain=0)
-                    P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],speaker_panel=True,
-                           source_ink=[box],caption_baseline=.88)
-                    continue
-            if any(lo <= fa < hi for lo,hi in closing_estimates.items()):
-                from scene.motion import fit_panel
-                # Let the verdict land on its spoken quantity, with the original
-                # shoulders and hands in view and the source running at unit speed.
-                box = fit_panel([0,0,1,1], (take["w"],take["h"]), (W,H), [0,.15,1,.67])
-                P.page([fa,fb],"#14171B",grain=0)
-                P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],crop=[0,0,1,1],
-                       speaker_panel=True,source_ink=[box],caption_baseline=.88)
-                continue
-            instrument = next((dial for lo,hi,dial in instrument_scenes if lo <= fa < hi), None)
-            if instrument:
-                active = word_frame(instrument["at"]["w"]) <= fa < (
-                    word_frame((instrument.get("until") or instrument["at"])["w"]+1) or f_end)
-                portrait = next((r for r in reading.get("speaker_inserts", [])
-                                 if r["shot"][0] <= (t0+t1)/2 < r["shot"][1]
-                                 and word_frame(r["first"]) <= fa < (word_frame(r["last"]+1) or f_end)), None)
-                if portrait or active:
-                    from scene.motion import fit_panel
-                    from wf1_source_frame import presenter_card
-                    tile = portrait["tile"] if portrait else [0,0,1,1]
-                    x,y,r,bottom = tile
-                    # Leave a small inset inside the documented feed, clear of adjacent webcams.
-                    dx,dy = .024*(r-x), .024*(bottom-y)
-                    crop = [x+dx, y+dy, r-dx, bottom-dy] if portrait else tile
-                    seat = [0,.09,1,.49] if active else [0,.13,1,.73]
-                    box = fit_panel(crop,(take["w"],take["h"]),(W,H),seat)
-                    P.page([fa,fb],"#152126",grain=0)
-                    presenter_card(P,[fa,fb],pieces[k]["key"],box,tile,crop,[t0,t1],sup["work"],sup["ffmpeg"],
-                                   decode_region if portrait else None,presenter_insert=True,source_ink=[box],caption_baseline=.88)
-                    cut_pts.append(fa)
-                    continue
-            if contrast and any(lo <= fa < hi for lo,hi in live_example):
-                faces = [face["box"] for face in pieces[k]["faces"] if face.get("box")]
-                acted.live_picture(P,contrast,word_frame,[fa,fb],[t0,t1],pieces[k]["key"],take,
-                                   (W,H),faces,returning=fa >= contrast_return)
-                cut_pts.append(fa)
-                continue
-            on_reporting = reporting_span and reporting_span[0] <= fa < reporting_span[1]
-            on_approval = approval_span and approval_span[0] <= fa < approval_span[1]
-            on_case = any(lo <= fa < hi for lo,hi in case_payoffs)
-            if on_case or on_reporting or on_approval or (demo_span and demo_span[0] <= fa < demo_span[1]):
+            if demo_span and demo_span[0] <= fa < demo_span[1]:
                 from scene.motion import fit_panel
                 crop = [0,0,1,1]
-                seat = [0,.10,1,.48] if on_case or on_reporting or on_approval else [0,.09,1,.52]
+                seat = [0,.09,1,.52]
                 box = fit_panel(crop, (take["w"],take["h"]), (W,H), seat)
                 P.page([fa,fb],"#14171B",grain=0)
                 P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],source_frame=True,
@@ -1915,8 +1203,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     from scene.motion import fit_panel
                     box = fit_panel([0,0,1,1], (take["w"],take["h"]), (W,H), [0,.13,1,.47])
                     P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],crop=[0,0,1,1],caption_baseline=.88)
-                wf1_display.reading_card(P,[fa,fb],entry["speaker"],"Speaking off camera","",pal,
-                                         centre=.62 if entry["reaction"] else .45, group="incoming-voice")
+                P.word([fa,fb], entry["speaker"], "lab", .5, .62 if entry["reaction"] else .45,
+                       pal["ink"], align="c", role="name")
                 continue
             close_crop = next((crop for lo,hi,crop in closing if lo <= fa < hi), None)
             if close_crop and not any(lo <= fa < hi for lo,hi in reactions):
@@ -1930,113 +1218,11 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],speaker_panel=True,
                        closing_view=True,source_ink=[box],caption_baseline=.88)
                 continue
-            on_report = any(lo <= fa < hi for lo,hi in report_spans)
-            live = next((role for lo,(hi,role,_) in live_beats.items() if lo <= fa < hi), None)
-            thought_role = next((role for lo,hi,role in thought_spans if lo <= fa < hi), None)
-            # Give the take's measured speaking face the setup and the space above its record.
-            in_record = record_span and record_span[0] <= fa < record_span[1]
-            if in_record and pieces[k]["who"] == "speaker" and (on_report or fa < word_frame(record["question"][0])):
-                from scene.motion import Cam
-                info = meta[pieces[k]["key"]]
-                if info["faces"]:
-                    face = info["faces"][0]
-                    split = any(lo <= (t0+t1)/2 < hi for lo,hi in authored)
-                    height = .43 if on_report else .55 if split else .79
-                    box = [0, .065, 1, .065+height]
-                    camera = Cam(info["pw"], info["ph"], W/(height*H), W, info["max_up"])
-                    crop = camera.on_face(face[:4], height=.77 if split else .65, eyes=face[4])
-                    P.page([fa,fb], "#14171B", grain=0)
-                    P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],source_ink=[box],
-                           speaker_panel=True,caption_baseline=.88)
-                    cut_pts.append(fa)
-                    continue
-            gesture = next((step for lo,hi,step in gestures if lo <= fa < hi), None)
-            study_crop = next((crop for lo,hi,crop in study_seats if lo <= fa < hi), None)
-            if gesture or (study_crop and not on_study_reading(fa)):
-                from scene.motion import fit_panel
-                crop = study_crop or gesture.get("box")
-                if not (isinstance(crop,list) and len(crop)==4 and all(type(v) in (int,float) for v in crop)
-                        and 0 <= crop[0] < crop[2] <= 1 and 0 <= crop[1] < crop[3] <= 1):
-                    crop = [0,0,1,1]
-                box = fit_panel(crop,(take["w"],take["h"]),(W,H),[0,.05,1,.58])
-                P.page([fa,fb],"#14171B",grain=0)
-                P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],source_frame=True,
-                       source_ink=[box],caption_baseline=.88)
-                cut_pts.append(fa)
-                continue
-            if thought_role == "citation":
-                P.page([fa,fb], "#EFE9DD", grain=.015)
-                bright.append((fa,fb))
-                cut_pts.append(fa)
-                continue
-            if (thought_role in ("definition","scale","landing","alternative","alternative_detail","payoff")
-                    and pieces[k]["who"] == "speaker" and meta[pieces[k]["key"]]["faces"]):
-                from scene.motion import Cam
-                info = meta[pieces[k]["key"]]
-                face = max(info["faces"], key=lambda box:box[2]*box[3])
-                height = {"definition":.44, "scale":.45, "landing":.59, "alternative":.64, "alternative_detail":.49, "payoff":.73}[thought_role]
-                box = [0,.06,1,.06+height]
-                camera = Cam(info["pw"], info["ph"], W/(height*H), W, info["max_up"])
-                crop = camera.on_face(face[:4], height=.75, eyes=face[4])
-                paper = thought_role in ("landing","alternative_detail")
-                if paper:
-                    bright.append((fa,fb))
-                ground = "#EFE9DD" if paper else "#112D39" if thought_role == "scale" else "#101A22"
-                P.page([fa,fb], ground, grain=0)
-                P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],crop=crop,source_ink=[box],
-                       speaker_panel=True,caption_baseline=.86)
-                cut_pts.append(fa)
-                continue
-            if any(lo <= fa < hi for lo, hi in phase_spans):
-                # Use the original wide frame above the source, including a second participant
-                # when the interview cuts to a two-shot. Keep the lower seat for the spoken cue.
-                from scene.motion import fit_panel
-                box = fit_panel([0,0,1,1], (take["w"],take["h"]), (W,H), [0,.10,1,.49])
-                P.page([fa,fb], "#14171B", grain=0)
-                P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],source_ink=[box],
-                       speaker_panel=True,caption_baseline=.87)
-                cut_pts.append(fa)
-                continue
-            if any(lo <= fa < hi for lo,hi in publisher_spans):
-                # The shot reader selected the speaking face, including its tile in a wide shot.
-                from scene.motion import Cam, fit_panel
-                info = meta[pieces[k]["key"]]
-                face = next(iter(info["faces"]), None)
-                box = [.04,.035,.96,.42]
-                if any(lo <= fa < hi for lo,hi in credited_spans):
-                    box = [.04,F.MARK[3]+.015,.96,.523]
-                if face:
-                    cam = Cam(info["pw"], info["ph"], .92*W/((box[3]-box[1])*H), .92*W, info["max_up"])
-                    crop = cam.on_face(face[:4], height=.64, eyes=face[4])
-                else:
-                    crop = [0,0,1,1]
-                    box = fit_panel(crop,(take["w"],take["h"]),(W,H),box)
-                P.page([fa,fb],"#14171B",grain=0)
-                P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],speaker_panel=True,
-                       source_ink=[box],caption_baseline=.89)
-                cut_pts.append(fa)
-                continue
-            if any(lo <= fa < hi for lo, hi in dated_spans) and pieces[k]["who"] == "speaker":
-                # Keep the full camera height for the gesture, beside the short source reading.
-                face = max(meta[pieces[k]["key"]].get("faces", []), key=lambda q: q[2]*q[3], default=None)
-                if face and len(tshots[pieces[k]["cut"]].get("faces") or []) <= 1 and not reading.get("inserts"):
-                    focus = (face[0] + face[2]/2, .5)
-                    box = [0, .025, 1, .515]
-                    crop = F.cover_crop(take["w"],take["h"],W/(.49*H),focus,(.5,.5))
-                    P.page([fa,fb],"#14171B",grain=0)
-                    P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],speaker_panel=True,
-                           source_ink=[box],caption_baseline=.88)
-                    cut_pts.append(fa)
-                    continue
-            if any(lo <= fa < hi and (lo,hi) not in live_citations for lo,hi in source_pages):
-                P.page([fa,fb],"#14171B",grain=0)
-                cut_pts.append(fa)
-                continue
             tile = next((tile for lo,hi,tile in speakers if lo <= fa < hi), None)
-            if tile and not live:
+            if tile:
                 from scene.motion import fit_panel
                 from wf1_source_frame import presenter_card
-                seat = [0,.04,1,.48] if on_report else [0,.08,1,.82]
+                seat = [0,.08,1,.82]
                 dest = fit_panel(tile,(take['w'],take['h']),(W,H),seat)
                 P.page([fa,fb],"#151A20",grain=0)
                 presenter_card(P,[fa,fb],pieces[k]['key'],dest,tile,tile,[t0,t1],
@@ -2045,66 +1231,24 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 continue
             authored_span = next(((start, end) for start, end in authored if start <= (t0+t1)/2 < end), None)
             close_start = turn_f if turn_f is not None else f_last
-            if interview_camera and not on_report:
-                piece = pieces[k]
-                shot = tshots[piece["cut"]]
-                camera = interview_camera(tuple(authored_span or (shot["t0"], shot["t1"])))
-                if place(P,[fa,fb],piece["key"],[t0,t1],meta[piece["key"]],camera,(W,H)):
-                    cut_pts.append(fa)
-                    continue
             closing_speaker = (authored_span and fa >= close_start - FPS
                                and (round(authored_span[0]*FPS)+LEAD_F >= close_start or
                                     round(authored_span[1]*FPS)+LEAD_F >= f_voice_end)
                                and pieces[k]["who"] == "speaker" and meta[pieces[k]["key"]]["faces"]
                                and not any(lo <= fa < hi for lo, hi in reactions))
-            comparison_outcome = any(lo <= fa < hi for lo,hi in comparison_landings.items())
-            illustrating = any(lo <= fa < hi and p.get("principle_plate") for lo,hi,p in timed_facts)
-            if (closing_speaker or comparison_outcome or illustrating) and on_report and not live and meta[pieces[k]["key"]]["faces"]:
-                # Keep the citation's reading surface below the live presenter.
-                from scene.motion import Cam
-                info = meta[pieces[k]["key"]]
-                box = [.05, .06, .95, .56] if comparison_outcome else [.05, .10, .95, .47]
-                camera = Cam(info["pw"], info["ph"], .90*W/((box[3]-box[1])*H), .90*W, info["max_up"])
-                face = max(info["faces"], key=lambda f: f[2]*f[3])
-                crop = camera.on_face(face[:4], height=.68)
-                P.page([fa,fb], "#14171B", grain=0)
-                P.card([fa,fb], pieces[k]["key"], box, crop=crop, src=[t0,t1],
-                       speaker_panel=True, source_ink=[box], caption_baseline=.88)
-                cut_pts.append(fa)
-                continue
-            returning = any(lo <= fa < hi for lo,hi in returns)
-            if (reading_plan and authored_span and pieces[k]["who"] == "speaker" and not on_report
-                    and (closing_speaker or authored_span[0] == 0) and meta[pieces[k]["key"]]["faces"]):
-                # In a show's composite, keep the live portrait above a separate caption seat.
-                # A portrait cover of the whole landscape would also magnify the show's lower third.
-                from scene.motion import fit_panel
-                face = meta[pieces[k]["key"]]["faces"][0]
-                from scene.continuity import portrait_region
-                crop = portrait_region(face, (take["w"],take["h"]), composite_frame(tuple(authored_span)))
-                box = fit_panel(crop,(take["w"],take["h"]),(W,H),[0,.08,1,.79])
-                P.page([fa,fb],"#14171B",grain=0)
-                P.card([fa,fb],pieces[k]["key"],box,crop=crop,src=[t0,t1],speaker_panel=True,
-                       source_ink=[box],caption_baseline=.87)
-                cut_pts.append(fa)
-                continue
-            if on_report or returning or (authored_span and not closing_speaker):
+            if authored_span and not closing_speaker:
                 # The source cut is already a composition. Fit all panels and both original
                 # credit corners together, with an independent ground for the caption.
                 aspect = take["w"]/take["h"]
-                max_height, centre = (.38, .29) if on_report else (.70, .46)
-                if live == "turn":
-                    centre = .43
+                max_height, centre = (.70, .46)
                 width = min(1., max_height * H / W * aspect)
                 height = width * W / H / aspect
                 box = [.5-width/2, centre-height/2, .5+width/2, centre+height/2]
                 P.page([fa,fb],"#14171B",grain=0)
                 P.card([fa,fb],pieces[k]["key"],box,src=[t0,t1],crop=[0,0,1,1],
-                       source_frame=True,caption_baseline=.88 if on_report else min(.91,box[3]+.10))
+                       source_frame=True,caption_baseline=min(.91,box[3]+.10))
                 coverage_report.setdefault("authored_source",[]).append(dict(f=[fa,fb],url=script.get("source_url"),
                     publisher=script.get("source_credit"),start=script.get("source_start",0)+t0,box=box))
-                cut_pts.append(fa)
-                continue
-            if pieces[k]["who"] == "listener" and not in_record and quote_panel(fa,fb,t0):
                 cut_pts.append(fa)
                 continue
             stack = next((span for span in stacks if span[0] <= fa < span[1]), None)
@@ -2126,7 +1270,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                     centre = sum(head)/2
                 left = max(0., min(1.-width, centre-width/2))
                 full = [left, 0., left+width, 1.]
-                box = fit_panel(full, (info["pw"],info["ph"]), (W,H), [0,.10,1,.56 if on_report else .80])
+                box = fit_panel(full, (info["pw"],info["ph"]), (W,H), [0,.10,1,.80])
                 P.page([fa,fb], "#171B23", "#0D1015", grain=.018)
                 P.card([fa,fb], pieces[k]["key"], box, src=[t0,t1], crop=full, source_frame=True,
                        caption_baseline=.87)
@@ -2168,7 +1312,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                    sup['work'],sup['ffmpeg'],decode_region,source_ink=[[0,0,1,height]],caption_baseline=.87)
                     cut_pts.append(fa)
                     continue
-            kw = dict(grade=dict(TAKE_PAST)) if any(s0 <= fa < s1 for s0, s1 in take_past) else {}
+            kw = {}
             prev = P.items[-1] if P.items else None
             if (prev is not None and prev["id"] in drive_ids and prev["pic"] == pieces[k]["key"] and prev["f"][1] == fa
                     and abs(prev["src"][1] - t0) < 1e-3 and set(prev) == {"id","k","f","pic","src",*kw}
@@ -2187,18 +1331,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     # a story that is all past keeps its colour (round1 default-design: 11 of 12 films had no section finish)
     spoken_s = [max(clock.segs[i][1] - clock.segs[i][0], 0.0) for i in range(nseg)]
     past_share = sum(spoken_s[i] for i in past if 0 <= i < nseg) / max(sum(spoken_s), 1e-6)
-    by_section = 0.0 < past_share <= 0.6
-    # with a director the sections it prints in black and white are the mono ones, whatever the style; else the style's rule
-    mono_dir = [(a_, min(b_, f_voice_end)) for a_, b_, s_ in secs if str(s_.get("surface")).lower() in ("mono", "gate") and
-                min(b_, f_voice_end) - a_ >= 12] if secs else None
-    # the take itself takes the section's finish too (low saturation while he tells of the past), cut at the joins
-    take_past = (mono_dir if mono_dir is not None else
-                 section_spans(past, seg_f, f_voice_end) if st["mono"] == "past" and by_section else [])
-
-    def is_mono(f0):
-        if mono_dir is not None:
-            return any(a_ <= f0 < b_ for a_, b_ in mono_dir)
-        return st["mono"] == "all" or (st["mono"] == "past" and by_section and seg_at(f0) in past)
+    take_past = []  # the current interview remains in its own time
+    def is_mono(frame):
+        return any(a <= frame < b and s.get("surface") == "mono" for a,b,s in secs)
 
     def note(f0, f1, kind, name, rec, mode):
         # origin: the candidate this picture is (a copy the check cut clear of another editor's text is placed under a
@@ -2254,7 +1389,14 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             kw["look"] = "mono_silver"
         P.shot([f0, f1], key, F.cover_crop(pw_, ph_, W / H, (0.5, 0.45), (0.5, 0.40)), **kw)
 
+    def frame_meaning(f0, f1, kind, name, rec, key):
+        geometry = F.placed_evidence(P,[f0,f1],key,rec,rec["meaning_box"],size=(W,H))
+        note(f0,f1,kind,name,rec,geometry["mode"])
+        P.pictures[-1].update(source_crop=geometry["crop"], **geometry)
+
     def window(f0, f1, kind, name, rec, key, source_ink=()):
+        if rec.get("meaning_box"):
+            return frame_meaning(f0, f1, kind, name, rec, key)
         # A verified action's row already ends where the action ends (wf1_coverage.action_holds); the take returns
         # after it, and the row's credits end with it.
         n = f1 - f0
@@ -2326,6 +1468,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             P.pictures[-1]["dialog_crop"] = dialog
 
     def document(f0, f1, kind, name, rec, key):
+        if rec.get("meaning_box"):
+            return frame_meaning(f0, f1, kind, name, rec, key)
         from scene.motion import fit_panel
         from wf1_documents import recorded_detail, valid_detail
 
@@ -2345,23 +1489,14 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         full = [0., 0., 1., 1.]
         crop = detail if figure and not rec.get("reframe") else full
         result_start = f0
-        route_example = next((p for a,b,p in timed_facts if p.get("route_example") and a < f1 and f0 < b
-                              and p["facts"][0]["source"].get("url") == rec.get("page")), None)
-        if route_example and not rec.get("reframe") and figure:
-            # The actual request occupies one detail seat while the same camera clock
-            # continues above it. The receiving teams belong to the speaker's diagram.
-            source_box = fit_panel(full,(take["w"],take["h"]),(W,H),[0,.095,1,.41])
-            src = [max(0,(f-LEAD_F)/FPS) for f in span]
-            P.card(span,pieces[0]["key"],source_box,crop=full,src=src,source_ink=[source_box],caption_baseline=.88)
-            view(crop,[.045,.416,.955,.524],span,document_excerpt=True,look=None,grade=dict(gain=1.))
-        elif figure or rec.get("reframe"):
+        if figure or rec.get("reframe"):
             from scene.motion import document_figure, contextual_detail
-            below = .50 if any(lo < f1 and f0 < hi for lo,hi in report_spans) else .79
+            below = .79
             reference = rec.get("example") or {}
             figure_url = reference.get("figure_url")
             example = (figure_url == (rec.get("document") or {}).get("url") if figure_url else
                        bool(reference.get("source")) and reference["source"].split("#")[0] == (rec.get("page") or "").split("#")[0])
-            top = .20 if example or (principle and rec.get("page") == principle.get("cover_source")) else .15  # the fixed brand ends at .182
+            top = .20 if example else .15  # the fixed brand ends at .182
             if example:
                 below = min(.79, below+.04)
                 crop = contextual_detail(crop, size, (W,H), bottom=below, top=top)
@@ -2384,9 +1519,6 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             view(full, [.055,.15,.945,.30], span)
             half = min(.445,(detail[2]-detail[0])*size[0]/360)
             view(detail,[.5-half,.31,.5+half,.50],span,document_excerpt=True)
-        elif literal:
-            view(full, [.055, .16, .945, .37], span)
-            wf1_display.reading_card(P, span, literal, "", "", pal, centre=.43, max_height=.13, group="excerpt")
         else:
             view(full, [.055, .198, .945, .48], span)
         note(f0, f1, kind, name, rec, "document")
@@ -2395,6 +1527,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             P.pictures[-1]["overview"] = dict(f=[f0,result_start], pic=overview_key, path=overview["path"], crop=full)
 
     def bleed(f0, f1, kind, name, rec, key):
+        if rec.get("meaning_box"):
+            return frame_meaning(f0, f1, kind, name, rec, key)
         source_ink = clipped_source_ink(rec) if kind == "clip" else []
         if rec.get("action_box") or rec.get("reframe") or rec.get("full_source") or rec.get("provider") == "primary-document" or source_ink or archive_event(rec) or (rec.get("attribution") and rec.get("verified_motion") is False):
             return window(f0, f1, kind, name, rec, key, source_ink)             # the approved document crop is already the editorial rectangle
@@ -2453,27 +1587,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             note(f0,f1,kind,name,rec,"print")
 
     document_pics = set()
-    archive_labels = d.get("archive_credits") or {}
     pos, labelled, labels, flashes = 0, set(), [], []
-    from scene.text_layout import shared_source_credits
-    views = []
-    for a,b,kind,name,rec in ins:
-        src = rec.get("source") or {}
-        url = src.get("url")
-        page = next((p for lo,hi,p in timed_facts if lo <= a and b <= hi and any(
-            url in (fact.get("also_sources") or []) or url == fact["source"].get("url")
-            for fact in p["facts"])), None)
-        credit = archive_credit(rec, archive_labels)
-        if kind == "clip" and url and credit.get("label") and not credit.get("credit"):
-            views.append((a,b,(url,credit["label"]),src.get("channel"),credit["label"]))
-            continue
-        if kind == "clip" and url and page and src.get("channel") and not credit.get("credit"):
-            views.append((a,b,(url,rec.get("window"),page["first"],page["last"]),src["channel"],credit.get("label")))
-    shared_credits = shared_source_credits(views)
-    for lo,hi,credit in shared_credits:
-        archived = any(archive_credit(r[4],archive_labels).get("label") == credit for r in ins if r[0] == lo)
-        wf1_display.reading_card(P,[lo,hi],"","",credit,pal,centre=.64 if archived else .12,
-                                 group="archive-credit" if archived else "figure-credit")
     runs = _runs(ins)
     layouts_used = []
     for run in runs:
@@ -2493,68 +1607,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 P.page(span,"#14171B",grain=0)
                 P.card(span,keys[rec["path"]],box,crop=full,source_ink=[box],document_excerpt=True,caption_baseline=.88)
                 credit = rec["publication"]
-                wf1_display.reading_card(P,span,"","",credit["publisher"]+" · "+credit["publication_date"],
-                                         pal,centre=.72,max_height=.08,group="publication-credit")
                 note(f0,f1,kind,name,rec,"document")
                 P.pictures[-1].update(publication=credit,document=rec["document"],source_crop=full,selected_archive_view=True)
                 document_pics.add(keys[rec["path"]])
                 cut_pts.append(f0)
-                continue
-            if rec.get("spoken_reading"):
-                span = [f0,f1]
-                wf1_evidence_reading.compose(P,span,keys[rec["path"]],rec,pal,(W,H))
-                # A typeset source history is credited in display_facts. Only a drawn
-                # publisher image has pixels for downstream placement and palette use.
-                if not rec["spoken_reading"]["history"]:
-                    note(f0,f1,kind,name,rec,"document")
-                    P.pictures[-1].update(document=rec["document"], reading=rec["spoken_reading"],
-                                          source_crop=rec["action_box"], excerpt_crop=rec["mark_box"])
-                cut_pts.append(f0)
-                continue
-            if rec.get("field_example"):
-                from scene.motion import fit_panel
-                example = rec["field_example"]
-                span = [f0,f1]
-                crop = example.get("crop") or rec.get("action_box") or [0,0,1,1]
-                # A previous crop can identify this same source with different geometry.
-                # Keep the new readable excerpt unless that exact placement needs widening.
-                origin = rec.get("document_origin") or (rec.get("text_cleared") or {}).get("from_path") or rec["path"]
-                if any(isinstance(r,dict) and (r.get("origin") or r.get("path")) == origin
-                       and r.get("window") == rec.get("window") and r.get("f") == span
-                       and r.get("source_slice") == rec.get("src") and r.get("source_crop") == crop
-                       for r in d.get("reframe") or []):
-                    crop = [0,0,1,1]
-                P.page(span,"#171B23","#0D1015",grain=.012)
-                size = (rec["w"], rec["h"])
-                key = keys[rec["path"]]
-                if kind == "clip" and crop != [0,0,1,1]:
-                    # The listing scrolls off the screen. Keep that motion above a stable excerpt
-                    # of the exact frame the reader cited, rather than cropping a different link.
-                    from PIL import Image
-                    still = wf1_field_report.sample(rec, sup["work"], sup["ffmpeg"])
-                    with Image.open(still) as im:
-                        width,height = im.size
-                    detail = P.image(asset_id("p",dict(path=still)),dict(path=still,w=width,h=height))
-                    full = [0,0,1,1]
-                    context_box = fit_panel(full,size,(W,H),[.04,.15,.96,.43])
-                    P.card(span,key,context_box,crop=full,src=rec["src"],source_ink=[context_box],caption_baseline=.88)
-                    box = fit_panel(crop,size,(W,H),[.04,.44,.96,.57])
-                    P.card(span,detail,box,crop=crop,source_ink=[box],caption_baseline=.88)
-                else:
-                    box = fit_panel(crop,size,(W,H),[.04,.18,.96,.54])
-                    P.card(span,key,box,crop=crop,source_ink=[box],caption_baseline=.88,
-                           **({"src":rec["src"]} if kind=="clip" else {}))
-                publisher = (rec.get("source") or {}).get("channel") or rec.get("credit") or name
-                source = " · ".join(dict.fromkeys(filter(None,(publisher,example.get("source_label")))))
-                wf1_display.reading_card(P,span,example["body"],"Example · "+example["title"],source,
-                                         pal,centre=.684,max_height=.20,group="source-example")
-                note(f0,f1,kind,name,rec,"document" if rec.get("document") else "window")
-                P.pictures[-1].update(source_crop=crop,field_example=example)
-                if rec.get("document"):
-                    document_pics.add(keys[rec["path"]])
-                    P.pictures[-1]["document"] = rec["document"]
-                cut_pts.append(f0)
-                P.events.append(f0)
                 continue
             if rec.get("provider") == "publisher-demo":
                 from scene.motion import fit_panel
@@ -2569,20 +1625,8 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             if rec.get('provider') == 'interview-frame':
                 from wf1_source_frame import compose
                 key = keys[rec["path"]]
-                edges = sorted({f0,f1,*(f for span in report_spans for f in span if f0<f<f1)})
-                for fa,fb in zip(edges,edges[1:]):
-                    src = [max(0,(f-LEAD_F)/FPS) for f in (fa,fb)]
-                    compose(P,[fa,fb],rec,key,pieces[0]["key"],src,W,H,sup["work"],sup["ffmpeg"],decode_region,
-                            report=any(lo<=fa<hi for lo,hi in report_spans))
-                if rec.get("demonstration"):
-                    credit = " · ".join(filter(None,(demo.get("speaker"),rec["source"].get("channel"))))
-                    wf1_display.reading_card(P,[f0,f1],"","",credit,pal,centre=.821,max_height=.052,
-                                             group="episode-credit")
-                if rec.get("episode_excerpt"):
-                    lo,hi = rec["episode_excerpt"]
-                    credit = " · ".join(filter(None,(rec["source"]["channel"], f"{lo}–{hi} s")))
-                    action = rec["source"].get("action") or ""
-                    wf1_display.reading_card(P, [f0,f1], "", action, credit, pal, centre=.248, group="episode-credit")
+                src = [max(0,(f-LEAD_F)/FPS) for f in (f0,f1)]
+                compose(P,[f0,f1],rec,key,pieces[0]["key"],src,W,H,sup["work"],sup["ffmpeg"],decode_region)
                 note(f0,f1,kind,name,rec,"source-insert")
                 P.pictures[-1].update(source_crop=rec["box"],source_slot=rec["source_slot"])
             elif rec.get("provider") == "primary-document":
@@ -2591,74 +1635,17 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                 figure = (rec.get("example") or {}).get("figure_url")
                 if figure and figure == (rec.get("document") or {}).get("url"):
                     P.pictures[-1]["selected_archive_view"] = True
-            elif any(page.get("scope_cue") and a < f1 and f0 < b for a,b,page in timed_facts):
-                from scene.motion import fit_panel
-                size = rec["w"],rec["h"]
-                box = fit_panel([0,0,1,1],size,(W,H),[0,.09,1,.49])
-                P.page([f0,f1],"#14171B",grain=0)
-                P.card([f0,f1],keys[rec["path"]],box,crop=[0,0,1,1],source_ink=[box],
-                       **({"src":rec["src"]} if kind=="clip" else {}))
-                note(f0,f1,kind,name,rec,"window")
-                source = rec.get("source") or {}
-                credit = " · ".join(dict.fromkeys(filter(None,(rec.get("name_super") or name,source.get("channel")))))
-                if credit:
-                    labels.append((f0,f1,credit,keys[rec["path"]]))
-                cut_pts.append(f0)
-                P.events.append(f0)
                 continue
             elif lay == "bleed" or kind == "clip":
                 bleed(f0, f1, kind, name, rec, keys[rec["path"]])
             elif lay == "window":
                 window(f0, f1, kind, name, rec, keys[rec["path"]])
             cut_pts.append(f0)
-            P.events.append(f0)
-            label = rec.get("name_super") or (rec.get("attribution") if d.get("labels") else None)
-            placed_credit = archive_credit(rec, archive_labels)
-            if rec.get("film_example"):
-                placed_credit = dict(placed_credit or {}, label="Film example · "+rec["film_example"])
-            if placed_credit:
-                P.pictures[-1]["archive_credit"] = placed_credit
-            if placed_credit and placed_credit.get("credit"):
-                i = rec.get("window")
-                if isinstance(i, int) and any(rec["path"] in group for group in coverage["windows"][i].get("archive_views", [])):
-                    P.pictures[-1]["selected_archive_view"] = True
-                wf1_display.reading_card(P, [f0,f1], "", placed_credit["label"], placed_credit["credit"],
-                                         pal, centre=.68, group="archive-credit")
-                continue
-            if any(lo <= f0 and f1 <= hi for lo,hi,_ in shared_credits):
-                continue
-            if rec.get("provider") == "primary-document":
-                # The figure and the supporting statement may have different sources.
-                urls = {url.split("#")[0] for url in (rec.get("page"), rec.get("url")) if url}
-                credited = [(a, b) for a, b, page in timed_facts
-                            if any((fact["source"].get("url") or "").split("#")[0] in urls
-                                   for fact in page["facts"])]
-                from wf1_documents import screen_credit
-                credit = placed_credit["label"] if placed_credit else (rec.get("example") or {}).get("credit") or screen_credit(rec)
-                if (rec.get("example") or {}).get("figure_url") and credit:
-                    wf1_display.reading_card(P,[f0,f1],"","",credit,pal,centre=.72,group="publication")
-                    continue
-                if credit:
-                    intervals, _ = _director().hold_take([ins[k]], credited, min_f=14)
-                    labels.extend((lo, hi, credit, keys[rec["path"]]) for lo, hi, *_ in intervals)
-                continue
-            event=placed_credit["label"] if placed_credit else archive_event(rec)
-            if event:
-                label=" · ".join(s for s in (rec.get("name_super"),event) if s)
-                labels.append((f0,f1,label,keys[rec["path"]]))
-                continue
-            source_url = (rec.get("source") or {}).get("url") or rec.get("page")
-            if (rec.get("attribution") or rec.get("action_caption")) and (rec.get("reframe") or rec.get("action_box")) and not label:
-                publisher = (rec.get("source") or {}).get("channel")
-                label = " · ".join(filter(None,(rec.get("action_caption") or rec.get("attribution"),publisher)))
-            if rec.get("action_box") and label:
-                wf1_display.reading_card(P, [f0,f1], "", "", label, pal, centre=.12, group="figure-credit")
-                continue
-            if source_url and label and label not in labelled and f1 - f0 >= 16:
+            label = rec.get("name_super")
+            if label and label not in labelled and f1 - f0 >= 16:
                 labelled.add(label)
-                labels.append((f0 + 2, min(f1, f0 + int(2.4 * FPS)), label, keys[rec["path"]]))
-        if st["flash"] == "runs" and not dr and (not flashes or r0 - flashes[-1] >= 4 * FPS):      # the projector catches: into a run of archive
-            flashes.append(r0)
+                labels.append((f0, min(f1, f0 + int(2.4 * FPS)), label, keys[rec["path"]]))
+            P.events.append(f0)
         pos = r1
     take_shot(pos, f_end)
     if st["flash"] == "turn" and turn_f is not None and not dr:        # with a director its asks place every flash
@@ -2718,369 +1705,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
     # timing (a word too early, too close to another or too short to hold gives its place to the next), so a film
     # never loses its display words to timing. A long phrase is stacked (display_rows), never skipped for its length.
     omit = []
-    device_omit = []                                     # caption words a palette device draws itself (laid at the render)
     devices = []                                         # the palette's asks: rows whose type performs (laid at the render, chain.alien_bank)
     # An attributed claim carries the reading on the ground below its source picture.
     fact_pages = []
-    if tenure:
-        a,b = tenure_span
-        change = word_frame(tenure["change"])
-        age_onset = word_frame(tenure["first"])
-        for lo,hi,body in ((a,age_onset,""),(age_onset,change,tenure["left"]),
-                           (change,b,tenure["left"]+"  /  "+tenure["right"])):
-            if hi <= lo:
-                continue
-            wf1_display.reading_card(P,[lo,hi],body,tenure["speaker"]+" · Age comparison","",pal,
-                                     centre=.64,max_height=.20,group="comparison-age")
-    if contrast:
-        acted.draw(P,contrast,word_frame,contrast_span[1],contrast_return,pal,W)
-        for a,b,entry in contrast_entries:
-            P.word([a,b],entry["speaker"],"cap",.5,.78,pal["ink"],align="c",role="graphic",
-                   text_group="incoming-speaker")
-        fact_pages.append(dict(first=contrast["first"], last=contrast["last"], f=list(contrast_span),
-                               acted_contrast=contrast, facts=[dict(value=contrast["item"],
-                               source=dict(url=script.get("source_url")))]))
-    if approval:
-        a,b = approval_span
-        wf1_approval.draw(P,approval,word_frame,b,pal,W)
-        fact_pages.append(dict(first=approval["first"],last=approval["last"],f=[a,b],
-                               approval_example=approval, facts=[dict(value=approval["job"],
-                               relation="Illustration", source=dict(url=script.get("source_url")))]))
-    if reporting:
-        a,b = reporting_span
-        wf1_reporting.draw(P,a,b,reporting,word_frame,pal,W,H)
-        fact_pages.append(dict(first=reporting["first"], last=reporting["last"], f=[a,b],
-                               reporting_example=reporting, facts=[dict(value=reporting["finding"],
-                               attribution=reporting["speaker"], source=dict(url=script.get("source_url")))]))
-    for lo,hi,rec in readings:
-        read = rec["spoken_reading"]
-        if read.get("job") and read["intro"] < lo:
-            wf1_display.reading_card(P,[read["intro"],lo],read["job"],rec.get("name") or rec.get("credit"),"",pal,
-                                     centre=.65,max_height=.17,group="review-job")
-        sources = [row["source"] for row in read["history"]]
-        statement = " · ".join(row["stamp"]+" "+row["label"] for row in read["history"]) or read["text"]
-        fact = dict(value=statement,statement=statement,relation="Example",example=True,
-                    source=dict(url=rec["page"],publisher=rec.get("credit")),supporting_sources=sources)
-        fact_pages.append(dict(first=read["first"],last=read["last"],f=[lo,hi],facts=[fact]))
-
-    for start,end,dial in instrument_scenes:
-        cue = word_frame(dial["at"]["w"])
-        finish = min(cue, start + 3*FPS)
-        if finish > start:
-            origin = script.get("source_start", 0) + (start-LEAD_F)/FPS
-            speaker = next((t["speaker"] for t in script.get("speaking_turns") or []
-                            if t["start"] < origin + (finish-start)/FPS and origin < t["end"]), "")
-            wf1_display.reading_card(P,[start,finish],speaker,"Thought experiment","",pal,
-                                     centre=.685,max_height=.14,group="analogy-intro")
-    for a,b,body,title,credit in report_cards:
-        wf1_display.reading_card(P,[a,b],body,title,credit,pal,centre=.64,max_height=.22,group="field-report")
-        P.events.append(a)
-    for a,b,role in thought_spans:
-        if b <= a:
-            continue
-        author = thought["excerpt"]["speaker"]
-        if role == "definition":
-            wf1_display.reading_card(P,[a,b],thought["paraphrase"],author,"",pal,
-                                     centre=.636,max_height=.25,group="definition")
-        elif role == "citation":
-            src = thought["source"]
-            credit = " · ".join(filter(None,(thought["edition"],src.get("publisher"),src.get("publication_date"))))
-            wf1_display.reading_card(P,[a,b],thought["title"],author,credit+" · "+thought["locator"],
-                                     dict(ink="#16232A",accent="#235469"),centre=.43,max_height=.52,group="edition")
-        elif role in ("scale","alternative"):
-            byline = thought["speaker"] + (" · Thought experiment" if role=="scale" else " · Another example")
-            wf1_display.reading_card(P,[a,b],"",byline,"",pal,centre=.602 if role=="scale" else .747,
-                                     max_height=.08,group="speaker-example")
-        P.events.append(a)
-    record_accent = None
-    if argument:
-        coverage_report["publication_argument"] = argument
-        publication = next((r[4]["publication"] for r in ins if
-                            (r[4].get("publication") or {}).get("author") == argument["author"]), None)
-        compose_notes(P,argument,word_frame,argument_end,pal,(W,H),publication)
-    for a, b, page in timed_facts:
-        facts = page["facts"]
-        if page.get("viewer_line"):
-            # Place a short annotation on the synchronous picture. The caption keeps its seat.
-            wf1_display.reading_card(P,[a,b],page["viewer_line"],"","",pal,centre=.60)
-            fact_pages.append(dict(page, f=[a,b]))
-            continue
-        if page.get("demo_note"):
-            fact = facts[0]
-            source = fact["source"]
-            credit = " · ".join(filter(None,(source.get("publisher"),source.get("publication_date"))))
-            wf1_display.reading_card(P,[a,b],fact["value"],page["demo_note"],credit,pal,
-                                     centre=.65,max_height=.34,group="demonstration-note")
-            fact_pages.append(dict(page,f=[a,b]))
-            continue
-        if page.get("publisher_excerpt"):
-            wf1_publisher_reading.compose(P,[a,b],page["publisher_excerpt"],pal)
-            fact_pages.append(dict(page,f=[a,b]))
-            continue
-        if page.get("analogy_step"):
-            step = page["analogy_step"]
-            if not step["label"].strip():
-                continue
-            heading = ""
-            phases_so_far = page.get("comparison_labels") or []
-            states = [(label, i == len(phases_so_far)-1) for i,label in enumerate(phases_so_far)] if len(phases_so_far)>1 else []
-            wf1_display.reading_card(P,[a,b],"" if states else step["label"],heading,"",pal,
-                                     centre=.65,max_height=.24,group="analogy",steps=states)
-            fact_pages.append(dict(page,f=[a,b]))
-            P.events.append(a)
-            continue
-        if page.get("principle_plate") or page.get("model_phase"):
-            wf1_display.reading_card(P,[a,b],facts[0]["value"],page["heading"],page["credit"],pal,
-                                     centre=.635, max_height=.36 if page.get("model_phase") else .26,
-                                     group="model-source" if page.get("model_phase") else "principle")
-            fact_pages.append(dict(page,f=[a,b]))
-            P.events.append(a)
-            continue
-        if page.get("record_role"):
-            role = page["record_role"]
-            fact = facts[0]
-            stamp = int(fact["time_s"])
-            locator = f'{fact["source"].get("publisher") or "Interview"} · {stamp//60}:{stamp%60:02d}'
-            # Its classification, byline and locator stay in the record (fact_pages); the screen shows the words.
-            heading = credit = ""
-            if role in ("wording","return","qualification"):
-                body = "“" + fact["value"] + "”"
-                if role in ("wording", "qualification"):
-                    lo,hi = fact["word_ids"]
-                    reading_spans.append((a, min(b,word_frame(hi+1) or b)))
-                    omit.extend(clock.words[lo:hi+1])
-            else:
-                body = record[role+"_label"]
-            begin = len(P.items)
-            wf1_display.reading_card(P,[a,b],body,heading,credit,pal,centre=.645,max_height=.28,group="record-"+role)
-            if role == "return":
-                hit = word_frame(record["accent"])
-                rows = [it for it in P.items[begin:] if it.get("v") == "quote_body" and it["f"][0] <= hit < it["f"][1]]
-                if rows:
-                    # Mark the substantial line of the returned record when a
-                    # short trailing word wraps to the next line.
-                    target = max(rows, key=lambda it: P.R.width(it["v"], it["t"]))
-                    record_accent = dict(id="record-return-"+str(a), dev="highlight", f=[hit,target["f"][1]],
-                                         t=target["t"],target_id=target["id"],style="under",c=pal["accent"])
-            fact_pages.append(dict(page,f=[a,b],body=body,heading=heading,credit=credit,locator=locator,
-                                   classification=role,attribution=fact["attribution"]))
-            P.events.append(a)
-            continue
-        if page.get("route_example"):
-            fact = facts[0]
-            picture = next((pc for pc in P.pictures if a < pc["f"][1] and pc["f"][0] < b
-                            and pc.get("source") == fact["source"].get("url")), None)
-            credit = (picture or {}).get("document",{}).get("publication") or fact["source"].get("publisher","")
-            label = "Example · "+credit
-            wf1_display.reading_card(P,[a,b],"" if picture else fact["value"],label,"",pal,
-                                     centre=.066 if picture else .468, max_height=.10,group="handoff-example")
-            fact_pages.append(dict(page,f=[a,b]))
-            continue
-        if page.get("sequence_kind") == "handoff":
-            from scene.palette.type import handoff_route
-            fact = facts[0]
-            cues = [(word_frame(step["at"]),step["label"]) for step in page["sequence"]]
-            route = handoff_route("handoff-"+str(a), (a,b), cues, width=W, height=H,
-                                  voice=P.voices["cap"], ink=pal["ink"], accent=pal["accent"])
-            P.items.extend(route["items"])
-            P.voices.update(route["voices"])
-            wf1_display.reading_card(P,[a,b],"",fact["attribution"]+" · "+fact["value"],"",pal,
-                                     centre=.548,max_height=.09,group="handoff-heading")
-            P.events.extend(f for f,_ in cues)
-            fact_pages.append(dict(page,f=[a,b]))
-            continue
-        if page.get("scope_cue"):
-            fact = facts[0]
-            attributed = wf1_display.estimate_credit(fact) if not wf1_display.same_recording(
-                fact["source"].get("url"),script.get("source_url")) else fact["attribution"]+" · Analogy"
-            wf1_display.reading_card(P,[a,b],fact["value"],attributed,"",pal,
-                                     centre=.645,max_height=.29,group="estimate-scope")
-            fact_pages.append(dict(page,f=[a,b]))
-            P.events.append(a)
-            continue
-        if page.get("context_cue") or page.get("action_intro"):
-            fact = facts[0]
-            wf1_display.reading_card(P, [a,b], fact["value"], fact["attribution"], "", pal,
-                                     centre=.65, max_height=.25, group="opening-context")
-            fact_pages.append(dict(page, f=[a,b]))
-            P.events.append(a)
-            continue
-        if page.get("episode_example") or page.get("gloss"):
-            label = "e.g." if page.get("episode_example") else facts[0]["chain"].get("term") or facts[0]["chain"].get("subject") or "Definition"
-            wf1_display.reading_card(P, [a,b], facts[0]["value"], label, "", pal,
-                                     centre=.67, max_height=.19, group="interview-note")
-            fact_pages.append(dict(page, f=[a,b]))
-            P.events.append(a)
-            continue
-        if page.get("estimate_landing") is not None:
-            # The speaker's estimate lands in his voice and captions; who estimated it, and whether it was
-            # hypothetical, stay in the record. No card held only that byline to the end of the film.
-            hypothetical = any(lo <= page["estimate_landing"] <= hi for lo,hi in hypotheticals)
-            fact_pages.append(dict(page,f=[a,f_end],credit=facts[0]["attribution"] + (" · Hypothetical" if hypothetical else " · Personal estimate")))
-            continue
-        if page.get("sequence"):
-            fact = facts[0]
-            steps = page["sequence"]
-            first_cue = word_frame(steps[0]["at"]) if steps[0].get("beat") else a
-            if page.get("sequence_kind") == "comparison":
-                first_cue = word_frame(steps[0]["at"])
-            cue = [first_cue] + [word_frame(step["at"]) for step in steps[1:]] + [b]
-            for i,(start,end) in enumerate(zip(cue,cue[1:])):
-                if start >= end:
-                    continue
-                # The episode is never credited on its own speaker's scenario; an outside publisher keeps its credit.
-                footer = "" if wf1_display.same_recording(fact["source"].get("url"), script.get("source_url")) else (
-                    fact["source"].get("publisher") or "")
-                if i == len(steps)-1:
-                    footer = page.get("explanation") or footer
-                    if page.get("callback_action") and not any(lo < end and start < hi and rec.get("episode_excerpt")
-                                                              for lo,hi,_,_,rec in source_rows):
-                        footer = page["callback_action"]
-                # Who proposed the scenario and how it is classified stay in the record; the steps are on screen.
-                heading = ""
-                if page.get("sequence_kind") == "comparison":
-                    # The final quantity lands in the verbatim cue on its own first word: the final state shows the
-                    # states so far, the last one active, never a label alone.
-                    final = i == len(steps)-1
-                    if page.get("spoken_estimate") or final:
-                        wf1_display.reading_card(P,[start,end],"","","",pal,
-                            centre=.65,max_height=.23,group="comparison",
-                            steps=[(s["label"],j==i) for j,s in enumerate(steps[:i+1])])
-                        P.events.append(start)
-                        continue
-                    wf1_display.reading_card(P, [start,end], steps[i]["label"], "", "", pal,
-                                             centre=.65, max_height=.21, group="comparison")
-                    P.events.append(start)
-                    continue
-                if page.get("sequence_kind") == "process":
-                    source = steps[i]["source"]
-                    credit = source.get("publisher") or source.get("url") or ""
-                    wf1_display.reading_card(P, [start,end], steps[i]["label"], credit, "", pal,
-                                             centre=.65, max_height=.23, group="process")
-                    P.events.append(start)
-                    continue
-                if page.get("sequence_kind") == "history":
-                    source = steps[i]["source"]
-                    heading = "Timeline"
-                    footer = ("" if source == fact["source"] else source.get("publisher") or source["url"])
-                if start in live_beats:
-                    wf1_display.reading_card(P, [start,end], "", "", footer, pal, centre=.50 if live_beats[start][1]=="figure" else .67, group="memory-credit")
-                    P.events.append(start)
-                    continue
-                wf1_display.reading_card(P, [start,end], "", heading,
-                                         footer, pal, centre=.605,
-                                         steps=[(s["label"],j==i) for j,s in enumerate(steps)
-                                                if page.get("sequence_kind") not in ("history","process") or j==i])
-                P.events.append(start)
-            fact_pages.append(dict(page, f=[a,b]))
-            continue
-        if opinion_byline(facts):
-            # The live voice and captions carry this claim. Its attribution stays in the record.
-            continue
-        if (a, b) in report_spans:
-            for i, fact in enumerate(facts):
-                claim = fact.get("chain") or {}
-                label = wf1_display.CONTEXT_LABELS.get(claim.get("stance")) or wf1_display.ESTIMATE_LABELS.get(claim.get("stance")) or wf1_display.OPINION_LABELS.get(claim.get("stance"))
-                speaker = fact.get("attribution") or ""
-                source = fact["source"].get("publisher") or fact["source"].get("url") or ""
-                body = str(fact["value"])
-                statement = wf1_display.source_statement(fact, script.get("source_url"))
-                excerpt = fact.get("excerpt")
-                if fact.get("record"):
-                    record = fact["record"]
-                    label = record["heading"]
-                    body = statement if record.get("display") == "statement" else "“" + excerpt["words"] + "”"
-                    date = record["event_date"]
-                    from datetime import datetime
-                    for pattern, style in (("%Y-%m-%d", "%d %b %Y"), ("%Y-%m", "%b %Y")):
-                        try:
-                            date = datetime.strptime(date, pattern).strftime(style)
-                            break
-                        except ValueError:
-                            continue
-                    citation = source + " · " + date
-                elif fact.get("program_entry"):
-                    entry = fact["program_entry"]
-                    body, label = entry["title"], source
-                    citation = "Talk by " + entry["speaker"] + " · " + entry["date"]
-                elif fact.get("example"):
-                    body = statement
-                    label = fact.get("credit") or source + " · Example"
-                    citation = ""
-                elif excerpt:
-                    body = "“" + excerpt["words"] + "”"
-                    label = excerpt["speaker"]
-                    date = fact["source"].get("publication_date")
-                    if date:
-                        from datetime import datetime
-                        try:
-                            date = datetime.strptime(date, "%Y-%m").strftime("%B %Y")
-                        except (TypeError, ValueError):
-                            pass
-                    # The exact section stays in the source report. Keep a recording's time on screen.
-                    location = excerpt["locator"] if claim and (not date or claim.get("event")==excerpt["event"]) else None
-                    citation = " · ".join(dict.fromkeys(filter(None, (excerpt["event"], date, location))))
-                    if (a,b) in live_citations and fact.get("perspective", {}).get("stance") == "concern":
-                        from urllib.parse import urlsplit
-                        label = source + " · " + excerpt["event"]
-                        citation = urlsplit(excerpt["url"]).hostname or excerpt["locator"]
-                elif statement:
-                    body = statement
-                    value = str(fact["value"])
-                    date = fact.get("publication_date") or fact["source"].get("publication_date")
-                    # Older cards carry a dated value. Keep it apart from the prose.
-                    stamp = date or (value if not fact.get("statement") and value not in statement else "")
-                    citation = " · ".join(dict.fromkeys(filter(None, (speaker, fact["source"].get("author"), source, stamp))))
-                    speaker = ""
-                    if fact.get("perspective"):
-                        label = source
-                        others = [s.get("publisher") or s["url"] for s in fact.get("supporting_sources", [])
-                                  if s.get("url") != fact["source"].get("url")]
-                        citation = " · ".join(dict.fromkeys(filter(None, (fact["source"].get("author"), date, *others))))
-                elif claim:
-                    citation = " · ".join(filter(None, (speaker if label else None, source, fact.get("relation"))))
-                else:
-                    body = " ".join(filter(None, (fact.get("qualifier"), body, fact.get("relation"))))
-                    citation = source
-                span = [a + round((b - a) * k / len(facts)) for k in (i, i + 1)]
-                if fact.get("visible_statement") and fact.get("figure_url"):
-                    for during,text in wf1_display.figure_readings(span, fact, P.pictures):
-                        wf1_display.reading_card(P, during, text, label or speaker, citation, pal)
-                elif (a,b) in live_citations:
-                    wf1_display.reading_card(P, span, body, label or source, citation, pal, centre=.64)
-                elif (a,b) in source_pages:
-                    perspective = fact.get("perspective")
-                    if perspective:
-                        wf1_display.reading_card(P, span, "", perspective["speaker"]+" · Recollection"
-                            if perspective["stance"] == "recollection" else perspective["speaker"]+" · Interview",
-                            "", pal, centre=.735, max_height=.08, group="interview-credit")
-                    wf1_display.reading_card(P, span, body, label or speaker, citation, pal,
-                                             centre=.44, max_height=.55)
-                else:
-                    wf1_display.reading_card(P, span, body, label or speaker, citation, pal)
-            supplemental = all((f.get("chain") or {}).get("stance") == "definition" for f in facts)
-            if not supplemental and (a,b) not in source_pages and not all(wf1_display.source_statement(f, script.get("source_url")) for f in facts):
-                reading_spans.append((a, b))
-                omit.extend(clock.words[page["first"]:page["last"] + 1])
-            fact_pages.append(dict(page, f=[a, b]))
-            P.events.append(a)
-            continue
-        rows = wf1_display.typeset(page["facts"], P.R, DISPLAY_W * W, cased)
-        y = cap_y - .075
-        seats = []
-        for k in reversed(range(len(rows))):
-            line, px, emphasis = rows[k]
-            vk = f"dsp_fact{a}_{k}"
-            P.voices[vk] = dict(P.voices["dsp"], px=px)
-            seats.append((line, vk, y, emphasis))
-            y -= (P.R.cap(vk) + 18) / H
-        # The final seat can be on the dark page beside a bright paper. Measure contrast there at draw time.
-        for line, vk, base, emphasis in reversed(seats):
-            ink = pal["accent"] if emphasis else pal["ink"]
-            land(a, b, line, vk, base, ink, stroke=DARK_INK, contrast_shadow=True, fact_type=True, text_group=f"fact{a}")
-        fact_pages.append(dict(page, f=[a, b]))
-        P.events.append(a)
-
     proposed = d.get("display") or []
     for row in proposed:
         if len(shown) >= DISPLAY_MOST:
@@ -3091,13 +1718,19 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             continue
         if not (0 <= seg < nseg) or not text or any(text.lower() in t.lower() or t.lower() in text.lower() for _, _, t in shown):
             continue
-        hit = F.said_at(clock, seg, text)
+        first, last = row.get("first"), row.get("last")
+        addressed = type(first) is int and type(last) is int and 0 <= first <= last < len(clock.words)
+        hit = (clock.words[first]["t0"], 1) if addressed else F.said_at(clock, seg, text)
         if hit is None:
             continue
-        a = max(Clock.f(hit[0]) - 1, 1)
-        if a < 2*FPS or any(abs(a - x) < 2.0 * FPS for x, _, _ in shown) or a >= f_voice_end - 12:
+        a = max(Clock.f(hit[0]), 0)
+        if any(abs(a - x) < 2.0 * FPS for x, _, _ in shown) or a >= f_voice_end - 12:
             continue
         b = int(min(a + 1.15 * FPS, f_end, Clock.f(clock.segs[seg][1]) + 10))
+        if addressed:
+            b = min(f_end, Clock.f(clock.words[last]["t1"]))
+        if row.get("picture_path") and not any(p["path"] == row["picture_path"] and p["f"][0] <= a < p["f"][1] for p in P.pictures):
+            continue
         # A display word cannot label the next documentary subject. If the
         # interval is too short for display, ordinary wordwise captions carry it.
         next_subject = [round(w['t0']*FPS)+LEAD_F for w in coverage['windows'] if round(w['t0']*FPS)+LEAD_F>a+1]
@@ -3107,14 +1740,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             continue
         if b - a < 14 or on_evidence(a,b):
             continue
-        if record_span and a < record_span[1] and record_span[0] < b:
-            continue
-        if thought and a < (word_frame(thought["last"]+1) or f_end) and word_frame(thought["first"]) < b:
-            continue
         if any(a < page["f"][1] and page["f"][0] < b for page in fact_pages):
             continue
         role = row.get("role") or "hook"
-        if role == "name" and not row.get("perform"):
+        if role == "name" and not (row.get("picture_path") or row.get("perform")):
             # Captions retain the spoken name. The identifying super belongs to its picture.
             continue
         import palette_menu
@@ -3144,26 +1773,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             if perf["dev"] in palette_menu.REPLACES:
                 # a device that draws the words itself takes the row's place and the caption words it draws; a word of
                 # the row it does not draw stays in the caption, which then keeps its seat (the device seats itself off it)
-                mask = palette_menu.drawn(ask, text)
-                span = F.said_span(clock, seg, text)
-                if all(mask):
-                    device_omit += span
-                else:
-                    device_omit += palette_menu.omit_of(span, text, mask, F.norm_word)
                 P.events.append(a)
                 shown.append((a, b, text))
                 continue
-        spoken_a = a
-        # If a stencil already performs this same word, show the display
-        # phrase on its release. Its words and the original caption survive.
-        tokens = {F.norm_word(w) for w in text.split()}
-        for ask in pre:
-            span = ask.get("f")
-            if ask.get("dev") != "diecut" or not isinstance(span, list) or F.norm_word(str(ask.get("t", ""))) not in tokens:
-                continue
-            if a < span[1] and span[0] < b and f_end - span[1] >= 10:
-                length = b - a
-                a, b = span[1], min(f_end, span[1] + length)
         rows = display_rows(P.R, P.voices["dsp"], cased(text), cased(str(row.get("key") or "")), role)
         base_y = cap_y - 0.062                           # the lowest baseline of the block, clear above the caption seat
         ys = [base_y]
@@ -3181,8 +1793,6 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
             line_ink, line_edge = (DARK_INK, pal["accent"]) if role == "contrast" and k == big else (ink, edge)
             plate = {"backplate": pal["accent"]} if role == "contrast" and k == big else {}
             land(a, b, line, vk, ys[k], line_ink, **plate, delay=0 if k == big else min(2, b - a - 1), stroke=line_edge, on=a)
-        if a == spoken_a:
-            omit += F.said_span(clock, seg, text)
         P.events.append(a)
         shown.append((a, b, text))
     shown.sort()
@@ -3190,10 +1800,6 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         if demo_span and a < demo_span[1] and demo_span[0] < b:
             continue
         if b - a < 14 or on_evidence(a,b):
-            continue
-        if pic in document_pics:
-            # The full byline remains in the picture credit. Wrap it at its reading size.
-            wf1_display.reading_card(P, [a,b], "", "", text, pal, centre=.09, group="figure-credit")
             continue
         t = text.upper()
         rows = [t]
@@ -3208,50 +1814,14 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         for n, r_ in enumerate(rows):
             P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat", name_picture=pic,
                    text_group=f"picture-credit-{pic}-{a}")
-    cue_starts = {step["at"] for _,_,page in timed_facts if page.get("sequence_kind") == "comparison"
-                  for step in page["sequence"]}
-    cue_starts.update(r['first'] for r in reading.get('voice_entries', []))
-    # A comparison's consequence is withheld until it is heard, the closing one too: the closing phrase still
-    # becomes one caption held to the end once its last word lands (closing_phrase below), never printed early.
-    reveal_words = {p["first"] for _,_,p in timed_facts if (p.get("analogy_step") or {}).get("reveal")}
-    reveal_words.update(c["reveal"] for _,_,c in research_views)
-    for _,end,dial in instrument_scenes:
-        # As the speaker acts out the change and its consequence, ink each word
-        # when heard. The next line can no longer print the end of a joke early.
-        reveal_words.update(i for i in range(dial["at"]["w"], len(clock.words)) if word_frame(i) < end)
-    marks = acted.restarts(d.get("caption_restarts", reading.get("caption_restarts")), len(clock.words))
-    caption_clock, gaps = (acted.caption_clock(clock,marks,take["path"],sup["ffmpeg"],LEAD_F/FPS)
-                           if marks else (clock,[]))
+    cue_starts = {r['first'] for r in reading.get('voice_entries', [])}
+    reveal_words = range(len(clock.words))
+    caption_clock, gaps = clock, []
     ends = set(d.get("caption_ends") or ())
-    groups = [(step["at"],step["last"]) for _,_,page in timed_facts if page.get("spoken_estimate")
-              for step in page["sequence"]]
-    if (marks or groups or hypotheticals) and not ends:
-        phrase_tails = {id(ws[-1]) for _,_,_,ws in clock.phrases()}
-        ends.update(i for i,w in enumerate(clock.words) if id(w) in phrase_tails)
-    for first,last in [*groups,*hypotheticals]:
-        cue_starts.add(first)
-        if last+1 < len(clock.words):
-            cue_starts.add(last+1)
-        ends.difference_update(range(first,last))
-        ends.add(last)
-    for mark in marks:
-        ends.difference_update(range(mark["question"], mark["end"]))
-        cue_starts.update((mark["fragment"], mark["question"]))
-        ends.update((mark["fragment"], mark["end"]))
-    if contrast:
-        cue_starts.add(contrast["pivot"])
-        reveal_words.add(contrast["switch"])
-    if marks and (omit or device_omit):
-        def on_caption_clock(ws):
-            original_ids = {id(w) for w in ws}
-            return [caption_clock.words[i] for i,w in enumerate(clock.words) if id(w) in original_ids]
-        omit, device_omit = on_caption_clock(omit), on_caption_clock(device_omit)
-    # A word yields its caption only to copy laid out at its time. The words a palette device draws are not laid out
-    # yet (scene.palette at the render), so they leave the caption on the device's own hand-off, never on this check.
-    caption_holds, omit = wf1_display.caption_handoffs(
-        P.items, caption_clock.words, reading_spans, omit, Clock.f)
-    kept = {id(w) for w in omit}
-    omit += [w for w in device_omit if id(w) not in kept]
+    caption_holds = [item["f"] for item in P.items if item.get("k") == "word" and item.get("t")]
+    # Unresolved palette asks leave the running caption intact. The compositor hands it off
+    # after it knows the actual device (including a fallback) and the frames it printed.
+    omit = []
     lines = F.caption_build(P, caption_clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), z=5,
                             hold=caption_holds, omit=omit, phrase_ends=sorted(ends),
                             accents=d.get("caption_accents") or (), accent_ink=pal["accent"], cue_starts=cue_starts, reveal_words=reveal_words)
@@ -3260,45 +1830,22 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         for cap in P.items:
             if cap.get("role") == "cap" and cap["f"][0] <= onset+1 < cap["f"][1]:
                 cap["f"][1] = max(cap["f"][0]+1,min(cap["f"][1],Clock.f(off)))
-    closing_phrase = any(p["last"] == len(clock.words)-1 and (p.get("analogy_step") or {}).get("reveal")
-                         and not p["analogy_step"].get("label") for _,_,p in timed_facts)
-    applied_close = any(p.get("case_phase") == "application" and p["last"] == len(clock.words)-1
-                        for _,_,p in timed_facts)
-    if closing_phrase or applied_close or closing:
+    if closing:
         captions = [it for it in P.items if it.get("role") == "cap"]
         if captions:
             last_caption = max(captions,key=lambda it:it["f"][1])
             if last_caption["f"][1] >= f_voice_end-1:
-                if applied_close or closing:
-                    # The subtitle owns the complete sentence and its reading breath.
-                    # End it on the first card-join frame after the source word releases.
-                    last_caption["f"][1] = caption_handoff
-                else:
-                    last_caption["f"][1] = f_end
+                last_caption["f"][1] = caption_handoff
     take_keys = {pc["key"] for pc in pieces}
     live_shots = [it["f"] for it in P.items if it.get("k") == "shot" and it.get("pic") in take_keys]
     for word in list(P.items):
         if word.get("role") == "cap":
-            # On the scale comparison its spoken cue is the graphic. Enlarge that
-            # single line in the reserved reading area without setting it twice.
-            closing_quantity = any(word["f"][0] == word_frame(first) for first,_ in hypotheticals)
-            if closing_quantity or any(role in ("scale","landing") and a <= (sum(word["f"])/2) < b for a,b,role in thought_spans):
-                line = word["t"]
-                size = P.R.fit_px("cap",line,(2*F.RAIL_X-1)*W,86)
-                voice = "scale-cue-" + str(size)
-                P.voices[voice] = dict(P.voices["cap"],px=size,track=0)
-                word.update(v=voice,x=.5-P.R.width(voice,line)/(2*W))
             if word.get("ink") == pal["accent"] and any(
                     a < word["f"][1] and word["f"][0] < b for a,b in live_shots):
                 ground = ground_at(word["f"][0], cap_y-.06, cap_y+.02)
                 if plate := caption_plate(ground, word["ink"]):
                     word["backplate"] = plate
             word["chunk"] = f'caption-{word["f"][1]}'
-            for cue,(end,role,index) in live_beats.items():
-                a,b = word["f"]
-                if role == "figure" and a <= cue < b <= end and d.get("caption_ends"):
-                    wf1_display.figure_cue(P, word, clock, index, cue, pal)
-                    break
     P.items = inside(P.items, f_end)
     P.items = ink_by_ground(P.items, P.voices, bright)
     film = dict(grain=float(st["grain"]), vignette=float(st["vignette"]), over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))
@@ -3390,28 +1937,10 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         # a picture the film placed is its scene asset; one it did not is its path, which the palette reads from the pool
         by_id = {pid: keys.get(path) or path for pid, path in (dr.get("pictures") or {}).items()}
         asks, notes = DR.palette_asks(dr, word_frame, seg_span, by_id.get, f_end)
-        owned = list(model_spans) + ([demo_span] if demo_span else [])
-        if thought:
-            owned.append((word_frame(thought["first"]), word_frame(thought["last"]+1) or f_end))
-        if owned:
-            from scene.palette import span as device_span
-            def independent(ask):
-                start,end = device_span(ask, l1)
-                return all(end <= lo or hi <= start for lo,hi in owned)
-            asks = [ask for ask in asks if independent(ask)]
+        owned = [dict(f=p["f"], device="document") for p in P.pictures if p.get("document")]
+        asks = DR.around(asks, owned, f_end)
         if asks:
             l1["devices"] = list(l1.get("devices") or []) + asks        # after the rows whose type performs (perform)
-    if thought:
-        index = thought["accent"]
-        hit = word_frame(index)
-        ink = "#235469" if any(lo <= hit < hi for lo,hi in bright) else pal["accent"]
-        accent = dict(id="spoken-scale", dev="highlight", f=hit, t=clock.words[index]["w"],
-                      target_role="cap", style="under", c=ink)
-        asks.append(accent)
-        l1.setdefault("devices", []).append(accent)
-    if record_accent:
-        asks.append(record_accent)
-        l1.setdefault("devices", []).append(record_accent)
     why = notes
     changes = sorted({it["f"][0] for it in l1["items"] if it["k"] == "shot"})
     for s_ in l1.get("sound") or []:
@@ -3425,7 +1954,7 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
                                | {e["f"] for e in dev_events if 0 <= e["f"] < f_end}),
                  device_events=dev_events,
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=CAPTION_CONTRACT, display=[dict(f=[a, b], text=t) for a, b, t in shown],
-                 display_facts=fact_pages, interview_accounts=personal_accounts, research_facts=research_pages, publisher_reading=reading_plan, field_report=report, thought_experiment=thought,
+                 display_facts=fact_pages, interview_accounts=[], research_facts=d.get("research_facts") or [], publisher_reading={}, field_report={}, thought_experiment={},
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t, pic=pic) for a, b, t, pic in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=(sorted(set(layouts_used)) if dr and len(set(layouts_used)) > 1 else (layouts_used[0] if dr and layouts_used else st["layout"])), placement_check=placement_report, coverage=coverage_report,

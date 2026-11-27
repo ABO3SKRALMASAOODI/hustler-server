@@ -18,7 +18,7 @@ REPLACES = ("counter", "staircase", "name", "ladder", "brackets", "typewriter", 
 # devices that act on the row as set (a marker behind it, a flip on its hit) or beside it (a box on the face, fine print,
 # the caption line read along, an analogy's dial whose needle moves on the spoken change): they draw none of the row's
 # words, so the row and its caption keep them
-DECORATES = ("highlight", "flip", "track", "fineprint", "donut", "bar", "readalong", "analogy_dial")
+DECORATES = ("highlight", "flip", "track", "fineprint", "donut", "bar", "readalong")
 # decorations that live as long as the row they mark; the others live to the end of the row's sentence
 ON_THE_ROW = ("highlight", "flip", "donut", "bar")
 # a figure device draws the whole row: the row is the figure and its unit, set by the device's own format
@@ -132,4 +132,51 @@ def omit_of(span, text, mask, norm=_norm):
             out.append(r)
         pend = []
         j = i + 1
+    return out
+
+
+def caption_handoff(items):
+    """Give resolved display lettering its visible frames and return the captions on the remaining frames."""
+    from scene.palette.kit import cut
+    intervals = []
+    for row in items:
+        if row.get("k") != "word" or row.get("role") == "cap" or not row.get("t"):
+            continue
+        a, b = row["f"]
+        opacity = row.get("op", 1)
+        if isinstance(opacity, list):
+            start = None
+            for i, value in enumerate([*opacity, 0]):
+                if value > 0 and start is None:
+                    start = a+i
+                elif value <= 0 and start is not None:
+                    intervals.append((start, min(a+i,b)))
+                    start = None
+        elif opacity > 0:
+            intervals.append((a,b))
+    occupied = []
+    for a,b in sorted(intervals):
+        if occupied and a <= occupied[-1][1]:
+            occupied[-1][1] = max(occupied[-1][1], b)
+        else:
+            occupied.append([a,b])
+    if not occupied:
+        return items
+    out = []
+    for row in items:
+        if row.get("role") != "cap" or row.get("k") != "word":
+            out.append(row)
+            continue
+        a,b = row["f"]
+        cursor = a
+        for lo,hi in occupied:
+            if lo >= b:
+                break
+            if hi <= cursor:
+                continue
+            if cursor < lo:
+                out.append(cut(row, cursor, lo, f"{row['id']}.{cursor}"))
+            cursor = max(cursor,hi)
+        if cursor < b:
+            out.append(row if cursor == a else cut(row, cursor,b, f"{row['id']}.{cursor}"))
     return out

@@ -825,6 +825,12 @@ def director_pictures(pack, most=36):
             out.append(dict(id=f"P{len(out)}", path=p, src=p, kind="document" if r.get("provider") == "primary-document" else "photo",
                             archive_source=source,
                             label=str(r.get("shows") or r.get("title") or name)[:60], faces=len(r.get("faces") or [])))
+    inventory = {r.get("path"):r for group in (pack.get("pictures") or {}).values() for r in group}
+    inventory.update({r.get("path"):r for group in pack.get("footage") or [] for r in group.get("clips") or []})
+    for picture in out:
+        source = wf1_film._director().picture_identity(inventory.get(picture["src"], {}))
+        picture.update({key:source[key] for key in ("identity_year","version","meaning_box","people","overlays","printed_text")
+                        if source.get(key) is not None})
     out = out[:most]
     return out, {p["id"]: p["src"] for p in out}
 
@@ -833,6 +839,51 @@ def local_turns(script):
     start = script['window'][0]
     return [dict(speaker=t['speaker'], start=round(t['start']-start,3), end=round(t['end']-start,3))
             for t in script.get('speaking_turns') or []]
+
+
+def podcast_word_screen(rows, pack, pictures, turns):
+    """Bind each caption to the source cut, speaker and placement that intersect its word."""
+    coverage = pack.get("coverage") or {}
+    take = pack.get("take") or {}
+    inventory = {p["src"]: p for p in pictures}
+    fields = ("id", "label", *wf1_film._director().PICTURE_FIELDS)
+    for index, word in enumerate(rows):
+        a, b = (round(word[k] * F.FPS) for k in ("t0", "t1"))
+        b = max(a + 1, b)
+        start = (a - F.LEAD_F) / F.FPS
+        end = (b - F.LEAD_F) / F.FPS
+        window_id, window = next(((i,w) for i,w in enumerate(coverage.get("windows") or [])
+                                  if w["first"] <= index <= w["last"]), (None, {}))
+        shown = []
+        for placement in (coverage.get("passed_placements") or {}).get(str(window_id), []):
+            span = placement.get("f")
+            if span and (span[1] <= a or b <= span[0]):
+                continue
+            pic = inventory.get(placement.get("path"), {})
+            if pic:
+                shown.append({k: pic[k] for k in fields if k in pic})
+        on_take = not shown and (not window or window.get("on_take") or window.get("publisher_camera"))
+        faces = []
+        people = []
+        for cut in take.get("cuts") or []:
+            if cut["t1"] <= start or end <= cut["t0"]:
+                continue
+            for span in cut.get("spans") or []:
+                if span["t1"] <= start or end <= span["t0"]:
+                    continue
+                person = span.get("person")
+                if span.get("who") == "speaker" and person is not None and person not in people:
+                    people.append(person)
+                box = span.get("box") or {}
+                box = box.get("box") if isinstance(box, dict) else box
+                faces.append(dict(person=person, role=span.get("who"), box=box))
+            if not cut.get("spans"):
+                faces.extend({k:f[k] for k in ("box","speaker") if k in f} for f in cut.get("faces") or [])
+        voices = [t["speaker"] for t in turns if t["start"] < end and start < t["end"]]
+        word["screen"] = dict(voice=voices or people or ["speaker"], text=[word["w"]], pictures=shown,
+                              picture=window.get("must_show") or window.get("name") or "interview",
+                              role="speaker" if on_take else "planned cutaway", faces=faces if on_take else [],
+                              **{k:window[k] for k in ("meaning_box","identity_year","version","printed_text") if k in window})
 
 
 def direction_of(ctx, script, pack):
@@ -856,31 +907,16 @@ def direction_of(ctx, script, pack):
     llm = _llm()
     from placement_check import file_digest
     import wf1_display
-    editorial = dict(writing=wf1_display.WRITING + "\nWrite provenance, research limitations and claim classifications only to the record. For a fact that adds concrete information to this exact spoken beat, put one concise audience-facing sentence in args.viewer_line. When the speaker already says it, leave viewer_line empty. A title naming a person belongs only on their identified image.", material=wf1_display.editorial(ctx, script, pack))
-    import wf1_experiment
-    argument = (pack.get("coverage") or {}).get("publication_argument")
-    if argument:
-        editorial["material"]["publication_argument"] = argument
-        editorial["writing"] += (" The published work, synchronous personal reaction, fitted gesture, and open "
-            "inference diagram already have word-timed scenes. Give the original cover a clear reading breath. "
-            "The guest owns the closing graphic. Supply publication_copy:{present,question}. Present is a short "
-            "conditional paraphrase of how the people the guest describes interpret current change. Name whose "
-            "inference it is in the sentence. Question is the actual open logical question as a direct question, "
-            "connecting the observed change to the hypothetical outcome. Avoid restating that the guest has doubts, "
-            "and avoid generic words like dots or links when the two concrete ideas can be named. About 7–10 "
-            "words per line of copy. Omit event illustrations. Preserve first-person speech in voice and captions.")
-    thought_facts = wf1_experiment.director_material(editorial["material"], rows)
-    if thought_facts:
-        prints, _ = wf1_experiment.materials(dict(thought_facts=thought_facts))
-        editorial["material"]["originals"] = [f["excerpt"] for f in prints]
-        editorial["writing"] += "\nInclude the reading below as thought_reading in the same direction.\n" + wf1_experiment.PROMPT
+    material = wf1_display.editorial(ctx, script, pack)
+    editorial = dict(writing=wf1_display.WRITING, material={k: material.get(k) for k in
+                     ("picture_windows", "speaker_inserts", "source_inserts", "speakers", "story", "moment")})
     archive = {pic["id"]:pic["archive_source"] for pic in pics if pic.get("archive_source")}
     editorial["material"]["archive_pictures"] = archive
     for pic in pics:
         src = archive.get(pic["id"])
         if pic["kind"] != "photo" or not src:
             continue
-        editorial["material"]["sources"].setdefault(src["url"], dict(url=src["url"], publisher=src.get("credit"),
+        material["sources"].setdefault(src["url"], dict(url=src["url"], publisher=src.get("credit"),
             supports=[v for v in (src.get("description"), src.get("shows")) if v]))
         coverage = pack.get("coverage") or {}
         for window, priors in coverage.get("passed_placements", {}).items():
@@ -893,6 +929,7 @@ def direction_of(ctx, script, pack):
                             and [w["t0"],w["t1"]] == prior.get("clause_t") for w in coverage.get("windows", [])):
                         # The score can read the verified view without opening another tile.
                         pic["path"] = None
+    podcast_word_screen(rows, pack, pics, local_turns(script) if script.get("speaking_turns") else [])
     coverage_contract = (pack.get("coverage") or {}).get("contract")
     intent = hashlib.sha256(json.dumps([DR.CONTRACT, coverage_contract, editorial,rows,stress,st,script.get("title"),script.get("direction"),
                                          script.get("hook_line"),script.get("close_line"),take.get("cuts")],
@@ -914,10 +951,14 @@ def direction_of(ctx, script, pack):
                              upper=st.get("upper")) if st else None,
                   workflow="podcast short", dur_s=dur, title=(script or {}).get("title"), hook=(script or {}).get("hook_line"),
                   payoff=(script or {}).get("close_line"), editorial=editorial, ask=llm.ask, log=getattr(ctx, "log", None))
-    d = wf1_display.bind(d, editorial["material"], rows)
-    if thought_facts:
-        d["thought_facts"] = thought_facts
-    sources = editorial["material"]["sources"]
+    d["display"] = wf1_display.viewer_text(d["viewer_text"], rows) if "viewer_text" in d else d.get("display", [])
+    for row in d["display"]:
+        if row.get("picture") in ids:
+            row["picture_path"] = ids[row["picture"]]
+    sources = material["sources"]
+    d["research_facts"] = [dict(facts=[dict(source=source, statement=" ".join(
+        value for value in source.get("supports") or [] if isinstance(value, str)))])
+        for key, source in sources.items() if key != "interview"]
     credits = {}
     for credit in d.get("archive_credits") or []:
         if not isinstance(credit, dict):
@@ -1391,7 +1432,8 @@ def descend(ctx, script, pack, missing):
 
 def film_direction(d):
     """Carry the Director's authored fields into the picture and sound composers."""
-    knobs = {k: d.get(k) for k in ("display", "publication_copy", "model_phases", "principle_example", "reporting_example", "approval_example", "archive_credits", "archive_views", "caption_ends", "caption_accents", "display_facts", "claims", "past_segs", "turn_seg", "story_turn_seg", "arc")}
+    knobs = {k: d.get(k) for k in ("display", "archive_views", "caption_ends", "caption_accents",
+                                  "past_segs", "payoff_seg", "turn_seg", "story_turn_seg", "arc", "research_facts")}
     if d.get("beats") or d.get("sections") or d.get("asks"):
         knobs["director"] = {k: d.get(k) for k in ("beats", "sections", "asks", "arc", "pictures", "by", "seed")}
     return knobs
@@ -1449,7 +1491,6 @@ def score(ctx, script):
 
 def compose(ctx, script, pack, d, reviewed_clauses=()):
     import wf1_coverage
-    import wf1_experiment
     sys.path[:0] = [p for p in wf3.env_path().split(os.pathsep) if p not in sys.path]
     coverage = pack["coverage"]
     index_path = os.path.join(ctx.supply, "index.json")
@@ -1478,32 +1519,9 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
                                 or timed.get("contextual_definitions", []))
                 pack = dict(pack, coverage=coverage)
             retiming_spend = timed.get("spend") or []
-    thought, reading_spend = wf1_experiment.read(d, pack["coverage"]["words"], ctx.supply, _llm())
-    reading_spend.extend(retiming_spend)
-    import wf1_publisher_reading
-    pages = wf1_publisher_reading.material(d.get("display_facts") or [], coverage)
-    publisher, usage = wf1_publisher_reading.read(pages, coverage, ctx.supply, _llm(), pack.get("pictures"))
-    reading_spend.extend(usage)
+    reading_spend = retiming_spend
     knobs = film_direction(d)
-    demo = (coverage.get("source_reading") or {}).get("live_demo")
-    if demo:
-        import wf1_demo
-        knobs["demo_notes"], usage = wf1_demo.read(demo, coverage["words"],
-            (pack.get("referent_research") or {}).get("references", []), pages, ctx.supply, _llm(), pack["ffmpeg"])
-        reading_spend.extend(usage)
-    if publisher:
-        knobs["display_facts"] = pages
-    if knobs.get("principle_example"):
-        from wf1_principle import finish_reading
-        knobs["principle_example"], setup_spend = finish_reading(
-            knobs["principle_example"],d.get("archive_credits") or {},pack["coverage"]["words"],ctx.supply,_llm())
-        reading_spend.extend(setup_spend)
-    if thought:
-        knobs["thought_experiment"] = thought
-    overrides = dict((ctx.args or {}).get("direction") or {})
-    selected = overrides.pop("publisher_reading", None)
-    knobs["publisher_reading"] = selected if isinstance(selected, dict) else publisher
-    knobs.update(overrides)
+    knobs.update((ctx.args or {}).get("direction") or {})
     # The composed review's findings, each local to its window: a contradiction gives that window's slot to its next
     # candidate, a crop through a face is framed again (never a global, permanent drop: round 1, 19 Nov).
     found = current_rejections(ctx.supply)
@@ -1516,14 +1534,10 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
               source_start=(script.get("window") or [0])[0], speaking_turns=script.get("speaking_turns", []),
               segments=[dict(say=ln["text"], pictures=[n for n in ln.get("subjects") or []]) for ln in pack["lines"]])
     sc["reviewed_clauses"] = reviewed_clauses
-    import wf1_field_report
-    def read_report(account, words, rows):
-        return wf1_field_report.read(account, words, rows, ctx.supply, pack["ffmpeg"], _llm())
-
     for attempt in range(RECOVERY_PASSES + 3 + LADDER_RUNGS):
         knobs["coverage_final"] = coverage_final(pack) or bool(pack.get("coverage_recoveries"))
         try:
-            l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs, read_report=read_report)
+            l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
             break
         except wf1_coverage.CoverageError as error:
             pack['coverage_missing']=list(error.report.get('missing_windows') or [])
@@ -1546,7 +1560,7 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
             save_pack(ctx,pack)
     else:
         knobs["coverage_final"] = True
-        l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs, read_report=read_report)
+        l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
     early = seat_brand_words(l1)
     if early:
         beats.setdefault("taste_moved",[]).extend(early)
@@ -1596,7 +1610,7 @@ def compose(ctx, script, pack, d, reviewed_clauses=()):
     # the drop then lands on the turn (this one, else the one music_film reads from the lines) or the last hit moves
     # into the film's tail, so no short keeps a flat bed (round1 thin-sound)
     story_turn_s = round(beats["story_turn_f"] / F.FPS, 3) if beats.get("story_turn_f") is not None else None
-    return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, last_word_s=last_word_s, story_turn_s=story_turn_s, turn_drop=turn_s is not None, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
+    return dict(l1=out, l1_audio=l1_audio, payoff_s=turn_s, last_word_s=last_word_s, story_turn_s=story_turn_s, turn_drop=turn_s is not None, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
                 scoped_read=True, publisher_read=True, field_report_read=True, thought_read=True, frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=reading_spend + ([d["spend"]] if d.get("spend") else []) +
                 [dict(u,stage='supply',what='primary documents') for research in pack.get('document_research',[]) for u in research.get('spend',[])] +
                 [dict(u,stage='supply',what='documentary research revision') for u in pack.get('research_spend',[])] +
@@ -1729,7 +1743,12 @@ def prepare_picture_mix(ctx, sc):
             continue
         with open(target) as handle:
             doc = json.load(handle)
-        if doc.get("sound") != sounds or doc.get("sound_design") != report:
+        items = doc["items"]
+        if target == scene_path:
+            import palette_menu
+            items = palette_menu.caption_handoff(items)
+        if items != doc["items"] or doc.get("sound") != sounds or doc.get("sound_design") != report:
+            doc["items"] = items
             doc.update(sound=sounds, sound_design=report)
             with open(target+".part","w") as handle:
                 json.dump(doc,handle,ensure_ascii=False)
@@ -1803,29 +1822,6 @@ def repair_options(pack, wanted):
     return options
 
 
-def restore_publisher_reading(ctx, sc, pages):
-    """Recover an older score's reading from its original inputs without a new study."""
-    import wf1_publisher_reading as reading
-    beats = sc.setdefault("beats", {})
-    if isinstance(beats.get("publisher_reading"), dict):
-        return
-    override = ((getattr(ctx, "args", {}) or {}).get("direction") or {}).get("publisher_reading")
-    if isinstance(override, dict):
-        plan = override
-    elif sc.get("publisher_read") and (reading.sources_of(pages) or sc.get("scoped_read")):
-        pack = wf3.load_pack(ctx)
-        coverage = pack["coverage"]
-        pages = reading.material(pages, coverage)
-        plan, _ = reading.read(pages, coverage, ctx.supply, None, pack.get("pictures"), cached_only=True)
-    else:
-        plan = {}
-    if not plan and not isinstance(override, dict):
-        # A copied score may retain the placed excerpt even when its study cache is gone.
-        excerpts = [page["publisher_excerpt"] for page in beats.get("display_facts") or []
-                    if isinstance(page.get("publisher_excerpt"), dict)]
-        if excerpts:
-            plan = dict(readings=excerpts)
-    beats["publisher_reading"] = plan
 
 
 def render(ctx, script, sc):
@@ -1838,17 +1834,7 @@ def render(ctx, script, sc):
     rejected_plan=any(unrepaired(p,found) for p in sc.get('beats',{}).get('pictures',[]))
     stale_captions=('caption_lines' in sc.get('beats',{})
                     and sc['beats'].get('caption_contract')!=wf1_film.CAPTION_CONTRACT)
-    import wf1_experiment
-    needs_reading = not sc.get("thought_read") and all(wf1_experiment.materials(sc.get("direction") or {}))
-    import wf1_field_report
-    needs_account = not sc.get("field_report_read") and wf1_field_report.account(sc.get("direction") or {})
-    import wf1_publisher_reading
-    pages = (sc.get("direction") or {}).get("display_facts") or []
-    restore_publisher_reading(ctx, sc, pages)
-    needs_publisher = not (sc.get("publisher_read") or sc["beats"]["publisher_reading"]) and wf1_publisher_reading.sources_of(pages)
-    import wf1_scoped_reading
-    needs_scoped = not sc.get("scoped_read") and all(wf1_scoped_reading.materials(pages))
-    if rejected_plan or stale_captions or needs_reading or needs_account or needs_publisher or needs_scoped:
+    if rejected_plan or stale_captions:
         if history and rejected_plan:
             pictures = sc.get("beats", {}).get("pictures", [])
             _repair_window_boundaries(ctx, [r for r in history[-1]["placements"] if not r["ok"]
@@ -2075,7 +2061,8 @@ def retained_cuts(supply, coverage):
 def recompose(ctx, script, sc):
     """Render repairs inherit the scored words, direction and checked source stock."""
     from wf1_coverage import story_context
-    if sc.get("direction") and os.path.isfile(os.path.join(ctx.supply, "pack.json")):
+    if (sc.get("direction") and (sc.get("beats") or {}).get("caption_contract") == wf1_film.CAPTION_CONTRACT
+            and os.path.isfile(os.path.join(ctx.supply, "pack.json"))):
         pack = wf3.load_pack(ctx)
         if (pack.get("coverage", {}).get("story") == story_context(script)
                 and not pack.get("platform_walled")
@@ -2413,7 +2400,7 @@ def check(ctx, rd, sc):
     if not r.get("final_music") and (ctx.args or {}).get("music_ledger"):
         # The parent has the branded take and measured cuts after supply is pruned.
         # Keep the two authored score positions that it cannot read from those bytes.
-        r["checks"]["music_cues"] = dict(turn_s=sc.get("story_turn_s"), payoff_s=sc.get("turn_s"))
+        r["checks"]["music_cues"] = dict(turn_s=sc.get("story_turn_s"), payoff_s=sc.get("payoff_s", sc.get("turn_s")))
     history = [dict(b["rendered_check"], frames="the render review's composed frames; the delivered programme is the same")] \
         if b.get("rendered_check") else []
     if history:

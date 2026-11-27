@@ -1027,6 +1027,8 @@ def witness_crop(row):
     The final rater still measures the actual encoded cuts and camera motion.
     """
     duration=row['clip']['seconds']
+    if row['clip'].get('meaning_box'):
+        return row['clip']['meaning_box']
     if not row.get('real_voice') or duration<=8:return [0,0,1,1]
     crops=[]
     for q in range(row['f'][1]-row['f'][0]):
@@ -1098,6 +1100,21 @@ def build(sc,pack,*,edit=None):
     shots,clock,end=schedule(sc,pack['words'],pack['footage'])
     if edit:
         shots = edit(shots, clock)
+    l1, chapters = frame_programme(sc, pack, shots, clock, end)
+    audio=F.audio_scene(l1,pack)
+    from score import sound as SD
+    wd=read(pack['words'])
+    sounds,rep=SD.design(audio,src=pack['narration'],index=dict(words=[dict(t0=w['start'],t1=w['end']) for w in wd['words']],video=dict(duration=wd['duration'])),
+                         bed=True,supply=dict(np10=len(shots)/clock.dur*10,bed=True))
+    if not sounds or rep.get('fault'): raise RuntimeError('SND3 returned no designed sound')
+    from chapter_audio import editorial_cues
+    l1['sound']=editorial_cues(sounds,l1['evidence_changes'],FPS)
+    l1['sound_design']=dict(rep,selected_event_frames=[s['event_f'] for s in l1['sound']])
+    return l1,shots,chapters
+
+
+def frame_programme(sc, pack, shots, clock, end, *, passage_dir=None):
+    from film_long import Plan
     chapters=chapter_clock(sc,clock,end)
     voices={'cap':dict(font='InterDisplay-Bold.ttf',px=40,track=0,shadow={'a':0.9}),
             'excerpt':dict(font='InterDisplay-Bold.ttf',px=43,track=0),
@@ -1117,13 +1134,31 @@ def build(sc,pack,*,edit=None):
                 if (design.get('supplied_passage') and c.get('fact') not in seg.get('facts', [])
                         and (seg.get('design') or {}).get('fact') in seg.get('facts', [])
                         and urldefrag(design['source']['url']).url == urldefrag(c['source']['url']).url):
+                    # The pack retains the actual excerpt for this clause, sometimes on a different page
+                    # of the same publication. Show those pixels in place of the neighbouring passage.
                     companion = design
                     row['companion_source'] = design['source']
-                document_shot(P, row['f'], key, c, companion)
+                from documentary_layout import source_passage
+                directory = passage_dir
+                if directory is None and isinstance(pack.get("words"), (str, Path)):
+                    directory = Path(pack["words"]).parent / "publication-excerpts"
+                passage = companion or c
+                if directory:
+                    passage = source_passage(passage, directory)
+                if passage["path"] != c["path"]:
+                    key = P.image(f'evidence-passage-{j}',passage)
+                    row["framed_passage"] = dict(path=passage["path"],source=passage["source"])
+                if passage.get("capture_error"):
+                    row["capture_error"] = passage["capture_error"]
+                document_shot(P,row['f'],key,passage)
             else:
                 n=row['f'][1]-row['f'][0]
                 ratio=c['w']/c['h']
-                if BLEED_RATIO <= ratio <= (W/H)/.84 and c['w'] >= 960:
+                if c.get("meaning_box"):
+                    from documentary_layout import fit
+                    P.page(row["f"],"#14161A",grain=.005)
+                    fit(P,row["f"],key,c,[.02,.195,.98,.80],crop=c["meaning_box"])
+                elif BLEED_RATIO <= ratio <= (W/H)/.84 and c['w'] >= 960:
                     # A landscape photograph fills the frame and the camera
                     # pushes in; its cover crop keeps at least 84% of it.
                     P.shot(row['f'],key,F.push(F.cover_crop(c['w'],c['h'],W/H,(.5,.45),(.5,.45)),n,.10 if n>240 else .07,(.5,.45)))
@@ -1190,16 +1225,8 @@ def build(sc,pack,*,edit=None):
     l1['chapters']=chapters
     l1['evidence_changes'] = evidence_changes(shots, chapters)
     l1['music_marks']=dict(turn_s=chapters[0]['turn_s'],payoff_s=chapters[-1]['payoff_s'])
-    audio=F.audio_scene(l1,pack)
-    from score import sound as SD
-    wd=read(pack['words'])
-    sounds,rep=SD.design(audio,src=pack['narration'],index=dict(words=[dict(t0=w['start'],t1=w['end']) for w in wd['words']],video=dict(duration=wd['duration'])),
-                         bed=True,supply=dict(np10=len(shots)/clock.dur*10,bed=True))
-    if not sounds or rep.get('fault'): raise RuntimeError('SND3 returned no designed sound')
-    from chapter_audio import editorial_cues
-    l1['sound']=editorial_cues(sounds,l1['evidence_changes'],FPS)
-    l1['sound_design']=dict(rep,selected_event_frames=[s['event_f'] for s in l1['sound']])
-    return l1,shots,chapters
+    return l1, chapters
+
 
 
 def evidence_changes(shots, chapters):

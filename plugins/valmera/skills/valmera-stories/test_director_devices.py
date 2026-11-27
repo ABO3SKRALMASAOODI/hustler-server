@@ -41,11 +41,20 @@ def built(tmp_path):
     return l1, beats, pack, sc
 
 
-def test_the_director_lays_devices_on_a_built_story(tmp_path):
+@pytest.fixture
+def directed(monkeypatch):
+    module = wf3._director()
+    direct = module.direct
+    def answer(*args, **kwargs):
+        return json.dumps(dict(asks=[dict(dev="white", at=dict(w=0)), dict(dev="neg", at=dict(w=17))])), {}
+    monkeypatch.setattr(module, "direct", lambda *args, **kwargs: direct(*args, ask=answer, **kwargs))
+
+
+def test_the_director_lays_devices_on_a_built_story(tmp_path, directed):
     l1, beats, pack, sc = built(tmp_path)
     ctx = SimpleNamespace(supply=str(tmp_path), log=lambda _: None, args={}, workflow="wf3")
     rec = wf3.director_devices(ctx, dict(style=dict(id="reel")), sc, pack, l1, beats)
-    assert rec["by"] == "signal" and rec["asked"]                      # a test never reaches a model: the signal director
+    assert rec["by"] == "model" and rec["asked"]                      # a test never reaches a model: the signal director
     assert l1["devices"] and all(isinstance(a["f"], (int, list)) for a in l1["devices"])
     import director
     assert json.load(open(tmp_path / "director.json"))["contract"] == director.CONTRACT
@@ -58,20 +67,30 @@ def test_the_director_lays_devices_on_a_built_story(tmp_path):
     assert log and all(r["done"] for r in log), [r for r in log if not r["done"]]
 
 
-def test_a_marketing_reel_gets_the_directors_devices_round_its_hero(tmp_path, monkeypatch):
+def test_a_marketing_reel_gets_the_directors_devices_round_its_hero(tmp_path, monkeypatch, directed):
     l1, beats, pack, sc = built(tmp_path)
     click = dict(id="timeline.send", device="timeline", event_f=21, s="click")
     l1["sound"].append(click)
     (tmp_path / "l1.json").write_text(json.dumps(l1))
     monkeypatch.setattr(wf3, "load_pack", lambda ctx: pack)
     ctx = SimpleNamespace(supply=str(tmp_path), log=lambda _: None, args={}, workflow="wf2")
+    def compose(ctx, source):
+        wf3._director().palette_module()
+        from scene import palette
+        doc, _ = palette.apply(json.load(open(source)), ctx.supply)
+        path = tmp_path / "laid.json"
+        path.write_text(json.dumps(doc))
+        return str(path)
+    monkeypatch.setattr(wf3.chain, "lay_devices", compose)
     hero = [0, l1["dur_f"] // 2]
     path = wf3.with_director(ctx, dict(script=sc, style=dict(id="reel")), dict(l1=str(tmp_path / "l1.json"), beats=beats,
                                                                              devices=dict(laid=[dict(frames=hero)])))
     got = json.load(open(path))
-    assert path.endswith("l1_director.json") and got["devices"]
+    assert path.endswith("l1_director.json") and got["director_performance"]["asked"]
     assert click in got["sound"]
-    starts = [a["f"][0] if isinstance(a["f"], list) else a["f"] for a in got["devices"]]
+    rec = got["director_performance"]
+    assert rec["performed"][0]["frames"] == hero
+    starts = [a["f"][0] if isinstance(a["f"], list) else a["f"] for a in rec["placements"]]
     assert all(not (hero[0] <= f < hero[1]) for f in starts)            # the hero device keeps its frames
     other = SimpleNamespace(supply=str(tmp_path), log=lambda _: None, args={}, workflow="wf3")
     assert wf3.with_director(other, {}, dict(l1=str(tmp_path / "l1.json"))) == str(tmp_path / "l1.json")

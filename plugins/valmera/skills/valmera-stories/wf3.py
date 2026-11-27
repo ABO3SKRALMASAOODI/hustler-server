@@ -2,10 +2,8 @@
 
 ideas   the writer finds stories on the web itself (writer.find_ideas), then each idea's pictures are probed on
         Wikimedia Commons and Openverse: an idea whose named things have no free photographs cannot be made
-script  VERIFY FIRST: the best idea's spine (hook, turn, payoff, close) is researched and every claim verified on its
-        page before a word is written (writer.spine_bank; the next idea when it cannot be); the writer writes from the
-        verified bank alone (writer.write_from_bank), every line judged on its quotes and the spine held
-        (writer.hold_spine), then the ear and the final support pass; every number on screen stands in a verified quote
+script  Research the central claim and its causes. Plan the sheet, write the first draft and use
+        support, repeat, spine and spoken-time measurements in one whole-script revision.
 supply  the narrator (narrate tool, local, through heavy.sh) and the pictures (worker/broll_source: Commons and
         Openverse, checked by a vision model against what each must show, licence kept), and real video per line
         (worker/footage through _shell/chain.footage: YouTube and archive.org, transcribed and checked on OpenAI,
@@ -28,7 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shell"))
 import chain  # noqa: E402
-import ear  # noqa: E402
+import story_chain  # noqa: E402
 import film as F  # noqa: E402
 import fit as FIT  # noqa: E402
 import pictures as PX  # noqa: E402
@@ -157,7 +155,7 @@ def idea_rank(i):
 
 def remake_of(ctx):
     """A delivered film's record when this run re-makes it (--args '{"remake": "<its folder or film.json>"}'): the
-    same story and script on today's engines. No model writes anything: the facts are fetched and checked again."""
+    same story on today's engines. With rewrite, retain its idea and facts for fresh causal research."""
     p = ctx.args.get("remake")
     if not p:
         return None
@@ -193,7 +191,7 @@ def ideas(ctx):
 
 def script(ctx, ideas_out):
     old = remake_of(ctx)
-    if old:
+    if old and not ctx.args.get("rewrite"):
         prev = old["script"]
         sc = prev["script"]
         rep = writer.verify(sc)
@@ -214,7 +212,7 @@ def script(ctx, ideas_out):
                     close_line=sc.get("close_line"), direction=f"{card.get('name', sid)}: {card.get('look', '')}", idea=prev.get("title"),
                     idea_full=prev.get("idea_full"), script=sc, verify=rep, words=writer.words_of(sc), remake_of=old.get("run_id"),
                     annotate=ann, spend=spend)
-    able = {s["id"]: s for s in able_cards(ctx)}
+    able = cards() if old else {s["id"]: s for s in able_cards(ctx)}
     picks = [i for i in ideas_out["ideas"] if i.get("style") in able and (i.get("supply") or {}).get("ok")]
     if not picks:
         raise RuntimeError("no idea with a buildable style and enough free pictures: " +
@@ -236,19 +234,17 @@ def script(ctx, ideas_out):
             break
         pick = queue.pop(0)
         card = able[pick["style"]]
-        got = from_spine(ctx, pick, card, spend, n)
+        prior = old["script"] if old else {}
+        read = {r["id"]: r for r in (prior.get("verify") or {}).get("facts", []) if r["found"]}
+        verified = [dict(f, prior_source=read[f["id"]].get("source") or f["url"])
+                    if f["id"] in read else f for f in prior.get("script", {}).get("facts", [])]
+        got = from_spine(ctx, pick, card, spend, n, verified=verified)
         n += 1
         if got["ok"]:
             sc, rep, bank = got["script"], got["verify"], got["bank"]
-            try:
-                sc, rep = for_the_ear(ctx, sc, rep, spend)
-                sc, rep = final_gate(ctx, sc, rep, spend)          # the last text gate: the narration's words are frozen after it
-                sc, rep = timed(ctx, sc, rep, spend)               # the hook's lead and the close's length, measured on the read itself
-                break
-            except RuntimeError as e:
-                if "the final support pass does not stand" not in str(e):
-                    raise
-                got = dict(ok=False, tried=dict(got["tried"], why=f"its script did not stand at the final support pass: {e}"[:600]))
+            break
+        if old:
+            raise RuntimeError(got["tried"]["why"])
         tried.append(got["tried"])
         ctx.log(f"spine: {pick.get('title')!r} cannot stand: {got['tried']['why'][:300]}; the next idea")
     if not got or not got["ok"]:
@@ -321,139 +317,128 @@ def spine_record(sc, bank):
                 close_from_hook=(bank or {}).get("close_from_hook"))
 
 
-def from_spine(ctx, pick, card, spend, n, bank_fn=None, write=None, settle=None, hold=None):
-    """{"ok", "script", "verify", "bank", "tried"}: VERIFY FIRST, then WRITE FROM THE BANK.
-      1. the idea's spine (hook, turn, payoff, close) is researched and verified as claims before a word is written
-         (writer.spine_bank: the idea's own sources, then up to three search rounds a claim with new queries, primary
-         sources first; report spine<n>.json). A spine that cannot be verified gives the next idea.
-      2. the script is written from the bank alone (writer.write_from_bank), settled, every line judged on its quotes
-         and the spine held (writer.hold_spine: a beat that lost its point is rewritten on the bank, its claims searched
-         again when the bank cannot carry it); BANK_TRIES scripts at most, then the next idea."""
-    bank_fn = bank_fn or (lambda: writer.spine_bank(pick, log=ctx.log))
-    bank, more = bank_fn()
-    spend += [dict(stage="spine", idea=n, **u) for u in more if u]
-    json.dump(bank, open(os.path.join(ctx.run_dir, f"spine{n}.json"), "w"), ensure_ascii=False, indent=1)
-    tried = dict(title=pick.get("title"), why=bank.get("why") or "",
-                 claims=[dict(beat=c["beat"], claim=c["claim"], stated=c.get("stated"), missing=c.get("missing"),
-                              queries=len(c.get("queries") or [])) for c in bank.get("claims") or []])
-    if not bank.get("ok"):
-        return dict(ok=False, tried=tried)
-    write = write or (lambda notes, bank_: writer.write_from_bank(pick, card, FORM, bank_, voices=card.get("voice"), notes=notes))
-    hold = hold or (lambda sc_, bank_: writer.hold_spine(
-        sc_, bank_, pick, log=ctx.log,
-        again=lambda b, cids, why: writer.spine_again(b, pick, cids, why, log=ctx.log)))
-    state = dict(bank=bank)
-
-    def write_n(notes):
-        return write(notes, state["bank"])
-
-    def settle_held(sc_):
-        sc_, rep_, more_ = (settle or (lambda s_: writer.settle(s_, log=ctx.log)))(sc_)
-        if not rep_.get("ok"):
-            return sc_, rep_, more_
-        sc2, hr, more2, state["bank"] = hold(sc_, state["bank"])
-        json.dump(dict(script=sc2, report=hr), open(os.path.join(ctx.run_dir, f"spine{n}_hold.json"), "w"), ensure_ascii=False, indent=1)
-        rep2 = dict(hr["verify"], settle=dict(rep_.get("settle") or {}, hold=dict({k: v for k, v in hr.items() if k != "verify"})))
-        if hr.get("core_repaired") or hr.get("spine_regenerated"):
-            ctx.log(f"repaired instead of stopping: core lines restated on their quotes {len(hr.get('core_repaired') or [])}, "
-                    f"spine beats written again from the bank {[b for r in hr.get('spine_regenerated') or [] for b in r['beats']]}")
-        if not hr.get("ok"):
-            rep2["ok"] = False
-            rep2["spine_lost"] = (hr.get("why") if hr.get("why") != "core_unsupported" else
-                                  "a core line cannot stand on its quotes: " + json.dumps(hr.get("core_unsupported"), ensure_ascii=False))
-            return sc_, rep2, list(more_) + list(more2)
-        return sc2, rep2, list(more_) + list(more2)
+def from_spine(ctx, pick, card, spend, n, verified=()):
+    """Plan on the researched bank, measure one draft, revise it as a whole."""
+    bank_path = os.path.join(ctx.run_dir, f"spine{n}.json")
+    source_key = hashlib.sha256(json.dumps([pick, verified], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     try:
-        sc, rep, more = write_checked(ctx, pick, card, write=write_n, settle=settle_held, tries=BANK_TRIES)
-    except RuntimeError as e:
-        tried["why"] = f"written from its verified bank, the script did not stand: {e}"[:600]
+        with open(bank_path) as saved:
+            bank = json.load(saved)
+    except (FileNotFoundError, ValueError):
+        bank = {}
+    if bank and "request" not in bank and bank.get("idea") == pick.get("title"):
+        # Older interrupted runs saved the idea and the bank separately. Recover a bank only
+        # from this run's exact selected idea, with all original source receipts represented.
+        try:
+            with open(os.path.join(ctx.run_dir, "ideas.json")) as saved:
+                matching_idea = pick in json.load(saved)["ideas"]
+        except (OSError, KeyError, ValueError):
+            matching_idea = False
+        have = {(f["url"], f["quote"]) for f in bank.get("facts", [])}
+        if matching_idea and all((f["url"], f["quote"]) in have for f in verified):
+            bank["request"] = source_key
+            chain_record(ctx, f"spine{n}", bank)
+    if bank.get("request") != source_key or not bank.get("ok"):
+        bank, more = writer.spine_bank(pick, log=ctx.log, verified=verified)
+        spend.extend(dict(stage="spine", **u) for u in more if u)
+        bank["request"] = source_key
+        chain_record(ctx, f"spine{n}", bank)
+    tried = dict(title=pick.get("title"), why=bank.get("why"))
+    if not bank["ok"]:
         return dict(ok=False, tried=tried)
-    spend += more
-    return dict(ok=True, script=sc, verify=rep, bank=state["bank"], tried=tried)
+    notes = ctx.args.get("notes")
+    instructions = [story_chain.PITCH, writer.BANK_WRITE_RULES, writer.SUPPORT_SYSTEM,
+                    writer.REPEAT_SYSTEM, writer.SPINE_JUDGE_SYSTEM]
+    fingerprint = hashlib.sha256(json.dumps([source_key, card, notes, writer.bank_facts(bank),
+                                             writer.spine_view(bank), instructions],
+                                            sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    stage = f"story-work{n}"
+    state = chain_read(ctx, stage)
+    if state.get("request") != fingerprint:
+        state = {"request": fingerprint}
+        chain_record(ctx, stage, state)
+
+    if "sheet" not in state:
+        state["sheet"], usage = story_chain.plan("story", pick, dict(facts=writer.bank_facts(bank), spine=writer.spine_view(bank)))
+        spend.append(dict(stage="sheet", **usage))
+        chain_record(ctx, stage, state)
+    sheet = state["sheet"]
+    chain_record(ctx, "beat_sheet", sheet)
+
+    def write(instructions):
+        sc, use = writer.write_from_bank(pick, card, FORM, bank, notes=instructions, sheet=sheet)
+        spend.append(dict(stage="script", **use))
+        return sc
+
+    if "draft" not in state:
+        state["draft"] = write(notes)
+        chain_record(ctx, stage, state)
+    draft = state["draft"]
+    chain_record(ctx, "script_draft", draft)
+    if "measures" not in state:
+        state["measures"], more = writer.measurements(draft, {f["id"]: f["quote"] for f in bank["facts"]})
+        spend.extend(dict(stage="measurement", **u) for u in more)
+        chain_record(ctx, stage, state)
+    measures = state["measures"]
+    prior = {(f["url"], f["quote"]): f["prior_source"] for f in verified if f.get("prior_source")}
+    for fact in bank["facts"]:
+        # _take retains these records only after checking the exact quote on the cited page.
+        if fact.get("read") and fact.get("how") != "delivered verification":
+            prior[(fact["url"], fact["quote"])] = dict(read="verified bank: " + fact["read"],
+                                                       source=fact.get("verified_source") or fact["url"])
+    if "timing" not in measures:
+        measures["timing"] = timed(ctx, draft)
+        chain_record(ctx, stage, state)
+    if "facts" not in measures:
+        measures["facts"] = script_problems(writer.verify(draft, previous=prior))
+        chain_record(ctx, stage, state)
+    chain_record(ctx, "script_measurements", measures)
+    if "revision" not in state:
+        guidance = dict(draft=draft, measurements=measures, instruction=
+                        "Return the whole revised script on the same sheet. Keep supported causal links, "
+                        "setups and the conflict. Write the landing before the rest of the revision: speak the "
+                        "planner's exact hook word again and say how its meaning changed. Move setup or scale to "
+                        "the preceding line when the measured close runs long. The causal resolution takes priority "
+                        "over hitting a reference time.", hook_word=sheet.get("hook_word"), meaning=sheet.get("meaning_line"))
+        state["revision"] = write(json.dumps(guidance, ensure_ascii=False))
+        chain_record(ctx, stage, state)
+    sc = state["revision"]
+    rep = writer.verify(sc, previous=prior)
+    chain_record(ctx, "script_final", dict(script=sc, report=rep))
+    return dict(ok=True, script=sc, bank=bank, verify=rep, tried=tried)
 
 
-SCRIPT_TRIES = 3
+def chain_read(ctx, name):
+    try:
+        with open(os.path.join(ctx.run_dir, name + ".json")) as src:
+            return json.load(src)
+    except (FileNotFoundError, ValueError):
+        return {}
 
 
-def script_problems(rep, sc):
-    """What a written and settled script still lacks, as notes the writer reads on its next attempt ([] = it stands)."""
-    problems = []
-    st = rep.get("settle") or {}
-    if st.get("core_unverified"):
-        problems.append("the story's core claims (its hook, turn or payoff) could not be verified on any readable page, even after "
-                        f"searching for other sources: {json.dumps(st.get('core_why') or st['core_unverified'], ensure_ascii=False)}. "
-                        "Build the hook, the turn and the payoff on facts a readable page states word for word (read it with web_fetch "
-                        "first: Wikipedia, archive.org, the studio's own site, free trade press; never a document mirror, a paywall or a PDF)")
-    elif st.get("core_unsupported"):
-        problems.append("the story's core lines (its hook, turn or payoff) say more than the quotes of the facts they cite: "
-                        f"{json.dumps(st['core_unsupported'], ensure_ascii=False)}. Say in each core line only what a fact's quote "
-                        "states, and give someone's own words only when a quote holds them word for word")
-    elif rep.get("facts_unverified"):
-        problems.append(f"these facts still do not verify: {rep['facts_unverified']}")
-    if rep.get("numbers_unbacked"):
-        problems.append(f"these numbers are on screen but in no verified quote: {rep['numbers_unbacked']}")
-    if rep.get("speech_unbacked"):
-        problems.append("these words are given as someone's own but stand in no verified quote the line cites: "
-                        f"{json.dumps(rep['speech_unbacked'], ensure_ascii=False)}")
-    if rep.get("spine_lost"):
-        hold = ((rep.get("settle") or {}).get("hold") or {})
-        last = (hold.get("spine") or [{}])[-1].get("beats") or {}
-        lost = {b: dict(line=v.get("say"), lost=v.get("lost")) for b, v in last.items() if not v.get("carried")}
-        problems.append(("the spine lost its point: " + json.dumps(lost, ensure_ascii=False) if lost else rep["spine_lost"]) +
-                        ". Write each beat (hook, turn, payoff, close) from the bank facts the spine names for it, saying the point "
-                        "itself (both halves of the collision, the price and who paid it, the irony) in words those quotes support")
-    n_words = writer.words_of(sc)
-    lo, hi = writer.FORMS[FORM]["words"]
-    if not lo * 0.85 <= n_words <= hi * 1.15:
-        problems.append(f"{n_words} spoken words; the form wants {lo}-{hi}")
-    return problems
+def chain_record(ctx, name, value):
+    path = os.path.join(ctx.run_dir, name + ".json")
+    with open(path + ".part", "w") as out:
+        json.dump(value, out, ensure_ascii=False, indent=1)
+    os.replace(path + ".part", path)
 
 
-def write_checked(ctx, pick, card, write=None, settle=None, tries=SCRIPT_TRIES):
-    """(script, verify report, spend): the script written, then settled claim by claim (writer.settle: a fact whose page
-    will not open or whose quote is absent is sourced again, else its sentences are rewritten without it or dropped; a
-    number on screen without a verified quote leaves the screen). The writer writes again only when the story's own
-    core (hook, turn, payoff) cannot be verified or the script is out of its form; after SCRIPT_TRIES the stage stops
-    and says which core claims failed and why."""
-    write = write or (lambda notes: writer.write(pick, card, FORM, voices=card.get("voice"), notes=notes))
-    settle = settle or (lambda sc_: writer.settle(sc_, log=ctx.log))
-    spend, notes, rep, sc, best = [], ctx.args.get("notes"), None, None, None
-    for attempt in range(tries):
-        sc, use = write(notes)
-        spend.append(dict(stage="script", attempt=attempt, **use))
-        sc, rep, more = settle(sc)
-        spend += [dict(stage="script", attempt=attempt, **u) for u in more]
-        json.dump(dict(script=sc, verify=rep), open(os.path.join(ctx.run_dir, f"script_attempt{attempt}.json"), "w"), ensure_ascii=False, indent=1)
-        problems = script_problems(rep, sc)
-        if rep.get("ok"):
-            best = (sc, rep)            # a verified script out of its word range is kept if no later attempt does better
-        if not problems:
-            break
-        notes = "\n".join(problems)
-        ctx.log("script repair: " + notes[:400])
-    if (rep is None or not rep["ok"]) and best:
-        sc, rep = best
-    if rep is None or not rep["ok"]:
-        st = (rep or {}).get("settle") or {}
-        if st.get("core_unverified"):
-            raise RuntimeError("the story's core claims cannot be verified on any readable page: "
-                               f"{json.dumps(st.get('core_why'), ensure_ascii=False)[:700]}")
-        if st.get("core_unsupported"):
-            raise RuntimeError("the story's core lines say more than their verified quotes state: "
-                               f"{json.dumps(st.get('core_unsupported'), ensure_ascii=False)[:700]}")
-        if (rep or {}).get("spine_lost"):
-            raise RuntimeError(f"the spine lost its point: {rep['spine_lost'][:600]}")
-        raise RuntimeError(f"the script's facts do not verify: {json.dumps({k: (rep or {}).get(k) for k in ('facts_unverified', 'numbers_unbacked', 'speech_unbacked', 'verified', 'total')}, ensure_ascii=False)[:600]}")
-    return sc, rep, spend
+def script_problems(report):
+    return {k: report[k] for k in ("facts_unverified", "numbers_unbacked", "speech_unbacked") if report.get(k)}
 
 
 def needs_annotate(sc):
-    """A script without the picture brief or the display anchors (a delivered film from before 14 Nov), or with a brief
-    from before round 2 (no photo search per item, no list reading): it is annotated again on its own words."""
-    segs = sc.get("segments") or []
-    return any(not s.get("see") or any(isinstance(x, str) or not isinstance(x, dict) or "word_i" not in x for x in s.get("show") or [])
-               or not s.get("phrases") or "list" not in s or any(isinstance(x, dict) and "search" not in x for x in s.get("see") or [])
-               for s in segs)
+    """Refresh delivered or draft scripts that predate phrase-specific visual acquisition."""
+    for segment in sc.get("segments") or []:
+        pictures = segment.get("see") or []
+        if not pictures or not segment.get("phrases") or "list" not in segment:
+            return True
+        if any(not isinstance(item, dict) or "word_i" not in item for item in segment.get("show") or []):
+            return True
+        if any(not isinstance(item, dict) or not {"kind", "word_i", "search", "video_searches"} <= item.keys()
+               for item in pictures):
+            return True
+    return False
 
 
 def annotate_script(ctx, sc, idea_full, spend, reel=True):
@@ -504,7 +489,7 @@ def annotate_script(ctx, sc, idea_full, spend, reel=True):
         # the facts stand on the script's own show items: the brief, phrases, finishes and anchors are laid on them
         keep = json.loads(json.dumps(sc))
         for s0, s1 in zip(keep["segments"], sc2["segments"]):
-            for k in ("see", "pictures", "phrases", "finish", "finish_rank", "list", "list_items"):
+            for k in ("see", "pictures", "phrases", "list", "list_items"):
                 if k in s1:
                     s0[k] = s1[k]
             by_text = {str(x.get("text")): x for x in s1.get("show") or [] if isinstance(x, dict)}
@@ -522,7 +507,6 @@ def annotate_script(ctx, sc, idea_full, spend, reel=True):
         if not rep["verify"].get("ok"):
             raise RuntimeError(f"the annotated script does not verify even on its own show items: {json.dumps(rep['verify'])[:400]}")
     if reel:
-        names = {n.get("name") for n in sc2.get("named") or [] if n.get("name")}
         for k, s_ in enumerate(sc2["segments"]):
             if s_.get("see"):
                 continue
@@ -532,39 +516,15 @@ def annotate_script(ctx, sc, idea_full, spend, reel=True):
             except Exception as e:  # noqa: BLE001
                 ctx.log(f"annotate segment {k}: {e!r}"[:200])
                 see = []
-            see = [x for x in see if x.get("thing") in names]
-            if see:
-                s_["see"] = see
-                s_["pictures"] = list(dict.fromkeys(x["thing"] for x in see))
-        lack = [k for k, s_ in enumerate(sc2["segments"]) if not s_.get("see")]
-        if lack:
-            raise RuntimeError(f"no picture brief for segments {lack}: a story reel is never cut without one")
+            if not see:
+                see = writer.spoken_briefs(s_)
+                ctx.log(f"Using the spoken phrases for segment {k}'s picture research")
+            s_["see"] = see
+            s_["pictures"] = list(dict.fromkeys(x["thing"] for x in see))
         rep["problems"] = [p for p in rep.get("problems") or [] if "no valid see item" not in p]
     json.dump(dict(script=sc2, report=rep), open(os.path.join(ctx.run_dir, "script_annotate.json"), "w"), ensure_ascii=False, indent=1)
-    ctx.log(f"annotate: ok {rep['ok']}, devices {rep.get('device_share_words')} of the words, problems {len(rep.get('problems') or [])}")
+    ctx.log(f"annotate: {sum(len(seg.get('see') or []) for seg in sc2['segments'])} phrase briefs, {len(rep.get('problems') or [])} unresolved annotations")
     return sc2, dict({k: v for k, v in rep.items() if k != "spend"}, kept=True)
-
-
-def for_the_ear(ctx, sc, rep, spend):
-    """The checked script rewritten for the ear by a model (ear.py: short spoken lines, the stress word placed, a real
-    turn, the film's question), audited for facts by a second call and checked again on its pages. Any failure keeps the
-    script as written. --args '{"ear": false}' skips it."""
-    if ctx.args.get("ear") is False:
-        return sc, rep
-    try:
-        sc2, er = ear.for_ear(sc, "story", log=ctx.log)
-    except Exception as e:  # noqa: BLE001
-        ctx.log(f"ear: {e!r}"[:300])
-        return sc, rep
-    spend += [dict(stage="ear", **u) for u in er.get("spend") or []]
-    json.dump(dict(script=sc2, report=er), open(os.path.join(ctx.run_dir, "script_ear.json"), "w"), ensure_ascii=False, indent=1)
-    if not er.get("ok"):
-        return sc, rep
-    rep2 = writer.verify(sc2)
-    if not rep2["ok"]:
-        ctx.log("ear: the rewrite does not verify; the script stands as written")
-        return sc, rep
-    return sc2, (dict(rep2, settle=rep["settle"]) if rep.get("settle") else rep2)
 
 
 def narrate_script(ctx, sc, out, previous=None):
@@ -602,142 +562,53 @@ def narrate_script(ctx, sc, out, previous=None):
         env["STORIES_PREVIOUS_READ"] = os.path.abspath(previous)
     else:
         env.pop("STORIES_PREVIOUS_READ", None)
-    return PX.narrate(ns, out, band=band, label=f"wf3-narrate-{ctx.run_id}", env=env, reader=os.path.join(HERE, "voice.py"))
-
-
-def _spoken_request(sc):
-    read = writer.narration_script(sc, writer.FORMS[FORM]["band"])
-    read.pop("title", None)
-    for segment in read["segments"]:
-        # The Stories reader sets the gap from the actual beat at the next generation.
-        segment.pop("pause_after", None)
+    read = PX.narrate(ns, out, band=band, label=f"wf3-narrate-{ctx.run_id}", env=env, reader=os.path.join(HERE, "voice.py"))
+    import subprocess
+    subprocess.run([chain.TORCH_PY, os.path.join(HERE, "forced_clock.py"), read["wav"], sp, read["words"]],
+                   check=True, env=env)
     return read
 
 
-def timed(ctx, sc, rep, spend, narrate=None, rewrite=None, final=None):
-    """(script, verify report): the hook's collision and the close's length measured on the narration's own word times
-    (timing.measure: the judge's 3.7 s to the hook's landing word, a close of at most 5 s). A beat over its budget goes
-    back to the writer with the measured seconds (timing.rewrite, from the same verified facts), the script is judged on
-    its quotes again (final_gate, its report in script_timing_final<ask>.json) and read again, up to timing.TIMING_ROUNDS
-    reads; the read nearest the budgets is kept, and its narration is the one supply uses (supply/narration). Only words
-    that changed are read again: a rewrite the final pass cannot stand, or one that changes no word, keeps the last read
-    and its measure and goes back to the writer with the reason (up to timing.TIMING_ASKS asks). script_final.json is
-    written last from the kept script and its own final report. --args '{"timing": false}' or a given narration skips it."""
-    if ctx.args.get("timing") is False or ctx.args.get("narration"):
-        return sc, rep
-    import shutil
-    asks = 0
-    previous = None
-    rewrite = rewrite or (lambda sc_, m, notes: timing.rewrite(sc_, m, notes=notes, log=ctx.log))
-    final = final or (lambda sc_, rep_: final_gate(ctx, sc_, rep_, spend, record=f"script_timing_final{asks}.json"))
-    os.makedirs(ctx.supply, exist_ok=True)
-    rounds, tries, best, notes, m = [], [], None, None, None
-    cur, cur_rep, cur_rec = sc, rep, "script_final.json"
-    fresh = True                                       # cur's words have not been read yet
-    while True:
-        if fresh:
-            k = len(rounds)
-            out = os.path.join(ctx.supply, f"narration_t{k}")
-            try:
-                nar = narrate(cur, out) if narrate else narrate_script(ctx, cur, out, previous)
-                previous = out
-                m = timing.measure(nar["words"], cur)
-            except Exception as e:  # noqa: BLE001 - a read that failed is read again by supply itself
-                ctx.log(f"timing: read {k} failed: {e!r}"[:300])
-                break
-            fresh = False
-            rounds.append(dict(round=k, ask=asks, hook_land_s=m.get("hook_land_s"), hook_word=m.get("hook_word"),
-                               close_s=m.get("close_s"), wps=m.get("wps"), over=m.get("over"), overage_s=timing.overage(m),
-                               hook=cur["segments"][0].get("say"), close=cur["segments"][-1].get("say")))
-            ctx.log(f"timing {k}: hook lands at {m.get('hook_land_s')} s on {m.get('hook_word')!r}, close {m.get('close_s')} s, "
-                    f"over by {timing.overage(m)} s")
-            if best is None or timing.overage(m) <= best[0]:
-                best = (timing.overage(m), k, cur, cur_rep, out, cur_rec)
-        if not m.get("over") or len(rounds) >= timing.TIMING_ROUNDS or asks >= timing.TIMING_ASKS:
-            break
-        asks += 1
-        new, uses, changed = rewrite(cur, m, notes)    # the last read's measure stands until the words change
-        spend += [dict(stage="timing", **u) for u in uses if u]
-        if not changed or _spoken_request(new) == _spoken_request(cur):
-            notes = "your last answer changed none of the words of the beats asked for"
-            tries.append(dict(ask=asks, read=False, why="no word changed"))
-            continue
-        try:
-            new, new_rep = final(new, cur_rep)
-        except Exception as e:  # noqa: BLE001 - the rewrite does not stand on its quotes: the script it came from stays
-            notes = f"the fact check could not stand your rewrite: {str(e)[:400]}"
-            ctx.log(f"timing: {notes}"[:300])
-            tries.append(dict(ask=asks, read=False, why=notes[:300]))
-            continue
-        if _spoken_request(new) == _spoken_request(cur):           # the fact check restored the words that were read
-            notes = "the fact check put back the words you rewrote; land the beat inside its quotes"
-            tries.append(dict(ask=asks, read=False, why="the fact check restored the read words"))
-            continue
-        tries.append(dict(ask=asks, read=True))
-        cur, cur_rep, cur_rec, notes, fresh = new, new_rep, f"script_timing_final{asks}.json", None, True
-    if best is None:
-        return sc, rep
-    _, k, sc2, rep2, out, rec = best
-    final_dir = os.path.join(ctx.supply, "narration")
-    if os.path.isdir(out):
-        with tempfile.TemporaryDirectory(prefix="join-match-", dir=ctx.supply) as scratch:
-            check_path = os.path.join(out, "check.json")
-            prepared = os.path.join(scratch, "master")
-            if os.path.isfile(check_path) and (json.load(open(check_path)).get("joins") or {}).get("with_artefact"):
-                donors = [os.path.join(ctx.supply, f"narration_t{j}") for j in range(len(rounds)) if j != k]
-                os.mkdir(prepared)
-                import fcntl
-                env = dict(os.environ, TMPDIR=ctx.tmp, VALMERA_RUN=ctx.run_id, VALMERA_SKILL="wf3")
-                with open(PX.NARRATE_LOCK, "a") as lock:
-                    fcntl.flock(lock, fcntl.LOCK_EX)
-                    command = [PX.NARRATE_PY, os.path.join(HERE, "voice.py"), "match-joins", out, prepared, *donors]
-                    for attempt in range(2):
-                        child = subprocess.run(command, cwd=os.path.dirname(PX.NARRATE), env=env)
-                        if child.returncode == 0:
-                            break
-                        ctx.log(f"narration join assembly exited {child.returncode} on attempt {attempt+1}")
-                        shutil.rmtree(prepared)
-                        os.mkdir(prepared)
-            chosen = out
-            if os.path.isfile(os.path.join(prepared, "check.json")):
-                grouped = os.path.join(out, "_generations.json")
-                if os.path.isfile(grouped):
-                    shutil.copy2(grouped, prepared)
-                chosen = prepared
-            shutil.rmtree(final_dir, ignore_errors=True)
-            os.replace(chosen, final_dir)
-    for j in range(len(rounds)):
-        shutil.rmtree(os.path.join(ctx.supply, f"narration_t{j}"), ignore_errors=True)
-    sc2 = dict(sc2, timing=dict(kept=k, rounds=rounds, asks=tries, budgets=dict(hook_land_s=timing.HOOK_LAND_S, close_s=timing.CLOSE_S)))
-    json.dump(dict(script=sc2, report=dict(kept=k, rounds=rounds, asks=tries)), open(os.path.join(ctx.run_dir, "script_timing.json"), "w"),
-              ensure_ascii=False, indent=1)
-    # the last text gate's record is the delivered script's: the kept read's script with the final report it passed on
+def timed(ctx, sc, narrate=None):
+    """Measure the draft on the actor's word clock for the one whole-script revision."""
+    if ctx.args.get("timing") is False:
+        return {"available": False}
+    supplied = ctx.args.get("narration")
+    if supplied:
+        return {"available": False, "reason": "a supplied read belongs to the final script"}
     try:
-        fr = json.load(open(os.path.join(ctx.run_dir, rec))).get("report")
-    except (OSError, ValueError):
-        fr = None
-    if fr is None:
-        fr = dict((rep2.get("settle") or {}).get("final") or {}, verify={k_: v for k_, v in rep2.items() if k_ != "settle"})
-    json.dump(dict(script=sc2, report=fr, record=rec), open(os.path.join(ctx.run_dir, "script_final.json"), "w"),
-              ensure_ascii=False, indent=1)
-    return sc2, rep2
-
-
-def final_gate(ctx, sc, rep, spend, final=None, record="script_final.json"):
-    """(script, verify report): the last text gate before the script is frozen (writer.final_support). Every line,
-    after the ear's rewrite, is judged against the verified quotes it cites in one batched call; an unsupported line is
-    rewritten on its quotes in the ear's style (ear.KEEP_STYLE) and judged again, at most twice, else dropped; a core
-    line is restated or the stage fails; a core line whose rewrite lost its claim or tension is rewritten once more.
-    The report is `record` in the run folder (script_final.json; timed's rewrites write script_timing_final<ask>.json)."""
-    final = final or (lambda sc_: writer.final_support(sc_, log=ctx.log, style=ear.KEEP_STYLE))
-    sc2, fr, more = final(sc)
-    spend += [dict(stage="final-support", **u) for u in more if u]
-    json.dump(dict(script=sc2, report=fr), open(os.path.join(ctx.run_dir, record), "w"), ensure_ascii=False, indent=1)
-    if not fr.get("ok"):
-        raise RuntimeError("the final support pass does not stand: " + json.dumps(
-            {k: fr.get(k) for k in ("why", "core_unsupported", "support_dropped")}, ensure_ascii=False)[:700])
-    st = dict(rep.get("settle") or {}, final=dict({k: v for k, v in fr.items() if k != "verify"}))
-    return sc2, dict(fr["verify"], settle=st)
+        os.makedirs(ctx.supply, exist_ok=True)
+        meaning = sc.get("beats", {}).get("meaning", len(sc["segments"])-1)
+        indexes = sorted({0, meaning})
+        sample = dict(sc, segments=[sc["segments"][i] for i in indexes], beats={"meaning": indexes.index(meaning)})
+        folder = os.path.join(ctx.supply, "narration_draft")
+        if narrate is None:
+            os.makedirs(folder, exist_ok=True)
+            sample_path = os.path.join(folder, "landing-lines.json")
+            with open(sample_path, "w") as stream:
+                json.dump(sample, stream, ensure_ascii=False)
+            try:
+                clock_path = os.path.join(folder, "draft-words.json")
+                try:
+                    with open(clock_path) as clock:
+                        measured = json.load(clock)
+                except (FileNotFoundError, ValueError):
+                    measured = {}
+                if measured.get("request") != timing.signature(sample):
+                    subprocess.run(["zsh", PX.HEAVY, f"wf3-timing-{ctx.run_id}", PX.NARRATE_PY, timing.__file__,
+                                    sample_path, folder], env=dict(os.environ, HF_HUB_OFFLINE="1"),
+                                   check=True, capture_output=True, timeout=3600)
+                    with open(clock_path) as clock:
+                        measured = json.load(clock)
+                return dict(timing.measure(measured, sample), segment_indexes=indexes,
+                            source=measured["source"], voice=measured["voice"])
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                ctx.log(f"CPU timing take unavailable, using the production reader: {exc}")
+        read = (narrate or narrate_script)(ctx, sample, folder)
+        return dict(timing.measure(read["words"], sample), segment_indexes=indexes, source="production reader")
+    except (OSError, RuntimeError, ValueError) as exc:
+        ctx.log(f"draft read unavailable: {exc}")
+        return {"available": False, "reason": str(exc)[:300]}
 
 
 # ----------------------------------------------------------------- supply
@@ -911,7 +782,7 @@ def photo_searches(sc, named):
                 continue
             seen.add(request)
             must = (n.get("must_show") or n["name"]) if is_person(n) else (x.get("must_show") or n.get("must_show") or n["name"])
-            out.append(dict(name=n["name"], key=n["name"], searches=[q], must_show=str(must).strip(), search_for=k,
+            out.append(dict(name=n["name"], key=n["name"], entity=x.get("entity"), searches=[q], must_show=str(must).strip(), search_for=k,
                             archive_brief=x.get("must_show"), as_of=x.get("as_of"), moment=x.get("moment"), **{"is": n.get("is", "thing")}))
     searched = {o["name"] for o in out}
     return out + [n for n in named if n.get("name") not in searched]
@@ -989,6 +860,12 @@ def clip_facts(c):
 def supply(ctx, script):
     sc = script["script"]
     sid = script["style"]["id"]
+    if sid in R.STYLES and any("kind" not in brief or "word_i" not in brief
+                               for segment in sc["segments"] for brief in segment.get("see") or [{}]):
+        sc, report = annotate_script(ctx, sc, script.get("idea_full"), script.setdefault("spend", []))
+        script.update(script=sc, annotate=report)
+        from shell import jsave
+        jsave(os.path.join(ctx.run_dir, "script.json"), script)
     sup_dir = ctx.supply
     os.makedirs(sup_dir, exist_ok=True)
     tempfile.tempdir = ctx.tmp
@@ -1010,6 +887,18 @@ def supply(ctx, script):
         used.update(s.get("pictures") or [])
         if (s.get("window") or {}).get("subject"):
             used.add(s["window"]["subject"])
+    if sid in R.STYLES:
+        named_by_key = {n["name"]:n for n in sc.get("named") or []}
+        for segment in sc["segments"]:
+            for brief in segment.get("see") or []:
+                if brief.get("kind") in ("card", "callback"):
+                    continue
+                thing = brief["thing"]
+                named_by_key.setdefault(thing, dict(name=thing, entity=brief.get("portrait_of"),
+                    **{"is":"person" if brief.get("portrait_of") else "thing"}, must_show=brief.get("must_show"),
+                    searches=[brief.get("search") or thing], video_searches=brief.get("video_searches") or []))
+                used.add(thing)
+        sc["named"] = list(named_by_key.values())
     named = [n for n in sc.get("named") or [] if n.get("name") in used]
     reel = sid in R.STYLES
     subj = []
@@ -1533,17 +1422,8 @@ def match_units(units, demand):
 
 
 def line_demand(pack, sc, durs, seed=1114, tail_f=15):
-    """{line: distinct fitting takes the cut needs}: ceil(DEMAND_K x (the shots reel.shot_plan draws on the line, on the
-    cut's own Clock, f_end and seed, less its planned glimpses of GLIMPSE_MAX_F frames or fewer)). Without the
-    narration's words (a pack under test), the line's seconds at the judge's median shot."""
-    n = len(sc["segments"])
-    try:
-        clock = F.Clock(pack["words"], sc)
-        f_end = F.Clock.f(clock.dur) + int(tail_f)
-        plan = R.shot_plan(sc, clock, f_end, seed)
-        return {i: max(1, int(math.ceil(DEMAND_K * sum(1 for x in plan.get(i) or [] if x > GLIMPSE_MAX_F)))) for i in range(n)}
-    except Exception:  # noqa: BLE001 - no words to plan on
-        return {i: max(1, int(math.ceil(DEMAND_K * float(durs[i] if i < len(durs) and durs[i] else 1.0) / JUDGE_MEDIAN_S))) for i in range(n)}
+    return {i: len({x.get("word_i", 0) for x in seg.get("see") or [{}]
+                    if x.get("kind") not in ("callback", "card")}) for i, seg in enumerate(sc["segments"])}
 
 
 def still_only_line(seg):
@@ -1557,31 +1437,42 @@ def moment_line(seg):
 
 
 def fit_report(pack, sc, durs):
-    """Per line: demand (line_demand: from the cut's own shot plan), have (distinct fitting take groups matched one to
-    one to lines, match_units), moving (matched takes whose played span moves), moment_ok (a line whose brief names a
-    moment has a fitting take of MOMENT_GRADE or more) and short (have under demand, moving under MOVING_SHARE of demand
-    unless every brief item is still_only, the moment not yet found, or a person in its brief with no moving take)."""
-    units = _units(pack)
-    n = len(sc["segments"])
-    demand = line_demand(pack, sc, durs)
-    slots = match_units(units, demand)
-    people = {x.get("name") for x in sc.get("named") or [] if str(x.get("is") or "").lower() == "person"}
+    offers, briefs = {}, {}
+    groups = {c["path"]:c.get("take_group") or c["path"]
+              for group in pack.get("footage") or [] for c in group["clips"]}
+    for i,seg in enumerate(sc["segments"]):
+        for brief in seg.get("see") or [{}]:
+            if brief.get("kind") not in ("card","callback"):
+                slot = (i,brief.get("word_i",0))
+                offers[slot], briefs[slot] = {}, brief
+    for path,takes in (pack.get("fit_verdicts") or {}).items():
+        for ti,by_line in FIT._rows(takes).items():
+            for i,verdict in by_line.items():
+                for wi,v in (verdict.get("phrases") or {0:verdict}).items():
+                    slot = (i,int(wi))
+                    if slot in offers and FIT.usable(v):
+                        offers[slot][groups.get(path,path),ti] = v.get("grade") or 0
+    # Match one distinct picture per phrase before counting another for any phrase.
+    assigned = {}
+    def match(slot,seen):
+        for pic in sorted(offers[slot],key=offers[slot].get,reverse=True):
+            if pic in seen:
+                continue
+            seen.add(pic)
+            if pic not in assigned or match(assigned[pic],seen):
+                assigned[pic] = slot
+                return True
+        return False
+    for slot in sorted(offers,key=lambda s:len(offers[s])):
+        match(slot,set())
+    placed = set(assigned.values())
     rows = []
-    for i in range(n):
-        seg = sc["segments"][i]
-        have = slots.get(i) or []
-        mov = sum(1 for u in have if units[u]["moving"])
-        still_ok = still_only_line(seg)
-        named_people = {x.get("thing") for x in seg.get("see") or []} & people
-        person_still = bool(named_people) and not still_ok and \
-            not any(units[u]["moving"] and i in units[u]["lines"] for u in units if units[u]["kind"] == "clip")
-        moment_ok = None
-        if moment_line(seg):
-            moment_ok = any(i in units[u]["lines"] and units[u]["grades"].get(i, 0) >= MOMENT_GRADE for u in units)
-        mov_short = 0 if still_ok else max(int(math.ceil(MOVING_SHARE * demand[i])) - mov, 0)
-        short = len(have) < demand[i] or mov_short > 0 or person_still or moment_ok is False
-        rows.append(dict(i=i, need=demand[i], have=len(have), moving=mov, deficit=max(demand[i] - len(have), 0) + mov_short +
-                         (1 if moment_ok is False else 0), person_without_moving=person_still, moment_ok=moment_ok, still_only=still_ok, short=short))
+    for i,seg in enumerate(sc["segments"]):
+        slots = [slot for slot in offers if slot[0]==i]
+        missing = [briefs[slot] for slot in slots if slot not in placed]
+        rows.append(dict(i=i,need=len(slots),have=sum(slot in placed for slot in slots),moving=None,
+                         deficit=len(missing),missing=missing,moment_ok=not missing,
+                         still_only=still_only_line(seg),short=bool(missing)))
     return rows
 
 
@@ -1611,7 +1502,7 @@ def topup_script(script, short, moments_only=False):
             if nm not in named and nm not in [e["name"] for e in extra]:
                 extra.append(dict(name=nm, **{"is": base.get("is") or "thing"}, must_show=x.get("must_show") or base.get("must_show"),
                                   searches=[q for q in (x.get("moment"), f"{x.get('thing')} {x.get('as_of')}", x.get("search")) if q][:3],
-                                  thing=x.get("thing"), as_of=x.get("as_of"),
+                                  thing=x.get("thing"), as_of=x.get("as_of"), video_searches=x.get("video_searches") or [],
                                   **({"video_sources": base["video_sources"]} if base.get("video_sources") else {})))
         s_["pictures"] = pics + [p for p in s_.get("pictures") or [] if p not in pics]
     sc["named"] = (sc.get("named") or []) + extra
@@ -1688,9 +1579,46 @@ def footage_kw(reel_kw, **more):
     return dict(reel_kw, **{k: v for k, v in dict(FOOTAGE_FLAGS, **more).items() if k in ok}) if reel_kw else {}
 
 
+def name_portraits(ctx, sc, pack):
+    """Acquire the real portrait for each timed person introduction, including in saved scripts."""
+    people = {n["name"].casefold(): n["name"] for n in sc.get("named") or [] if is_person(n) and n.get("name")}
+    lines = {}
+    for i,seg in enumerate(sc["segments"]):
+        for item in seg.get("show") or []:
+            if isinstance(item,dict) and item.get("role") == "name":
+                person = people.get(str(item.get("text","")).casefold())
+                if person:
+                    lines.setdefault(person,set()).add(i)
+        for brief in seg.get("see") or []:
+            if brief.get("portrait_of"):
+                lines.setdefault(brief["portrait_of"],set()).add(i)
+    for person,placements in lines.items():
+        records = pack.setdefault("pictures",{}).setdefault(person,[])
+        rec = next((r for r in records if r.get("entity_id") and os.path.isfile(r["path"])),None)
+        if not rec:
+            try:
+                rec = PX.portrait_from_wikidata(person,os.path.join(ctx.supply,"pics"))
+            except Exception as exc:
+                ctx.log(f"Portrait lookup for {person}: {type(exc).__name__}, trying the other archives")
+                rec = None
+        if rec:
+            existing = next((r for r in records if r["path"] == rec["path"]),None)
+            if existing is None:
+                rec = dict(rec)
+                try:
+                    rec["faces"] = PX.faces(rec["path"])
+                except (OSError,ValueError,RuntimeError):
+                    rec["faces"] = []
+                records.append(rec)
+            else:
+                rec = existing
+            rec["placement_lines"] = sorted(set(rec.get("placement_lines") or [])|placements)
+
+
 def judge_supply(ctx, sc, pack):
     """Every take of the supply identified once and judged per (take, line) (fit.verdicts): pack["fit"], ["fit_verdicts"]
     and ["identity"]. Returns (usd, calls)."""
+    name_portraits(ctx,sc,pack)
     table, u, c, ids = FIT.verdicts(FIT.candidates(pack), sc, cache_path=os.path.join(ctx.supply, "fit.json"), work=os.path.join(ctx.tmp, "fit"),
                                     log=ctx.log)
     pack["fit"], pack["fit_verdicts"], pack["identity"] = FIT.fits(table), table, ids
@@ -1789,9 +1717,10 @@ def fit_supply(ctx, script, pack, durs, spend, anchors, reel_kw):
     deficit is 0. A story reel without a brief on every line stops here: the cut is never made without per-line
     verdicts."""
     sc = script["script"]
-    if not all(s_.get("see") for s_ in sc["segments"]):
-        raise RuntimeError("fit: the script has no picture brief on segments "
-                           f"{[k for k, s_ in enumerate(sc['segments']) if not s_.get('see')]}; a story reel is never cut without per-line verdicts")
+    for segment in sc["segments"]:
+        if not segment.get("see"):
+            segment["see"] = writer.spoken_briefs(segment)
+            segment["pictures"] = [b["thing"] for b in segment["see"]]
     measure_clips(pack)
     usd, calls = judge_supply(ctx, sc, pack)
     spend.append(dict(stage="supply", provider="openai", model=FIT.MODEL, what="picture identity and check", usd=round(usd, 4), calls=calls))
@@ -1799,15 +1728,33 @@ def fit_supply(ctx, script, pack, durs, spend, anchors, reel_kw):
     topups = []
     for k in range(TOPUP_CALLS):
         short = [r["i"] for r in rows if r["short"]]
-        if not short or "footage" not in pack or os.environ.get("VALMERA_FOOTAGE", "1") == "0":
+        if not short:
             break
+        import publisher_pictures
+        briefs = [dict(name=x["thing"], must_show=x.get("must_show"), archive_brief=x.get("must_show"),
+                       as_of=x.get("as_of"), moment=x.get("moment"), searches=[x.get("search")], search_for=r["i"],
+                       search_round=k+2) for r in rows for x in r["missing"] if x.get("thing")]
+        reports, uses = publisher_pictures.supply(sc, briefs, pack["pictures"], os.path.join(ctx.supply,"pics"), 3)
+        spend.extend(uses)
+        pack.setdefault("phrase_searches", []).append(dict(briefs=briefs, reports=reports))
+        if reports:
+            judge_supply(ctx, sc, pack)
         before = sum(r["deficit"] for r in rows)
         ask_max = max([r["deficit"] for r in rows if r["short"]] + [1])
-        added = topup_once(ctx, script, pack, durs, short, spend, f"footage{k + 2}", anchors, reel_kw, line_max=ask_max, want_voices=True)
+        added = 0
+        if os.environ.get("VALMERA_FOOTAGE", "1") != "0":
+            repair = dict(script, script=json.loads(json.dumps(sc)))
+            for row in rows:
+                if row["missing"]:
+                    seg = repair["script"]["segments"][row["i"]]
+                    seg["see"] = row["missing"]
+                    seg["pictures"] = [x["thing"] for x in seg["see"] if x.get("thing")]
+            added = topup_once(ctx, script, pack, durs, short, spend, f"footage{k + 2}", anchors, reel_kw,
+                               line_max=ask_max, want_voices=True, request=repair)
         rows = fit_report(pack, sc, durs)
         after = sum(r["deficit"] for r in rows)
         topups.append(dict(lines=short, line_max=ask_max, clips=added, deficit_before=before, deficit_after=after))
-        if added == 0 or after == 0 or after >= before:           # continue only while the summed deficit falls
+        if after == 0:           # continue only while the summed deficit falls
             break
     photos = [r["path"] for v in (pack.get("pictures") or {}).values() for r in v]
     usable_photos = [p for p in photos if FIT.lines_fit((pack.get("fit") or {}).get(p))]
@@ -1849,7 +1796,7 @@ def supply_evidence(ctx, pack):
         recs.append(dict(record=n, counts=r.get("counts"), sources=[{k: s.get(k) for k in ("url", "title", "error", "rung")} for s in r.get("sources") or []][:40],
                          lines=[dict(i=ln.get("i"), want=ln.get("want"), clips=len(ln.get("clips") or []), lost=ln.get("lost"), replaced=ln.get("replaced"))
                                 for ln in r.get("lines") or []], looked=looked))
-    return dict(footage=recs, fit=pack.get("fit"), identity=pack.get("identity"), fit_report=pack.get("fit_report"),
+    return dict(footage=recs, phrase_searches=pack.get("phrase_searches") or [], fit=pack.get("fit"), identity=pack.get("identity"), fit_report=pack.get("fit_report"),
                 moment_cover=(pack.get("fit_report") or {}).get("moment_cover"),
                 sources_opened_share=_opened_share(recs))
 
@@ -1892,6 +1839,8 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
     pictures the film placed (one contact sheet) and the recent films' sequences, and its asks ride the scene under
     ``devices``. Returns what it chose, for the record."""
     DR = _director()
+    if pack.get("programme_segments"):
+        sc = dict(sc, segments=pack["programme_segments"])
     clock = F.Clock(pack["words"], sc)
     rows = [dict(w=w["w"], t0=w["t0"], t1=w["t1"], seg=w["seg"]) for w in clock.words]
     try:
@@ -1920,14 +1869,29 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
         palette["direction"] = ("The supplied names, figures and source exhibits are already printed at these frames, at 30 fps. "
                                 "Keep those faces, details and printed values readable as they are heard. Design around them. "
                                 "For an accent on existing type, use its exact visible text as the sound partner.")
-    d = DR.direct(ctx.supply, [dict(i=k, text=str(seg.get("say") or "")) for k, seg in enumerate(sc["segments"])], rows, stress, pics,
+    owners = [row if isinstance(row, dict) else dict(frames=row, device="recording") for row in around]
+    voices = [dict(v, f=[round(float(v[k]) * F.FPS) + F.LEAD_F for k in ("start", "end")])
+              for v in (pack.get("screen_voices") or pack.get("voices") or []) if v.get("start") is not None and v.get("end") is not None]
+    owners.extend(dict(v, device=v.get("person") or "soundbite") for v in voices)
+    sources = {r.get("path"): r for group in (pack.get("pictures") or {}).values() for r in group}
+    sources.update({r.get("path"): r for group in pack.get("footage") or [] for r in group.get("clips") or []})
+    placed = [dict(sources.get(p.get("path"), {}), **p) for p in beats.get("pictures") or [] if p.get("f")]
+    path_ids = {(l1.get("assets") or {}).get(asset, {}).get("path"): ident for ident, asset in ids.items()}
+    for pic in placed:
+        pic.setdefault("id", path_ids.get(pic.get("path")))
+        pic.setdefault("role", pic.get("tier") or pic.get("kind"))
+        for row in voices:
+            if row.get("file") == pic.get("path"):
+                pic.update(person=row.get("person"), role="speaker")
+    rows = DR.composed_words(rows, placed, l1.get("items", []), [*owners, *(beats.get("recorded_ink") or [])], voices, F.FPS)
+    d = DR.direct(ctx.supply, [dict(seg, i=k, text=str(seg.get("say") or "")) for k, seg in enumerate(sc["segments"])], rows, stress, pics,
                   style=palette, workflow="story film (narrated)", dur_s=l1["dur_f"] / F.FPS,
                   title=sc.get("title"), hook=sc.get("hook_line"), payoff=sc.get("close_line"), log=ctx.log)
     nseg = len(sc["segments"])
     words = clock.words
 
     def word_frame(w):
-        return (0 if int(w) == 0 else max(F.Clock.f(words[int(w)]["t0"]) - 1, 0)) if 0 <= int(w) < len(words) else None
+        return F.Clock.f(words[int(w)]["t0"]) if 0 <= int(w) < len(words) else None
 
     def seg_span(i):
         return (F.Clock.f(clock.segs[i][0]), min(F.Clock.f(clock.segs[i][1]) + 6, l1["dur_f"])) if 0 <= i < nseg else (None, None)
@@ -1943,17 +1907,42 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
     sounds, l1["sound_design"] = F.replan_sound(l1, pack)
     l1["sound"] = sorted(device_sounds + [s for s in sounds if not any(
         abs(s["event_f"] - own["event_f"]) <= 2 for own in device_sounds)], key=lambda s: s["event_f"])
+    d = dict(d, sections=DR.shot_sections(d, placed, word_frame, seg_span, sc["segments"], l1["dur_f"]))
     asks, notes = DR.palette_asks(d, word_frame, seg_span, ids.get, l1["dur_f"])
     performed = []
-    if ctx.workflow == "wf2":
+    if beats.get("display") or ctx.workflow == "wf2":
         asks, performed = DR.recorded_type(asks, beats.get("display") or [], beats.get("recorded_ink") or [], beats.get("recorded_devices") or [])
-    asks = DR.around(asks, around, l1["dur_f"])         # a reel's own hero device keeps its frames: the Director's land beside it
+    asks = DR.around(asks, owners, l1["dur_f"], performed)         # a reel's own hero device keeps its frames: the Director's land beside it
+    l1["frame_owners"] = owners
     if asks:
         l1["devices"] = list(l1.get("devices") or []) + asks
         ev = DR.device_events(asks)                      # landings the music and sound workflow may answer (no device sounds)
         beats["device_events"] = ev
         beats["events"] = sorted(set(beats.get("events") or []) | {e["f"] for e in ev})
-    return dict(by=d.get("by"), performed=performed, asked=[a["dev"] for a in asks], notes=notes, sections=d.get("sections"), why=d.get("why"))
+    return dict(by=d.get("by"), performed=performed, asked=[a["dev"] for a in asks], placements=[dict(id=a["id"], f=a.get("f")) for a in asks], notes=notes, sections=d.get("sections"), why=d.get("why"))
+
+
+def hear_composed(ctx, l1, beats, pack):
+    owners = l1.get("frame_owners") or []
+    if not owners or not (l1.get("devices") or l1.get("alien")):
+        return chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))
+    source = os.path.join(ctx.supply, "l1_owners.json")
+    with open(source, "w") as stream:
+        json.dump(l1, stream)
+    path = chain.lay_devices(ctx, source)
+    if path == source:
+        return {}
+    with open(path) as stream:
+        composed = _director().compose_owned(l1, json.load(stream), owners)
+    sounds, report = F.replan_sound(composed, pack)
+    native = [s for s in l1.get("sound", []) if s.get("device")]
+    if not report.get("fault"):
+        composed["sound"] = native + [s for s in sounds if all(abs(s["event_f"]-n["event_f"]) > 2 for n in native)]
+        composed["sound_design"] = report
+    l1.clear()
+    l1.update(composed)
+    beats["device_events"] = l1.get("composed_events") or []
+    return dict(events=len(beats["device_events"]), sounds=len(l1.get("sound", [])))
 
 
 def with_director(ctx, script, sc):
@@ -1972,13 +1961,15 @@ def with_director(ctx, script, sc):
             return out
         beats = sc.get("beats") or json.load(open(os.path.join(ctx.supply, "beats.json")))
         pack = load_pack(ctx)
-        hero = [list(x["frames"]) for x in ((sc.get("devices") or {}).get("laid") or []) if x.get("frames")]
+        hero = [x for x in ((sc.get("devices") or {}).get("laid") or []) if x.get("frames")]
+        hero.extend(dict(frames=list(frames), device="recording") for frames in sc.get("recording_spans") or [])
         beats = dict(beats, recorded_devices=(sc.get("devices") or {}).get("laid"), recorded_ink=[
             dict(f=item["frames"], text=text)
             for item in (sc.get("devices") or {}).get("laid") or [] if item.get("frames")
             for text in ([item.get("title")] + [row.get("t") for row in item.get("texts", [])]) if text])
         rec = director_devices(ctx, script, script["script"], pack, l1, beats, around=hero)
-        rec["heard"] = chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))     # the sound hears them
+        l1["director_performance"] = rec
+        rec["heard"] = hear_composed(ctx, l1, beats, pack)     # the sound hears them
         json.dump(l1, open(out, "w"), ensure_ascii=False)
         ctx.log(f"director: {len(rec['asked'])} devices round the hero device ({rec.get('by')})")
         return out
@@ -2005,6 +1996,27 @@ def checked_render_shots(ctx, receipt):
     return [p for p in (score.get("beats") or {}).get("pictures") or []
             if p.get("kind") in ("clip", "photo") and p.get("tier") != "voice"
             and (tuple(p["f"]), f"{os.path.basename(p['path'])}@{p.get('line')}") in passed]
+
+
+def music_times(script, clock, plan):
+    """Story beat indices address the narration, including its programme lead-in."""
+    authored = script.get("beats") or {}
+    if not authored:
+        # Delivered scripts before beats used structured segment roles.
+        roles = {"hook":"hook", "low":"setback", "turn":"turn", "payoff":"payoff", "close":"meaning"}
+        authored = {}
+        for i, segment in enumerate(script.get("segments") or []):
+            role = roles.get(segment.get("beat"))
+            if role:
+                authored.setdefault(role, i)
+    times = {}
+    for role in ("hook", "setback", "turn", "payoff", "meaning", "coda"):
+        i = authored.get(role)
+        if type(i) is int and 0 <= i < clock.nseg and clock.seg_words(i):
+            times[role] = round(clock.seg_words(i)[0]["t0"], 3)
+    if "payoff" not in times and plan.get("turn_f") is not None:
+        times["payoff"] = round(plan["turn_f"] / F.FPS, 3)
+    return times
 
 
 def score(ctx, script):
@@ -2034,6 +2046,9 @@ def score(ctx, script):
         if changed:
             whole["pack"] = pack
             json.dump(whole, open(pk, "w"), ensure_ascii=False, indent=1)
+    # Choose the archival finish after the actual shots and their identities are known.
+    for segment in sc.get("segments") or []:
+        segment.pop("finish", None)
     knobs = {k: v for k, v in d.items() if k not in ("script", "why", "targets", "retarget", "alien")}
     if render_drop(ctx):                                  # the picture gate's repair: the render's failing pictures go (check)
         knobs["drop"] = list(knobs.get("drop") or []) + [x for x in render_drop(ctx) if x not in (knobs.get("drop") or [])]
@@ -2077,11 +2092,14 @@ def score(ctx, script):
             ctx.log(f"director: the film keeps its builder's devices: {e!r}"[:300])
     if l1.get("devices") or l1.get("alien"):
         # the sound design hears the devices: laid now, their landings planned again with the film's own turn and words
-        beats["devices_heard"] = chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))
+        beats["devices_heard"] = hear_composed(ctx, l1, beats, pack)
     out = os.path.join(ctx.supply, "l1.json")
     json.dump(l1, open(out, "w"), ensure_ascii=False)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")       # the same scene with the narration as its spine: what the song is cut to
     aud = F.audio_scene(l1, pack)
+    times = music_times(sc, F.Clock(pack["words"], sc), beats)
+    aud.setdefault("music_marks", {})["beats"] = times
+    beats["music_beats"] = times
     if script["style"]["id"] in R.STYLES:
         # the story's joints, where the bed breathes (worker/score/music.flow reads them from the scene's music_marks)
         joints = joints_of(sc, pack, beats)
@@ -2093,8 +2111,7 @@ def score(ctx, script):
     if ctx.args.get("look", True) is False:
         # one command, no stop: the look is the engines' and the checks'; nothing is drawn for a director who is not there
         taste_carry_on(ctx, beats, taste)
-        turn_s = round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None
-        return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
+        return dict(l1=out, l1_audio=l1_audio, payoff_s=times.get("payoff"), story_turn_s=times.get("turn"), beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
                     frames=l1["dur_f"], items=len(l1["items"]), direction=d, spend=[])
     frames = sorted({int(f) for f in beats["look"] if 0 <= int(f) < l1["dur_f"]})
     for n in os.listdir(look) if os.path.isdir(look) else []:      # a look before this one: its stills are of another plan
@@ -2110,8 +2127,7 @@ def score(ctx, script):
     if ctx.args.get("look", True) and not os.path.exists(os.path.join(ctx.run_dir, "look.ok")):
         raise RuntimeError(f"the director's look: open {look}/sheet.jpg, put changes in {ctx.run_dir}/direction.json, "
                            f"then touch {ctx.run_dir}/look.ok and resume")
-    turn_s = round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None
-    return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
+    return dict(l1=out, l1_audio=l1_audio, payoff_s=times.get("payoff"), story_turn_s=times.get("turn"), beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
                 frames=l1["dur_f"], items=len(l1["items"]), direction=d, spend=[])
 
 
@@ -2446,38 +2462,10 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
         layout.update(rebuilt=True, bleed_share_after=bleed_share(beats)[0], print_window_share_after=bleed_share(beats)[1])
         if bleed_share(beats)[0] < BLEED_MIN:
             defects.append(f"full-frame pictures on {bleed_share(beats)[0]:.0%} of shots (at least {BLEED_MIN:.0%})")
-    # ---- display density on the plan: under DISPLAY_SHARE's floor, the writer adds anchored items once and the plan is
-    # built again; what stays short is a recorded defect
-    density = None
-    try:
-        typ = type_measures(l1, beats, sc)
-        density = dict(before=typ["display_shot_share"])
-        if typ["display_shot_share"] < DISPLAY_SHARE[0] and ctx.args.get("density", True) is not False:
-            lines = uncovered_lines(beats)
-            sc2, added, use = density_repair(sc, lines)
-            density.update(lines=lines, added=added, usd=(use or {}).get("usd"))
-            if added:
-                sc.clear()
-                sc.update(sc2)
-                l1, beats = build(sc, pack, knobs)
-                taste = F.taste_check(l1, beats)
-                density["after"] = type_measures(l1, beats, sc)["display_shot_share"]
-            if float(density.get("after", density["before"])) < DISPLAY_SHARE[0]:
-                defects.append(f"display type on {float(density.get('after', density['before'])):.0%} of planned shots after the repair")
-    except Exception as e:  # noqa: BLE001 - the repair is one call; its failure is recorded, the plan stands
-        density = dict(error=repr(e)[:200])
+    density = dict(before=type_measures(l1, beats, sc)["display_shot_share"])
     # ---- colour by measure
     bw = plan_bw(beats)
     colour = dict(bw_shot_share_plan=bw, rebuilt=False, intrinsic_grey_share=(beats.get("measured") or {}).get("intrinsic_grey_share"))
-    if not BW_SHARE[0] <= bw <= BW_SHARE[1]:
-        if bw > BW_SHARE[1]:
-            knobs = dict(knobs, device_budget=0.5 * float(knobs.get("device_budget", 1.0)))
-            l1, beats = build(sc, pack, knobs)
-            taste = F.taste_check(l1, beats)
-            colour.update(rebuilt=True, bw_shot_share_after=plan_bw(beats))
-            ctx.log(f"colour: black and white on {bw:.0%} of shots; built again with the devices lowered")
-        if not BW_SHARE[0] <= plan_bw(beats) <= BW_SHARE[1]:
-            defects.append(f"black and white on {plan_bw(beats):.0%} of planned shots (bar {BW_SHARE[0]:.0%}-{BW_SHARE[1]:.0%})")
     # ---- repeats: a take group shown twice is denied on its later line and the plan built once more
     rep_fix = None
     if float((beats.get("measured") or {}).get("repeat_share") or 0) > REPEAT_MAX:
@@ -2584,7 +2572,7 @@ def repeated_keys(beats, pack):
         k = (group.get(p["path"], p["path"]), p.get("take")) if p["kind"] == "clip" else (p["path"], None)
         if p.get("cont") and k == last:
             continue
-        if k in seen and p.get("tier") not in ("reframe", "replay"):     # the fill's own repeats: denying them leaves only a card
+        if k in seen and p.get("tier") not in ("callback", "identity", "reframe", "replay"):     # the fill's own repeats: denying them leaves only a card
             out.append(f"{os.path.basename(p['path'])}@{int(p['line'])}")
         seen.add(k)
         last = k
@@ -2614,6 +2602,16 @@ def score_search(ctx, script_rec, pack, windows, durs):
             else:
                 merged.append([a, b])
         words = clock.seg_words(line)
+        briefs = sorted(seg.get("see") or [],key=lambda b:b.get("word_i",0))
+        relevant = []
+        for j,brief in enumerate(briefs):
+            wi = brief.get("word_i",0)
+            stop = briefs[j+1].get("word_i",0) if j+1<len(briefs) else len(words)
+            if any(w["t1"]>a/F.FPS and w["t0"]<b/F.FPS for w in words[wi:stop] for a,b in merged):
+                relevant.append(brief)
+        if relevant:
+            seg["see"] = relevant
+            seg["pictures"] = [brief["thing"] for brief in relevant if brief.get("thing")]
         seg["claim"] = seg["say"]
         seg["say"] = " ".join(w["w"] for w in words if any(w["t1"] > a/F.FPS and w["t0"] < b/F.FPS
                                                            for a,b in merged)) or seg["claim"]
@@ -2688,6 +2686,13 @@ def repair_layout(beats, windows, knobs, build, read=None):
                 verdicts = FIT._rows(pack.get("fit_verdicts", {}).get(path))
                 for ti, take in enumerate(R.Takes.of(c)):
                     v = verdicts.get(ti, {}).get(line)
+                    if v and v.get("phrases"):
+                        slot = next((p for p in (beats.get("measured",{}).get("phrase_plan") or {}).get("phrases",[])
+                                     if p["line"]==line and p["f"][0]<=a<p["f"][1]),None)
+                        if slot:
+                            wi = slot["word_i"]
+                            v = v["phrases"].get(wi,v["phrases"].get(str(wi)))
+                            b = min(b,slot["f"][1])
                     group = (c.get("take_group") or path, ti)
                     if FIT.usable(v) and group not in used and os.path.isfile(path):
                         native = round((take[1] - take[0]) * F.FPS) >= b - a
@@ -2731,6 +2736,16 @@ def topup_from_score(ctx, script_rec, pack, lines, windows=None, remaining=None)
     words = pack["words"] if isinstance(pack["words"], dict) else json.load(open(pack["words"]))
     durs = chain.seg_durs(words["words"], len(script_rec["script"]["segments"]))
     reused_frames = 0
+    if windows == []:
+        cached = ctx.out("score") if hasattr(ctx,"out") else None
+        plan = ((cached or {}).get("beats") or {}).get("measured",{}).get("phrase_plan") or {}
+        windows = [p for p in plan.get("phrases",[]) if p["line"] in lines and p.get("pictures")==0]
+        if not windows:
+            clock = F.Clock(words,script_rec["script"])
+            missing = {(row["i"],brief.get("word_i",0)) for row in (pack.get("fit_report") or {}).get("lines",[])
+                       if row["i"] in lines for brief in row.get("missing") or []}
+            windows = [dict(line=i,word_i=wi,f=[a,b]) for i,wi,a,b,brief in
+                       R.phrase_slots(script_rec["script"],clock,F.Clock.f(words["duration"])) if (i,wi) in missing] or None
     if windows is not None:
         windows = [p for p in windows if p.get("line") in lines and p.get("f")]
         if remaining and windows:
@@ -3051,7 +3066,7 @@ def check_once(ctx, rd, sc):
                         narration=dict(voice=None, gate=None),
                         pictures=sc["beats"].get("pictures"), missing_pictures=pack.get("missing"),
                         # how the film moves and sounds, as the engines measured it, and where it was drawn
-                        pace=sc["beats"].get("pace"), sound_design=scene.get("sound_design", sc["beats"].get("sound_design")), turn_s=sc.get("turn_s"),
+                        pace=sc["beats"].get("pace"), sound_design=scene.get("sound_design", sc["beats"].get("sound_design")), payoff_s=sc.get("payoff_s", sc.get("turn_s")), story_turn_s=sc.get("story_turn_s"),
                         render=rd.get("engine_check"), measured=sc["beats"].get("measured"), style=sc["beats"].get("style"))
     rec = json.load(open(os.path.join(ctx.supply, "pack.json")))["record"]
     c["stories"]["narration"] = dict(seconds=rec.get("narration_s"), voice=rec.get("voice"), gate=rec.get("gate"))
@@ -3557,8 +3572,6 @@ def film_checks(ctx, film, sc, pack, music=None, clean=None):
     defects = []
     if fail_s > 0:
         defects.append(f"pictures under words they do not carry or that do not read: {fail_s} s")
-    if not (BW_SHARE[0] <= colour["bw_shot_share"] <= BW_SHARE[1]):
-        defects.append(f"black and white on {colour['bw_shot_share']:.0%} of shots (bar {BW_SHARE[0]:.0%}-{BW_SHARE[1]:.0%})")
     if colour["colourfulness_median"] is None or colour["colourfulness_median"] < COLOUR_MEDIAN_MIN:
         defects.append(f"colourfulness median {colour['colourfulness_median']} (at least {COLOUR_MEDIAN_MIN})")
     if colour["void_share"] is not None and colour["void_share"] > VOID_MAX:
