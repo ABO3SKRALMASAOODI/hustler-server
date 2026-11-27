@@ -1042,3 +1042,31 @@ def test_refit_resumes_an_exchange_the_process_stopped_between_renames(tmp_path,
     assert json.loads((folder / "film.json").read_text())["music"]["staged_mix_version"] == 2
     assert json.loads((tmp_path / "music_used.json").read_text()) == ["same"]
     assert [p.name for p in folder.parent.iterdir()] == ["accepted"]
+
+
+def test_remake_starts_with_delivered_window_and_stops_before_delivery(tmp_path, monkeypatch):
+    import shell
+    source = tmp_path / "source"
+    source.mkdir()
+    video = source / "podcast.mp4"
+    video.write_bytes(b"test")
+    (tmp_path / "words.json").write_text("[]")
+    record = dict(run_id="abc", idea=dict(id="m22", t0=2, t1=32),
+                  source=dict(path=str(video), bytes=4, source_url="https://example.com/episode"),
+                  window=[1.5, 33.2], script=dict(title="An episode"), style=dict(id="footage-cut"))
+    path = tmp_path / "22.json"
+    path.write_text(json.dumps(record))
+    out = tmp_path / "test"
+    monkeypatch.setattr(podcast, "probe_s", lambda _: 100)
+    monkeypatch.setattr(podcast, "footage_routes", lambda: [])
+    def stages(args):
+        assert args.until == "check"
+        work = out / "work" / args.resume
+        script = json.loads((work / "script.json").read_text())
+        assert script["window"] == record["window"] and script["idea"] == record["idea"]
+        (work / "check.json").write_text(json.dumps(dict(final=str(video), checks={"ok": True})))
+        return 0
+    monkeypatch.setattr(shell, "run", stages)
+    assert podcast.remake_record(str(path), str(out)) == 0
+    assert (out / "abc.mp4").read_bytes() == b"test"
+    assert not (out / "ledger.json").exists()

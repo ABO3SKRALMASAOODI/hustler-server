@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 import threading
 import time
 
@@ -1044,9 +1045,78 @@ def deliver(run, fetched, sel, built, out_root, test=False):
     return dict(folder=final, shorts=len(rows), not_made=failed, spend_usd=spend, test=test)
 
 
+def remake_record(record_path, out_root):
+    """Resume the production workflow at supply with the recorded script and stop after check."""
+    import shell
+    import wf1_short
+
+    record = jload(record_path)
+    source, moment = record["source"], record["idea"]
+    link = source["source_url"]
+    os.makedirs(out_root, exist_ok=True)
+    source_work = os.path.join(out_root, "sources", video_id(link))
+    os.makedirs(source_work, exist_ok=True)
+    run = Run(link, source_work)
+    footage_routes()
+    footage_pace(run)
+    local = source.get("path")
+    if local and os.path.isfile(local) and os.path.getsize(local) == source.get("bytes"):
+        folder = os.path.dirname(local)
+        caps = sorted(n for n in os.listdir(folder) if n.endswith(".json3"))
+        fetched = dict(video=local, info={"id": source.get("video_id")},
+                       duration=probe_s(local), captions=os.path.join(folder, caps[0]) if caps else None)
+    else:
+        saved_proxy = {k: os.environ.get(k) for k in ("https_proxy", "http_proxy")}
+        proxy = os.environ.get("YTDLP_PROXY")
+        if proxy:
+            os.environ.update(https_proxy=proxy, http_proxy=proxy)
+        try:
+            fetched = fetch(run)
+        finally:
+            for k, v in saved_proxy.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    words = os.path.join(os.path.dirname(fetched["video"]), "..", "words.json")
+    if not os.path.isfile(words):
+        words = hear(run, fetched)["path"]
+    run = Run(link, out_root)
+    key = os.path.basename(str(record["run_id"]))
+    rid = "remake-" + uuid.uuid5(uuid.NAMESPACE_URL, os.path.realpath(out_root) + "/" + key).hex[:12]
+    work = run.p("work", rid)
+    os.makedirs(work, exist_ok=True)
+    args = dict(moment=moment, words=words, style=record["style"]["id"], delivered_ledger="off",
+                audit_out=run.p("evidence", rid), **{k: v for k, v in source.items() if k in
+                ("video_id", "source_url", "channel", "upload_date", "source_title")})
+    if not os.path.isfile(os.path.join(work, "run.json")):
+        script = dict(record["script"], source=fetched["video"], window=record["window"], idea=moment,
+                      style=next((s for s in shell.registry()["wf1"]["styles"] if s["id"] == record["style"]["id"]), record["style"]))
+        jsave(os.path.join(work, "ideas.json"), dict(chosen=moment, ideas=[moment], source=source))
+        jsave(os.path.join(work, "script.json"), script)
+        jsave(os.path.join(work, "run.json"), dict(run_id=rid, workflow="wf1", source=fetched["video"],
+              args=args, done=["ideas", "script"], seconds={}))
+    state = jload(os.path.join(work, "run.json"))
+    if "check" not in state["done"]:
+        code = shell.run(argparse.Namespace(state_root=out_root, resume=rid, out=out_root,
+                                            engine=wf1_short, until="check"))
+        if code:
+            return code
+    result = jload(os.path.join(work, "check.json"))
+    film = run.p(key + ".mp4")
+    shutil.copyfile(result.get("final_music") or result["final"], film)
+    jsave(run.p(key + ".json"), dict(window=jload(os.path.join(work, "script.json"))["window"],
+          moment=moment, checks=result["checks"], film=film))
+    shell.chain.unlink("wf-" + rid)
+    shutil.rmtree(work)
+    print(json.dumps(dict(film=film, window=record["window"], evidence=args["audit_out"])))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="A podcast or interview link in, one folder of finished shorts out.")
-    ap.add_argument("link")
+    ap.add_argument("link", nargs="?")
+    ap.add_argument("--remake-record", metavar="RECORD", help="remake the recorded moment and window under --test-out")
     ap.add_argument("--out", default=None, help=argparse.SUPPRESS)              # where the one folder goes; the owner's Podcast Shorts by default
     ap.add_argument("--test-out", default=None,
                     help="a test run: may reuse a delivered source, writes only here, never to a delivery folder or the ledger")
@@ -1062,6 +1132,12 @@ def main():
     if a.test_out and DL.in_delivery_root(a.test_out):
         ap.error(f"--test-out {a.test_out} is inside a delivery folder; a test run never writes there")
     out_root = os.path.abspath(a.test_out or a.out or OUT_ROOT)
+    if a.remake_record:
+        if not a.test_out or a.link:
+            ap.error("--remake-record takes --test-out and reads the source link from the record")
+        return remake_record(a.remake_record, out_root)
+    if not a.link:
+        ap.error("a source link is required")
     # only a folder inside the owner's delivery folders is a delivery (however its path is spelled); any other --out
     # is a test like --test-out: it may reuse a source and is never recorded
     test = bool(a.test_out) or not DL.records(out_root)

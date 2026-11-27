@@ -127,8 +127,15 @@ def test_the_speaker_s_own_filmed_past_is_invited_and_only_this_take_excluded():
     import wf1_short
     title=wf1_short.footage_title('Watermelon','Speaker: Mark Zuckerberg')
     assert 'never him as he looks today' not in title and 'never show this conversation' in title and 'livestream' in title
-    rr=open(os.path.join(os.path.dirname(__file__),'wf1_coverage.py')).read()
-    assert 'resolved_referents=coverage.get' in rr and 'current interview take (this conversation' in rr
+    sent=[]
+    llm=SimpleNamespace(ask=lambda system,content,**kw: sent.append((system,json.loads(content))) or ('{}',{}),
+                        json_block=json.loads)
+    plan=story()
+    plan["named"]=[dict(name="the earlier speaker")]
+    coverage.repair_requirements(plan,[0],{},llm)
+    prompt,request=sent[0]
+    assert "Earlier filmed appearances" in prompt and "current interview take" in prompt
+    assert request["resolved_referents"]==plan["named"]
 
 
 def test_referent_research_reads_the_scripts_resolved_referents(tmp_path,monkeypatch):
@@ -691,3 +698,28 @@ def test_checked_print_and_imagined_span_do_not_request_motion_for_their_words(t
     beats = dict(thought_experiment=dict(first=1, last=113), display_facts=[
         dict(first=1,last=12,facts=[dict(excerpt={"words":"checked definition"})])])
     assert wf.retained_repairs(str(tmp_path),dict(coverage=dict(windows=windows)),beats,range(5)) == ([4],[])
+
+
+def test_two_seconds_and_ten_seconds_take_the_same_three_distinct_pictures():
+    pictures={"work":[dict(path=f"/source-{i}.jpg", title=f"view {i}",page=f"https://example.org/{i}") for i in range(3)]}
+    for duration in (2,10):
+        window=dict(name="work",must_show="the work",t0=0,t1=duration,say="the work")
+        rows=coverage.proposals(dict(windows=[window]),{},pictures)
+        assert len(rows)==3 and rows[-1][1]-rows[0][0]==duration*30
+
+
+def test_exhausted_video_route_finds_a_primary_picture_for_the_missing_words(tmp_path,monkeypatch):
+    import types
+    coverage_plan = dict(windows=[dict(name="campus laboratory",say="where they worked",must_show="the laboratory")],
+                         research_context=dict(references=[dict(windows=[0],referent="the laboratory",
+                            sources=[dict(url="https://university.example/lab",supports="The laboratory in use")])]))
+    def supply(script,subjects,got,out,per):
+        assert script["facts"][0]["url"] in script["segments"][0]["facts"]
+        assert subjects[0]["must_show"]=="the laboratory" and subjects[0]["moment"]=="where they worked"
+        got["campus laboratory"]=[dict(path="/original.jpg")]
+        return [dict(added=1)], []
+    monkeypatch.setitem(sys.modules,"publisher_pictures",types.SimpleNamespace(supply=supply))
+    photos={}
+    assert coverage.publisher_recovery(coverage_plan,[0],photos,tmp_path)[-1]==1
+    assert coverage.publisher_recovery(coverage_plan,[0],photos,tmp_path)[-1]==0
+    assert photos["campus laboratory"]==[dict(path="/original.jpg")]

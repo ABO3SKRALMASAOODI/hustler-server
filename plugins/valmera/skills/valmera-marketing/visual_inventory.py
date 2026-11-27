@@ -31,7 +31,25 @@ def distinct_files(pictures):
     return rows
 
 
-def prepare(ctx, idea, receipts, ask, pictures, still):
+def studio_photos(record):
+    """The actual session's composer, sent request, result and site photographs."""
+    from PIL import Image
+    ui = record.get("ui") or {}
+    folder = Path(ui["dir"]) if ui.get("dir") else Path(record["upload"]["file"]).parent / "ui"
+    if not folder.is_dir() and record.get("upload",{}).get("file"):
+        folder = Path(record["upload"]["file"]).parent / "ui"
+    rows = []
+    for path in sorted(folder.glob("*.png")):
+        if not (path.name.startswith(("type_00_", "result", "board_")) or path.name == "site.png"):
+            continue
+        with Image.open(path) as image:
+            w,h = image.size
+        rows.append(dict(path=str(path), name="THE STUDIO", title=path.stem, shows=path.stem,
+                         credit="Valmera", licence="recorded session", w=w,h=h))
+    return rows
+
+
+def prepare(ctx, idea, receipts, ask, pictures, still, studio=()):
     root = Path(ctx.supply) / "visual_inventory"
     manifest = root / "inventory.json"
     if manifest.exists():
@@ -46,16 +64,9 @@ def prepare(ctx, idea, receipts, ask, pictures, still):
         plan, use = ask(
             "Plan a retrievable visual vocabulary for a film about an EDITOR'S PROBLEM. The film markets Valmera "
             "with its authenticated upload, typed sentence and export; those product assets already exist. "
-            "Choose four to six concrete subjects from an editor's or creator's own world that literally show this "
-            "editing pain or technique (a phone playing a vertical short, a creator filming themselves, an editor at a "
-            "timeline, a podcast set with microphones, a feed being scrolled). Never metaphors or analogies (no cups, "
-            "road signs, shop shelves, landscapes or food standing for an editing idea), and never a celebrity story. "
-            "Free photo libraries contain objects, places and ordinary activities. They seldom contain a particular "
-            "captioned video playing in a particular application's preview or an exact UI operation. Do not ask "
-            "for those bespoke combinations. Do not invent product screens. Give each subject two short image "
-            "queries and a simple visual requirement. The next writer will SEE the acquired images and adapt "
-            "the argument to them; do not prewrite claims that require unavailable pictures. "
-            "On a retry choose different, concrete alternatives to subjects that returned no images. "
+            "Read the upload's words, the claim, the speaker and the film's premise. Choose subjects "
+            "a viewer can see that explain those actions. Give the original scene or document and image "
+            "searches to find it. Use the genuine Studio stills where the action is inside the product. "
             'Return JSON {"subjects":[{"name":string,"is":"thing"|"place"|"person",'
             '"searches":[string,string],"must_show":string,"editorial_use":string}]}.',
             json.dumps(dict(idea=idea, receipts=receipts, existing=[dict(subject=r.get("subject"),
@@ -76,7 +87,7 @@ def prepare(ctx, idea, receipts, ask, pictures, still):
         if len(distinct_files(found)) >= 24:
             break
     candidates = distinct_files(found)
-    if not candidates:
+    if not candidates and not studio:
         raise RuntimeError("no inspected pictures are available for the marketing writer")
     content = []
     readable = {}
@@ -88,16 +99,18 @@ def prepare(ctx, idea, receipts, ask, pictures, still):
         readable[k] = row
         content.extend([dict(type="text", text=f"Picture {k}; subject {row['name']}; library description: {row.get('shows')}"),
                         dict(type="image", source=dict(type="base64", media_type="image/jpeg", data=picture))])
-    if not readable:
+    if not readable and not studio:
         raise RuntimeError("the acquired visual inventory could not be opened")
-    judged, use = ask(
-        "Describe this real visual inventory for a marketing-film writer. This is not a film rating. "
-        "For each picture state only what can actually be seen. Group duplicate images, re-crops, and near-identical "
-        "views of the same photographed scene under the earliest picture ID in that group; those are not distinct "
-        "new pictures. Different actual scenes remain separate. Reject unreadable or irrelevant images. "
-        'Return JSON {"pictures":[{"id":number,"usable":boolean,"group":earliest picture id,"shows":string}]}.',
-        content, what="visual inventory inspection", effort="low", max_tokens=6500)
-    spend.append(use)
+    judged = {"pictures":[]}
+    if content:
+        judged, use = ask(
+            "Describe this real visual inventory for a marketing-film writer. This is not a film rating. "
+            "For each picture state only what can actually be seen. Group duplicate images, re-crops, and near-identical "
+            "views of the same photographed scene under the earliest picture ID in that group; those are not distinct "
+            "new pictures. Different actual scenes remain separate. Reject unreadable or irrelevant images. "
+            'Return JSON {"pictures":[{"id":number,"usable":boolean,"group":earliest picture id,"shows":string}]}.',
+            content, what="visual inventory inspection", effort="low", max_tokens=6500)
+        spend.append(use)
     _save(root / "inspection.json", judged)
     selected, groups = {}, set()
     for verdict in judged.get("pictures", []):
@@ -107,6 +120,10 @@ def prepare(ctx, idea, receipts, ask, pictures, still):
         groups.add(group)
         row = dict(readable[k], shows=verdict.get("shows"), visual_group=group)
         selected.setdefault(row["name"], []).append(row)
+    if studio:
+        subjects.append(dict(name="THE STUDIO", must_show="The recorded session", **{"is":"product"}))
+        selected["THE STUDIO"] = [dict(row, inventory_id=len(candidates)+i,
+            sha256=hashlib.sha256(Path(row["path"]).read_bytes()).hexdigest()) for i,row in enumerate(studio)]
     if not selected:
         raise RuntimeError("no distinct, readable pictures survived inventory inspection")
     result = dict(subjects=[s for s in subjects if s["name"] in selected], pictures=selected,
@@ -117,10 +134,10 @@ def prepare(ctx, idea, receipts, ask, pictures, still):
 
 def writer_content(inventory, still):
     """The writer sees the actual pictures and their verified descriptions."""
-    content = [dict(type="text", text="AVAILABLE EXTERNAL PICTURES. Use these exact subject names in named/pictures. "
+    content = [dict(type="text", text="AVAILABLE PICTURES. Use these exact subject names in named/pictures. "
                     "Use a picture only on a line whose words it literally shows; never as a metaphor, and never "
                     "as footage of the recorded Valmera session. Do not require unseen interfaces "
-                    "or claim an action that a still cannot establish. Product proof remains THE UPLOAD / THE EXPORT.")]
+                    "or claim an action that a still cannot establish. THE STUDIO shows the recorded composer and its result.")]
     for name, rows in inventory["pictures"].items():
         for row in rows:
             frame = still(row["path"], 0, w=480)

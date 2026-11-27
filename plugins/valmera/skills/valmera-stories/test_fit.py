@@ -212,7 +212,7 @@ def _ann_sc():
                 segments=[dict(say="Woody almost killed Toy Story.", beat="hook"), dict(say="John Lasseter directed it.", beat="low")])
 
 
-def test_a_segment_without_a_brief_gets_one_or_the_script_stage_stops(tmp_path, monkeypatch):
+def test_a_segment_without_a_brief_gets_one_or_uses_its_spoken_words(tmp_path, monkeypatch):
     import pytest
     import wf3 as W3
     ok = dict(ok=True, numbers_unbacked=[], facts_unverified=[], facts=[1])
@@ -231,15 +231,24 @@ def test_a_segment_without_a_brief_gets_one_or_the_script_stage_stops(tmp_path, 
     assert len(calls) == 2 and calls[1]                                    # the repair call carries the problems back
     assert all(s["see"] for s in sc2["segments"]) and sc2["segments"][1]["see"][0]["thing"] == "John Lasseter"
     monkeypatch.setattr(W3.writer, "annotate_segment", lambda sc, k, idea=None, ask=None: ([], dict(usd=0.0)))
-    with pytest.raises(RuntimeError):
-        W3.annotate_script(_ctx(tmp_path), _ann_sc(), {}, [], reel=True)
+    repaired, _ = W3.annotate_script(_ctx(tmp_path), _ann_sc(), {}, [], reel=True)
+    seg = repaired["segments"][1]
+    assert seg["see"][0]["must_show"] == seg["say"] and seg["see"][0]["word_i"] == 0
 
 
-def test_fit_supply_never_cuts_a_reel_without_a_brief(tmp_path):
-    import pytest
+def test_fit_supply_researches_a_legacy_line_with_its_own_words(tmp_path,monkeypatch):
     import wf3 as W3
-    with pytest.raises(RuntimeError):
-        W3.fit_supply(_ctx(tmp_path), dict(script=_ann_sc()), {}, [1.0, 1.0], [], {}, {})
+    captured=[]
+    monkeypatch.setattr(W3,"TOPUP_CALLS",0)
+    monkeypatch.setattr(W3,"measure_clips",lambda pack:None)
+    def judge(ctx,sc,pack):
+        captured.extend(b for seg in sc["segments"] for b in seg["see"])
+        return 0,0
+    monkeypatch.setattr(W3,"judge_supply",judge)
+    pack=dict(footage=[],pictures={})
+    W3.fit_supply(_ctx(tmp_path),dict(script=_ann_sc()),pack,[1.,1.],[],{}, {})
+    assert [b["must_show"] for b in captured] == [seg["say"] for seg in _ann_sc()["segments"]]
+    assert pack["fit_report"]["deficit"]==2
 
 
 def _report_pack(n_photo=0, moving=True, shared=False):

@@ -459,26 +459,32 @@ def write(idea, card, form, voices=None, notes=None, effort="high"):
 ANNOTATE_MODEL = "gpt-6.1-sol"           # pinned to OpenAI: writer.ask would turn to Anthropic when its key is present
 FINISHES = ("bw", "gate", "crt", "none")
 ROLES = ("figure", "name", "key", "chapter", "ordinal")
-DEVICE_SHARE = (0.12, 0.25)              # the judge: black and white, a gate or scanlines on 12-25% of the voice, never the payoff or close
 PHRASE_MAX = 5
 
-ANNOTATE_SYSTEM = """You are the picture editor of a narrated vertical story film cut like the best documentary reels. The script is final and checked: you never change a word of it. You read it and write the data the cut needs.
+SEE_SYSTEM = """Read the story chain and the numbered spoken words. Return JSON with see, an ordered
+array of picture briefs covering every phrase. Start the first at word_i 0. Start another at the first
+word whose subject, action, version, or evidence changes. A list has a separate picture for each item.
+A brief has word_i, thing (a short free description), entity (the associated named entity or null),
+must_show (what the viewer must actually see happening), as_of, moment, search (photo search),
+video_searches (footage queries), display_word (the exact spoken word on a metaphor), portrait_of (the name only for an identifying portrait), document_fact
+(the cited fact id only when the original document is the evidence), still_only, keep_full_frame, and kind.
+Use literal for real people, companies, products, numbers, evidence and events. For a person's name,
+show any identifiable portrait unless the spoken words specify a time of life. Show the named role
+and action for people acting in a group. Show the original page only if the words name the document
+itself. Use metaphor only for an abstract word or idiom, depicting its physical sense for about a
+second between literal pictures, with its spoken display word. A callback returns the picture and
+treatment of the plant identified by pays. A blank caption card belongs only to a time_jump or reveal.
+The last picture answers the opening. Every relationship to the spoken phrase must be visible."""
 
-For each segment:
-- "see": one to four items, in the order the line says them: {"thing": exactly one name from the named list, "as_of": the story time of that thing as THIS line means it, a year plus its version or state (e.g. "the finished 1995 release, not the 1993 test reel"; "Pixar's Point Richmond office in 1993, not the later Emeryville campus"), "must_show": one sentence, only what must be VISIBLE in a picture for it to carry this line (who or what, doing what, in which version); never the film's treatment of it (colour, black and white, muted, grain, composition, framing): treatment belongs to "finish" alone, "moment": the scene or event the line describes when it describes one (e.g. "Woody knocking Buzz out of the window in the finished 1995 film"), else null, "search": one photo search an archivist would type to find a photograph of exactly this thing at this time (e.g. "John Lasseter 1995"; "Pixar Point Richmond 1993"), "still_only": true when the true picture of this line is still by its nature (a storyboard, a document, a drawing, a letter, a printed page), else false, "word_i": the index of the first spoken word that needs this particular picture, "keep_full_frame": true for a detail, comparison or group whose evidence a tight crop could hide}. A line about a scene of a film names that scene as its moment, in the version the line means. The hook's first see item is the moment its collision names (the person in the scene, the crowd, the screen), the strongest picture of the film, never the figure the line says (a figure belongs to type).
-- "exhibit": the ID of a fact the segment cites and a short exact excerpt from its quote that shows the action or proof, as {"fact": id, "excerpt": verbatim text}. Use a clause that lets a viewer see the relationship, even if an archival image is unavailable. Within that excerpt, mark two or three successive exact phrases as "passages": [{"text": exact words from excerpt, "word_i": spoken anchor}]. Land a result or number only as the narrator reaches it; together the successive printed phrases should explain the evidence.
-- "list": true when the line itself reads as a list of several distinct things or a quick montage of them (the cut may burst through them in a few frames each), else false; "list_items": the things of the list, in order, as see things, when list is true.
-- "finish": bw|gate|crt|none and "finish_rank" (1 = the segment that most needs it). Black and white, a film gate or scanlines are a device for a memory, an early version, the past cut in, a low point; never a look for the whole film. The devices together cover 12 to 25 percent of the spoken words, never the payoff or the close, never a segment at or after the colour turn.
-- "show": the segment's display items, each {"text": as printed, "role": figure|name|key|chapter|ordinal (ordinal only for the numbers of a list the film itself counts out, "1.", "2.", from 1; a rank such as #1 is a figure), "word_i": the index of the spoken word it lands on (a figure: the first word of the spoken figure; a name: the first word of the name; a chapter: the first word of the segment), "big": the part of the text set large (e.g. "$362M"), "small": the rest set small under it (e.g. "box office, 1995"), or null}. Every item needs its word_i. Keep every given item's text exactly. You may add: the payoff's figure if it lacks one (a figure printed with digits only when the same figure stands in a fact's quote), a name item for each person (is=person) at the line that first says them, one key word where the story turns, and a chapter title only where the story truly changes subject (a film of about a minute and a half needs none, at most one). A chapter title is words a viewer reads as the story itself: exactly the spoken word or words of that segment, or the name of the thing it turns on, the way a key word is. Each segment's role in the story is given in plain words so you know the structure; those roles are the editor's private notes and never become words on the screen. Display type lands on about one picture in six across the film: a figure card for each verified figure, a name for each person, a key word or a spoken phrase where the story needs weight. At most three items a segment.
-- "phrases": the caption lines: lists of word indices, each 1 to 5 consecutive indices, together covering every word of the segment once and in order. Never split a name, a figure, a date or a noun phrase across two lines; a line reads as one unit of sense.
-
-And once for the film: "colour_turn": the index of the one segment from which the film stays in colour (the turn or the release); "true_pictures": for every named thing, where a faithful picture of it can exist: "stills" (a free photo archive holds true photographs of it: a real person, a building, an object), "footage" (it exists faithfully only in the work's own moving pictures: an animated film's characters and scenes, whose photographs are toys, rides, statues and costumes), or "both".
-
-Answer with one JSON object only: {"colour_turn": int, "true_pictures": {"<named thing>": "stills"|"footage"|"both", ...}, "segments": [{"i": int, "see": [...], "exhibit": {"fact": id, "excerpt": exact clause}, "list": bool, "list_items": [...], "finish": ..., "finish_rank": int or null, "show": [...], "phrases": [[int, ...], ...]}]}"""
-
-SEE_SYSTEM = """You are the picture editor of a narrated documentary film. The script is final; you never change a word. For the ONE segment you are given, write what a picture must show to carry it.
-
-Answer with one JSON object only: {"see": [one to four items, in the order the line says them: {"thing": exactly one name from the named list, "as_of": the story time of that thing as THIS line means it, a year plus its version or state, "must_show": one sentence, only what must be VISIBLE (never colour, black and white or composition), "moment": the scene or event the line describes, or null, "search": one photo search an archivist would type to find exactly this thing at this time, "still_only": true when the true picture of this line is still by its nature (a storyboard, a document, a drawing), else false}]}"""
+ANNOTATE_SYSTEM = SEE_SYSTEM + """
+For the whole film return {segments:[{i,see,show,phrases,list,list_items,exhibit}],true_pictures}.
+Keep all spoken words. Anchor each existing show item to its spoken word_i and keep its text. For a
+named person's introduction, return a name item on their portrait. Preserve each item's role
+(figure, name, key, chapter or ordinal), and optional big and small parts. Set a metaphor's display
+on its word. Phrases are caption groups of one to five consecutive word indices covering the line.
+Keep names and quantities together. For a named document return exhibit with its fact id, verbatim
+excerpt and passages [{text,word_i}] in reading order. For every named entity set true_pictures to
+stills, footage or both according to the actual archive. Plan no finish before placement."""
 TRUE_PICTURES = ("stills", "footage", "both")
 
 
@@ -504,11 +510,13 @@ def _ann_content(sc, idea_full, problems=None):
         ws = str(s.get("say", "")).split()
         given = [dict(text=str(x.get("text") if isinstance(x, dict) else x), role=x.get("role") if isinstance(x, dict) else None)
                  for x in s.get("show") or []]
-        rows.append(f"{k}. role in the story: {beat_prose(s.get('beat'))}; era={s.get('era')} facts={s.get('facts') or []} show={json.dumps(given, ensure_ascii=False)}\n   words: "
+        context = {q: s[q] for q in ("role", "job", "link", "plant", "pays", "display", "print") if q in s}
+        rows.append(f"{k}. {json.dumps(context, ensure_ascii=False)} role in the story: {beat_prose(s.get('beat'))}; era={s.get('era')} facts={s.get('facts') or []} show={json.dumps(given, ensure_ascii=False)}\n   words: "
                     + " ".join(f"{j}:{w}" for j, w in enumerate(ws)))
     named = [dict(name=n.get("name"), is_=n.get("is"), must_show=n.get("must_show")) for n in sc.get("named") or []]
     facts = [dict(id=f.get("id"), claim=f.get("claim"), quote=f.get("quote")) for f in sc.get("facts") or []]
     idea = {k: (idea_full or {}).get(k) for k in ("title", "story", "turn", "payoff") if (idea_full or {}).get(k)}
+    idea["chain"] = sc.get("chain")
     out = (f"# The story\n{json.dumps(idea, ensure_ascii=False)}\n\n# Named things\n{json.dumps(named, ensure_ascii=False)}\n\n"
            f"# Facts\n{json.dumps(facts, ensure_ascii=False)}\n\n# Segments (word indices start at 0 in each segment)\n" + "\n".join(rows))
     if problems:
@@ -517,19 +525,18 @@ def _ann_content(sc, idea_full, problems=None):
 
 
 def _clean_see(v, names):
-    """The valid items of a see list (structure only: thing in the named list, the fields present)."""
     out = []
     for x in v if isinstance(v, list) else []:
-        if not isinstance(x, dict) or x.get("thing") not in names or not str(x.get("as_of") or "").strip():
+        if not isinstance(x, dict) or not isinstance(x.get("thing"), str) or not x["thing"].strip():
             continue
-        m, q = x.get("moment"), x.get("search")
-        out.append(dict(thing=x["thing"], as_of=str(x["as_of"]).strip(), must_show=str(x.get("must_show") or "").strip(),
-                        moment=str(m).strip() if isinstance(m, str) and m.strip() else None,
-                        search=str(q).strip()[:120] if isinstance(q, str) and q.strip() else None,
-                        still_only=x.get("still_only") is True,
-                        **({"keep_full_frame": True} if x.get("keep_full_frame") is True else {}),
-                        **({"word_i": x["word_i"]} if type(x.get("word_i")) is int else {})))
-    return out[:4]
+        row = {k: x.get(k) for k in ("thing", "as_of", "must_show", "moment", "search", "entity", "portrait_of", "document_fact", "display_word")}
+        row.update(kind=x.get("kind") if x.get("kind") in ("literal", "metaphor", "callback", "card") else "literal",
+                   word_i=x.get("word_i", 0), still_only=x.get("still_only") is True,
+                   keep_full_frame=x.get("keep_full_frame") is True,
+                   video_searches=[q for q in x.get("video_searches") or [] if isinstance(q, str)])
+        if type(row["word_i"]) is int and row["word_i"] >= 0:
+            out.append(row)
+    return sorted(out, key=lambda r: r["word_i"])
 
 
 def _clean_phrases(v, n):
@@ -586,19 +593,26 @@ def _merge_ann(sc, got):
         n = len(str(s.get("say", "")).split())
         # the model's brief when it is valid (an older script's brief may lack the photo search or carry treatment in
         # must_show); else what the script already holds
-        see = _clean_see(g.get("see"), names) or _clean_see(s.get("see"), names)
+        see = [b for b in _clean_see(g.get("see"), names) if b["word_i"] < n]
+        if not see:
+            see = [b for b in _clean_see(s.get("see"), names) if b["word_i"] < n]
+        if see and (see[0]["word_i"] != 0 or len({b["word_i"] for b in see}) != len(see)):
+            problems.append(f"segment {k}: give each phrase its own first word, beginning at zero")
         if see:
+            for pos,brief in enumerate(see):
+                stop = see[pos+1]["word_i"] if pos+1<len(see) else n
+                name = next((item["text"] for item in g.get("show") or s.get("show") or []
+                             if isinstance(item,dict) and item.get("role")=="name" and
+                             _valid_i(item.get("word_i"),n) and brief["word_i"]<=item["word_i"]<stop and
+                             str(item.get("text")).casefold()==str(brief.get("entity")).casefold()),None)
+                if name:
+                    brief["portrait_of"] = brief["entity"]
             s["see"] = see
             s["pictures"] = list(dict.fromkeys(x["thing"] for x in see))
         else:
-            problems.append(f"segment {k}: no valid see item (thing must be exactly a name from the named list, as_of given)")
-        if s.get("finish") not in FINISHES:
-            if g.get("finish") in FINISHES:
-                s["finish"] = g["finish"]
-                fr = g.get("finish_rank")
-                s["finish_rank"] = int(fr) if isinstance(fr, (int, float)) and not isinstance(fr, bool) else None
-            else:
-                problems.append(f"segment {k}: finish must be one of {list(FINISHES)}")
+            problems.append(f"segment {k}: no valid see item for the spoken phrase")
+        for field in ("finish", "finish_rank", "finish_cut"):
+            s.pop(field, None)
         if not isinstance(s.get("list"), bool) and isinstance(g.get("list"), bool):
             s["list"] = g["list"]
             if g["list"]:
@@ -644,6 +658,12 @@ def _merge_ann(sc, got):
                 texts.append(given[-1]["text"])
             else:
                 problems.append(f"segment {k}: added item {y.get('text')!r} needs a role in {list(ROLES)} and a word_i 0..{n - 1}")
+        for brief in see:
+            label = brief.get("display_word")
+            wi = brief["word_i"]
+            if brief.get("kind") == "metaphor" and isinstance(label,str) and label.strip():
+                if not any(x.get("word_i")==wi and str(x.get("text")).casefold()==label.casefold() for x in given):
+                    given.append(dict(text=label.strip(),role="key",word_i=wi,added=True))
         s["show"] = given
         ph = s.get("phrases") if isinstance(s.get("phrases"), list) and s["phrases"] and \
             all(isinstance(q, list) and len(q) == 2 for q in s["phrases"]) else None
@@ -653,39 +673,22 @@ def _merge_ann(sc, got):
         else:
             s.pop("phrases", None)
             problems.append(f"segment {k}: phrases must be lists of 1-{PHRASE_MAX} consecutive word indices covering 0..{n - 1} in order")
-    if not _valid_i(out.get("colour_turn"), nseg):
-        ct = (got or {}).get("colour_turn")
-        if _valid_i(ct, nseg):
-            out["colour_turn"] = ct
-        else:
-            problems.append(f"colour_turn must be a segment index 0..{nseg - 1}")
     return out, problems
 
 
-def device_budget(sc, weights=None, share=DEVICE_SHARE):
-    """The writer's finishes held to the judge's budget: none on the payoff, the close or from colour_turn on; above
-    the top of the band only the best ranked stay. weights: each segment's voice time (word counts when not given).
-    Returns the device share after the budget (a measure of the given weights)."""
-    segs = sc.get("segments") or []
-    w = list(weights) if weights else [len(str(s.get("say", "")).split()) for s in segs]
-    ct = sc.get("colour_turn")
-    for k, s in enumerate(segs):
-        if s.get("beat") in ("payoff", "close") or (isinstance(ct, int) and k >= ct):
-            if s.get("finish") not in (None, "none"):
-                s["finish_cut"] = s["finish"]
-            s["finish"] = "none"
-    total = max(sum(w), 1e-9)
-    dev = [k for k, s in enumerate(segs) if s.get("finish") in ("bw", "gate", "crt")]
-    dev.sort(key=lambda k: (segs[k].get("finish_rank") if isinstance(segs[k].get("finish_rank"), (int, float)) else 99, k))
-    kept, used = [], 0.0
-    for k in dev:
-        if (used + w[k]) / total <= share[1] + 1e-9:
-            kept.append(k)
-            used += w[k]
-        else:
-            segs[k]["finish_cut"] = segs[k]["finish"]
-            segs[k]["finish"] = "none"
-    return round(used / total, 3)
+def spoken_briefs(segment):
+    """Preserve the actual words for photo and footage researchers when annotation is unavailable."""
+    words = str(segment.get("say") or "").split()
+    spans = [span for span in segment.get("phrases") or []
+             if isinstance(span, (list, tuple)) and len(span) == 2
+             and all(type(i) is int for i in span) and 0 <= span[0] < span[1] <= len(words)]
+    rows = []
+    for start, stop in spans or ([(0, len(words))] if words else []):
+        phrase = " ".join(words[start:stop])
+        rows.append(dict(word_i=start, thing=phrase, must_show=phrase, search=phrase,
+                         video_searches=[phrase], kind="literal",
+                         source="spoken passage"))
+    return rows
 
 
 def annotate_segment(sc, k, idea_full=None, ask=None):
@@ -694,12 +697,7 @@ def annotate_segment(sc, k, idea_full=None, ask=None):
     ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=8000, what="annotate segment",
                                                      model=ANNOTATE_MODEL))
     names = {n.get("name") for n in sc.get("named") or [] if n.get("name")}
-    s = sc["segments"][k]
-    named = [dict(name=n.get("name"), is_=n.get("is"), must_show=n.get("must_show")) for n in sc.get("named") or []]
-    idea = {q: (idea_full or {}).get(q) for q in ("title", "story", "turn", "payoff") if (idea_full or {}).get(q)}
-    near = [dict(i=j, say=sc["segments"][j].get("say")) for j in range(max(k - 1, 0), min(k + 2, len(sc["segments"])))]
-    content = (f"# The story\n{json.dumps(idea, ensure_ascii=False)}\n\n# Named things\n{json.dumps(named, ensure_ascii=False)}\n\n"
-               f"# Around it\n{json.dumps(near, ensure_ascii=False)}\n\n# The segment\n{k}. beat={s.get('beat')} era={s.get('era')}: {s.get('say')}")
+    content = _ann_content(sc, idea_full) + f"\nReturn see for segment {k} only."
     text, use = ask(SEE_SYSTEM, content)
     try:
         got = json_block(text)
@@ -709,7 +707,7 @@ def annotate_segment(sc, k, idea_full=None, ask=None):
 
 
 def annotate(sc, idea_full=None, ask=None, verify_fn=None, log=print, problems=None):
-    """(script, report): the final script with its picture brief (see), its devices (finish, colour_turn), its display
+    """(script, report): the final script with its phrase picture briefs (see), its display
     items anchored to word indices (show[].word_i) and its caption phrases, written by one model call (a second when
     the first answer is not structurally valid). `say` is never changed; only valid output is laid in; the result is
     verified again (every figure on screen must stand in a verified quote), and items the model added that do not
@@ -735,14 +733,6 @@ def annotate(sc, idea_full=None, ask=None, verify_fn=None, log=print, problems=N
     say0 = [s.get("say") for s in sc["segments"]]
     if [s.get("say") for s in out["segments"]] != say0:
         raise RuntimeError("annotate changed the words")
-    share = device_budget(out)
-    device_added = []
-    if share < DEVICE_SHARE[0] and out.get("segments"):
-        # under the judge's floor: the writer is asked once more for ONE device beat, where it chooses; the budget's cap
-        # (DEVICE_SHARE[1]) and its exclusions (payoff, close, from colour_turn on) still hold
-        share, device_added, use = device_repair(out, idea_full, ask, share)
-        if use is not None:
-            spend.append(use)
     rep = verify_fn(out)
     dropped = []
     if not rep.get("ok"):
@@ -765,44 +755,7 @@ def annotate(sc, idea_full=None, ask=None, verify_fn=None, log=print, problems=N
             # which prompt wrote the item stays on the record (write or annotate; wf3's density pass marks its own)
             x.setdefault("from", "annotate" if x.pop("added", None) else "write")
     ok = bool(rep.get("ok")) and not problems
-    return out, dict(ok=ok, problems=problems or [], device_share_words=share, dropped_unverified=dropped, verify=rep, spend=spend,
-                     device_added=device_added)
-
-
-def device_repair(out, idea_full, ask, share):
-    """(share, [segments given a device], usage): one more annotate call asking for one device beat when the devices
-    cover under DEVICE_SHARE[0] of the words. The first valid device the answer gives a segment without one (not the
-    payoff or close, before colour_turn) is laid in, then device_budget holds the cap again."""
-    probs = [f"the devices (bw, gate, crt) cover {share:.0%} of the spoken words, under {DEVICE_SHARE[0]:.0%}: choose one more segment "
-             "for a device (a memory, an early version, the past cut in, a low point) and give it its finish and finish_rank; "
-             "never the payoff, the close, or a segment at or after colour_turn. Answer in full."]
-    try:
-        text, use = ask(ANNOTATE_SYSTEM, _ann_content(out, idea_full, probs))
-    except Exception:  # noqa: BLE001 - the repair is one more ask; the film keeps its devices
-        return share, [], None
-    try:
-        got = json_block(text)
-    except ValueError:
-        return share, [], use
-    ct = out.get("colour_turn")
-    segs = out["segments"]
-    cands = []
-    for g in got.get("segments") or []:
-        if not isinstance(g, dict) or not _valid_i(g.get("i"), len(segs)) or g.get("finish") not in ("bw", "gate", "crt"):
-            continue
-        k = g["i"]
-        s = segs[k]
-        if s.get("finish") not in (None, "none") or s.get("beat") in ("payoff", "close") or (isinstance(ct, int) and k >= ct):
-            continue
-        fr = g.get("finish_rank")
-        cands.append((fr if isinstance(fr, (int, float)) and not isinstance(fr, bool) else 99, k, g["finish"]))
-    if not cands:
-        return share, [], use
-    _, k, fin = min(cands)
-    segs[k]["finish"], segs[k]["finish_rank"] = fin, 1
-    segs[k].pop("finish_cut", None)
-    share = device_budget(out)
-    return share, ([k] if segs[k].get("finish") == fin else []), use
+    return out, dict(ok=ok, problems=problems or [], dropped_unverified=dropped, verify=rep, spend=spend)
 
 
 # ----------------------------------------------------------------- verify against the pages themselves

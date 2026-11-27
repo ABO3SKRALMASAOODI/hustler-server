@@ -28,7 +28,7 @@
        "hook": "The boldest claim, with superscript 1.", "close": "The footnotes stack up as the conclusion.",
        "needs": "concrete claims, numbers or names that can be footnoted"},
       {"id": "footage-cut", "name": "Footage Cut", "spine": ["G1", "T1"], "pace": [8, 14], "engine": "cut",
-       "look": "The take is the spine; over the sentences that name real people, companies and places the picture fills the phone with real footage and photographs of them, in colour, a new one about every second, then back to him. Heavy grotesk display words, yellow accent.",
+       "look": "The take is the spine; over the sentences that name real people, companies and places the picture fills the phone with real footage and photographs of them, in colour, holding the evidence until the words turn back to the speaker. Heavy grotesk display words, yellow accent.",
        "hook": "The spoken hook on his face, captioned word by word from the first word.", "close": "The payoff line on his face, then the end card.",
        "needs": "a moment that names real people, companies or places a camera has filmed"},
       {"id": "window", "name": "Window", "spine": ["G1", "N6"], "pace": [7, 12], "engine": "cut",
