@@ -492,9 +492,14 @@ def test_look_measures_see_an_upscaled_soft_clip_and_a_burned_in_timecode():
 def test_the_ideas_call_sees_each_clips_picture(monkeypatch):
     seen = {}
     monkeypatch.setattr(P, "able_cards", lambda ctx: [dict(id="reel", look="l", hook="h")])
-    monkeypatch.setattr(P, "sources", lambda: [dict(id="hd", file="/x/hd.mp4"), dict(id="vhs", file="/x/vhs.mp4")])
+    monkeypatch.setattr(P, "sources", lambda: [dict(id="hd", file="/x/hd.mp4", title="HD"), dict(id="vhs", file="/x/vhs.mp4", title="VHS")])
     monkeypatch.setattr(P, "ledger_rows", lambda ctx: [])
-    monkeypatch.setattr(P, "transcript_windows", lambda s, used: [dict(t0=10.0 * k, t1=10.0 * k + 9, text="w") for k in range(9)])
+    rows = [dict(i=k, t0=10.0*k, t1=10.0*k+9, text="A claim.") for k in range(9)]
+    monkeypatch.setattr(P, "source_sentences", lambda *args: (rows, []))
+    monkeypatch.setattr(P, "probe_wh", lambda path: (1920,1080,90))
+    monkeypatch.setattr(P, "pauses", lambda *a, **kw: [])
+    monkeypatch.setattr(P.DL, "prompt_block", lambda wf: "")
+
     monkeypatch.setattr(P, "references", lambda: [])
     monkeypatch.setattr(P, "ref_pace", lambda: {})
     monkeypatch.setattr(P, "source_look", lambda path, *a, **k: dict(w=640, h=480, crop_px=270, upscale=4.0, acuity=0.61, overlay=[0.3, 0.8, 0.7, 0.95])
@@ -504,7 +509,7 @@ def test_the_ideas_call_sees_each_clips_picture(monkeypatch):
 
     def ask(system, content, **kw):
         seen.update(system=system, content=content)
-        return dict(ideas=[dict(title="t", source="hd", asks=["a"], style="reel")]), dict(usd=0)
+        return dict(ideas=[dict(title="t", source="hd", first_sentence=0, last_sentence=1, asks=["a"], style="reel")]), dict(usd=0)
     monkeypatch.setattr(P, "ask", ask)
 
     class Ctx:

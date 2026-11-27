@@ -113,7 +113,10 @@ def attach(script, sheet):
     for i, (segment, entry) in enumerate(zip(lines, entries)):
         for field in ("role", "link", "job", "plant", "pays", "display"):
             segment[field] = entry[field]
-        segment.setdefault("print", {})
+        if segment.get("print") is None:
+            segment["print"] = {}
+        if not isinstance(segment["print"], dict):
+            raise ValueError("print must map spoken forms to printed forms")
         chapter_turn = segment.get("chapter") and segment.get("beat") == "turn"
         segment["beat"] = legacy.get(i, "turn" if chapter_turn else "setup")
     if isinstance(sheet["chain"], list):
