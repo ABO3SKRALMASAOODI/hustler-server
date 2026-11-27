@@ -35,6 +35,10 @@ def improve(ctx,script,ft,words,shots,research=True):
     import cinema as C
     from timeline_repair import identity
     from wf4 import story
+    # Once the recorded edit consumed both archive rounds and its exact residuals
+    # have been repaired, offer remaining real motion from the bin. New searches
+    # are for unsupported words, not for redoing a completed six-chapter edit.
+    if (Path(ctx.supply)/'interval-evidence/feedback.json').is_file():research=False
     stills=[r for r in shots if r['clip'].get('kind')=='image']
     used={}
     for row in shots:
@@ -44,7 +48,7 @@ def improve(ctx,script,ft,words,shots,research=True):
     available={}
     for line in ft['lines']+[dict(clips=ft.get('editorial',{}).get('bank',[]))]:
         for c in line['clips']:
-            if c.get('kind')!='image' and C.unused_seconds(used,c)>=.5:available[identity(c)]=c
+            if c.get('kind') not in ('image','diagram') and C.unused_seconds(used,c)>=.5:available[identity(c)]=c
     clips=list(available.values())
     if not stills:return 0
     candidates=[dict(i=i,seconds=C.unused_seconds(used,c),shows=c.get('shows'),source=c['source'],
@@ -53,27 +57,38 @@ def improve(ctx,script,ft,words,shots,research=True):
     payload=dict(version=2,title=script['title'],slots=slots,candidates=candidates,allow_new_research=research)
     key=hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()[:16]
     root=Path(ctx.supply)/'moving-alternatives';root.mkdir(exist_ok=True);path=root/(key+'.json')
-    if path.exists():proposal=C.read(path)
-    else:
-        text,use=story.writer.ask('Edit a documentary using truthful original moving footage wherever it illustrates the words better than the current still. '
-            'Every candidate is unused footage, but its metadata alone does not prove fit. Respect the recorded rejection reasons: '
-            'do not substitute another mission, repair state, component or action. A genuine interior scene can support life in that interior; '
-            'an unrelated interview cannot stand for a mechanical action. Pick enough suitable unused seconds to cover the complete slot. '
-            'Do not propose a partial replacement or repeat source seconds. Multiple genuinely suitable alternatives are welcome. '
-            'No picture target excuses a false match. Return JSON {replacements:[{slot:index,candidates:[indexes],why:string}],research:[slot indexes]}. '
-            'Leave slots without suitable existing moving material alone. When new research is allowed, select at most six such slots '
-            'whose actual event or activity is likely to survive in moving archive. Prefer well-documented observable work and daily life; '
-            'do not request nonexistent cameras for unfilmed mechanisms or replace a precise technical figure with generic activity. '
-            'Every proposed replacement will be checked on its actual spoken interval.',
-            json.dumps(source_table(payload)),effort='high',max_tokens=5000,what='WF4 moving archive alternatives')
-        proposal=story.writer.json_block(text);proposal['usage']=use;C.save(path,proposal)
+    checked=root/(key+'-checked.json')
+    if checked.exists() and not research and C.read(checked).get('accepted_slots')==[]:
+        return 0
+    try:
+        if path.exists():proposal=C.read(path)
+        else:
+            text,use=story.writer.ask('Edit a documentary using truthful original moving footage wherever it illustrates the words better than the current still. '
+                'Every candidate is unused footage, but its metadata alone does not prove fit. Respect the recorded rejection reasons: '
+                'do not substitute another mission, repair state, component or action. A genuine interior scene can support life in that interior; '
+                'an unrelated interview cannot stand for a mechanical action. Pick enough suitable unused seconds to cover the complete slot. '
+                'Do not propose a partial replacement or repeat source seconds. Multiple genuinely suitable alternatives are welcome. '
+                'No picture target excuses a false match. Return JSON {replacements:[{slot:index,candidates:[indexes],why:string}],research:[slot indexes]}. '
+                'Leave slots without suitable existing moving material alone. When new research is allowed, select at most six such slots '
+                'whose actual event or activity is likely to survive in moving archive. Prefer well-documented observable work and daily life; '
+                'do not request nonexistent cameras for unfilmed mechanisms or replace a precise technical figure with generic activity. '
+                'Every proposed replacement will be checked on its actual spoken interval.',
+                json.dumps(source_table(payload)),effort='high',max_tokens=5000,what='WF4 moving archive alternatives')
+            proposal=story.writer.json_block(text);proposal['usage']=use;C.save(path,proposal)
+    except (RuntimeError,OSError) as exc:
+        ctx.log(f'motion alternatives unavailable; keeping the verified edit: {exc}')
+        return 0
     accepted=[]
     for row in proposal['replacements']:
         i=row['slot'];indexes=row['candidates']
         if not isinstance(i,int) or not 0<=i<len(stills) or any(not isinstance(j,int) or not 0<=j<len(clips) for j in indexes):
             raise ValueError('invalid moving archive alternative')
         if i in accepted:continue
-        trial=replacement(ctx,script,ft,words,stills[i],[clips[j] for j in indexes])
+        try:
+            trial=replacement(ctx,script,ft,words,stills[i],[clips[j] for j in indexes])
+        except (RuntimeError,OSError) as exc:
+            ctx.log(f'optional motion inspection unavailable; keeping the verified edit: {exc}')
+            return len(accepted)
         if trial is not None:
             ft.clear();ft.update(trial);accepted.append(i)
             C.save(Path(ctx.supply)/'footage/footage.json',ft)
@@ -95,6 +110,6 @@ def improve(ctx,script,ft,words,shots,research=True):
                    start=stills[i]['f'][0]/30,end=stills[i]['f'][1]/30) for i in dict.fromkeys(requested) if i not in accepted]
         if planning_share<.55 and gaps:
             from timeline_repair import research as find_moving
-            find_moving(ctx,script,ft,C.CoverageError(gaps,current));C.save(Path(ctx.supply)/'footage/footage.json',ft)
+            find_moving(ctx,script,ft,C.CoverageError(gaps,current),words=words);C.save(Path(ctx.supply)/'footage/footage.json',ft)
             return len(accepted)+improve(ctx,script,ft,words,current,research=False)
     return len(accepted)

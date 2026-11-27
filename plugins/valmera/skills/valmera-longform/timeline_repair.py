@@ -51,32 +51,27 @@ def retain(ft,shots,clock,report):
         line['clips']=[c for c in line['clips'] if (line['i'],identity(c)) not in rejected]
 
 
-def research(ctx,script,ft,failure,merge=True):
+def research(ctx,script,ft,failure,merge=True,words=None):
     """A failed literal match triggers new evidence research, not a looser gate."""
     import cinema as C
     import footage_box
-    rows=[]
-    for gap in failure.gaps:
-        i=gap['seg'];segment=script['script']['segments'][i]
-        rejected=[r['why'] for r in ft.get('editorial',{}).get('rejected',[]) if r['seg']==i]
-        rows.append(dict(i=i,say=gap['heard'] or gap['words'],dur=gap['seconds']+1,pictures=segment.get('pictures',[]),
-                         visual='Surrounding narration: '+segment['say']+'\nShow the correct named people, location or hardware in its accurate state. Truthful context may support an unfilmed action, '
-                         'but must never imply a different mission, component or repair state is that event. Prior rejected views: '+'; '.join(dict.fromkeys(rejected))))
-    # A segment can have several gaps; research each as a distinct shot request.
-    combined={}
+    rows,targets=C.interval_requests(script['script'],failure.gaps)
     for row in rows:
-        if row['i'] in combined:
-            combined[row['i']]['say']+=' '+row['say'];combined[row['i']]['dur']+=row['dur']
-        else:combined[row['i']]=row
+        segment=targets[str(row['i'])]['seg']
+        reasons=[r['why'] for r in ft.get('editorial',{}).get('rejected',[]) if r['seg']==segment]
+        if reasons:row['visual']+=' Prior rejected views: '+'; '.join(dict.fromkeys(reasons))
     avoid=[dict(url=r['clip']['source']['url'],time_range=[r['clip']['time_range'][0]+t for t in r['src']]) for r in failure.shots]
     known=list({c['source']['url']:c['source'] for line in ft['lines'] for c in line['clips'] if c.get('kind')!='image'}.values())
     verifier='wf4-source-and-encoded-picture-check'
-    key=hashlib.sha256(json.dumps(dict(rows=rows,avoid=avoid,verification_owner=verifier),sort_keys=True).encode()).hexdigest()[:12]
+    key=hashlib.sha256(json.dumps(dict(rows=rows,targets=targets,avoid=avoid,verification_owner=verifier),sort_keys=True).encode()).hexdigest()[:12]
     dest=Path(ctx.supply)/'footage'/('timing-research-'+key)
-    ctx.log(f'exact picture research: {len(combined)} lines in {dest.name}')
-    extra=footage_box.fetch(dict(lines=list(combined.values()),named=script['dossier']['named'],about=script['title'],
+    ctx.log(f'exact picture research: {len(rows)} spoken intervals in {dest.name}')
+    extra=footage_box.fetch(dict(lines=rows,interval_targets=targets,named=script['dossier']['named'],about=script['title'],
                                  avoid=avoid,known_sources=known,want_voices=False,verification_owner=verifier),dest,ctx.log)
-    if merge:C.add_footage(ft,extra,dest)
+    if merge:
+        if words is None:words=Path(ctx.supply)/'narration/words.json'
+        clock=C.F.Clock(str(words) if isinstance(words,Path) else words,script['script'])
+        C.attach_intervals(ft,extra,dest,targets,clock)
     return dest
 
 
@@ -96,7 +91,7 @@ def release_borrowed_images(ft,failure):
     return released
 
 
-def continue_still(ctx,script,ft,failure,words):
+def continue_still(ctx,script,ft,failure,words,max_hold=12):
     """Continue one checked figure through adjacent words, with a real move.
 
     A 7.8-second source budget is artificial for an image. A longer contiguous
@@ -123,7 +118,7 @@ def continue_still(ctx,script,ft,failure,words):
             a,b=[round(resolve(clock,t)*30) for t in pin['anchors']]
             if b!=ga and gb!=a:continue
             lo,hi=min(a,ga),max(b,gb);seconds=(hi-lo)/30
-            if seconds>12:continue
+            if seconds>max_hold:continue
             clip=copy.deepcopy(pin['clip']);clip.update(seconds=seconds,time_range=[0,seconds],editorial_hold_move=True)
             spoken=[w for w in clock.words if w['t0']<hi/30 and w['t1']>lo/30]
             say=' '.join(w['w'] for w in spoken)
@@ -221,7 +216,7 @@ def repair(ctx,script,ft,words,rounds=3):
             allocate(ctx,script,ft,failure,words);C.save(path,ft)
             try:shots,clock,_=C.schedule(script['script'],words,ft)
             except C.CoverageError as uncovered:
-                research(ctx,script,ft,uncovered);C.save(path,ft)
+                research(ctx,script,ft,uncovered,words=words);C.save(path,ft)
                 try:shots,clock,_=C.schedule(script['script'],words,ft)
                 except C.CoverageError as rare:
                     from evidence_web import supply as exact_archive
