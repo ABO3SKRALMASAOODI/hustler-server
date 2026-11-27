@@ -1,13 +1,14 @@
-"""The most recent Sol conversation on this worker, for an immediately linked follow-up.
+"""The most recent Sol conversation in a project session, for an immediately linked follow-up.
 
 A snapshot replaces the overlapping recent-chat excerpt. A cold worker, different
 kernel, compacted history, or unrelated turn uses the ordinary editor context.
-Keep at most one bounded, short-lived snapshot per session in RAM.
+Keep one expiring copy per session in the private database and a bounded worker-local copy.
 """
 from collections import OrderedDict
 import json
 import threading
 import time
+import zlib
 
 _entries = OrderedDict()
 _lock = threading.Lock()
@@ -17,9 +18,49 @@ MAX_ENTRY = 4 * 1024 * 1024
 TTL = 30 * 60  # the evolving history's provider write lifetime
 
 
-def remember(key, message_id, body, input_tokens):
+def _save(conn, project, session, message, tokens, payload):
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO edit_session_prefixes
+            (project_id,session_id,message_id,input_tokens,expires_at,body)
+            VALUES (%s,%s,%s,%s,NOW() + %s * interval '1 second',%s)
+            ON CONFLICT (project_id,session_id) DO UPDATE SET
+                message_id=EXCLUDED.message_id, input_tokens=EXCLUDED.input_tokens,
+                expires_at=EXCLUDED.expires_at, body=EXCLUDED.body
+            WHERE edit_session_prefixes.message_id < EXCLUDED.message_id""",
+            (project, session, message, tokens, TTL, payload))
+
+
+def _load(conn, project, session, message, room):
+    with conn.cursor() as cur:
+        cur.execute("""SELECT body FROM edit_session_prefixes WHERE project_id=%s AND session_id=%s
+            AND message_id=%s AND input_tokens<=%s AND expires_at>NOW()""",
+            (project, session, message, room))
+        row = cur.fetchone()
+        return bytes(row["body"]) if row else None
+
+
+def expire(conn):
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM edit_session_prefixes WHERE expires_at<=NOW()")
+
+
+def _shared(worker_db, operation, *args):
+    if worker_db is None:
+        return None
+    try:
+        return worker_db.run(operation, *args)
+    except Exception as exc:
+        # A rolling release, cache outage or concurrent project deletion must
+        # leave the ordinary editor context available. Keep content out of logs.
+        print(f"[edit-cache] {operation.__name__}: {type(exc).__name__}", flush=True)
+        return None
+
+
+def remember(key, message_id, body, input_tokens, *, worker_db=None, scope=None):
     global _bytes
     payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
+    if len(payload) > MAX_ENTRY:
+        return
     now = time.monotonic()
     with _lock:
         existing = _entries.get(key)
@@ -28,20 +69,31 @@ def remember(key, message_id, body, input_tokens):
         if existing:
             _bytes -= len(_entries.pop(key)[3])
         while _entries and (now - next(iter(_entries.values()))[1] > TTL
-                            or _bytes + min(len(payload), MAX_ENTRY) > MAX_BYTES):
+                            or _bytes + len(payload) > MAX_BYTES):
             _bytes -= len(_entries.popitem(last=False)[1][3])
-        if len(payload) <= MAX_ENTRY:
-            _entries[key] = (message_id, now, input_tokens, payload)
-            _bytes += len(payload)
+        _entries[key] = (message_id, now, input_tokens, payload)
+        _bytes += len(payload)
 
 
-def previous(key, message_id, token_room):
+    if scope:
+        _shared(worker_db, _save, *scope, message_id, input_tokens, zlib.compress(payload, level=1))
+
+
+def previous(key, message_id, token_room, *, worker_db=None, scope=None):
     with _lock:
         entry = _entries.get(key)
-        if not entry or entry[0] != message_id or time.monotonic() - entry[1] > TTL or entry[2] > token_room:
-            return None
-        payload = entry[3]
-    return json.loads(payload)
+        payload = entry[3] if (entry and entry[0] == message_id and time.monotonic() - entry[1] <= TTL
+                               and entry[2] <= token_room) else None
+    if payload:
+        return json.loads(payload)
+    if token_room > 0 and scope:
+        compressed = _shared(worker_db, _load, *scope, message_id, token_room)
+        if compressed:
+            try:
+                return json.loads(zlib.decompress(compressed))
+            except (ValueError, zlib.error):
+                pass
+    return None
 
 
 def join(body, previous_body, static_count, catalog):

@@ -868,9 +868,17 @@ def reaper():
     exhausted, tell the user in chat instead of leaving the UI on 'Editing…'
     (or 'Analyzing…') forever."""
     worker_db = dbx.Db()
+    next_cache_cleanup = 0.0
     while True:
         time.sleep(60)
         publish_mcp_catalog(worker_db)
+        if time.monotonic() >= next_cache_cleanup:
+            import edit_session_history
+            try:
+                worker_db.run(edit_session_history.expire)
+            except Exception as exc:
+                print(f"[edit-cache] expiry: {type(exc).__name__}", flush=True)
+            next_cache_cleanup = time.monotonic() + 300
         # A request a budget or subscribe gate refused runs once the gate's
         # reason is gone, without the customer resending (P0 #861).
         try:

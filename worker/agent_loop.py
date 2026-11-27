@@ -2409,10 +2409,12 @@ def run_agent_job(worker_db, job):
             _claude_trial_settle(ctx, result)
         if (result or {}).get("status") != "continued":
             sol_plan = getattr(ctx, "_sol_tool_plan", None) or {}
-            if sol_plan.get("last_body") and not edit_rung.turn_fell_back():
+            if (sol_plan.get("last_body") and not edit_rung.turn_fell_back()
+                    and sol_plan["last_input_tokens"] < config.CLAUDE_HISTORY_COMPACT_TOKENS):
                 import edit_session_history
                 edit_session_history.remember(edit_rung._cache_key(), user_message["id"],
-                                              sol_plan["last_body"], sol_plan["last_input_tokens"])
+                                              sol_plan["last_body"], sol_plan["last_input_tokens"],
+                                              worker_db=worker_db, scope=(ctx.project_id, session_id))
             agent_tools.queue_sharper_preview(ctx)
         return result
     except dbx.JobLeaseLost:
@@ -6437,7 +6439,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             import edit_session_history
             room = config.CLAUDE_HISTORY_COMPACT_TOKENS - _agent_request_token_estimate(messages, tools, 0)
             tool_plan["previous_body"] = edit_session_history.previous(
-                edit_rung._cache_key(), prior[0], room)
+                edit_rung._cache_key(), prior[0], room,
+                worker_db=worker_db, scope=(ctx.project_id, session_id))
             tool_plan["skip_chat_until"] = prior[1]
     total_steps = _cont.get("steps", 0)
     t_start = _cont.get("t_start") or time.monotonic()

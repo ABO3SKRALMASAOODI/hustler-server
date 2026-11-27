@@ -384,3 +384,48 @@ def test_large_answers_retain_sol_usage_in_inspector_rows(monkeypatch):
     assert saved["cached_in"] == saved["prompt_cache"]["cached_tokens"] == 718
     assert saved["provider_cost_usd"] == .02
     assert "cached_in" not in db._capped_payload(response)
+
+
+def test_sol_history_moves_between_workers_and_expires_in_postgres(monkeypatch):
+    import os
+    from pathlib import Path
+    import uuid
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    import edit_session_history as snapshots
+    dsn = os.environ.get("TEST_EDIT_SESSION_DSN")
+    if not dsn:
+        pytest.skip("integration test needs a disposable PostgreSQL database")
+    conn = psycopg2.connect(dsn, cursor_factory=RealDictCursor)
+    schema = "test_sol_history_" + uuid.uuid4().hex
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE SCHEMA {schema}")
+            cur.execute(f"SET LOCAL search_path TO {schema}")
+            for table in ("projects", "chat_sessions", "chat_messages"):
+                cur.execute(f"CREATE TABLE {table} (id integer PRIMARY KEY)")
+                cur.execute(f"INSERT INTO {table} VALUES (11), (12), (13)")
+            migration = Path(__file__).resolve().parents[2] / "backend/migrations/044_edit_session_prefixes.sql"
+            sql = migration.read_text().replace("BEGIN;", "").replace("COMMIT;", "")
+            cur.execute(sql)
+        key = "edit:11:12"
+        body = {"input": [{"role": "user", "content": "original edit"}]}
+        worker_db = SimpleNamespace(run=lambda fn, *args: fn(conn, *args))
+        snapshots.remember(key, 12, body, 620, worker_db=worker_db, scope=(11, 12))
+        # A new process has no local entries. Only the database can answer.
+        monkeypatch.setattr(snapshots, "_entries", {})
+        assert snapshots.previous(key, 12, 700, worker_db=worker_db, scope=(11, 12)) == body
+        assert snapshots.previous(key, 12, 600, worker_db=worker_db, scope=(11, 12)) is None
+        assert snapshots.previous(key, 12, 700, worker_db=worker_db, scope=(13, 12)) is None
+        snapshots._save(conn, 11, 12, 11, 10, b"stale")
+        assert snapshots.previous(key, 12, 700, worker_db=worker_db, scope=(11, 12)) == body
+        with conn.cursor() as cur:
+            cur.execute("UPDATE edit_session_prefixes SET expires_at = now() - interval '1 minute'")
+        assert snapshots.previous(key, 12, 700, worker_db=worker_db, scope=(11, 12)) is None
+        snapshots.expire(conn)
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM edit_session_prefixes")
+            assert cur.fetchone()["n"] == 0
+    finally:
+        conn.rollback()
+        conn.close()
