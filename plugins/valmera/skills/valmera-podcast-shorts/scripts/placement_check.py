@@ -22,7 +22,7 @@ import tempfile
 from pathlib import Path
 
 MODEL = "gpt-6-sol"
-CONTRACT = 16       # The excerpt and its source must support the role attributed in this clause.
+CONTRACT = 17       # The excerpt and its source must support the role attributed in this clause.
 PHONE = 9 / 16
 # One call carries as many placements as fit these bounds. On the codex-proxy a call's cost is its harness prefix
 # (about 13k input tokens); each phone frame adds about 0.6k tokens and no latency (calls.jsonl, 15-16 Nov: 1 image
@@ -387,6 +387,8 @@ SYSTEM = (
     "company may illustrate that company when it implies no unsupported action. If every candidate misses "
     "the referent, return ok=false for each and describe what actual picture to search for; the editor can "
     "use the synchronized original shot. Rank matching candidates by fit from 1 to 10. "
+    "For each placement give meaning_box [left,top,right,bottom], normalized in the full source, enclosing the "
+    "complete visible evidence of these words, including the relevant text rows, subject or working display. "
     "subject_x: where across the full source frame (0 left, 1 right) the subject the words need stands, so the phone "
     "slice can be centred on it; null when you cannot tell. "
     "For a matching source, set full_source=true when the full frame establishes the action but the phone slice "
@@ -482,7 +484,7 @@ def _decision(decision, review, menu=None):
     from wf1_documents import valid_detail
     action = decision.get("action_box")
     foreign = decision.get("foreign_text") is True
-    return dict(mark_box=decision.get("mark_box") if valid_detail(decision.get("mark_box")) else None, action_box=action if valid_detail(action) else None, action_caption=str(decision.get("action_caption") or "").strip()[:100], full_source=decision.get("full_source") is True, ok=ok, fit=min(max(fit, 0), 10), subject_x=sx, fault=fault, reason=decision.get("reason", ""), model=MODEL,
+    return dict(meaning_box=decision.get("meaning_box") if valid_detail(decision.get("meaning_box")) else None, mark_box=decision.get("mark_box") if valid_detail(decision.get("mark_box")) else None, action_box=action if valid_detail(action) else None, action_caption=str(decision.get("action_caption") or "").strip()[:100], full_source=decision.get("full_source") is True, ok=ok, fit=min(max(fit, 0), 10), subject_x=sx, fault=fault, reason=decision.get("reason", ""), model=MODEL,
                 motion_ok=decision.get("motion_ok") is True, motion_reason=decision.get("motion_reason", ""),
                 attribution_text=str(decision.get("attribution_text") or "")[:120],
                 name_super=" ".join(str(decision.get("name_super") or "").split())[:60],
@@ -497,7 +499,7 @@ def _foley(answer, menu):
     return fam if menu and fam in menu else None
 
 
-KEPT = ("mark_box", "action_box", "action_caption", "ok", "full_source", "fit", "subject_x", "fault", "reason", "model", "motion_ok", "motion_reason", "attribution_text", "name_super",
+KEPT = ("meaning_box", "mark_box", "action_box", "action_caption", "ok", "full_source", "fit", "subject_x", "fault", "reason", "model", "motion_ok", "motion_reason", "attribution_text", "name_super",
         "foreign_text", "text_box", "text_reason", "foley")
 
 
@@ -763,6 +765,8 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         rec = row[4]
         rec['verified_motion'] = row[2] == 'clip' and decision.get('motion_ok') is True
         if review == "placement":
+            if decision.get("meaning_box"):
+                rec["meaning_box"] = decision["meaning_box"]
             rec["detail_read"] = "action_box" in decision
             if decision.get("action_box"):
                 rec["action_box"] = decision["action_box"]

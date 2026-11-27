@@ -691,3 +691,11 @@ def test_checked_print_and_imagined_span_do_not_request_motion_for_their_words(t
     beats = dict(thought_experiment=dict(first=1, last=113), display_facts=[
         dict(first=1,last=12,facts=[dict(excerpt={"words":"checked definition"})])])
     assert wf.retained_repairs(str(tmp_path),dict(coverage=dict(windows=windows)),beats,range(5)) == ([4],[])
+
+
+def test_two_seconds_and_ten_seconds_take_the_same_three_distinct_pictures():
+    pictures={"work":[dict(path=f"/source-{i}.jpg", title=f"view {i}",page=f"https://example.org/{i}") for i in range(3)]}
+    for duration in (2,10):
+        window=dict(name="work",must_show="the work",t0=0,t1=duration,say="the work")
+        rows=coverage.proposals(dict(windows=[window]),{},pictures)
+        assert len(rows)==3 and rows[-1][1]-rows[0][0]==duration*30
