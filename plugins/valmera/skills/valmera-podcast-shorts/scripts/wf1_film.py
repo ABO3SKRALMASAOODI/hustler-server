@@ -2255,16 +2255,9 @@ def build(script, sup, style_id, direction=None, *, read_report=None):
         P.shot([f0, f1], key, F.cover_crop(pw_, ph_, W / H, (0.5, 0.45), (0.5, 0.40)), **kw)
 
     def frame_meaning(f0, f1, kind, name, rec, key):
-        from scene.motion import fit_panel
-        box = rec["meaning_box"]
-        crop = [max(0, box[0]-.025), max(0, box[1]-.025), min(1, box[2]+.025), min(1, box[3]+.025)]
-        panel = fit_panel(crop, (rec["w"], rec["h"]), (W,H), [.02,.20,.98,.80])
-        P.page([f0,f1], "#14171B", grain=0)
-        P.card([f0,f1], key, panel, crop=crop, source_ink=[panel],
-               **({"src":rec["src"]} if kind == "clip" else {}))
-        note(f0, f1, kind, name, rec, "window")
-        P.pictures[-1].update(source_crop=crop, meaning_box=box, meaning_height_px=round(
-            H*(panel[3]-panel[1])*(box[3]-box[1])/(crop[3]-crop[1])))
+        geometry = F.placed_evidence(P,[f0,f1],key,rec,rec["meaning_box"],size=(W,H))
+        note(f0,f1,kind,name,rec,geometry["mode"])
+        P.pictures[-1].update(source_crop=geometry["crop"], **geometry)
 
     def window(f0, f1, kind, name, rec, key, source_ink=()):
         if rec.get("meaning_box"):

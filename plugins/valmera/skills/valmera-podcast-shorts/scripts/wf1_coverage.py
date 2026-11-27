@@ -847,75 +847,16 @@ def checked_proposals(coverage, footage, pictures, duration, checker, composed_s
 
 def repair_requirements(coverage, wanted, evidence, llm):
     """A director corrects over-specific research constraints without changing spoken facts or timing."""
-    system='''Direct documentary acquisition requirements using primary research and any previous failures.
-Return JSON {"windows":[{"i":integer,"name":resolved subject name,"referent_evidence":str,"claim":str,"must_show":str,"video_searches":[str]}]}.
-In research.excerpts each id is an existing exact clip or original document crop, with its observed
-content and provenance. Return reuse_id for a change of emphasis that THIS excerpt already depicts well,
-even across different subject labels. Read the hook and local words together. Return claim with the
-actual proposition the example illustrates. Repair a retained window that used a true incidental fact
-as its subject. A specific company introduced by a previous researcher is an illustration, not a
-named entity in the speech. When it only demonstrates an adjacent scale comparison, carry the actual
-operational example through that window. For a primary source illustrating an unnamed category, return
-example:{source: exact primary_research URL, statement: roughly six to nine plain words about the documented case}.
-Write statement so it stands on its own over the interview. When pointing to a specific pictured example,
-For a selected result figure or verified history, add example.reading:{first,at,last,speaker} using
-zero-based spoken word IDs. Open the figure on the incoming reply, mark its result on the action word and
-allow reading time into the connective phrase. Start the compact history on the word naming the old thing,
-then return to the speaker on the concluding clause. speaker is the replying voice if applicable.
-For a figure, copy figure_url from its primary source and give visible_statement for those pixels alone. Use ordinary
-language for the action, the qualified price and its unit. Give a technical name its meaning on first use.
-For a facility illustrating wider resource claims, name the site and what it supported in this one
-example. Give example.credit as the compact publisher/site credit when the scope matters on screen.
-Keep the scope specific to the applications or activity the publisher describes. Name the actual object of
-the claim. Put source, page and standing qualifications in the research record. The on-screen line should
-read within the word interval; the film already labels its publisher and status as an example. Prefer the primary source that documents the relevant operation or process. Use a dated lab talk to show the lab's work or a legible detail of the
-same paper on the mechanism. A separate event, product, date, user or action needs its own direct proof.
-Omit reuse_id for a new depiction, a merely similar subject, or a mismatch in the actual delivery finding.
-Composed-frame rejections are evidence that an earlier depiction brief may have been too broad.
-A different interview in which a founder tells a similar story is not footage of the event being
-told. Search the actual named artifact, contemporaneous primary document or recorded occasion. When an
-external picture would imply an unsupported role or record of a private conversation, identify the
-missing evidence. The original synchronous interview can carry this testimony after acquisition.
-An illustration intent cannot override the actual words: depict the activity or relationship being
-discussed, not merely an unrelated example of the broad category used as its search label.
-Revise an unsuitable acquisition brief instead of requesting more shots of the same unsuitable activity.
-If a rejection concerns only cropping, readability or timing, preserve the semantic requirement.
-When faithful pictures fail subject-motion checks, use those motion reasons to change acquisition,
-not the definition of moving footage. Seek genuine visible activity: actual use of the named software,
-an attributed live demonstration or an authentic institutional/customer film of that workflow.
-More static screens, document crops or cursor-only demos do not solve this failure. Do not merely
-reword the same queries. Keep an unchanged brief when no different faithful approach is supported.
-For a broad historical observation, authentic period footage can illustrate the named field without
-proving the entire observation in every frame. Keep exact named systems, events, numbers and dates;
-never replace a specific experiment with generic activity or invent a recording of a private event.
-must_show is a concise visual identity test, not an editing brief. Do not include numerical quotas, required durations, claims about unavailable footage, or a closed list of preferred sources. Earlier requirements may contain invented constraints: discard those while retaining facts from the actual words. A category such as deep learning permits any authentic period demonstration of that category; do not restrict it to the few papers already found. Specific named systems still require their exact identity.
-Resolve pronouns and formerly unnamed projects using the full spoken context, the script's resolved
-referents (resolved_referents: the people, companies and events the whole moment names, with the
-event-level picture each needs) and primary research. If an earlier subject label names the wrong referent, correct its canonical name and give referent_evidence explaining the exact words and primary source that establish it. For example a reaction to an internship must not retain the city as its subject merely because the city was named earlier. A corrected name directs research; it never approves a picture. Do not rename an explicit named entity to an easier substitute.
-Keep every actual identity, object, place and spoken fact. Do not replace a specific named thing with
-a merely related one. Requirements describe ANY ONE faithful shot, using alternatives (OR), not a
-whole montage that every one-second clip must contain. Do not require a specific paper, demo or
-camera angle invented by the previous director when the speaker did not name it.
-For a company, its authentic premises, products, interfaces or original records can illustrate the
-company; they do not prove the economic claim. The company's original film can establish the
-provenance of its facilities; a logo need not occupy every frame. Generic stock found by a search
-for the company is not evidence. Evaluate the actual source publisher and the pictured subject.
-Do not invent a specific company or interface screen when the speaker says only enterprise software:
-any genuine business-software workflow can illustrate that category. Do not narrow it to a contact,
-opportunity or case panel that the speaker never mentions. Do not turn earlier checker objections
-into extra requirements beyond the spoken facts. A historical setting can illustrate a recollection
-without pretending to record the particular conversation. Never invent an unnamed participant.
-A named scientific system still needs that exact system; a galaxy is never a solar system, and a
-generic neural network is not AlexNet. A hypothetical theory needs an attributed theoretical diagram
-or document, never purported observational footage. Do not invent searches for unfilmed events.
-video_searches must be natural-language YouTube search phrases, never document URLs or site: web operators. Primary document URLs belong in the contextual research, not in video search. Suggest existing, fetchable primary footage and actual documents. Separate context from claims of
-exact archival evidence. The independent picture-to-word checks will still reject every mismatch.
-Every supplied window is EXTERNAL documentary coverage. Never replace its requirement with the
-current interview take (this conversation's own recording). Use the speaker's filmed appearances when the words specifically describe that occasion.
-For an unnamed activity, seek truthful illustrative footage or an
-original document about that activity without inventing its participants, employer or exact location.
-If no faithful external depiction exists, state that research failure; never count the interview take as it.
-Do not change any spoken words, window boundaries, or numerical quality targets. Keep the old canonical name unless referent evidence establishes that it is wrong or unresolved.'''
+    system = """Read the complete spoken story and the evidence gathered for each window. Identify the
+specific visible action, people in their actual roles, object, original document or recorded event
+that explains those words. Use the hook and the local turn to resolve pronouns. Give the evidence
+for any corrected referent. If catalogued material already shows this beat, identify that excerpt.
+If the picture was unreadable, retain its subject and locate the detail. If sources depict the
+wrong role or action, widen acquisition to primary archives, original publications, catalogues,
+official media and contemporaneous photographs. Give concrete queries suited to recorded footage
+and a question about what visible material would establish the claim. Keep the window's word
+boundaries. Return JSON {windows:[{i,name,referent_evidence,must_show,scope_question,video_searches,
+reuse_id:optional catalogue index}]}."""
     research = dict(evidence)
     if "excerpts" in research:
         # The director selects by number; filesystem paths and byte hashes stay local.
@@ -936,7 +877,8 @@ Do not change any spoken words, window boundaries, or numerical quality targets.
             window["claim"] = row["claim"].strip()
         if isinstance(row.get("example"), dict):
             window["example"] = row["example"]
-        window.update(must_show=row['must_show'],video_searches=row.get('video_searches') or [])
+        window.update(must_show=row['must_show'],video_searches=row.get('video_searches') or [],
+                      scope_question=row.get("scope_question") or window.get("scope_question"))
         window.pop("reuse_excerpt", None)
         candidates = evidence.get("excerpts") or []
         selected = row.get("reuse_id")

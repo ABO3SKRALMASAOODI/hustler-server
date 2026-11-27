@@ -66,8 +66,9 @@ For a name, a portrait identifies the person at any age unless the words specify
 For a change in state, evaluate only the state spoken on these words. A metaphor depicts the physical
 sense the brief specifies. Use the source and the settled identity as evidence. Answer JSON
 {verdicts:[{c,line,shows,why,grade,exact_thing,time_ok,version_ok,contradicts,fits_line,
-story_time,picture_time,live_action,speaking_on_camera}]}. fits_line means the viewer can see the
-relationship. The first three checks are booleans about the subject, period and version."""
+story_time,picture_time,meaning_box,passages:[{word_i,box}],live_action,speaking_on_camera}]}. fits_line means the viewer can see the
+relationship. Give a normalized meaning_box enclosing the evidence for these words. For a cited
+document mark only the actual visible passage(s), with the supplied spoken word_i and source box. The first three checks are booleans about the subject, period and version."""
 
 IDENTITY_SYSTEM = """Identify each numbered source take using its frames and provenance. Identify people
 and their role only with evidence. Distinguish performers, subjects of interviews and people doing the
@@ -221,6 +222,8 @@ def _img(path, detail="high"):
 def _line_text(ln):
     see = ln.get("see") or []
     out = f"Line {ln['i']} ({ln.get('beat') or 'line'}, speaks from {ln.get('era') or '?'}): \"{ln.get('say')}\"\n   brief: {json.dumps(see, ensure_ascii=False)}"
+    if ln.get("exhibit") and any(b.get("document_fact")==ln["exhibit"].get("fact") for b in see):
+        out += "\n   Document passages: " + json.dumps(ln["exhibit"].get("passages") or [])
     if ln.get("words_under"):
         out += f"\n   words spoken exactly under this shot: \"{ln['words_under']}\""
     return out
@@ -249,6 +252,10 @@ def _clean(v):
         out["grade"] = int(round(g))
     out["shows"] = str(v.get("shows") or "")[:160]
     out["why"] = str(v.get("why") or "")[:240]
+    if valid_box(v.get("meaning_box")):
+        out["meaning_box"] = v["meaning_box"]
+    out["passages"] = [p for p in v.get("passages") or [] if isinstance(p,dict) and
+                       type(p.get("word_i")) is int and valid_box(p.get("box"))]
     for k in ("story_time", "picture_time"):          # the model's own reading of the two times: why time_ok is what it is
         if v.get(k):
             out[k] = str(v[k])[:80]
@@ -306,7 +313,7 @@ def judge(items, lines, ask=None, work=None, log=print, batch=BATCH, detail="hig
 # ----------------------------------------------------------------- per-line verdicts for the supply
 
 def lines_of(sc):
-    return {k: dict(i=k, say=s.get("say"), see=s.get("see") or [], era=s.get("era"), beat=s.get("beat")) for k, s in enumerate(sc["segments"])}
+    return {k: dict(i=k, say=s.get("say"), see=s.get("see") or [], era=s.get("era"), beat=s.get("beat"), exhibit=s.get("exhibit")) for k, s in enumerate(sc["segments"])}
 
 
 def judged_lines(c, lines):

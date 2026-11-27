@@ -359,6 +359,58 @@ def focus_of(rec):
     return ((x0 + x1) / 2, ey), (big["box"][3] - big["box"][1])
 
 
+def evidence_frame(rec, box, clean=None, size=None):
+    """Frame the requested evidence and the largest detected face outside the fixed mark."""
+    from keepout import watermark_zone
+    from scene.motion import fit_panel
+
+    w, h = size or (W, H)
+    pw, ph = rec["w"], rec["h"]
+    area = clean or [0., 0., 1., 1.]
+    face = max((f["box"] for f in rec.get("faces") or []),
+               key=lambda b: (b[2]-b[0])*(b[3]-b[1]), default=None)
+    box = box or face or area
+    focus = list(box)
+    if face:
+        focus = [min(box[0], face[0]), min(box[1], face[1]),
+                 max(box[2], face[2]), max(box[3], face[3])]
+    centre = ((focus[0]+focus[2])/2, (focus[1]+focus[3])/2)
+    cover = cover_crop(pw, ph, w/h, centre, (.5,.50))
+    mark = watermark_zone(w,h)
+    def contains(outer, inner):
+        return outer[0]<=inner[0] and outer[1]<=inner[1] and outer[2]>=inner[2] and outer[3]>=inner[3]
+    def projection(rect, crop):
+        return [(v-crop[i%2])/(crop[2+i%2]-crop[i%2]) for i,v in enumerate(rect)]
+    visible = projection(focus, cover)
+    clear = visible[2]<=mark[0] or visible[0]>=mark[2] or visible[3]<=mark[1] or visible[1]>=mark[3]
+    if contains(area, cover) and contains(cover, focus) and clear and visible[3]-visible[1]>=.18:
+        panel, crop, mode = [0.,0.,1.,1.], cover, "bleed"
+    else:
+        crop = [max(area[0], focus[0]-.035), max(area[1], focus[1]-.035),
+                min(area[2], focus[2]+.035), min(area[3], focus[3]+.035)]
+        if crop[2]<=crop[0] or crop[3]<=crop[1]:
+            crop = area
+        panel = fit_panel(crop,(pw,ph),(w,h),[.015,mark[3]+.016,.985,.84])
+        mode = "window"
+    height = round(h*(panel[3]-panel[1])*(box[3]-box[1])/(crop[3]-crop[1]))
+    return dict(mode=mode, panel=panel, crop=crop, meaning_box=box, meaning_height_px=height)
+
+
+def placed_evidence(plan, span, key, rec, box, clean=None, size=None):
+    """Apply the same measured frame to a still or to a moving source excerpt."""
+    geo = evidence_frame(rec,box,clean,size)
+    kw = {"src":list(rec["src"])} if rec.get("src") else {}
+    if geo["mode"]=="bleed":
+        plan.shot(span,key,geo["crop"],**kw)
+    else:
+        plan.page(span,"#171B20",grain=.008)
+        if not kw:
+            n = span[1]-span[0]
+            kw["s"] = [1+.035*j/max(1,n-1) for j in range(n)]
+        plan.card(span,key,geo["panel"],z=1,crop=geo["crop"],source_ink=[geo["panel"]],**kw)
+    return geo
+
+
 def bleed_ok(rec):
     """Can this photograph fill the frame (no upscale past 3x, its people not cut)?"""
     (fx, fy), _ = focus_of(rec)

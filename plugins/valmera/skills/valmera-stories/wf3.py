@@ -1022,8 +1022,8 @@ def supply(ctx, script):
                 if brief.get("kind") in ("card", "callback"):
                     continue
                 thing = brief["thing"]
-                entity = named_by_key.get(brief.get("entity"), {})
-                named_by_key.setdefault(thing, dict(entity, name=thing, must_show=brief.get("must_show"),
+                named_by_key.setdefault(thing, dict(name=thing, entity=brief.get("portrait_of"),
+                    **{"is":"person" if brief.get("portrait_of") else "thing"}, must_show=brief.get("must_show"),
                     searches=[brief.get("search") or thing], video_searches=brief.get("video_searches") or []))
                 used.add(thing)
         sc["named"] = list(named_by_key.values())
@@ -1565,25 +1565,42 @@ def moment_line(seg):
 
 
 def fit_report(pack, sc, durs):
+    offers, briefs = {}, {}
+    groups = {c["path"]:c.get("take_group") or c["path"]
+              for group in pack.get("footage") or [] for c in group["clips"]}
+    for i,seg in enumerate(sc["segments"]):
+        for brief in seg.get("see") or [{}]:
+            if brief.get("kind") not in ("card","callback"):
+                slot = (i,brief.get("word_i",0))
+                offers[slot], briefs[slot] = {}, brief
+    for path,takes in (pack.get("fit_verdicts") or {}).items():
+        for ti,by_line in FIT._rows(takes).items():
+            for i,verdict in by_line.items():
+                for wi,v in (verdict.get("phrases") or {0:verdict}).items():
+                    slot = (i,int(wi))
+                    if slot in offers and FIT.usable(v):
+                        offers[slot][groups.get(path,path),ti] = v.get("grade") or 0
+    # Match one distinct picture per phrase before counting another for any phrase.
+    assigned = {}
+    def match(slot,seen):
+        for pic in sorted(offers[slot],key=offers[slot].get,reverse=True):
+            if pic in seen:
+                continue
+            seen.add(pic)
+            if pic not in assigned or match(assigned[pic],seen):
+                assigned[pic] = slot
+                return True
+        return False
+    for slot in sorted(offers,key=lambda s:len(offers[s])):
+        match(slot,set())
+    placed = set(assigned.values())
     rows = []
-    for i, segment in enumerate(sc["segments"]):
-        briefs = [x for x in segment.get("see") or [{}] if x.get("kind") not in ("callback", "card")]
-        missing = []
-        matches = set()
-        for brief in briefs:
-            wi = brief.get("word_i", 0)
-            found = set()
-            for path, takes in (pack.get("fit_verdicts") or {}).items():
-                for ti, by_line in FIT._rows(takes).items():
-                    verdict = by_line.get(i, {})
-                    phrases = verdict.get("phrases") or {}
-                    if FIT.usable(phrases.get(wi, phrases.get(str(wi), verdict if not phrases else {}))):
-                        found.add((path, ti))
-            if not found:
-                missing.append(brief)
-            matches.update(found)
-        rows.append(dict(i=i, need=len(briefs), have=len(matches), moving=None, deficit=len(missing),
-                         missing=missing, moment_ok=not missing, still_only=still_only_line(segment), short=bool(missing)))
+    for i,seg in enumerate(sc["segments"]):
+        slots = [slot for slot in offers if slot[0]==i]
+        missing = [briefs[slot] for slot in slots if slot not in placed]
+        rows.append(dict(i=i,need=len(slots),have=sum(slot in placed for slot in slots),moving=None,
+                         deficit=len(missing),missing=missing,moment_ok=not missing,
+                         still_only=still_only_line(seg),short=bool(missing)))
     return rows
 
 
@@ -1801,7 +1818,7 @@ def fit_supply(ctx, script, pack, durs, spend, anchors, reel_kw):
     topups = []
     for k in range(TOPUP_CALLS):
         short = [r["i"] for r in rows if r["short"]]
-        if not short or "footage" not in pack or os.environ.get("VALMERA_FOOTAGE", "1") == "0":
+        if not short:
             break
         import publisher_pictures
         briefs = [dict(name=x["thing"], must_show=x.get("must_show"), archive_brief=x.get("must_show"),
@@ -1814,7 +1831,15 @@ def fit_supply(ctx, script, pack, durs, spend, anchors, reel_kw):
             judge_supply(ctx, sc, pack)
         before = sum(r["deficit"] for r in rows)
         ask_max = max([r["deficit"] for r in rows if r["short"]] + [1])
-        added = topup_once(ctx, script, pack, durs, short, spend, f"footage{k + 2}", anchors, reel_kw, line_max=ask_max, want_voices=True)
+        added = 0
+        if os.environ.get("VALMERA_FOOTAGE", "1") != "0":
+            repair = dict(script, script=json.loads(json.dumps(sc)))
+            for row in rows:
+                if row["missing"]:
+                    seg = repair["script"]["segments"][row["i"]]
+                    seg["see"] = row["missing"]
+                    seg["pictures"] = [x["thing"] for x in seg["see"] if x.get("thing")]
+            added = topup_once(ctx, repair, pack, durs, short, spend, f"footage{k + 2}", anchors, reel_kw, line_max=ask_max, want_voices=True)
         rows = fit_report(pack, sc, durs)
         after = sum(r["deficit"] for r in rows)
         topups.append(dict(lines=short, line_max=ask_max, clips=added, deficit_before=before, deficit_after=after))
@@ -2625,6 +2650,16 @@ def score_search(ctx, script_rec, pack, windows, durs):
             else:
                 merged.append([a, b])
         words = clock.seg_words(line)
+        briefs = sorted(seg.get("see") or [],key=lambda b:b.get("word_i",0))
+        relevant = []
+        for j,brief in enumerate(briefs):
+            wi = brief.get("word_i",0)
+            stop = briefs[j+1].get("word_i",0) if j+1<len(briefs) else len(words)
+            if any(w["t1"]>a/F.FPS and w["t0"]<b/F.FPS for w in words[wi:stop] for a,b in merged):
+                relevant.append(brief)
+        if relevant:
+            seg["see"] = relevant
+            seg["pictures"] = [brief["thing"] for brief in relevant if brief.get("thing")]
         seg["claim"] = seg["say"]
         seg["say"] = " ".join(w["w"] for w in words if any(w["t1"] > a/F.FPS and w["t0"] < b/F.FPS
                                                            for a,b in merged)) or seg["claim"]

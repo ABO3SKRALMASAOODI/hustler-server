@@ -22,18 +22,25 @@ def reading_box(clip):
     except (KeyError,ValueError,OSError):
         return [0,0,1,1]
     h,w = rgb.shape[:2]
+    # An already-excerpted paragraph fits at full canvas width. Keeping the
+    # whole excerpt preserves wrapped qualifiers at the same reading size.
+    if w/h >= (.93*1920)/(.61*1080):
+        return [0,0,1,1]
     ink = rgb.max(axis=2)<155
     color = (rgb.max(axis=2)-rgb.min(axis=2)>70)
     rows = np.where(ink.sum(axis=1) >= max(3,w*.009))[0]
     marked = np.where(color.sum(axis=1)>w*.025)[0]
     if not len(rows) or not len(marked):
         return [0,0,1,1]
-    groups = np.split(rows, np.where(np.diff(rows)>max(2,h*.005))[0]+1)
+    groups = np.split(rows, np.where(np.diff(rows)>max(3,h*.008))[0]+1)
+    groups = [g for g in groups if len(g)>=max(3,h*.009)]
+    if not groups:
+        return [0,0,1,1]
     center = marked.mean()
-    i = min(range(len(groups)),key=lambda q:abs(groups[q].mean()-center))
+    i = max((j for j,g in enumerate(groups) if g[0] <= center),default=0)
     line_h = max(3,groups[i][-1]-groups[i][0]+1)
-    top = max(0,int(min(groups[i][0],marked.min())-line_h*.4))
-    bottom = min(h,int(max(groups[min(i+1,len(groups)-1)][-1],marked.max())+line_h*.4+1))
+    top = max(0,int(min(groups[i][0],marked.min())-line_h*.22))
+    bottom = min(h,int(max(groups[min(i+1,len(groups)-1)][-1],marked.max())+line_h*.22+1))
     xs = np.where(ink[top:bottom].any(axis=0))[0]
     if not len(xs):
         return [0,0,1,1]

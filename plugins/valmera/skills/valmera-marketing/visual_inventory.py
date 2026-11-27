@@ -36,6 +36,8 @@ def studio_photos(record):
     from PIL import Image
     ui = record.get("ui") or {}
     folder = Path(ui["dir"]) if ui.get("dir") else Path(record["upload"]["file"]).parent / "ui"
+    if not folder.is_dir() and record.get("upload",{}).get("file"):
+        folder = Path(record["upload"]["file"]).parent / "ui"
     rows = []
     for path in sorted(folder.glob("*.png")):
         if not (path.name.startswith(("type_00_", "result", "board_")) or path.name == "site.png"):

@@ -687,15 +687,31 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
             ranks[index].append((grade, take_motion(rec,bounds) if kind == "clip" else 0., path, ti))
         ranks[index].sort(reverse=True)
 
-    owned = set()
+    owned, intervals, reserved_room = set(), {}, {}
     order = sorted(ranks, key=lambda i: (len(ranks[i]), i))
     def reserve(index):
+        line, wi, lo, hi, brief = slots[index]
+        if brief.get("kind") == "card" or (brief.get("kind") == "callback" and script["segments"][line].get("pays")):
+            return False
         for grade, motion, path, ti in ranks[index]:
             key = sp.group.get(path,path), ti
             if key in owned:
                 continue
             if assigned[index] and grade < assigned[index][0][0]:
                 break
+            kind,name,rec,bounds = catalogue[path,ti]
+            if kind == "clip":
+                room = sp.fresh_room(rec,bounds)
+                if not room:
+                    continue
+                origin,offset = sp.origin.get(path,(path,0))
+                free = _free_in(intervals.get(origin,[]),(room[0]+offset,room[1]+offset))
+                free = [r for r in free if r[1]-r[0]>=min(.30,room[1]-room[0])]
+                if not free:
+                    continue
+                a,b = max(free,key=lambda r:r[1]-r[0])
+                intervals.setdefault(origin,[]).append((a,b))
+                reserved_room[path,ti] = (a-offset,b-offset)
             owned.add(key)
             assigned[index].append((grade,path,ti))
             return True
@@ -739,12 +755,15 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                     continue
                 kind,name,original,bounds = catalogue[path,ti]
                 identity = getattr(sp,"identities",{}).get(fit.take_key(path,bounds),{})
-                rec = dict(original, pick_line=line, word_i=wi, grade=grade, identity=identity, use=2 if callback else 1,
+                by_line = fit._rows(getattr(sp,"verdicts",{}).get(path,{})).get(ti,{})
+                v = by_line.get(line,{})
+                phrase = (v.get("phrases") or {}).get(str(wi),(v.get("phrases") or {}).get(wi,v))
+                if phrase.get("meaning_box"):
+                    identity = dict(identity,meaning_box=phrase["meaning_box"])
+                rec = dict(original, passages=phrase.get("passages") or [], pick_line=line, word_i=wi, grade=grade, identity=identity, use=2 if callback else 1,
                            keep_full_frame=brief.get("keep_full_frame"), tier="callback" if callback else kind)
                 if kind == "clip":
-                    room = sp.fresh_room(rec,bounds) if not callback else bounds
-                    if not room:
-                        continue
+                    room = reserved_room.get((path,ti),bounds)
                     rec.update(src=list(Takes.best(rec,room,(b-a)/FPS)),take_i=ti,take=list(bounds))
                     sp.take_clip(rec,*rec["src"],a)
                     sp.use_take(path,ti)
@@ -1132,7 +1151,7 @@ def fit_measures(pictures, timeline, sp, takes, secs, fin, seg_len, device_share
     off_line = sum(p["f"][1] - p["f"][0] for p in pictures if p.get("line") is not None and p.get("spoken_line") is not None
                    and p["line"] != p["spoken_line"])
     fill_f = sum(p["f"][1] - p["f"][0] for p in pictures if p.get("tier") in ("missing", "designed", "reframe", "replay"))
-    return dict(reference_shot_quantiles=SHOT_Q, reference_cuts_per_10s=16, phrase_plan=sp.plan, tier_s=tiers, shortfall_s={str(k): round(v / FPS, 2) for k, v in sorted(sp.shortfall.items())},
+    return dict(reference_shot_quantiles=SHOT_Q, reference_cuts_per_10s=16, phrase_plan=getattr(sp,"plan",None), tier_s=tiers, shortfall_s={str(k): round(v / FPS, 2) for k, v in sorted(sp.shortfall.items())},
                 reframed_s={str(k): round(v / FPS, 2) for k, v in sorted(sp.reframed.items())}, spread_lines=dict(getattr(sp, "spread", None) or {}),
                 again_s={str(k): round(v / FPS, 2) for k, v in sorted((getattr(sp, "again", None) or {}).items())},
                 new_pictures_10s=round(takes["new_pictures_10s_n"] / max(secs, 1) * 10, 2), repeat_share=takes["repeat_share"],
@@ -1608,14 +1627,25 @@ def build(script, sup, style_id, direction=None):
             note(f0,f1,kind,name,rec,"portrait")
             return
         box = identity.get("meaning_box") or area
-        crop = [max(area[0],box[0]-.05),max(area[1],box[1]-.05),min(area[2],box[2]+.05),min(area[3],box[3]+.05)]
-        panel = fit_panel(crop,(rec["w"],rec["h"]),(W,H),[.015,.20,.985,.82])
-        P.page([f0,f1], "#272521", "#141310", grain=.02)
-        kw = dict(src=list(rec["src"])) if kind == "clip" else dict(s=[1+.035*j/max(1,f1-f0-1) for j in range(f1-f0)])
-        P.card([f0,f1],key,panel,z=1,crop=crop,**kw)
-        layer_spans.append((f0,f1,2))
-        note(f0,f1,kind,name,rec,"window")
-        P.pictures[-1].update(crop=crop,meaning_height_px=round(H*(panel[3]-panel[1])*(box[3]-box[1])/(crop[3]-crop[1])))
+        geo = F.placed_evidence(P,[f0,f1],key,rec,box,area,(W,H))
+        if geo["mode"] == "window":
+            layer_spans.append((f0,f1,2))
+        note(f0,f1,kind,name,rec,geo["mode"])
+        P.pictures[-1].update(geo)
+        passages = rec.get("passages") or []
+        if rec.get("document_fact") and passages:
+            words = clock.seg_words(rec["pick_line"])
+            starts = sorted((max(f0,Clock.f(words[p["word_i"]]["t0"])),p["box"]) for p in passages
+                            if 0<=p["word_i"]<len(words))
+            panel,crop = geo["panel"],geo["crop"]
+            for (at,source),end in zip(starts,[a for a,_ in starts[1:]]+[f1]):
+                if at >= min(end,f1):
+                    continue
+                l,top,r,bottom = [panel[i%2]+(v-crop[i%2])*(panel[2+i%2]-panel[i%2])/
+                                   (crop[2+i%2]-crop[i%2]) for i,v in enumerate(source)]
+                left,right = max(panel[0],l),min(panel[2],r)
+                if left<right and panel[1]<=bottom<panel[3]:
+                    P.block([at,min(end,f1)],[left,bottom,right,bottom+.004],"#F4C758",z=2)
 
     def bleed(f0, f1, kind, name, rec, key):
         n_win[1] += 1

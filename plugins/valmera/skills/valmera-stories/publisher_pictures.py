@@ -139,29 +139,74 @@ def saved_original(item, folder, pictures):
     return photo, usable
 
 
+def document_originals(script, subjects, got, root):
+    """Capture the actual cited passage when the annotated phrase names this document."""
+    import importlib.util
+    from PIL import Image
+    source = Path(__file__).resolve().parents[1]/"valmera-longform"/"cited_page.py"
+    spec = importlib.util.spec_from_file_location("stories_cited_page",source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    reports = []
+    facts = {f["id"]:f for f in script.get("facts") or [] if f.get("url")}
+    for s in subjects:
+        i = s.get("search_for")
+        if not isinstance(i,int):
+            continue
+        seg = script["segments"][i]
+        exhibit = seg.get("exhibit") or {}
+        brief = next((b for b in seg.get("see") or [] if b.get("thing")==s["name"] and
+                      b.get("document_fact") in facts),None)
+        if not brief:
+            continue
+        fact = facts[brief["document_fact"]]
+        excerpt = exhibit.get("excerpt") if exhibit.get("fact")==fact["id"] else fact.get("quote")
+        if not excerpt:
+            continue
+        path = root/(identifier([fact["url"],excerpt])+".png")
+        report = dict(subject=s["name"],url=fact["url"],excerpt=excerpt,line=i)
+        try:
+            if not path.exists():
+                module.capture(dict(fact,quote=excerpt),str(path))
+            with Image.open(path) as im:
+                w,h = im.size
+            rec = dict(path=str(path),name=s["name"],w=w,h=h,title=fact.get("title") or s["name"],
+                       page=fact["url"],credit=fact.get("source") or fact["url"],licence=fact.get("licence"),
+                       provider="primary-document",shows=excerpt,document_fact=fact["id"])
+            rows = got.setdefault(s["name"],[])
+            if not any(r["path"]==str(path) for r in rows):
+                rows.append(rec)
+            report["capture"] = str(path)
+        except Exception as exc:
+            report["error"] = str(exc)[:180]
+        reports.append(report)
+    return reports
+
+
 def supply(script, subjects, got, out, per):
     """One research call for the outstanding briefs. Resume the results on the next supply pass."""
     import writer
     import pictures
     facts = {f['id']: f for f in script.get('facts') or [] if f.get('url') and f.get('id')}
+    captures = document_originals(script,subjects,got,Path(out)/"documents")
     briefs = []
     for s in subjects:
         i = s.get('search_for')
         must = s.get("archive_brief") or s.get("must_show") or s["name"]
-        if not isinstance(i, int) or any(must in ([r.get("checked_brief")] + (r.get("checked_briefs") or [])) for r in got.get(s["name"], [])):
+        if not isinstance(i, int) or (s.get("search_round",1)==1 and any(must in ([r.get("checked_brief")] + (r.get("checked_briefs") or [])) for r in got.get(s["name"], []))):
             continue
         sources = [facts[k] for k in script['segments'][i].get('facts', []) if k in facts]
         if sources or must:
             briefs.append(dict(name=s['name'], must_show=must, line=i, as_of=s.get('as_of'), moment=s.get('moment'), searches=s.get('searches'), sources=sources, search_round=s.get('search_round',1)))
     if not briefs:
-        return [], []
+        return captures, []
     B = pictures._worker()
     import openai_budget
     root = Path(out)/'publisher'
     root.mkdir(parents=True, exist_ok=True)
     cited = list(dict.fromkeys(f["url"] for f in facts.values()))
     plan = root/(identifier([briefs, cited])+'.json')
-    uses, reports = [], []
+    uses, reports = [], list(captures)
     try:
         images = json.loads(plan.read_text())
     except (FileNotFoundError, ValueError):
@@ -175,7 +220,7 @@ def supply(script, subjects, got, out, per):
             images, use = lookup(briefs, writer, catalog)
         except Exception as exc:
             openai_budget.propagate(exc)
-            return [dict(subject=b['name'], must_show=b['must_show'], errors=[str(exc)[:180]]) for b in briefs], uses
+            return captures + [dict(subject=b['name'], must_show=b['must_show'], errors=[str(exc)[:180]]) for b in briefs], uses
         uses.append(dict(stage='supply', **use))
         with tempfile.NamedTemporaryFile(mode='w', dir=root, delete=False) as f:
             json.dump(images, f)

@@ -55,3 +55,28 @@ def test_burned_timecode_crop_preserves_subject_and_measures_changing_glyphs(tmp
     signal=fit.overlay_signal(frames,box)
     assert signal["fixed_strokes"]>.2 and signal["changing_strokes"]>0
     assert fit.overlay_crop([box],[.12,.15,.81,.72]) == [0,0,1,.82]
+
+
+def test_slide_recorded_as_video_preserves_the_readable_rows_and_video_clock(monkeypatch):
+    import film
+    monkeypatch.syspath_prepend(film.scene_worker())
+    from keepout import watermark_zone
+    rows = [.04,.28,.94,.48]
+    slide = dict(w=1920,h=1080,src=[3.,5.],meaning_box=rows)
+    plan = film.Plan.__new__(film.Plan)
+    plan.items, plan.frame_ids, plan.n = [],None,0
+    geometry = film.placed_evidence(plan,[0,60],"slide",slide,rows)
+    item = plan.items[-1]
+    assert item["k"]=="card" and item["src"]==[3.,5.]
+    assert item["crop"][0]<=rows[0]<rows[2]<=item["crop"][2]
+    assert geometry["panel"][1]>watermark_zone()[3]
+    assert geometry["meaning_height_px"]>=100
+
+
+def test_scarce_picture_is_reported_on_the_specific_uncovered_phrase():
+    import wf3
+    v = dict(fits_line=True,exact_thing=True,time_ok=True,version_ok=True,contradicts=False,grade=4)
+    table = {"one photo":{0:{0:dict(v,phrases={0:v,2:v})}}}
+    report, = wf3.fit_report(dict(fit_verdicts=table),dict(segments=[dict(see=[
+        dict(word_i=0,thing="first"),dict(word_i=2,thing="second")])]),[3.])
+    assert report["deficit"]==1 and report["missing"][0]["word_i"] in (0,2)
