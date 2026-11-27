@@ -7,8 +7,12 @@ PITCH = """Plan this film before the writer speaks a line. Start by writing the 
 use the hook's own key word, now changed by the outcome. Then plan backwards from that landing.
 Write a short chain explaining who wanted what and why, the grounds of the objection,
 what decided it and what followed. Use the evidence in the bank, including causes established
-across quotes. Give the arc one payoff figure if the evidence supplies one. Leave other totals
-in the bank. Introduce each person by role when first named.
+across quotes. Choose the one event that answers the opening conflict and, where the sources
+give it a scale, its one payoff figure. A later achievement belongs in this arc only if it
+changes the answer to that conflict. For the callback choose a word whose significance or
+ownership changes over the arc. Write one spoken meaning sentence that makes that change clear.
+Record the cast as people [{name, role, first_beat, facts}]. Name each person with the role that
+explains their action on first encounter; someone who only passes a message can be described by role.
 
 In a story or documentary, open on the collision of the starting and ending states, leaving the how
 open, or on a sourced climax in the subject's voice. Establish who matters now, rewind in one line,
@@ -44,7 +48,8 @@ one before it; a conjunction need not be spoken where the relation is audible. S
 before a line points back to it. Write the hook and the meaning line as a pair. Speak the planner's
 hook_word verbatim in each, in the same grammatical form. In the meaning line, use it to say
 what the outcome changed about the opening conflict. When shortening the landing, move context
-to the preceding beat and keep the meaning intact. Return on each
+to the preceding beat and keep the meaning intact. At each person's first appearance, introduce them
+with the role that makes their action intelligible. Return on each
 segment a print dictionary mapping every voice spelling in say to its printed form (numbers,
 acronyms, web addresses, units and names), or {}. Write the spoken words and their punctuation
 for the actor. The reference lengths describe completed films; end where this story lands."""

@@ -1884,7 +1884,8 @@ SPINE_JUDGE_SYSTEM = """Measure the arc of this documentary. Does the hook pose 
 Does the turn follow its cause and does the payoff resolve the conflict? The meaning line should reuse the hook's
 own word with its new significance. Check the specified hook word against both spoken lines and compare their
 meanings: what changed for the person who faced that conflict? Count the return as carried when the meaning line
-voices that connection. Flag a missing setup or a landing that leaves that connection to the listener.
+voices that connection. Flag a missing setup, a person acting before their role is introduced,
+or a landing that leaves the connection to the listener.
 Return JSON {"beats":[{"beat":"hook|turn|payoff|close","carried":true,"lost":""}]}."""
 
 

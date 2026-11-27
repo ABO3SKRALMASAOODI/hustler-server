@@ -582,6 +582,9 @@ def ideas(ctx):
     system = """Read the numbered, punctuated speech first. Find one complete thought from one speaker.
 Name who speaks and the actual claim. Then derive an editor's concrete problem and an edit that lets the
 viewer hear and see the whole claim. The ask must cover its entire spoken unit, including a list's last item.
+Write one natural instruction the editor could say in a breath: name the visual change and how long it should stay.
+The first and last indices already specify the clip. Put the boundary quotations and transcription notes in the
+research fields. The sentence typed in Studio should be the sentence the narrator can speak.
 Choose inclusive first_sentence and last_sentence indices; include setup and resolution and exclude clipped
 excerpt edges. For a remake preserve the supplied idea, source, style and requested format while expanding the ask
 to cover the complete claim. Return JSON {"ideas":[{"title","speaker","claim","pain","technique","source",
@@ -652,7 +655,7 @@ def restore_window(ctx, idea):
     rows, words = source_sentences(ctx, src, "prior-idea", lo, hi)
     got, _ = ask("Locate the complete claim for this existing edit in the numbered sentences. "
                  "Give first_sentence,last_sentence,speaker and ask. Preserve the editing idea and cover the "
-                 "whole claim in its typed ask.", json.dumps(dict(idea=idea, sentences=rows)),
+                 "whole claim in one concise, natural instruction; the indices carry its exact boundaries.", json.dumps(dict(idea=idea, sentences=rows)),
                  what="restore complete thought", effort="high")
     choice = [got["first_sentence"], got["last_sentence"]]
     a, b = snap_window(rows, choice, src, duration, clock=words)
@@ -1251,12 +1254,18 @@ def script_problems(sc, ask_text, rc):
         p.append("proof.before_after and proof.after_after must be segment indexes with before < after < the last segment")
     if any(ch.isdigit() for s in segs for ch in str(s.get("say", ""))):
         p.append("digits in say: write numbers as words")
-    want = norm_words(ask_text)
-    if not any(" ".join(want) in " ".join(norm_words(s.get("say", ""))) for s in segs):
-        p.append(f"no segment says the typed sentence word for word: {ask_text!r}")
-    for f in (rc or {}).get("follow_ups") or []:       # the film never says one sentence did what two did
-        if not any(" ".join(norm_words(f["typed"])) in " ".join(norm_words(s.get("say", ""))) for s in segs):
-            p.append(f"no segment says the follow-up typed after the first result word for word: {f['typed']!r}")
+    readings = []
+    for seg in segs:
+        say = seg.get("say", "")
+        readings.append(" ".join(norm_words(say)))
+        # Compare the actual typed characters against the writer's explicit spoken-to-print pairs.
+        printed = say.casefold()
+        for spoken, display in sorted((seg.get("print") or {}).items(), key=lambda pair: -len(pair[0])):
+            printed = printed.replace(spoken.casefold(), str(display))
+        readings.append(" ".join(norm_words(printed)))
+    for typed in [ask_text, *(f["typed"] for f in (rc or {}).get("follow_ups") or [])]:
+        if not any(" ".join(norm_words(typed)) in reading for reading in readings):
+            p.append(f"the narration needs the typed sentence in spoken form: {typed!r}")
     have = json.dumps(rc)
     for s in segs:
         if not 1 <= len(str(s.get("fallback_text") or "").split()) <= 5:
