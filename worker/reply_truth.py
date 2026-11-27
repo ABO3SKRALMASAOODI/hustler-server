@@ -256,3 +256,13 @@ def enforce(ctx, client, model, request_text, draft, honesty=None, strict=False)
         print(f"[reply-truth] job {job}: {len(swapped)} claim(s) the film contradicts, told "
               "truthfully", flush=True)
     return text
+
+
+def first_cut_summary(preview):
+    """Use the delivered player's runtime. Plan cuts, fetched assets and EDL
+    cues cannot establish the images or sounds in that encoded file."""
+    seconds = round(float(preview.get("duration_s") or 0))
+    if not seconds:
+        return "your edited video"
+    article = "an" if seconds in (8, 11, 18) or 80 <= seconds <= 89 else "a"
+    return f"{article} {seconds}-second edit"

@@ -175,7 +175,14 @@ def _parse_deepgram(payload):
                           speaker=spk, confidence=w.get("confidence"),
                           filler=is_filler_token(token)))
     lang = ch.get("detected_language") or alts[0].get("language") or "en"
-    return words, str(lang)
+    return _script_words(words, lang, alts[0].get("transcript")), str(lang)
+
+
+def _script_words(words, language, transcript):
+    import script_words
+    if language not in script_words.LANGUAGES:
+        return words
+    return [Word(**row) for row in script_words.timed([w.model_dump() for w in words], language, transcript)]
 
 
 def _upload_payload(wav_path):
@@ -406,6 +413,7 @@ def _transcribe_whisper(wav_path, progress_cb=None):
                 or float(getattr(info, "duration", 0.0) or 0.0))
     words = []
     for seg in segments:
+        segment_words = []
         for w in (seg.words or []):
             token = (w.word or "").strip()
             if not token:
@@ -413,11 +421,12 @@ def _transcribe_whisper(wav_path, progress_cb=None):
             # No speaker: whisper does not diarize, and inventing one would
             # make an undiarized transcript indistinguishable from a
             # single-speaker one.
-            words.append(Word(w=token,
+            segment_words.append(Word(w=token,
                               t0=round(float(w.start), 3),
                               t1=round(float(w.end), 3),
                               confidence=getattr(w, "probability", None),
                               filler=is_filler_token(token)))
+        words.extend(_script_words(segment_words, getattr(info, "language", "en"), getattr(seg, "text", None)))
         if duration > 0:
             _report_progress(
                 progress_cb, float(getattr(seg, "end", 0.0) or 0.0)

@@ -110,7 +110,11 @@ def level(sounds, voice, fps, shift_db=0.0, *, speaks=True, bed=None):
         # hero/body/tick hierarchy; this is component gain, never a count.
         background = 0.0
         if not speaks:
-            background += background_power(v[a:b], sound.AR)
+            # Masking is local to the attack. A loud beat on this frame
+            # disappears in a three-second median of a quieter passage.
+            h = int(hit * sound.AR)
+            local = v[max(0, h - sound.AR//10):h + sound.AR//5]
+            background += max(background_power(v[a:b], sound.AR), peak_power(local, sound.AR, .05))
         if bed is not None:
             background += background_power(np.asarray(bed)[a:max(a, int((hit+1.5)*sound.AR))], sound.AR)
         background_db = 10 * math.log10(background) if background > 1e-8 else None
@@ -128,6 +132,11 @@ def level(sounds, voice, fps, shift_db=0.0, *, speaks=True, bed=None):
         # the automatic hierarchy. All generated body/tick cues are levelled.
         if it.get('tier'):
             it['db'] = gain
+        if not speaks and background_db is not None:
+            actual = 10 * math.log10(sp) + float(it["db"])
+            room = max(0., background_db + BACKGROUND_DB.get(it.get("tier"), 7.) - actual)
+            if room > .5:
+                it["source_duck_db"] = round(min(room, 14.), 1)
         evidence.append({'id': it.get('id'), 'gain_db': it.get('db'),
                          'peak50_over_voice400_db': round(10 * math.log10(sp) + float(it['db']) - voice_db, 1),
                          'target_over_voice_db': RELATIVE_DB.get(it.get('tier'), -3.0),
@@ -258,6 +267,8 @@ def chain(ctx):
         music_gate.grant_sfx(ctx, key)
         cue = {'id': item['id'], 'storage_key': key, 'at': round(item['start_s'], 3),
                'gain_db': item['db'], 'purpose': f"first-film {item.get('for') or 'picture event'}"}
+        if item.get("source_duck_db"):
+            cue["source_duck_db"] = item["source_duck_db"]
         if item.get('trim_s'):
             cue['offset_s'] = item['trim_s']
         if item.get('dur_s'):

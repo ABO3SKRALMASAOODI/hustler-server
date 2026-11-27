@@ -221,7 +221,7 @@ def keyed_video_providers():
 
 
 def place_broll(ctx, steps, started, run, moments, hook_end, spend=None,
-                clear_from=None):
+                clear_from=None, visual=False):
     """Cut away to B-roll on the scout's concrete moments (source_broll:
     every live library, licence-checked, judged on the real files,
     colour-matched; photos move). Returns the placed program windows."""
@@ -251,7 +251,7 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None,
     kind = "video" if video else "photo"
     specs = [{"id": f"b{n}", "query": q, "word": w, "at": a,
               "duration_s": round(b - a, 2), "kind": kind,
-              "purpose": f"show {q} as '{w}' is said"}
+              "purpose": f"show {q} during {w}" if visual else f"show {q} as '{w}' is said"}
              for n, (a, b, w, q) in enumerate(wins, 1)]
     print(f"[first_cut] b-roll moments: {[(s['at'], s['word'], s['query']) for s in specs]}",
           flush=True)
@@ -761,7 +761,6 @@ def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
                         target=target or CUT_IN_TARGET_S,
                         hi=hi or CUT_IN_MAX_S)
     levels = levels or (CUT_IN_BANDED if bands else CUT_IN_STRENGTH)
-    cx, cy = aim or (0.5, 0.4)
     n, held = 0, []
     for a, b, close in segs:
         if not close:
@@ -777,6 +776,19 @@ def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
             held.append((round(a, 2), round(b, 2), round(room, 3)))
             continue
         strength = min(0.10, levels[n % len(levels)])
+        cx, cy = aim or (0.5, 0.4)
+        from agent_tools import _source_box_to_output
+        from timeline import Timeline
+        source_t = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed")).out_to_src((a+b)/2)
+        samples = (ctx.index.get("spatial") or {}).get("samples") or []
+        if source_t is not None:
+            nearby = [row for row in samples if row.get("faces") and abs(row["t"]-source_t) <= 1.0]
+            if nearby:
+                row = min(nearby, key=lambda r: abs(r["t"]-source_t))
+                face = max(row["faces"], key=lambda r: (r[2]-r[0])*(r[3]-r[1]))
+                box = _source_box_to_output(ctx, edl, source_t, face)
+                if box:
+                    cx, cy = (box[0]+box[2])/2, box[1]+.4*(box[3]-box[1])
         res = run(ctx, steps, "add_zoom", {
             "start": a, "end": b, "strength": strength, "mode": "ease",
             "ramp_s": min(0.5, (b - a) / 2), "cx": cx, "cy": cy,
@@ -819,7 +831,7 @@ _SCREEN_SYSTEM = (
     "cursor, what changed); never the browser bar, the page's top "
     "navigation or its breadcrumb line. The box must be SMALL: the named heading with "
     "the 2-4 lines under it, one code block, one button or menu, at most a "
-    "third of the image wide and a quarter of it tall, never a whole column "
+    "few lines tall. Include the complete width of the active line, even across a whole column "
     "or page. Answer with JSON only: {\"boxes\": "
     "[{\"n\": <frame number>, \"box\": [x0, y0, x1, y1]}]}.")
 
@@ -898,14 +910,10 @@ def window_for(box, aspect, zoom=SCREEN_ZOOM):
     SCREEN_ZOOM_MIN), and its zoom."""
     bx0, by0, bx1, by1 = box
     bw, bh = max(0.02, bx1 - bx0), max(0.02, by1 - by0)
-    z = max(SCREEN_ZOOM_MIN, min(zoom, 1.0 / (bh * 1.1)))
+    z = max(1.0, min(zoom, 1.0 / (bh * 1.1), 1.0 / (bw * 1.08)))
     w = h = 1.0 / z
     cx = (bx0 + bx1) / 2.0
     cy = (by0 + by1) / 2.0
-    if bw > 0.8 * w:
-        # a line wider than the window: text reads from the left, so the
-        # window opens on the line's start (the heading, the code's indent)
-        cx = bx0 - 0.04 * w + w / 2.0
     x0 = min(max(cx - w / 2.0, 0.0), 1.0 - w)
     y0 = min(max(cy - h / 2.0, 0.0), 1.0 - h)
     return [round(x0, 4), round(y0, 4), round(x0 + w, 4), round(y0 + h, 4)], z
@@ -1151,6 +1159,9 @@ def screen_follow(ctx, steps, started, run, spend, hook_end):
         if out_c is not None and not any(abs(out_c - r[0]) < 1.0 for r in rows):
             rows.append((out_c, c + 0.4, ""))
     rows.sort()
+    if not rows and keep:
+        # A stationary page has neither a shot change nor a spoken sentence.
+        rows.append((0.0, (keep[0][0] + keep[0][1]) / 2, ""))
     if not rows:
         return None
     rows = rows[:14]

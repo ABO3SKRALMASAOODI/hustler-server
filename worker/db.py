@@ -2928,6 +2928,22 @@ def insert_asset(conn, project_id, kind, storage_key, *, bytes_=None,
         return cur.fetchone()["id"]
 
 
+def repair_proxy_audio_on_arrival(conn, project_id, user_id, asset_id):
+    """Whichever transaction finishes second (silent proxy index or full
+    upload) queues one index of the original. The provisional edit can play."""
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE assets SET meta = meta || jsonb_build_object(
+                         'proxy_audio_repair', CASE WHEN meta->>'upload_state'='ready'
+                         THEN 'queued' ELSE 'waiting' END)
+                       WHERE id=%s AND project_id=%s AND kind='original'
+                         AND NOT (meta ? 'proxy_audio_repair')
+                       RETURNING meta->>'proxy_audio_repair' AS state""", (asset_id, project_id))
+        row = cur.fetchone()
+    if row and row["state"] == "queued":
+        return enqueue_job(conn, project_id, user_id, "index",
+                           {"asset_id": asset_id, "reindex": True, "repair_proxy_audio": True})
+
+
 def update_asset_probe(conn, asset_id, duration_s, width, height, fps, sha256):
     with conn.cursor() as cur:
         cur.execute("""UPDATE assets

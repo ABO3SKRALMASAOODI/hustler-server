@@ -243,7 +243,7 @@ def font_covers(font, t):
     h = _hb(font)
     if h is None:
         return True
-    return all(h[1].get_nominal_glyph(ord(c)) for c in str(t) if c.isalpha())
+    return all(h[1].get_nominal_glyph(ord(c)) for c in str(t) if not c.isspace() and c.isprintable())
 
 
 def shaped(font, t):
@@ -272,15 +272,19 @@ def shaped(font, t):
 
 def script_font(font, t):
     """The Director names a face; a face with no glyph for this script would draw nothing. The nearest weight that has one."""
-    if not joined_script(t) or font_covers(font, t):
+    if str(t).isascii() or font_covers(font, t):
         return font
-    return "NotoSansArabic-Bold.ttf"
+    from scene.type import FALLBACK
+    for name in (*FALLBACK, *(n for n in _font_dir() if n.startswith("NotoSans"))):
+        if font_path(name) and font_covers(name, t):
+            return name
+    return font
 
 
 def text_px(t, voice):
     """Advance width in pixels at the output frame, the way design-a Face measures it."""
     px, track = voice["px"], voice.get("track", 0) * voice["px"] / 100.0
-    if joined_script(t):
+    if joined_script(t) or voice["font"].startswith("Noto"):
         q = shaped(voice["font"], t)
         if q:
             return q[0] * px
@@ -3180,9 +3184,12 @@ def build_captions(ctx):
         layout = "prelaid"
     chunks = []
     said = " ".join(ctx.text.values())
-    if joined_script(said):
+    if not said.isascii():
         for key in ("a", "b"):
-            ctx.voices[key].update(font=script_font(ctx.voices[key]["font"], said), track=0)
+            voice = ctx.voices[key]
+            font = script_font(voice["font"], said)
+            if font != voice["font"] or joined_script(said):
+                voice.update(font=font, track=0)
     seat0 = ctx.dna.get("seat")
     if seat0 != "free" and not (isinstance(seat0, (list, tuple)) and len(seat0) == 2):
         seat0 = [0.5, 0.62]
@@ -3631,8 +3638,9 @@ def display_lines(ctx, text, opt):
         t = str(r["t"])
         if opt.get("case") == "upper":
             t = t.upper()
-        if joined_script(t):
-            font, track = script_font(font, t), 0
+        selected = script_font(font, t)
+        if selected != font or joined_script(t):
+            font, track = selected, 0
         px = int(round(float(size) * H)) if isinstance(size, (int, float)) and not isinstance(size, bool) and size > 0 else int(round(0.2 * H))
         out.append({"t": t, "font": font, "track": track, "px": px, "ink": r.get("ink"), "sized": bool(size)})
     return out
@@ -3996,7 +4004,7 @@ def display(ctx, iid, text, a, z, opt, b=None):
     lead_k = float(opt.get("lead", 1.02))
     ys, y, below = [], 0.0, 0.0
     for i, l in enumerate(lines):
-        q = shaped(l["font"], l["t"]) if joined_script(l["t"]) else None
+        q = shaped(l["font"], l["t"])
         top = q[1] if q else 0.74
         if i == 0:
             y += top * l["px"] / H
@@ -4041,7 +4049,7 @@ def display(ctx, iid, text, a, z, opt, b=None):
         ctx.taste_rows.append({"id": iid, "did": "thinned", "dept": "display", "why": "it lands on words the upload prints, and this frame has no clear seat for it"})
         return None
     # a block is as tall as its ink. A tall condensed face stands well above 0.74 em
-    q0 = shaped(lines[0]["font"], lines[0]["t"]) if joined_script(lines[0]["t"]) else None
+    q0 = shaped(lines[0]["font"], lines[0]["t"])
     ink_top = y_top + ys[0] - (q0[1] if q0 else cap_height(lines[0]["font"])) * lines[0]["px"] / H
     ctx.blocks.append((a, z, [out_rect[0], min(ink_top, y_top), out_rect[2], out_rect[3] + 0.006], ".".join(iid.split(".")[:2])))
     pool = opt.get("pool")

@@ -6974,6 +6974,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"[ac]{dialogue_level.volume_filter(dialogue_gain)}"
                      "[alev]")
         alabel = "alev"
+    for j, (_, item, _) in enumerate(sfx_inputs or []):
+        depth = item.get("source_duck_db")
+        if depth:
+            import sound_library
+            at = sound_library.hit_at(item)
+            env = measured_duck([(at, at+.09)], -depth, ramp=.09)
+            parts.append(f"[{alabel}]{env}[cuebg{j}]")
+            alabel = f"cuebg{j}"
     duck_wins = merge_spans(
         [(max(0.0, float(vo["start_output_s"])),
           min(tl.out_duration, float(vo["start_output_s"]) + vd))
@@ -8053,7 +8061,7 @@ def _render_asset_source_impl(key, tag, idx, workdir, asset_locals=None):
     Images and audio retain their existing cached download path.
     """
     known = (asset_locals or {}).get(key)
-    if known and os.path.exists(known):
+    if known and (os.path.isfile(known) or str(known).startswith(("http://", "https://"))):
         return known
     name = hashlib.sha256(key.encode()).hexdigest()[:32] + os.path.splitext(key)[1]
     resident = os.path.join(config.TMP_DIR, "srccache", name)
@@ -10199,7 +10207,7 @@ def _concat_check_pieces_exact(pieces, out_path, workdir, durations):
 def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
                              patch_locals, out_path, raw_ranges,
                              verify_times, progress_cb=None, raw_pages=None, proof_segments=None,
-                             budget_s=None):
+                             budget_s=None, asset_locals=None):
     """Render only affected output windows into one short proof reel.
 
     budget_s: a smaller output budget than 25 s a page, for a proof that only
@@ -10294,7 +10302,7 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
         pdur = render_edl(
             window, index, src_local, piece, workdir, preview=True,
             progress_cb=progress_cb, want_wm=False,
-            patch_locals=patch_locals, cap_ass_override=(cap_path or ""),
+            asset_locals=asset_locals, patch_locals=patch_locals, cap_ass_override=(cap_path or ""),
             cap_burn_offset=(a if cap_path else None), suppress_outro=True,
             render_fragment=True,
             program_edges=(a <= 0.001, b >= duration - 0.001))
@@ -10674,8 +10682,7 @@ def _run_render_job(worker_db, job):
     original = worker_db.run(dbx.latest_asset, project_id, "original")
     if variant == "preview" and original \
             and _PREVIEW_QUALITY.get() == "approval" \
-            and ((original.get("meta") or {}).get("upload_state") == "pending"
-                 or not storage.exists(original["storage_key"])) \
+            and not storage.exists(original["storage_key"]) \
             and worker_db.run(dbx.latest_asset, project_id, "proxy"):
         # Editing can continue against the completed proxy during a large
         # background upload, or when the upload never landed. Persist this as
@@ -10785,8 +10792,11 @@ def _run_render_job(worker_db, job):
         if variant == "preview" and _PREVIEW_QUALITY.get() != "approval":
             proxy = worker_db.run(dbx.latest_asset, project_id, "proxy")
             if proxy:
-                src_asset = proxy
-        elif (original.get("meta") or {}).get("upload_state") == "pending":
+                provisional_audio = ((original.get("meta") or {}).get("client_proxy_key")
+                                     and (index.get("video") or {}).get("has_audio") is False)
+                if not provisional_audio or not storage.exists(original["storage_key"]):
+                    src_asset = proxy
+        elif (original.get("meta") or {}).get("upload_state") == "pending" and not storage.exists(original["storage_key"]):
             # Proxy-first upload: the original is registered but its bytes are
             # still in flight. /render/final refuses this with a percentage, so
             # reaching here means a non-studio caller (the MCP surface) asked
@@ -11029,6 +11039,11 @@ def _run_render_job(worker_db, job):
             for key in worker_db.run(dbx.project_asset_keys_by_sha,
                                      project_id, src_sha):
                 asset_locals[key] = src_local
+        if original and src_local and not clean_key:
+            # A Director detail can refer to the main upload by object key.
+            # Reuse the actual input already staged for this rendition. A
+            # deferred original only has proxy bytes during early proof.
+            asset_locals[original["storage_key"]] = src_local
         if proof_only:
             out_dur, requested_ranges, changed_ranges, mapped_verify_times = \
                 _render_changed_sections(
@@ -11039,7 +11054,7 @@ def _run_render_job(worker_db, job):
                     progress_cb=_prog,
                     raw_pages=job["payload"].get("check_pages") or [],
                     proof_segments=proof_segments,
-                    budget_s=job["payload"].get("proof_budget_s"))
+                    budget_s=job["payload"].get("proof_budget_s"), asset_locals=asset_locals)
         # Lane D (12 Nov): a Director film whose scene plan was kept may be
         # drawn by the engine (engine_branch). Read once, here: an engine
         # film is never stitched, and today's renderer stays its fallback.

@@ -3,6 +3,8 @@ from functools import lru_cache
 from pathlib import Path
 
 FILES = {
+    'Noto Sans Thai': 'NotoSansThai-Variable.ttf',
+    'Noto Sans JP': 'NotoSansJP-Variable.ttf', 'Noto Sans SC': 'NotoSansSC-Variable.ttf',
     'Inter Display Black': 'InterDisplay-Black.ttf',
     'Inter Display ExtraBold': 'InterDisplay-ExtraBold.ttf',
     'Inter Display Bold': 'InterDisplay-Bold.ttf',

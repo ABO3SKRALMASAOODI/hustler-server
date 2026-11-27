@@ -118,6 +118,7 @@ def outline_sprite(text, voice, W, ss, blur_px, note=None, extra_pad=0):
                 continue
             if not alt.missing(text):
                 note(f"{v.get('font') or v.get('family')} lacks a glyph in {text!r}: drew it in {name}")
+                v = {**v, "font": name, "family": None, "var": None, "track": 0, "shaped": True}
                 face = alt
                 break
         else:

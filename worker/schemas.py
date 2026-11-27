@@ -426,7 +426,7 @@ class CaptionStyle(BaseModel):
         "Inter Display Black", "Inter Display ExtraBold", "Inter Display Bold",
         "Anton", "Bebas Neue", "Archivo Black", "Poppins Black",
         "Syne ExtraBold", "Playfair Display Black", "Instrument Serif",
-        "DM Serif Display", "Montserrat", "Plus Jakarta Sans"]] = None
+        "DM Serif Display", "Montserrat", "Plus Jakarta Sans", "Noto Sans Thai", "Noto Sans JP", "Noto Sans SC"]] = None
     # Layered text effect applied to emphasised words (or all words when the
     # preset sets it globally).
     effect: Optional[Literal["chroma", "chrome", "glow"]] = None
@@ -837,6 +837,8 @@ class SfxItem(BaseModel):
     id: str
     storage_key: str
     at: float        # position in the OUTPUT (edited) timeline
+    # Measured masking by the original soundtrack at this recording's hit.
+    source_duck_db: Optional[float] = Field(default=None, ge=0, le=14)
     # Start inside the source sound. Needed when a long extracted video track
     # is used as a one-shot and the requested hit occurs late in that track.
     offset_s: Optional[float] = None
@@ -2152,7 +2154,7 @@ TEXT_FONTS = ("Inter Display Black", "Inter Display ExtraBold",
               # round 79 — the site's own wordmark face (the navbar renders
               # "Valmera" in Plus Jakarta Sans 800), already bundled for the
               # watermark; exposing it lets brand text match the product.
-              "Plus Jakarta Sans ExtraBold")
+              "Plus Jakarta Sans ExtraBold", "Noto Sans Thai", "Noto Sans JP", "Noto Sans SC")
 VECTOR_KINDS = ("rectangle", "ellipse", "line", "arrow", "ring",
                 "progress")
 
@@ -2206,7 +2208,7 @@ class TextItem(BaseModel):
                            "Archivo Black", "Poppins Black", "Syne ExtraBold",
                            "Playfair Display Black", "Instrument Serif",
                            "DM Serif Display", "Montserrat",
-                           "Plus Jakarta Sans ExtraBold"]] = None
+                           "Plus Jakarta Sans ExtraBold", "Noto Sans Thai", "Noto Sans JP", "Noto Sans SC"]] = None
     # "none" = instant: full opacity at frame one, gone at the last frame.
     entrance: Optional[Literal["none", "fade", "pop", "slide_up", "blur_in",
                                "whip", "rise", "drop", "elastic", "bounce",
@@ -4931,6 +4933,7 @@ class VideoInfo(BaseModel):
 
 
 class VideoIndex(BaseModel):
+    script_word_boundaries: bool = False
     version: int = 1
     video: VideoInfo
     shots: List[Shot] = Field(default_factory=list)

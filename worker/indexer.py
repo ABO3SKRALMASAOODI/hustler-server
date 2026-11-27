@@ -439,6 +439,17 @@ def _claude_trial_indexed(worker_db, job, scope):
               f"{(got or {}).get('reason', 'error')}", flush=True)
 
 
+def _finish_proxy_audio(worker_db, job, asset, from_client_proxy, info):
+    if from_client_proxy and not info.get("has_audio"):
+        worker_db.run(dbx.repair_proxy_audio_on_arrival, job["project_id"], job["user_id"], asset["id"])
+    elif job["payload"].get("repair_proxy_audio") and info.get("has_audio"):
+        row = worker_db.run(dbx.latest_edl, job["project_id"])
+        if row and row["version"] > 1:
+            worker_db.run(dbx.get_or_enqueue_preview_job, job["project_id"], job["user_id"],
+                          {"source": "original_audio_restored", "quality": "approval",
+                           "edl_version": row["version"], "force": True})
+
+
 def _refuse_unfinished_source(asset):
     """Measure the object before reading it. The upload routes refuse a file
     with no moov, but a link import, a dedup copy or an upload from before them
@@ -739,6 +750,7 @@ def run_index_job(worker_db, job):
             except Exception as exc:
                 print(f"[index {job_id}] project-ready event dropped: {exc}",
                       flush=True)
+            _finish_proxy_audio(worker_db, job, asset, from_client_proxy, info)
             _mark("cache_hit_s")
             return {"sha256": sha, "cached": True,
                     "from_client_proxy": from_client_proxy,
@@ -1093,7 +1105,7 @@ def run_index_job(worker_db, job):
             tile_keys=tile_keys,
             tile_step_s=tile_step,
             speakers=speakers,
-            language=language,
+            language=language, script_word_boundaries=language in ("th", "ja", "zh"),
             warnings=warnings,
             perception=perception_sidecar,
             motion=motion_sidecar,
@@ -1114,6 +1126,7 @@ def run_index_job(worker_db, job):
                     execution_policy=config.execution_policy_for(job),
                     selection_pool=(job["payload"].get(
                         "selection_pool") or 0))
+        _finish_proxy_audio(worker_db, job, asset, from_client_proxy, info)
         try:
             worker_db.run(
                 dbx.record_client_event, job["user_id"], project_id,
@@ -1351,7 +1364,7 @@ def _run_clip_index(worker_db, job, asset):
             tile_keys=tile_keys,
             tile_step_s=tile_step,
             speakers=speakers,
-            language=language,
+            language=language, script_word_boundaries=language in ("th", "ja", "zh"),
             warnings=warnings,
             perception=perception_sidecar,
             motion=motion_sidecar,

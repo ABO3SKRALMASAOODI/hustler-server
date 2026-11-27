@@ -4063,7 +4063,12 @@ def _original_ready(user_id, project_id, data):
                 print(f"[uploads] project {project_id}: original landed — "
                       f"released {released} deferred short export(s)",
                       flush=True)
-        if drift and not account_gated:
+        repair_audio = False
+        if not account_gated and (a.get("meta") or {}).get("client_proxy_key"):
+            cur.execute("""UPDATE assets SET meta = meta || '{"proxy_audio_repair":"queued"}'::jsonb
+                           WHERE id=%s AND meta->>'proxy_audio_repair'='waiting' RETURNING id""", (asset_id,))
+            repair_audio = bool(cur.fetchone())
+        if (drift or repair_audio) and not account_gated:
             # Re-index from the ORIGINAL. No client_proxy_key on the payload,
             # so the indexer takes the ordinary trusted path — which is the
             # same self-healing rule the worker already applies whenever the
@@ -4072,11 +4077,9 @@ def _original_ready(user_id, project_id, data):
                         (project_id,))
             owner = cur.fetchone()
             _enqueue(cur, project_id, owner["user_id"], "index",
-                     {"asset_id": asset_id, "reindex": True})
-            print(f"[uploads] project {project_id}: original is "
-                  f"{drift['actual_s']}s but the browser claimed "
-                  f"{drift['claimed_s']}s — re-indexing from the original",
-                  flush=True)
+                     {"asset_id": asset_id, "reindex": True,
+                      **({"repair_proxy_audio": True} if repair_audio else {})})
+            print(f"[uploads] project {project_id}: re-indexing the landed original", flush=True)
 
     record_client_event(user_id, project_id, "upload_original_ready", detail={
         "bytes": nbytes, **({"duration_drift": drift} if drift else {})},

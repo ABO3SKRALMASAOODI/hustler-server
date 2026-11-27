@@ -105,6 +105,12 @@ def user_text(idx, sess, per):
                      f"Write a wish for every moment whose words name something a camera can show, a wish for each thing where a sentence names two, "
                      f"spread over the whole of it, {WISHES_MOST} at most. A sentence that names nothing a picture can show gets none: a picture that "
                      "has to be explained is taken out of the film again.")
+    elif idx.get("first_film"):
+        lines.append("Use the frame board as the story clock. Identify the setup, visible action, "
+                     "reaction and payoff with source seconds. Give timed picture wishes for a "
+                     "new, specific view that explains each turn: a factual detail of the object, "
+                     "its mechanism or its setting. Use own for the actual participants. For a "
+                     "screen, name the complete line or control that the viewer needs to read.")
     return "\n".join(lines)
 
 

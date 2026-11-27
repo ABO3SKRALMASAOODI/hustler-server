@@ -147,7 +147,7 @@ def _one_mix(ctx, work, comp):
     """The film's sounds and its bed as one mix, before the film is lowered (score.bed.one_mix). Never raises."""
     try:
         from . import bed
-        return bed.one_mix(work, comp.l1, getattr(ctx, "index", None) or None)
+        return bed.one_mix(work, comp.l1, dict(getattr(ctx, "index", None) or {}, first_film=True))
     except Exception as exc:  # noqa: BLE001 - the film keeps the sounds and the bed it had
         print(f"[director] one mix skipped: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
         return None

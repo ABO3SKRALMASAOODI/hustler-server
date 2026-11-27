@@ -1873,6 +1873,11 @@ def montage_scout(ctx, windows, spend, title_only=False, boxes=False):
             system = montage_cut.SCOUT_SYSTEM
         else:
             system = _MONTAGE_TITLE_SYSTEM
+        system += (' Also return cutaways as a JSON array. Each entry has shot (one of the frame '
+                   'numbers shown), detail (the visible action or object), and query (a specific real '
+                   'video or macro detail that explains it). Pick the moments where a distinct picture '
+                   'would reveal something new, including on a short clip. Keep the actual people, '
+                   'product, screen and action in the upload. Use [] if unrelated stock would mislead.')
         resp = claude_lane.create(
             model, [{"role": "system", "content": system},
                     {"role": "user", "content": parts}],
@@ -1889,6 +1894,15 @@ def montage_scout(ctx, windows, spend, title_only=False, boxes=False):
         print(f"[first_cut] montage scout failed: {type(exc).__name__}: "
               f"{str(exc)[:160]}", flush=True)
         return windows, None
+    moments = []
+    for item in pick.get("cutaways") or []:
+        if not isinstance(item, dict):
+            continue
+        n, detail, query = item.get("shot"), item.get("detail"), item.get("query")
+        if isinstance(n, int) and 1 <= n <= len(windows) and detail and query:
+            a, b = windows[n - 1]
+            moments.append(((a+b)/2, b, str(detail)[:120], str(query)[:100]))
+    ctx.first_cut_picture_wishes = moments
     out = list(windows)
     try:
         end = 0 if title_only else int(pick.get("end") or 0)
@@ -2678,6 +2692,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                                  samples=subject, across_take=continuous)):
             applied.append("a camera that follows the subject")
     cutaways = []
+    visual_wishes = getattr(ctx, "first_cut_picture_wishes", None) or []
+    if q1 and not talking and not screen_kept and visual_wishes:
+        import first_cut_visual as fcv
+        cutaways = fcv.place_broll(ctx, steps, started, _run, visual_wishes, hook_end, visual=True)
     if q1 and talking:
         # Q1: B-roll on the concrete things the speaker names, first (the
         # slams and cards keep clear of it)
@@ -3815,6 +3833,9 @@ def run(worker_db, job, project, index_row):
     ctx.credit_budget = None
     ctx.first_cut_db, ctx.first_cut_session = worker_db, session_id
     if getattr(ctx, "index", None) and not payload.get("url"):
+        ctx.first_cut_original_audio = ctx.index.get("video", {}).get("has_audio") is False
+        import script_words
+        ctx.index = script_words.first_cut_index(ctx.index)
         bound_to_source_screen(ctx, index_row, workdir)
     try:
         start_edl = ctx.latest_edl()
@@ -3955,13 +3976,6 @@ def run(worker_db, job, project, index_row):
         if picked and picked.get("how") == "director" and not _on_screen(ctx):
             steps, applied, picked, render = _film_fell_at_render(
                 ctx, worker_db, job, started, spend, steps, start_edl, render)
-        if picked and picked.get("how") == "director" and _on_screen(ctx):
-            import first_cut_floor
-            def before_style():
-                more, craft, pick = video_chain(ctx, worker_db, time.monotonic(), spend)
-                return more, craft, pick, _render_cut(ctx, more, pick)
-            steps, applied, picked, render = first_cut_floor.choose(
-                ctx, worker_db, started, start_edl, steps, applied, picked, render, before_style)
     finally:
         pf = getattr(ctx, "broll_prefetch", None)
         if pf is not None:
@@ -4004,16 +4018,11 @@ def run(worker_db, job, project, index_row):
             print(f"[first_cut] brief follow-up not queued: {exc}", flush=True)
     if delivered:
         duration = float(preview.get("duration_s") or 0)
-        if not url:
-            # What the first cut laid over the upload's sound, measured from
-            # the delivered version (p5744: a riser and an impact the reply
-            # never named were later taken for the upload's own).
-            import edit_provenance
-            added = edit_provenance.sounds_added(
-                (start_edl or {}).get("json"), (latest or {}).get("json"))
-            if added:
-                applied = list(applied) + [added]
-        summary = _summary(applied, duration, url)
+        if url:
+            summary = _summary(applied, duration, url)
+        else:
+            import reply_truth
+            summary = reply_truth.first_cut_summary(preview)
         admission = project_admission_safe(worker_db, project["id"])
         trial = bool(admission and admission.get("kind") == "trial")
         facts = getattr(ctx, "first_cut_brief", None) if url else None
@@ -4084,8 +4093,12 @@ def _render_cut(ctx, steps, picked):
     row = ctx.latest_edl() or {}
     frame = (row.get("json") or {}).get("frame") or {}
     ratio = frame.get("ratio", "source")
-    if ratio != "9:16" and not (ratio == "source" and _orientation(getattr(ctx, "index", {}) or {}) == "vertical"):
-        result = agent_tools.execute(ctx, "auto_reframe", {"ratio": "9:16", "mode": "crop"})
+    index = getattr(ctx, "index", {}) or {}
+    readable_screen = _text_wider_than_crop(ctx)
+    fit = readable_screen and frame.get("mode") not in ("pad", "pad_blur")
+    if fit or (ratio != "9:16" and not (ratio == "source" and _orientation(index) == "vertical")):
+        result = agent_tools.execute(ctx, "auto_reframe",
+                                     {"ratio": "9:16", "mode": "pad_blur" if readable_screen else "crop"})
         steps.append({"tool": "first_film_frame", "ok": not _failed(result), "note": str(result)[:160]})
         if _failed(result):
             return result
@@ -4108,8 +4121,7 @@ def _render_cut(ctx, steps, picked):
     render = None
     if ctx.versions_written or keep_whole:
         _say(ctx, "render", "Rendering your preview")
-        if config.FIRST_CUT_DRAFT_FIRST and \
-                getattr(ctx, "first_cut_q1", False):
+        if config.FIRST_CUT_DRAFT_FIRST and getattr(ctx, "first_cut_q1", False) and not getattr(ctx, "first_cut_original_audio", False):
             render = _render_draft_first(ctx, steps)
         else:
             with _timed(ctx, "render"):

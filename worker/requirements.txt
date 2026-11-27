@@ -58,3 +58,6 @@ pyphen==0.18.1
 # (fonts_brand.py). It was only in the dev venv. MIT.
 fonttools==4.67.0
 certifi>=2026.10.19
+
+# Lexical boundaries for code-switched Latin fragments in legacy Thai/CJK ASR.
+wordninja==2.0.0

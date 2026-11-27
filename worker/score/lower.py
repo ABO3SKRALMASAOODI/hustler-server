@@ -26,7 +26,9 @@ from scene.spine import source_at
 OV_MIN_S, TX_MIN_S = 0.2, 0.3      # today's minimums: schemas.validate_edl
 RUN_FIT = 0.86                     # a running line keeps the whole words that fit this share of the frame
 KF_MAX = 20                        # keyframes on one curve, under schemas.ANIM_MAX_KEYFRAMES
-FAMILY = {"Anton-Regular": ("Anton", False), "BebasNeue-Regular": ("Bebas Neue", False),
+FAMILY = {"NotoSansThai-Variable": ("Noto Sans Thai", False),
+          "NotoSansJP-Variable": ("Noto Sans JP", False), "NotoSansSC-Variable": ("Noto Sans SC", False),
+          "Anton-Regular": ("Anton", False), "BebasNeue-Regular": ("Bebas Neue", False),
           "ArchivoBlack-Regular": ("Archivo Black", False), "Poppins-Black": ("Poppins Black", False),
           "Syne-ExtraBold": ("Syne ExtraBold", False), "PlayfairDisplay-Black": ("Playfair Display Black", False),
           "InstrumentSerif-Regular": ("Instrument Serif", False), "InstrumentSerif-Italic": ("Instrument Serif", True),
@@ -1170,6 +1172,8 @@ def lower(l1, work):
             continue
         key = f"sound:{s['s']}" if s.get("s") else f"sound:{os.path.splitext(s['file'])[0]}"
         item = {"id": s["id"], "storage_key": key, "at": r2(s["start_s"]), "gain_db": float(s.get("db", -6)), "purpose": s.get("s")}
+        if s.get("source_duck_db"):
+            item["source_duck_db"] = s["source_duck_db"]
         if s.get("trim_s"):
             item["offset_s"] = r2(s["trim_s"])
         if s.get("dur_s"):                    # lane J: a recording with a measured audible tail stops there, 0.12 s fade (the renderer's own)

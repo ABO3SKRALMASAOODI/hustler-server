@@ -20,6 +20,7 @@ except Exception:      # noqa: BLE001 - reported by scene.eligible, never at imp
 
 WORKER = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FALLBACK = ("InterDisplay-Bold.ttf", "Montserrat-Bold.ttf", "Inter-Variable.ttf", "NotoSerifDisplay-Variable.ttf",
+            "NotoSansThai-Variable.ttf", "NotoSansJP-Variable.ttf", "NotoSansSC-Variable.ttf",
             "NotoSansArabic-Bold.ttf", "NotoSansArabic-Regular.ttf", "NotoNaskhArabic-Bold.ttf", "NotoSans-Bold.ttf")
 # Type tiers as a share of frame height (ATLAS 1.4, 8.4): vertical and landscape captions differ by two.
 TIERS = {"vertical": {"micro": 0.014, "caption": 0.030, "display": 0.060},
@@ -231,7 +232,7 @@ def compiler_advance(text, v):
     shaped there too, so there is nothing to make up. A voice with ``shaped`` true was placed by
     this module's own measure and needs no correction."""
     px = float(v.get("px", 58))
-    if v.get("shaped") or is_joined_script(text) or not v.get("font"):
+    if v.get("shaped") or is_joined_script(text) or str(v.get("font")).startswith("Noto") or not v.get("font"):
         return Face.of(v).measure(text, px, float(v.get("track", 0)) if v.get("shaped") else 0.0)
     from PIL import ImageFont
     key = (v.get("font"), int(round(px)))
