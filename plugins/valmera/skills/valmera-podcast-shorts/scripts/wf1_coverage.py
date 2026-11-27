@@ -863,22 +863,38 @@ def publisher_motion(coverage, missing, footage, work):
     root.mkdir(parents=True,exist_ok=True)
     state = dict(workflow="wf1",run_id=work.parent.parent.name)
     ctx = shell.Ctx(str(root),state,str(work))
-    originals = wf1_primary_sources.acquire(briefs,os.path.join(ctx.supply,"sources"),wf1_short._llm())
-    sources = originals.get("sources") or {}
-    report = dict(subjects=list(sources),errors=originals.get("errors") or [],briefs=briefs)
+    folder = os.path.join(ctx.supply,"sources")
+    llm = wf1_short._llm()
+    originals = wf1_primary_sources.acquire(briefs, folder, llm)
+    sources = dict(originals.get("sources") or {})
+    spend = list(originals["spend"])
+    errors = list(originals.get("errors") or [])
+    retry = [dict(brief, previous_sources=[e for e in errors if e.get("window")==brief["i"]],
+                  source_request="The previous publisher player did not supply this film. Find a different "
+                                 "accessible original, such as a downloadable conference excerpt, an institutional "
+                                 "repository, archive collection or the publisher's own hosted video file. "
+                                 "Verify the media and its page; exclude the unsuccessful URLs.")
+             for brief in briefs if brief["name"] not in sources]
+    if retry:
+        alternate = wf1_primary_sources.acquire(retry, folder, llm)
+        sources.update(alternate.get("sources") or {})
+        spend.extend(alternate["spend"])
+        errors.extend(alternate.get("errors") or [])
+    report = dict(subjects=list(sources), errors=errors, briefs=briefs, alternate_briefs=retry)
     if not sources:
-        return report,originals["spend"],0
+        return report,spend,0
     named = [dict(name=w["name"],must_show=w["must_show"],video_sources=sources[w["name"]])
              for w in briefs if w["name"] in sources]
     script = dict(title=coverage.get("context") or "Documentary inserts",
                   segments=[footage_segment(i,w) for i,w in enumerate(windows)],named=named)
     rec = chain.footage(ctx,dict(script=script),[w["t1"]-w["t0"] for w in windows],
                         lines=missing,preserve_source=True,native_pixels=True,whole_first=True,
-                        keep_sources=True,source_only=True,strict_lines=True,look_itself=True,hear_s=0)
+                        keep_sources=True,source_only=True,strict_lines=True,look_itself=True,hear_s=0,
+                        verify=False,out_name="publisher-fitted-footage")
     count = 0
     if rec:
         pool = dict(footage=[],credits=[])
-        wf1_short.merge_footage(ctx,pool,rec,"footage")
+        wf1_short.merge_footage(ctx,pool,rec,"publisher-fitted-footage")
         for line in pool["footage"]:
             clips = footage.setdefault(line["i"],[])
             known = {c["path"] for c in clips}
@@ -888,7 +904,7 @@ def publisher_motion(coverage, missing, footage, work):
                     known.add(clip["path"])
                     count += 1
     report["added"] = count
-    return report,originals["spend"],count
+    return report,spend,count
 
 
 def checked_proposals(coverage, footage, pictures, duration, checker, composed_stills=(), rejected=None,
