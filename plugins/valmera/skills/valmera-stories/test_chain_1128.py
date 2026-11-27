@@ -98,3 +98,15 @@ def test_verified_bank_quote_remains_attributed_when_the_archived_page_is_unavai
     assert verified["facts"][0]["source"] == fact["url"]
     monkeypatch.setattr(writer,"check_fact",lambda f:{"id":f["id"],"found":False,"missing":"quote absent"})
     assert not writer.verify(sc, previous)["ok"]
+
+
+def test_planned_spine_leaves_the_secondary_total_in_research():
+    bank = {"claims":[{"beat":"outcome","claim":"An intermediate shipment sold out.","stated":True,"by":["interim"]}]}
+    sheet = {"beats":{"hook":0,"turn":1,"payoff":2,"meaning":3}, "meaning_line":"He held their key.",
+             "sheet":[{"action":t,"facts":[f]} for t,f in [("They refused him.","refusal"),("He tried again.","attempt"),
+                       ("They paid him.","pay"),("He held their key.","return")]]}
+    assert writer.spine_view(bank)[0]["by"] == ["interim"]
+    selected = writer.spine_view(bank,sheet)
+    assert [r["beat"] for r in selected] == ["hook","turn","payoff","close"]
+    assert selected[-1]["claim"] == sheet["meaning_line"]
+    assert all("interim" not in r["by"] for r in selected)

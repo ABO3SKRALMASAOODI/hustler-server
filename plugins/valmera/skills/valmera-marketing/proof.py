@@ -2088,6 +2088,7 @@ def product_clips(script, out):
     return dict(before=dict(src=up["file"], t=[ba, bb], sha256=up["sha256"], crop=product_crop(script["record"], rec, (ba + bb) / 2)),
                 after=dict(src=ex["file"], t=[a, b], sha256=ex["sha256"]),
                 hook=dict(src=ex["file"], t=hook, at=float(script["hook"]["t"][0]), landing=script["hook"].get("landing")) if hook else None,
+                stretch=dict(src=ex["file"], t=spans["stretch"], sha256=ex["sha256"]) if "stretch" in spans else None,
                 body=dict(src=ex["file"], t=[0.0, round(body, 3)]))
 
 

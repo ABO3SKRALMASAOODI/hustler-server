@@ -1738,13 +1738,15 @@ def _research_round(bank, story, claims, rnd, asks, spend, log, why=None):
 
 def spine_view(bank, sheet=None):
     """The researched spine, narrowed to the planned resolution after the planner picks it."""
-    claims = [dict(beat=c["beat"], claim=c.get("as_stated") or c["claim"], by=list(c.get("by") or []))
-              for c in bank.get("claims", []) if c.get("stated")]
     if sheet:
-        ending = sheet["sheet"][sheet["beats"]["payoff"]]
-        claims = [c for c in claims if c["beat"] != "payoff"]
-        claims.append(dict(beat="payoff", claim=ending["action"], by=ending["facts"]))
-    return claims
+        spine = []
+        for name, landmark in (("hook","hook"), ("turn","turn"), ("payoff","payoff"), ("close","meaning")):
+            entry = sheet["sheet"][sheet["beats"][landmark]]
+            claim = sheet["meaning_line"] if landmark == "meaning" else entry["action"]
+            spine.append(dict(beat=name, claim=claim, by=entry["facts"]))
+        return spine
+    return [dict(beat=c["beat"], claim=c.get("as_stated") or c["claim"], by=list(c.get("by") or []))
+            for c in bank.get("claims", []) if c.get("stated")]
 
 
 def bank_facts(bank):

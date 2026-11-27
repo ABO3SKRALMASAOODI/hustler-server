@@ -32,7 +32,7 @@ Return JSON with meaning_line first, hook_word, meaning_word (the same word as u
 line), chain (one string containing a short paragraph), beats (hook,setback,turn,payoff,meaning,coda each a zero-based segment index;
 when jobs coincide point both at the same line), and sheet, an ordered list, one entry per line.
 Each entry has role (its job in your own words; marketing uses the six specified role names),
-action (the actual story beat), link (so|but|because|until|then|instead, empty for the hook),
+action (the sourced event, decision or consequence the audience learns), link (so|but|because|until|then|instead, empty for the hook),
 facts (supporting source ids), plant and pays (lists of matching thread ids), job
 (list|proof|emotion|time_jump|reveal|action), display (one printed word or figure chosen for
 the stake, contrast or turn, or empty). Marketing also returns spans with split,before,after,stretch

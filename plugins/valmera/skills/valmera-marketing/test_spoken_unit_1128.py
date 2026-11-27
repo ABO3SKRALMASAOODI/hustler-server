@@ -29,7 +29,8 @@ def test_recorded_clips_use_the_separate_upload_and_export_clocks(tmp_path, monk
     monkeypatch.setattr(proof, "product_crop", lambda *a: None)
     spans = dict(split=[2,8],before=[13,25],after=[9,20],stretch=[5,30])
     sc = dict(record=str(record),export_check={},hook={"t":spans["split"]},script={"proof":{"spans":spans}})
-    proof.product_clips(sc,str(tmp_path))
+    clips = proof.product_clips(sc,str(tmp_path))
+    assert clips["stretch"] == {"src":"ex","t":[5,30],"sha256":"ex-sha"}
     assert cuts["before.mp4"] == ("up",13,25)
     assert cuts["after.mp4"] == ("ex",9,20)
     assert cuts["hook.mp4"] == ("ex",2,8)
