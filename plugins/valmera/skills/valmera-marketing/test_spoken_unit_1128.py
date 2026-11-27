@@ -6,6 +6,40 @@ import sys
 import proof
 
 
+def test_studio_transcription_uses_the_exports_audio_and_preserves_its_word_edges(tmp_path, monkeypatch):
+    import requests
+    import wave
+
+    audio = tmp_path / "excerpt.wav"
+    with wave.open(str(audio), "wb") as wav:
+        wav.setparams((1, 2, 16000, 0, "NONE", ""))
+        wav.writeframes(bytes(16000 * 2))
+    monkeypatch.setenv("CODEX_PROXY_LOCAL", "1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8788/v1")
+    def post(url, *, files, data, timeout):
+        assert url == "http://127.0.0.1:8788/v1/audio/transcriptions"
+        assert data["response_format"] == "verbose_json"
+        assert files["file"][1].read(4) == b"RIFF"
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {
+            "words": [{"word": " Changed.", "start": .05, "end": .4}]})
+    monkeypatch.setattr(requests, "post", post)
+    words = proof.hear_clock(SimpleNamespace(tmp=str(tmp_path)), str(audio), "export", .2, .8)
+    assert words == [dict(w="Changed.", t0=.25, t1=.6)]
+    assert json.loads((tmp_path / "speech-export.json").read_text())["backend"] == "studio-local-whisper"
+
+
+def test_unavailable_studio_transcription_leaves_the_native_hearing_path_available(tmp_path, monkeypatch):
+    import requests
+    path = tmp_path / "speech.wav"
+    path.write_bytes(b"excerpt")
+    monkeypatch.setenv("CODEX_PROXY_LOCAL", "1")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8788/v1")
+    def unavailable(*args, **kwargs):
+        raise requests.ConnectionError("Local transcription worker offline")
+    monkeypatch.setattr(requests, "post", unavailable)
+    assert proof.local_studio_words(path) is None
+
+
 def test_spoken_unit_ignores_a_long_pause_and_cannot_snap_across_its_neighbors():
     words = [dict(t0=1,t1=2,w="Earlier."),dict(t0=3,t1=4,w="The"),
              dict(t0=6,t1=7,w="claim"),dict(t0=7,t1=8,w="lands."),
