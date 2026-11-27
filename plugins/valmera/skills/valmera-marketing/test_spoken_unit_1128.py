@@ -100,3 +100,32 @@ def test_click_blend_preserves_both_words_and_the_cut_clock():
     assert len(changes)==1 and np.array_equal(audio[:int(.42*rate)],original[:int(.42*rate)])
     assert np.array_equal(audio[int(.58*rate):],original[int(.58*rate):])
     assert np.max(abs(np.diff(audio[:,0]))) < .001
+
+
+def test_both_formats_narrate_the_same_recorded_claim_without_external_pictures(monkeypatch):
+    roles = ["subject", "pain", "before", "typed", "after", "cta"]
+    sheet = dict(chain="The labels let the audience follow the comparison.",
+                 beats=dict(hook=0,setback=1,turn=3,payoff=4,meaning=4,coda=5),
+                 sheet=[dict(role=role,link="so" if i else "",job="proof",display="",plant=[],pays=[])
+                        for i,role in enumerate(roles)])
+    spans = dict(split=[1,3],before=[0,4],after=[2,6],stretch=[2,9])
+    receipts = dict(speaker="Mira Li",upload_says="The second meter was faster.")
+    def speak(system, content, **kw):
+        material = json.loads(content[0]["text"])
+        assert material["receipts"] == receipts
+        return {"segments":[{"say":role+" line","print":{}} for role in roles]}, {}
+    monkeypatch.setattr(proof,"ask",speak)
+    for mode in ("showcase","tutorial"):
+        sc, _ = proof.write(SimpleNamespace(args={}), {"format":mode}, {}, receipts, sheet,
+                            {"spans":spans}, {"pictures":{}})
+        assert sc["format"] == mode and [s["role"] for s in sc["segments"]] == roles
+        assert sc["recording_pictures_only"] and sc["close_line"] == "cta line"
+        assert sc["proof"] == dict(spans=spans,before_after=2,after_after=4,typed=3)
+
+
+def test_typed_instruction_accepts_the_writers_spoken_to_print_mapping():
+    sc = {"proof":{"before_after":0, "after_after":1}, "segments":[
+        {"say":"Make it nine by sixteen.", "print":{"nine by sixteen":"9:16"}, "fallback_text":"Portrait"},
+        {"say":"Hear it.", "fallback_text":"Hear it"},
+        {"say":"Try it.", "show":["VALMERA.IO"], "fallback_text":"Try it"}]}
+    assert proof.script_problems(sc,"Make it 9:16.",{}) == []
