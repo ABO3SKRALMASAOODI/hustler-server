@@ -122,7 +122,6 @@ class Clock:
         self.words = [dict(w=w["w"], t0=float(w["start"]) + LEAD_F / FPS, t1=float(w["end"]) + LEAD_F / FPS, seg=int(w.get("seg", 0)))
                       for w in d["words"]]
         self.dur = float(d["duration"]) + LEAD_F / FPS
-        self._spread()
         self.nseg = len(script["segments"])
         self.segs = []
         for i in range(self.nseg):
@@ -132,28 +131,6 @@ class Clock:
             else:
                 prev = self.segs[-1][1] if self.segs else LEAD_F / FPS
                 self.segs.append((prev, prev + 0.4))
-
-    def _spread(self):
-        """Words the aligner gave one span between them (a figure heard as digits: "one hundred and eighty-six" all at
-        15.06-16.04) share that span by their length, in order, so each word has its own moment."""
-        ws, i = self.words, 0
-        while i < len(ws):
-            j, hi = i, max(ws[i]["t0"], ws[i]["t1"])
-            while j + 1 < len(ws) and ws[j + 1]["seg"] == ws[i]["seg"] and (ws[j + 1]["t0"] < hi - 0.02 or ws[j + 1]["t1"] <= ws[j + 1]["t0"]):
-                j += 1
-                hi = max(hi, ws[j]["t0"], ws[j]["t1"])
-            if j > i:
-                a = min(w["t0"] for w in ws[i:j + 1])
-                b = max(max(w["t0"], w["t1"]) for w in ws[i:j + 1])
-                if j + 1 < len(ws) and ws[j + 1]["seg"] == ws[i]["seg"]:
-                    b = min(b, ws[j + 1]["t0"])
-                b = max(b, a + 0.08 * (j - i + 1))
-                units = [len(norm_word(w["w"])) + 1 for w in ws[i:j + 1]]
-                t = a
-                for w, u in zip(ws[i:j + 1], units):
-                    w["t0"], w["t1"] = t, t + (b - a) * u / sum(units)
-                    t = w["t1"]
-            i = j + 1
 
     @staticmethod
     def f(t):

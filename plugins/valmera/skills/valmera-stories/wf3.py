@@ -602,7 +602,12 @@ def narrate_script(ctx, sc, out, previous=None):
         env["STORIES_PREVIOUS_READ"] = os.path.abspath(previous)
     else:
         env.pop("STORIES_PREVIOUS_READ", None)
-    return PX.narrate(ns, out, band=band, label=f"wf3-narrate-{ctx.run_id}", env=env, reader=os.path.join(HERE, "voice.py"))
+    read = PX.narrate(ns, out, band=band, label=f"wf3-narrate-{ctx.run_id}", env=env, reader=os.path.join(HERE, "voice.py"))
+    import subprocess
+    env.setdefault("VALMERA_CTC_MODELS", os.path.join(ctx.tmp, "ctc"))
+    subprocess.run([chain.TORCH_PY, os.path.join(HERE, "forced_clock.py"), read["wav"], sp, read["words"]],
+                   check=True, env=env)
+    return read
 
 
 def _spoken_request(sc):
@@ -1920,14 +1925,21 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
         palette["direction"] = ("The supplied names, figures and source exhibits are already printed at these frames, at 30 fps. "
                                 "Keep those faces, details and printed values readable as they are heard. Design around them. "
                                 "For an accent on existing type, use its exact visible text as the sound partner.")
-    d = DR.direct(ctx.supply, [dict(i=k, text=str(seg.get("say") or "")) for k, seg in enumerate(sc["segments"])], rows, stress, pics,
+    owners = list(around)
+    voices = [dict(v, f=[round(float(v[k]) * F.FPS) + F.LEAD_F for k in ("start", "end")])
+              for v in pack.get("voices") or [] if v.get("start") is not None and v.get("end") is not None]
+    sources = {r.get("path"): r for group in (pack.get("pictures") or {}).values() for r in group}
+    sources.update({r.get("path"): r for group in pack.get("footage") or [] for r in group.get("clips") or []})
+    placed = [dict(sources.get(p.get("path"), {}), **p) for p in beats.get("pictures") or [] if p.get("f")]
+    rows = DR.composed_words(rows, placed, l1.get("items", []), owners, voices, F.FPS)
+    d = DR.direct(ctx.supply, [dict(seg, i=k, text=str(seg.get("say") or "")) for k, seg in enumerate(sc["segments"])], rows, stress, pics,
                   style=palette, workflow="story film (narrated)", dur_s=l1["dur_f"] / F.FPS,
                   title=sc.get("title"), hook=sc.get("hook_line"), payoff=sc.get("close_line"), log=ctx.log)
     nseg = len(sc["segments"])
     words = clock.words
 
     def word_frame(w):
-        return (0 if int(w) == 0 else max(F.Clock.f(words[int(w)]["t0"]) - 1, 0)) if 0 <= int(w) < len(words) else None
+        return F.Clock.f(words[int(w)]["t0"]) if 0 <= int(w) < len(words) else None
 
     def seg_span(i):
         return (F.Clock.f(clock.segs[i][0]), min(F.Clock.f(clock.segs[i][1]) + 6, l1["dur_f"])) if 0 <= i < nseg else (None, None)
@@ -1943,17 +1955,18 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
     sounds, l1["sound_design"] = F.replan_sound(l1, pack)
     l1["sound"] = sorted(device_sounds + [s for s in sounds if not any(
         abs(s["event_f"] - own["event_f"]) <= 2 for own in device_sounds)], key=lambda s: s["event_f"])
+    d = dict(d, sections=DR.shot_sections(d, placed, word_frame, seg_span, sc["segments"], l1["dur_f"]))
     asks, notes = DR.palette_asks(d, word_frame, seg_span, ids.get, l1["dur_f"])
     performed = []
     if ctx.workflow == "wf2":
         asks, performed = DR.recorded_type(asks, beats.get("display") or [], beats.get("recorded_ink") or [], beats.get("recorded_devices") or [])
-    asks = DR.around(asks, around, l1["dur_f"])         # a reel's own hero device keeps its frames: the Director's land beside it
+    asks = DR.around(asks, owners, l1["dur_f"], performed)         # a reel's own hero device keeps its frames: the Director's land beside it
     if asks:
         l1["devices"] = list(l1.get("devices") or []) + asks
         ev = DR.device_events(asks)                      # landings the music and sound workflow may answer (no device sounds)
         beats["device_events"] = ev
         beats["events"] = sorted(set(beats.get("events") or []) | {e["f"] for e in ev})
-    return dict(by=d.get("by"), performed=performed, asked=[a["dev"] for a in asks], notes=notes, sections=d.get("sections"), why=d.get("why"))
+    return dict(by=d.get("by"), performed=performed, asked=[a["dev"] for a in asks], placements=[dict(id=a["id"], f=a.get("f")) for a in asks], notes=notes, sections=d.get("sections"), why=d.get("why"))
 
 
 def with_director(ctx, script, sc):
@@ -1972,12 +1985,14 @@ def with_director(ctx, script, sc):
             return out
         beats = sc.get("beats") or json.load(open(os.path.join(ctx.supply, "beats.json")))
         pack = load_pack(ctx)
-        hero = [list(x["frames"]) for x in ((sc.get("devices") or {}).get("laid") or []) if x.get("frames")]
+        hero = [x for x in ((sc.get("devices") or {}).get("laid") or []) if x.get("frames")]
+        hero.extend(dict(frames=list(frames), device="recording") for frames in sc.get("recording_spans") or [])
         beats = dict(beats, recorded_devices=(sc.get("devices") or {}).get("laid"), recorded_ink=[
             dict(f=item["frames"], text=text)
             for item in (sc.get("devices") or {}).get("laid") or [] if item.get("frames")
             for text in ([item.get("title")] + [row.get("t") for row in item.get("texts", [])]) if text])
         rec = director_devices(ctx, script, script["script"], pack, l1, beats, around=hero)
+        l1["director_performance"] = rec
         rec["heard"] = chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))     # the sound hears them
         json.dump(l1, open(out, "w"), ensure_ascii=False)
         ctx.log(f"director: {len(rec['asked'])} devices round the hero device ({rec.get('by')})")
@@ -2005,6 +2020,19 @@ def checked_render_shots(ctx, receipt):
     return [p for p in (score.get("beats") or {}).get("pictures") or []
             if p.get("kind") in ("clip", "photo") and p.get("tier") != "voice"
             and (tuple(p["f"]), f"{os.path.basename(p['path'])}@{p.get('line')}") in passed]
+
+
+def music_times(script, clock, plan):
+    """Story beat indices address the narration, including its programme lead-in."""
+    authored = script.get("beats") or {}
+    times = {}
+    for role in ("hook", "setback", "turn", "payoff", "meaning", "coda"):
+        i = authored.get(role)
+        if type(i) is int and 0 <= i < clock.nseg and clock.seg_words(i):
+            times[role] = round(clock.seg_words(i)[0]["t0"], 3)
+    if "payoff" not in times and plan.get("turn_f") is not None:
+        times["payoff"] = round(plan["turn_f"] / F.FPS, 3)
+    return times
 
 
 def score(ctx, script):
@@ -2082,6 +2110,9 @@ def score(ctx, script):
     json.dump(l1, open(out, "w"), ensure_ascii=False)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")       # the same scene with the narration as its spine: what the song is cut to
     aud = F.audio_scene(l1, pack)
+    times = music_times(sc, F.Clock(pack["words"], sc), beats)
+    aud.setdefault("music_marks", {})["beats"] = times
+    beats["music_beats"] = times
     if script["style"]["id"] in R.STYLES:
         # the story's joints, where the bed breathes (worker/score/music.flow reads them from the scene's music_marks)
         joints = joints_of(sc, pack, beats)
@@ -2093,8 +2124,7 @@ def score(ctx, script):
     if ctx.args.get("look", True) is False:
         # one command, no stop: the look is the engines' and the checks'; nothing is drawn for a director who is not there
         taste_carry_on(ctx, beats, taste)
-        turn_s = round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None
-        return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
+        return dict(l1=out, l1_audio=l1_audio, payoff_s=times.get("payoff"), story_turn_s=times.get("turn"), beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
                     frames=l1["dur_f"], items=len(l1["items"]), direction=d, spend=[])
     frames = sorted({int(f) for f in beats["look"] if 0 <= int(f) < l1["dur_f"]})
     for n in os.listdir(look) if os.path.isdir(look) else []:      # a look before this one: its stills are of another plan
@@ -2110,8 +2140,7 @@ def score(ctx, script):
     if ctx.args.get("look", True) and not os.path.exists(os.path.join(ctx.run_dir, "look.ok")):
         raise RuntimeError(f"the director's look: open {look}/sheet.jpg, put changes in {ctx.run_dir}/direction.json, "
                            f"then touch {ctx.run_dir}/look.ok and resume")
-    turn_s = round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None
-    return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
+    return dict(l1=out, l1_audio=l1_audio, payoff_s=times.get("payoff"), story_turn_s=times.get("turn"), beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
                 frames=l1["dur_f"], items=len(l1["items"]), direction=d, spend=[])
 
 
@@ -3051,7 +3080,7 @@ def check_once(ctx, rd, sc):
                         narration=dict(voice=None, gate=None),
                         pictures=sc["beats"].get("pictures"), missing_pictures=pack.get("missing"),
                         # how the film moves and sounds, as the engines measured it, and where it was drawn
-                        pace=sc["beats"].get("pace"), sound_design=scene.get("sound_design", sc["beats"].get("sound_design")), turn_s=sc.get("turn_s"),
+                        pace=sc["beats"].get("pace"), sound_design=scene.get("sound_design", sc["beats"].get("sound_design")), payoff_s=sc.get("payoff_s", sc.get("turn_s")), story_turn_s=sc.get("story_turn_s"),
                         render=rd.get("engine_check"), measured=sc["beats"].get("measured"), style=sc["beats"].get("style"))
     rec = json.load(open(os.path.join(ctx.supply, "pack.json")))["record"]
     c["stories"]["narration"] = dict(seconds=rec.get("narration_s"), voice=rec.get("voice"), gate=rec.get("gate"))
