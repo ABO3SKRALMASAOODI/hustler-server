@@ -168,9 +168,8 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
     avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again.
     hear_s, read_s, per: a caller with a deadline (a first film, score.film) hears less or nothing of each source, reads
     less of it and opens fewer sources a subject; None keeps the engine's own (HEAR_MAX_S, fetch.PROXY_MAX_S, PER_SUBJECT).
-    shot_s, line_max: a caller that cuts faster than SHOT_S (a story reel: a picture every 0.45 s) asks for
-    min(line_max, ceil(dur / shot_s) + 2) clips a line, each window clamp(2 * shot_s, cut.MIN_S, 1.6) s; None keeps
-    min(4, round(dur / SHOT_S)) clips of dur / n s.
+    Briefed lines acquire distinct takes that depict their words. shot_s and line_max provide
+    historical defaults for unbriefed callers. line_max also bounds acquisition breadth.
     Opt-in (a story reel; all off by default, so every other caller cuts exactly as before):
     strict_lines   a frame fills line i only when the look named i among its lines (never by its subject alone)
     motion_first   each source shot's content motion is measured on the proxy (footage.motion): short shots (0.3 s and
@@ -210,6 +209,16 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         # Cached originals are candidates, not a closed source whitelist. A cache
         # may contain only unsuitable footage; continue discovering alternatives.
         flat = [(si, q) for si, s in enumerate(subjects) for q in s["searches"]]
+        for si, subject in enumerate(subjects):
+            matching = [brief for line in lines for brief in line.get("see") or []
+                        if subject["name"] in (brief.get("thing"), brief.get("entity"), brief.get("moment"))]
+            seen = {(q.get("where"), q["q"]) for index,q in flat if index == si}
+            for brief in matching:
+                for query in brief.get("video_searches") or []:
+                    for source in ("archive", "youtube"):
+                        if (source, query) not in seen:
+                            flat.append((si, dict(where=source, q=query)))
+                            seen.add((source, query))
         found = {} if source_only else search.run([q for _, q in flat])
         hits = dict(primary)
         for k, (si, _) in enumerate(flat):
@@ -752,6 +761,11 @@ def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict
     for ln in lines:
         dur = _line_dur(ln)
         n, win_s = line_shots(dur, shot_s, line_max)
+        if ln.get("see") or ln.get("visual"):
+            distinct = {(c["source"], tuple(shots.shot_at(src_of[c["source"]]["shots"], c["t"])))
+                        for c in good if ln["i"] in c["lines"]}
+            n = min(len(distinct), line_max or len(distinct))
+            win_s = dur
         if ln.get("single_action") is True:
             n, win_s = 1, dur
         if ln.get("want_n"):
@@ -769,6 +783,8 @@ def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict
         for c in good:
             s = src_of[c["source"]]
             shot = shots.shot_at(s["shots"], c["t"])
+            if (ln.get("see") or ln.get("visual")) and shot_uses.get((c["source"], shot[0])):
+                continue
             if shot[1] - shot[0] < min_len:
                 continue
             mo = ((motion_of or {}).get(c["source"]) or {}).get(tuple(shot)) if motion_of is not None else None
