@@ -1,0 +1,57 @@
+import json
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+import fit
+import reel
+import evidence_cut
+import writer
+
+
+def test_literal_phrase_briefs_retain_actions_outside_the_named_list():
+    result = writer._clean_see([dict(thing="sweeping the floor", entity="the company", kind="literal",
+                                    word_i=3, search="period shop floor broom", video_searches=["sweeping a shop"])], {"the company"})
+    assert result[0]["word_i"] == 3
+    assert result[0]["video_searches"] == ["sweeping a shop"]
+
+
+def test_ad_actor_cannot_fill_insider_phrase_and_dropped_take_cannot_return():
+    words = "Insiders objected but listeners bought it".split()
+    clock = SimpleNamespace(segs=[(0,3)], seg_words=lambda _: [dict(w=w,t0=i/2) for i,w in enumerate(words)])
+    script = dict(segments=[dict(say=" ".join(words),see=[
+        dict(thing="the listeners",word_i=3),dict(thing="company insiders",word_i=0)])])
+    def verdict(grade):
+        return dict(fits_line=bool(grade), exact_thing=bool(grade),time_ok=True,version_ok=True,contradicts=False,grade=grade)
+    files = {"z-insider":{0:5,3:0},"a-listener":{0:0,3:5},"ad-actor":{0:0,3:0},"dropped":{0:5,3:5}}
+    photos = {"company":[dict(path=p) for p in files]}
+    table = {p:{0:{0:dict(verdict(max(v.values())), phrases={i:verdict(g) for i,g in v.items()})}} for p,v in files.items()}
+    sp = reel.Supply(photos,{},fit=fit.fits(table),deny={("dropped",0)})
+    sp.verdicts=json.loads(json.dumps(table))
+    cut=reel.cut_fit(script,clock,sp,90,[])
+    assert [(r[0],r[1],r[4]["path"]) for r in cut] == [(0,45,"z-insider"),(45,90,"a-listener")]
+
+
+def test_identifying_portrait_survives_render_readability_repair_at_any_age():
+    photo=dict(path="portrait",w=600,h=900)
+    supply=reel.Supply({"person":[photo]}, {}, deny={("portrait",0)})
+    names={fit.take_key("portrait",(0,0)): dict(work="a later interview",year=2018,people=[dict(name="A Person",role="founder")])}
+    rows=evidence_cut.place(dict(segments=[dict(era=1970,show=[dict(role="name",text="A Person",word_i=0)])]),
+        SimpleNamespace(seg_words=lambda _:[dict(t0=.1)]),[[0,90,"clip","other",dict(path="other",pick_line=0)]],supply,names)
+    portrait=next(r for r in rows if r[4].get("depicted_name"))
+    assert portrait[4]["path"]=="portrait" and portrait[1]-portrait[0]>=1.2*reel.FPS
+    assert portrait[4]["portrait_repair"]
+
+
+def test_burned_timecode_crop_preserves_subject_and_measures_changing_glyphs(tmp_path):
+    from PIL import Image,ImageDraw
+    frames=[]
+    for i in range(3):
+        im=Image.new("RGB",(320,180),"grey"); draw=ImageDraw.Draw(im)
+        draw.text((10,154),f"12:45:0{i}",fill="white")
+        path=tmp_path/f"{i}.png";im.save(path);frames.append(str(path))
+    box=[.01,.82,.35,1]
+    signal=fit.overlay_signal(frames,box)
+    assert signal["fixed_strokes"]>.2 and signal["changing_strokes"]>0
+    assert fit.overlay_crop([box],[.12,.15,.81,.72]) == [0,0,1,.82]

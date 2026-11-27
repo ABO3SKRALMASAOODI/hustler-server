@@ -150,6 +150,22 @@ def _record(c, got, name):
                 source_note=c.get("_source_note"), grade=c.get("_grade"))
 
 
+def portrait_from_wikidata(entity, out):
+    """Resolve a person's P18 Commons original and keep its licence with the picture."""
+    B = _worker()
+    item = B._wikidata_id(entity)
+    if not item:
+        return None
+    data = B.net_fetch.get_json(B.WIKIDATA_API, params=dict(action="wbgetclaims",entity=item[0],
+                                property="P18",format="json"),timeout_s=15,allowed_hosts=["www.wikidata.org"])
+    for claim in data.get("claims",{}).get("P18",[]):
+        name = claim.get("mainsnak",{}).get("datavalue",{}).get("value")
+        if isinstance(name,str):
+            record = commons_file(name,os.path.join(out,"portraits",item[0]),want_w=1280)
+            return dict(record,name=entity,shows="Portrait of " + entity,entity_id=item[0])
+    return None
+
+
 def pictures(named, out, per=4, min_px=700):
     """{name: [picture records]} for every named subject, best first, and a report per subject. A subject may carry "key"
     (the name its pictures gather under, when several searches look for one thing) and "search_for" (the line it was
@@ -160,11 +176,21 @@ def pictures(named, out, per=4, min_px=700):
     def one(subj):
         s = dict(name=subj["name"], searches=(subj.get("searches") or [subj["name"]])[:3],
                  must_show=subj.get("must_show") or subj["name"], **{"is": subj.get("is", "thing")})
+        portrait = None
+        if subj.get("is") == "person":
+            try:
+                portrait = portrait_from_wikidata(subj.get("entity") or subj["name"],out)
+            except Exception as exc:
+                portrait_error = str(exc)[:160]
+            else:
+                portrait_error = None
         try:
             kept, rep = B.find_named(s, kind=B.KIND_PHOTO, count=per + 2, workdir=out)
         except Exception as e:  # noqa: BLE001 - one subject without pictures is a gap, not a stop
-            return subj.get("key") or subj["name"], [], dict(subject=subj["name"], must_show=s["must_show"], searched=s["searches"], error=str(e)[:200])
-        recs, fails = [], []
+            return subj.get("key") or subj["name"], [portrait] if portrait else [], dict(subject=subj["name"], must_show=s["must_show"], searched=s["searches"], error=str(e)[:200])
+        recs, fails = ([portrait] if portrait else []), []
+        if subj.get("is") == "person" and portrait_error:
+            fails.append(portrait_error)
         for c in kept:
             if len(recs) >= per:
                 break

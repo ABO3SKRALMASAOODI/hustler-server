@@ -57,55 +57,31 @@ RETRY_WAITS = (30.0, 120.0)      # seconds before each further pass over the bat
 PHOTO_PX, FRAME_PX = 1024, 720
 BOOLS = ("fits_line", "exact_thing", "time_ok", "version_ok", "contradicts", "live_action", "speaking_on_camera")
 
-SYSTEM = """You are the picture checker of a narrated documentary film cut like the best founder-story reels. Each picture is shown while a few words of narration are spoken. A viewer who sees a picture that does not match the words stops trusting the film. Zero wrong pictures is the bar; a picture need not be the best one to pass.
+SYSTEM = """Read the exact words under this picture in their narrative context. For each requested line
+ID, describe in shows what a viewer can see that depicts those specific words. Grade 5 for the exact action
+or evidence, 4 for a clear depiction, 1 for an unrelated image. Company affiliation alone does not depict
+an action. People must be shown in the role asserted by the phrase. A performer in a commercial portrays
+a character; the commercial does not identify that performer as an employee, executive or founder.
+For a name, a portrait identifies the person at any age unless the words specify a time of life.
+For a change in state, evaluate only the state spoken on these words. A metaphor depicts the physical
+sense the brief specifies. Use the source and the settled identity as evidence. Answer JSON
+{verdicts:[{c,line,shows,why,grade,exact_thing,time_ok,version_ok,contradicts,fits_line,
+story_time,picture_time,live_action,speaking_on_camera}]}. fits_line means the viewer can see the
+relationship. The first three checks are booleans about the subject, period and version."""
 
-You get the film's lines: each with its words, its story time ("speaks from"), sometimes the words spoken exactly under this shot, and the editor's brief ("see": the ideal thing, time, version and moment). The brief is the editor's wish list for choosing the BEST picture; it is not the test. Then candidates: a photograph or three frames of one take, with the source's own text and, when given, the take's identity (what it is, which version, which year), settled once from its frames and source for every line it may carry. Take that identity as given.
-
-Ignore the film's own treatment of a frame (black and white, grain, a film gate, scanlines, captions or type laid over it, a soft frame, an end card, a transition frame at the very end of a take); judge what the picture shows.
-
-For each candidate and EACH line listed with it, decide in this order:
-
-1. "exact_thing": the picture is the very thing the narration is about at this point (a thing named in the words under the shot or in the line): that person; that work in any of its own versions (its test reel, storyboards, finished film, trailer, poster, making-of footage of it); that product; that company (its people, its logo, its offices, its own products); that place. False for a stand-in: a toy, sculpture, maquette, statue, ride or park figure, costume character, museum replica, another film's or product's characters, a lookalike, a namesake, a fan remake, a different person.
-
-2. "story_time": the time and version the narration means AT THIS SHOT, found in this order and no further:
-   (a) a time or version the words spoken under this shot name ("the finished film", "in 1993", "an early version", "today");
-   (b) else a time or version the line's own words name or point back to (a line that says a thing was changed, rewritten, replaced or "from X to Y" names BOTH the before and the after: a picture of either carries it);
-   (c) else the line's story time ("speaks from").
-   Write it in at most eight words, then "picture_time": the picture's own time and version from its identity and frames, at most eight words.
-
-3. "time_ok": the picture's time and version match story_time, or a viewer could not tell them apart. The finished work itself carries a line about its own making (being pitched, made, stopped, saved, rewritten, resumed) or about its people, unless the words under the shot or the line name another version against it (rule a or b). False when they plainly differ: a later building under the early days, a portrait decades away from the moment, a later film's characters, the test reel under the finished film or the finished film under the test reel. "version_ok": the same answer as time_ok.
-
-4. "contradicts": what the picture shows says the opposite of the words under it (a deliberate act under "an accident", a crowd under "nobody came", the wrong year printed in the frame, a villain under "leader" when the line does not name the villain).
-
-5. "fits_line": a careful viewer would accept this picture under these words: true only when exact_thing and time_ok are true and contradicts is false, and the picture shows the thing plainly enough to be recognised. A plain, recognisable picture of the right thing at the right time passes even when it does not show the brief's ideal moment.
-
-6. "grade": 1-5, how well it carries the words, for ranking only (5: the exact moment the words describe; 3: the right thing plainly; 1: wrong).
-
-Also "live_action" (camera footage of real people or places, not animation, drawings, renders or a still graphic), "speaking_on_camera" (a face on screen visibly speaking), "shows" (what the picture plainly shows, at most twelve words), "why" (at most twenty words).
-
-Answer with one JSON object only: {"verdicts": [{"c": candidate number, "line": line number, "exact_thing": bool, "story_time": "...", "picture_time": "...", "time_ok": bool, "version_ok": bool, "contradicts": bool, "fits_line": bool, "grade": int, "live_action": bool, "speaking_on_camera": bool, "shows": "...", "why": "..."}]}"""
-
-
-IDENTITY_SYSTEM = """You are the archivist of a narrated documentary film. You get takes: each one a photograph, or three frames from inside one continuous take of a video clip, with its source's own title, channel, upload date, description and time range. For each take, say once and for all what it is, so that every editor who later places it under a line of narration reads the same identity.
-
-For each take answer:
-- "work": the film, product, event, broadcast, place or person this take is of, as precisely as the frames and the source allow (e.g. "Toy Story (1995 feature film)", "Toy Story 1993 test reel", "Toy Story Midway Mania ride at Disney's Hollywood Studios", "John Lasseter interview").
-- "version": which version or state of it (the finished release, a test reel, concept drawings, a later sequel, a theme-park figure, a toy, a museum display, a fan remake, a news report about it), or null.
-- "year": the year the frames were made or show, when the source or the frames say it, else null.
-- "depicts": one sentence, what the frames plainly show (who or what, doing what).
-- "live_action": the frames are camera footage of real people or places (not animation, drawings, renders or a still graphic).
-- "speaking_on_camera": a person's face is on screen and they are visibly speaking.
-- "shows": at most twelve words.
-
-Ignore treatment (black and white, grain, captions, a blur): name what the picture is. Say only what the frames and the source's own text support; when the version or year cannot be told, say null rather than guess.
-
-Answer with one JSON object only: {"takes": [{"t": take number, "work": "...", "version": "..." or null, "year": int or null, "depicts": "...", "live_action": bool, "speaking_on_camera": bool, "shows": "..."}]}"""
+IDENTITY_SYSTEM = """Identify each numbered source take using its frames and provenance. Identify people
+and their role only with evidence. Distinguish performers, subjects of interviews and people doing the
+work in question. Return JSON {takes:[{t,work,version,year,vintage,depicts,people:[{name,role}],
+meaning_box:[left,top,right,bottom],overlays:[{kind,box}],live_action,speaking_on_camera,shows}]}.
+Every box is normalized to the full source image. The meaning box encloses the visible evidence.
+Overlays are burned-in timecodes, subtitles, watermarks and channel bugs, located separately from the
+subject. vintage is archival, modern or unknown. Record the depicted year when supported by evidence."""
 
 READ_SYSTEM = """You check a finished vertical documentary film, frame by frame. For each numbered frame you get what the picture under it is (its identity, settled from its source). The film treats its pictures (black and white, a film gate, scanlines, grain, a tilted print over a blurred copy of itself, a crop or a slow zoom): that is intended. Say only whether the subject of the picture is still readable in this frame: could a viewer tell what it shows?
 
 Answer with one JSON object only: {"frames": [{"n": frame number, "readable": bool, "why": "at most twelve words"}]}"""
 
-ID_FIELDS = ("work", "version", "year", "depicts", "live_action", "speaking_on_camera", "shows")
+ID_FIELDS = ("work", "version", "year", "vintage", "people", "depicts", "meaning_box", "overlays", "live_action", "speaking_on_camera", "shows")
 
 
 def usable(v):
@@ -243,7 +219,7 @@ def _img(path, detail="high"):
 # ----------------------------------------------------------------- the model
 
 def _line_text(ln):
-    see = [dict(thing=x.get("thing"), as_of=x.get("as_of"), must_show=x.get("must_show"), moment=x.get("moment")) for x in ln.get("see") or []]
+    see = ln.get("see") or []
     out = f"Line {ln['i']} ({ln.get('beat') or 'line'}, speaks from {ln.get('era') or '?'}): \"{ln.get('say')}\"\n   brief: {json.dumps(see, ensure_ascii=False)}"
     if ln.get("words_under"):
         out += f"\n   words spoken exactly under this shot: \"{ln['words_under']}\""
@@ -253,7 +229,7 @@ def _line_text(ln):
 def identity_text(idn):
     if not isinstance(idn, dict):
         return ""
-    return json.dumps({k: idn.get(k) for k in ID_FIELDS if idn.get(k) is not None}, ensure_ascii=False)[:600]
+    return json.dumps({k: idn.get(k) for k in ID_FIELDS if idn.get(k) is not None}, ensure_ascii=False)[:1600]
 
 
 def _meta_text(c):
@@ -337,7 +313,7 @@ def judged_lines(c, lines):
     """The lines a candidate is judged against: those whose brief names its subject or the named thing it was found as
     (c["thing"]: a clip found for a moment or a voice subject of that thing), and the line it was found for."""
     names = {x for x in (c.get("subject"), c.get("thing")) if x}
-    out = {i for i, ln in lines.items() if names and any(x.get("thing") in names for x in ln.get("see") or [])}
+    out = {i for i, ln in lines.items() if names and any((x.get("thing") in names or x.get("entity") in names) for x in ln.get("see") or [])}
     if isinstance(c.get("line"), int) and c["line"] in lines:
         out.add(c["line"])
     return sorted(out)
@@ -360,8 +336,56 @@ def _save(path, obj):
         os.replace(f.name, path)
 
 
+def valid_box(box):
+    return (isinstance(box, list) and len(box) == 4 and all(type(v) in (int, float) for v in box)
+            and 0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1)
+
+
+def overlay_crop(boxes, subject):
+    """Largest axis-aligned part of the source preserving the subject and clearing every mark."""
+    if not boxes or not valid_box(subject):
+        return None
+    rects = [[0, 0, 1, 1]]
+    for box in boxes:
+        left, top, right, bottom = box
+        available = []
+        for x, y, r, b in rects:
+            if right <= x or bottom <= y or r <= left or b <= top:
+                available.append([x, y, r, b])
+                continue
+            for crop in ([x,y,left,b], [right,y,r,b], [x,y,r,top], [x,bottom,r,b]):
+                if crop[0] <= subject[0] and crop[1] <= subject[1] and crop[2] >= subject[2] and crop[3] >= subject[3]:
+                    available.append(crop)
+        rects = available
+    return max(rects, key=lambda r: (r[2]-r[0])*(r[3]-r[1]), default=None)
+
+
+def overlay_signal(frames, box):
+    """Measure stationary glyph strokes and changing strokes in the same source rectangle."""
+    import cv2
+    import numpy as np
+    edges = []
+    for path in frames:
+        frame = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if frame is None:
+            continue
+        h, w = frame.shape
+        l,t,r,b = [round(n*size) for n,size in zip(box, (w,h,w,h))]
+        if r-l > 2 and b-t > 2:
+            edges.append(cv2.Canny(frame[t:b,l:r], 60, 150) > 0)
+    if len(edges) < 2:
+        return {}
+    frequency = np.mean(edges, axis=0)
+    ink = max(1, int((frequency > 0).sum()))
+    return dict(fixed_strokes=round(float((frequency == 1).sum()/ink),3),
+                changing_strokes=round(float(((frequency > 0) & (frequency < 1)).sum()/ink),3))
+
+
 def _clean_id(v):
     out = {k: (str(v.get(k))[:200] if v.get(k) is not None else None) for k in ("work", "version", "depicts", "shows")}
+    out.update(vintage=v.get("vintage"), people=[p for p in v.get("people") or [] if isinstance(p, dict)],
+               meaning_box=v.get("meaning_box") if valid_box(v.get("meaning_box")) else None,
+               overlays=[o for o in v.get("overlays") or [] if isinstance(o, dict) and valid_box(o.get("box"))])
     y = v.get("year")
     out["year"] = int(y) if isinstance(y, (int, float)) and not isinstance(y, bool) else None
     for k in ("live_action", "speaking_on_camera"):
@@ -381,7 +405,7 @@ def identify(cands, cache_path=None, ask=None, work=None, log=print, batch=BATCH
     for c in cands:
         for take in c.get("takes") or takes_of(c):
             k = take_key(c["path"], take)
-            if k in cache or k in seen:
+            if (k in cache and "overlays" in cache[k]) or k in seen:
                 continue
             seen.add(k)
             todo.append((k, c, take))
@@ -397,7 +421,7 @@ def identify(cands, cache_path=None, ask=None, work=None, log=print, batch=BATCH
             except Exception as e:  # noqa: BLE001 - a take that cannot be read is identified by no one: it is never usable
                 log(f"identify: no frames of {os.path.basename(str(c.get('path')))}: {str(e)[:100]}")
                 continue
-            ok_part[t_no] = k
+            ok_part[t_no] = (k, fr)
             kind = "photograph" if c.get("kind") == "photo" else f"clip, three frames inside one take ({take[0]:.2f}-{take[1]:.2f} s of the clip)"
             content.append({"type": "text", "text": f"\nTake {t_no}: a {kind}; source: {_meta_text(c)}"})
             content += [_img(q, detail) for q in fr]
@@ -412,7 +436,12 @@ def identify(cands, cache_path=None, ask=None, work=None, log=print, batch=BATCH
         ok_part = parts[bi]
         for v in got.get("takes") or []:
             if isinstance(v, dict) and isinstance(v.get("t"), int) and v["t"] in ok_part:
-                cache[ok_part[v["t"]]] = _clean_id(v)
+                key_id, frames = ok_part[v["t"]]
+                identity = _clean_id(v)
+                for mark in identity["overlays"]:
+                    mark["signal"] = overlay_signal(frames, mark["box"])
+                identity["clean_crop"] = overlay_crop([m["box"] for m in identity["overlays"]], identity["meaning_box"])
+                cache[key_id] = identity
     _save(cache_path, cache)
     out = {}
     for c in cands:
@@ -428,19 +457,33 @@ def verdicts(cands, sc, cache_path=None, ask=None, work=None, log=print, id_cach
     (take, line) against the lines it may carry, its frozen identity given beside its frames. Verdicts are cached by
     (path, take bounds, line, hash of the line's words). A clip's take no model answered for, after the retries, stays on
     the line it was found for as {"unjudged": True} (carries; never cached, so the next call asks again)."""
-    lines = lines_of(sc)
+    parents = lines_of(sc)
+    lines, slots = {}, {}
+    for i, parent in parents.items():
+        words = str(parent["say"] or "").split()
+        briefs = sorted(parent["see"] or [{}], key=lambda x: x.get("word_i", 0))
+        by_word = {x.get("word_i", 0): x for x in briefs}
+        edges = sorted(by_word)
+        for j, wi in enumerate(edges):
+            stop = edges[j+1] if j+1 < len(edges) else len(words)
+            number = len(lines)
+            slots[number] = i, wi
+            lines[number] = dict(parent, i=number, see=[by_word[wi]], words_under=" ".join(words[wi:stop]))
+    def phrase_key(path, ln, take):
+        return key(path, ln, json.dumps(lines[ln], sort_keys=True) + "phrase-v1", take)
     if id_cache is None and cache_path:
         id_cache = os.path.join(os.path.dirname(cache_path), "identity.json")
     ids, usd, calls = identify(cands, cache_path=id_cache, ask=ask, work=work, log=log, waits=waits, sleep=sleep)
     cache = _load(cache_path)
     table, items = {}, []
     for c in cands:
-        want = judged_lines(c, lines)
+        parent_ids = judged_lines(c, parents)
+        want = [ln for ln,(i,wi) in slots.items() if i in parent_ids]
         for ti, take in enumerate(c.get("takes") or takes_of(c)):
             row = table.setdefault(c["path"], {}).setdefault(ti, {})
             miss = []
             for ln in want:
-                k = key(c["path"], ln, lines[ln]["say"], take)
+                k = phrase_key(c["path"], ln, take)
                 if k in cache:
                     row[ln] = cache[k]
                 else:
@@ -457,22 +500,27 @@ def verdicts(cands, sc, cache_path=None, ask=None, work=None, log=print, id_cach
             if isinstance(idn.get(b), bool):
                 v[b] = idn[b]
         table.setdefault(it["path"], {}).setdefault(it["take_i"], {})[ln] = v
-        cache[key(it["path"], ln, lines[ln]["say"], it["take"])] = v
+        cache[phrase_key(it["path"], ln, it["take"])] = v
     kept = 0
     for k_ in sorted(set(left)):
         # an outage is not a verdict: the footage engine found this clip for its line (its frames checked against the
         # subject there), so with no answer it stays usable on that line, ranked after every judged take (grade 0)
         it = items[k_]
-        ln = it.get("line")
-        if it.get("kind") == "clip" and isinstance(ln, int) and ln in it["lines"]:
-            idn = it.get("identity") or {}
-            v = dict(unjudged=True, why="not judged: no model answered after the retries; kept on the line it was found for")
-            v.update({b: idn[b] for b in ("live_action", "speaking_on_camera") if isinstance(idn.get(b), bool)})
-            table.setdefault(it["path"], {}).setdefault(it["take_i"], {})[ln] = v
-            kept += 1
+        for ln in it["lines"]:
+            if it.get("kind") == "clip" and slots[ln][0] == it.get("line"):
+                table[it["path"]][it["take_i"]][ln] = dict(unjudged=True, grade=0)
+                kept += 1
     if kept:
         log(f"fit: {kept} takes no model answered for stay on the lines they were found for, unjudged")
     _save(cache_path, cache)
+    for path, takes in table.items():
+        for ti, verdicts_by_slot in takes.items():
+            by_line = {}
+            for number, v in verdicts_by_slot.items():
+                line, wi = slots[number]
+                by_line.setdefault(line, {})[wi] = v
+            takes[ti] = {line: dict(max(vs.values(), key=lambda v: (carries(v), v.get("grade", 0))), phrases=vs)
+                         for line, vs in by_line.items()}
     return table, round(usd + u2, 4), calls + -(-len(items) // BATCH), ids
 
 

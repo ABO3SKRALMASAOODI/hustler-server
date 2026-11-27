@@ -527,15 +527,10 @@ def cut_story(script, clock, sp, f_end, stress, aim_s=0.6, lo_s=0.4, hi_s=1.25, 
 # The judge's shot lengths (TEARDOWN.json, 1512 shots of the 28 reels): quantiles 5..95 of a shot's seconds
 SHOT_Q = ((0.05, 0.08), (0.10, 0.10), (0.20, 0.20), (0.30, 0.32), (0.40, 0.40), (0.50, 0.50), (0.60, 0.60), (0.70, 0.72),
           (0.80, 0.958), (0.90, 1.267), (0.95, 1.68))
-PACE_K = {"fast": 0.8, "brisk": 0.9, "steady": 1.0, "slow": 1.0}     # slowing comes from a held voice or title, not longer shots
 MOTION_FLOOR = 1.0          # px a frame of content motion at 270x480 (the rater's residual): under it a clip reads as a still
-REFRAME_MAX_S = 1.2         # a fitting take held on a camera reframe when a line's supply is spent: never longer
-PHOTO_SHARE = 0.10          # photographs on any line: at most this share of its shots while it has moving takes left
 BURST_F = (2, 5)            # a list burst: pictures of 2-5 frames
 BURSTS_MAX = 2              # list bursts a film, on lines the writer marks as a list (writer.annotate's "list")
 SHOT_MAX_S = 1.9            # no shot is 2.0 s or more
-STATIC_SHARE = 0.35         # shots that do not move by content (photographs, still takes, designed cards): a film-wide budget
-DRAW_U_LO = 0.0            # a line's shots are drawn from the judge's whole distribution: its 1-3 frame shots become glimpses
 GLIMPSE_F = 3              # a planned shot this short is a glimpse of the INCOMING take (its first 1-2 frames, a flash, then it plays on)
 CUTIN_SHARE = 0.15         # same-take cut-ins (a tighter framing of the take just played, time running on): at most this share of a line's cuts
 CUTIN_K = 0.80             # a cut-in's crop: this share of the cover framing (a 1.25x punch)
@@ -545,31 +540,6 @@ FIGURE_CARD_S = FIGURE_HOLD_S
 SNAP_Q = 0.6               # stresses above this quantile pull a cut onto them (every word would quantise the shots short)
 GLIMPSE_Q = 0.85           # cuts on the voice's stresses above this quantile get a 1-2 frame glimpse (about 8% of cuts)
 FILL_SHARE = 0.08           # designed cards plus reframes: at most this share of the voice (the overflow is logged)
-
-
-def shot_draw(rng, k=1.0, lo_s=1.0 / FPS, hi_s=1.9, u_lo=0.0, u_hi=1.0):
-    """One target length (s) from the judge's distribution (inverse of SHOT_Q, linear between quantiles), scaled by k;
-    u_lo..u_hi draws from a band of its quantiles (a line spreading what it has: its upper half, p50 to p90)."""
-    u = u_lo + (u_hi - u_lo) * rng.random()
-    q = SHOT_Q
-    if u <= q[0][0]:
-        v = q[0][1] * u / q[0][0] + 0.05 * (1 - u / q[0][0])
-    elif u >= q[-1][0]:
-        v = q[-1][1] + (u - q[-1][0]) / (1 - q[-1][0]) * 0.9
-    else:
-        for (u0, v0), (u1, v1) in zip(q, q[1:]):
-            if u0 <= u <= u1:
-                v = v0 + (v1 - v0) * (u - u0) / (u1 - u0)
-                break
-    return min(max(v * k, lo_s), hi_s)
-
-
-def seg_k(seg):
-    """How a segment's shots are scaled from the judge's distribution: its pace, and room on the low point and the turn."""
-    k = PACE_K.get(seg.get("pace"), 1.0)
-    if seg.get("beat") in ("hook", "setup") and len(seg.get("see") or []) >= 3:
-        k *= 0.85
-    return k, SHOT_MAX_S
 
 
 class Takes:
@@ -666,560 +636,125 @@ def line_bounds(script, clock, f_end):
     return [(Clock.f(clock.segs[i][0]) if i else 0, min(Clock.f(clock.segs[i + 1][0]) if i + 1 < nseg else f_end, f_end)) for i in range(nseg)]
 
 
-def shot_plan(script, clock, f_end, seed=1114):
-    """{line: [shot lengths in frames]}: the judge's distribution contoured by the segment's pace and beat, drawn before
-    cutting (plan_lengths), so takes are assigned to lines once against what the cut will really draw (cut_fit)."""
-    import random
-    rng = random.Random(seed ^ 0xD3)
-    out = {}
-    for line, (a, b) in enumerate(line_bounds(script, clock, f_end)):
-        k, hi_s = seg_k(script["segments"][line])
-        out[line] = plan_lengths(rng, b - a, k, hi_s) if b - a >= 3 else []
-    return out
-
-
-def shot_demand(script, clock, f_end, seed=1114):
-    """{line: shots the cut will draw on it} (shot_plan)."""
-    return {ln: len(v) for ln, v in shot_plan(script, clock, f_end, seed).items()}
-
-
-def plan_lengths(rng, L, k, hi_s, spread=False):
-    """A line's shot lengths (frames) drawn from the judge's distribution and laid to fill its L frames exactly: the
-    count whose sum lies nearest L, scaled to it, so the line's last shot is not cut short (a truncated tail biases the
-    film's shots short). spread: from the distribution's upper half (p50-p90), a line spreading the takes it has."""
-    xs, tot = [], 0
-    while tot < L:
-        x = max(int(round(shot_draw(rng, k, hi_s=hi_s, **(dict(u_lo=0.5, u_hi=0.9) if spread else dict(u_lo=DRAW_U_LO))) * FPS)), 1)
-        xs.append(x)
-        tot += x
-    if len(xs) > 1 and abs(tot - xs[-1] - L) < abs(tot - L):
-        tot -= xs.pop()
-    sc = L / max(tot, 1)
-    out = [max(int(round(x * sc)), 1) for x in xs]
-    cap = int(SHOT_MAX_S * FPS)
-    return [min(x, cap) for x in out]
+def phrase_slots(script, clock, f_end):
+    slots = []
+    for line, (start, end) in enumerate(line_bounds(script, clock, f_end)):
+        seg = script["segments"][line]
+        words = clock.seg_words(line) if hasattr(clock, "seg_words") else []
+        anchors = {b.get("word_i", 0): b for b in reversed(seg.get("see") or [{}])}
+        starts = [(i, start if i == min(anchors) else Clock.f(words[i]["t0"]), brief)
+                  for i, brief in sorted(anchors.items()) if i == min(anchors) or 0 <= i < len(words)]
+        for (wi, lo, brief), hi in zip(starts, [x[1] for x in starts[1:]] + [end]):
+            if lo < hi:
+                slots.append((line, wi, lo, hi, brief))
+    return slots
 
 
 def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer_new=False, proof_fill=()):
-    """[[f0, f1, kind, name, rec]] when every picture carries a verdict for its line and take (sp.fit). Planned before
-    it is cut:
-      demand    each line's shots are drawn first (shot_demand: the judge's distribution by pace and beat)
-      assign    every fitting take is assigned to lines once: the scarcest line first (fewest fitting takes against its
-                demand), one take a line a round, a take that fits several lines going where it has the fewest
-                alternatives; what no line's demand reserves is a spare any line it fits may take
-      cut       per line: its reserved moving takes, then spare moving takes, then photographs (PHOTO_SHARE of its
-                shots, lifted when it has no moving take left), then still takes; colour takes before grey ones on lines
-                without a device. A line short of distinct pictures spreads what it has (shots redrawn from the judge's p50-p90, sp.spread).
-      fill      a gap is filled only with pictures that carry the line: a same-take cut-in, a reframe of a different
-                own-line take (at most REFRAME_MAX_S, its window inside its take), a fitting picture shown at least
-                REUSE_AFTER_S ago (replay), then a designed card of the line's own display item (each text once in the
-                film), then its played takes again (a repeat, counted as one; the take just shown only on the other
-                framing); a line with nothing new left holds its card or photograph on as one shot, never a copy, and a
-                line with no picture and no new card text gets one card of its own fallback_text (even if shown
-                before), or of the name it is about only when it has no fallback_text. Never another line's picture,
-                never the brief's words on card after card. sp.shortfall logs each line's fill frames.
-    Shots are shorter than SHOT_MAX_S, except on a line with nothing new: its card or photograph held on as one shot may
-    run past SHOT_MAX_S, measured honestly as one long shot (pace_of, long_share) that the pace top-up answers. A list line (writer.annotate's "list") may burst through spare pictures, at
-    most BURSTS_MAX a film. rec["tier"] says which rung each shot came from, rec["pick_line"] the line it was picked for."""
-    import random
-    rng = random.Random(seed)
-    out = []
-    segs = script["segments"]
-    nseg = len(segs)
-    bounds = line_bounds(script, clock, f_end)
-    sp.shortfall, sp.reframed, sp.overflow, sp.fill_by_line, sp.again = {}, {}, 0, {}, {}
-    sp.spread = {}
-    voice_f = max(bounds[-1][1] - bounds[0][0], 1) if bounds else 1
-    planned = shot_plan(script, clock, f_end, seed)
-    demand = {ln: len(v) for ln, v in planned.items()}
-    devices = set(device_lines)
-    # ---- the units: every fitting take of every clip
-    units = {}
-    for found, lst in sp.footage.items():
-        for c in lst:
-            for ti, take in enumerate(Takes.of(c)):
-                if sp.take_used(c["path"], ti):
+    """Assign distinct fitting pictures to their spoken phrases before choosing their durations."""
+    import fit
+    slots = phrase_slots(script, clock, f_end)
+    catalogue = {}
+    for line, clips in sp.footage.items():
+        for c in clips:
+            for ti, bounds in enumerate(Takes.of(c)):
+                catalogue[c["path"], ti] = ("clip", c.get("subject"), c, bounds)
+    for name, photos in sp.pics.items():
+        for photo in photos:
+            catalogue[photo["path"], 0] = ("photo", name, photo, (0,0))
+    ranks, assigned = {}, {}
+    for index, (line, wi, lo, hi, brief) in enumerate(slots):
+        ranks[index], assigned[index] = [], []
+        for (path, ti), (kind, name, rec, bounds) in catalogue.items():
+            if not sp.fits(path, line, ti) or not sp.ok(rec, line) or sp.take_used(path, ti):
+                continue
+            by_take = getattr(sp, "verdicts", {}).get(path, {})
+            rows = by_take.get(ti, by_take.get(str(ti), {}))
+            line_fit = rows.get(line, rows.get(str(line), {}))
+            vs = line_fit.get("phrases")
+            if vs is not None:
+                v = vs.get(wi, vs.get(str(wi), {}))
+                if not fit.carries(v):
                     continue
-                lines = {ln for ln in range(nseg) if sp.fits(c["path"], ln, ti) and sp.ok(c, ln)}
-                if lines and (c["path"], ti) not in units:
-                    units[(c["path"], ti)] = dict(c=c, ti=ti, take=take, lines=lines, found=found, moving=take_motion(c, take) >= MOTION_FLOOR,
-                                                  motion=take_motion(c, take), chroma=take_chroma(c, ti),
-                                                  grades={ln: sp.grade(c["path"], ti, ln) for ln in lines})
-
-    def rank(u, line):
-        """The merged rank: the grade-4-and-up tier first (the moment takes lead), moving before still within a tier,
-        colour before grey off a device line, then the grade, the takes that fit fewest lines, the line's own finds and
-        the most moving."""
-        q = units[u]
-        g = q["grades"].get(line, 3)
-        grey = q["chroma"] is not None and q["chroma"] < 8 and line not in devices
-        return (g < 4, not q["moving"], grey, -g, len(q["lines"]), q["found"] != line, -q["motion"])
-    alts = {ln: sum(1 for q in units.values() if ln in q["lines"]) for ln in range(nseg)}
-    reserved, free = {ln: [] for ln in range(nseg)}, set(units)
-    order = sorted(range(nseg), key=lambda ln: (alts[ln] / max(demand[ln], 1), ln))
-    progress = True
-    while progress:
-        progress = False
-        for ln in order:
-            if len(reserved[ln]) >= demand[ln]:
-                continue
-            cand = [u for u in free if ln in units[u]["lines"]]
-            if not cand:
-                continue
-            u = min(cand, key=lambda u: rank(u, ln))
-            reserved[ln].append(u)
-            free.discard(u)
-            progress = True
-    for ln in reserved:
-        reserved[ln].sort(key=lambda u: rank(u, ln))
-    sp.plan = dict(demand=demand, reserved={ln: len(v) for ln, v in reserved.items()}, spares=len(free))
-    played = {ln: [] for ln in range(nseg)}          # (c, ti, take) played on each line, for its reframes
-    reframed_takes = set()
-    n_shots, n_static = [0], [0]
-    bursts = [0]
-
-    def photos_for(line):
-        rk = {x.get("thing"): k for k, x in enumerate(segs[line].get("see") or [])}
-        ph = [r for lst in sp.pics.values() for r in lst if sp.fits(r["path"], line) and not sp.uses.get(r["path"])]
-        ph.sort(key=lambda r: (rk.get(r.get("name"), 9), (r.get("chroma") is not None and r["chroma"] < 8 and line not in devices)))
-        return ph
-
-    def moving_left(line):
-        return any(units[u]["moving"] for u in reserved[line] if u in units) or any(units[u]["moving"] and line in units[u]["lines"] for u in free)
-
-    def group_of(u):
-        return (sp.group.get(units[u]["c"]["path"], units[u]["c"]["path"]), units[u]["ti"])
-
-    def take_unit(u, line, tier):
-        """Play a unit: every unit of its (take group, take) leaves reserved and free (one picture, whichever clip of
-        whichever source carries it)."""
-        q = units[u]
-        g = group_of(u)
-        same = {v for v in units if group_of(v) == g}
-        for ln in reserved:
-            reserved[ln] = [v for v in reserved[ln] if v not in same]
-        free.difference_update(same)
-        return "clip", q["c"].get("subject"), q["c"], tier, (q["ti"], q["take"])
-
-    def fresh(u):
-        return sp.fresh_room(units[u]["c"], units[u]["take"]) is not None
-
-    def pick(line, last, photos_on_line, shots_on_line, burst=False, lead=False):
-        """The next picture for this line: (kind, name, rec, tier, take) or None. lead: the line's first shot on the hook,
-        the payoff or the close, its best-graded fitting take (moving first among equals)."""
-        last_still = bool(out) and out[-1][2] == "clip" and not moving(out[-1][4])
-
-        mine = [u for u in reserved[line] if units[u]["c"]["path"] != last and fresh(u)]
-        spare = sorted((u for u in free if line in units[u]["lines"] and units[u]["c"]["path"] != last and fresh(u)), key=lambda u: rank(u, line))
-        if lead and (mine or spare):
-            u = min(mine + spare, key=lambda u: (-units[u]["grades"].get(line, 3), not units[u]["moving"], rank(u, line)))
-            return take_unit(u, line, "line" if units[u]["found"] == line else "other_line")
-        if burst:
-            if spare:
-                u = spare[0]
-                return take_unit(u, line, "line" if units[u]["found"] == line else "other_line")
-            ph = [r for r in photos_for(line) if r["path"] != last]
-            return ("photo", ph[0].get("name"), ph[0], "photo", None) if ph else None
-        for lst, own in ((mine, True), (spare, False)):
-            for u in lst:
-                if units[u]["moving"]:
-                    return take_unit(u, line, "line" if units[u]["found"] == line else "other_line")
-        ph = [r for r in photos_for(line) if r["path"] != last]
-        share_ok = photos_on_line + 1 <= PHOTO_SHARE * (shots_on_line + 1) + 1
-        if ph and (share_ok or not moving_left(line)) and n_static[0] + 1 <= STATIC_SHARE * (n_shots[0] + 1) + 1:
-            return "photo", ph[0].get("name"), ph[0], "photo", None
-        for lst in (mine, spare):
-            for u in lst:
-                if not last_still:
-                    return take_unit(u, line, "line" if units[u]["found"] == line else "other_line")
-        if ph:
-            return "photo", ph[0].get("name"), ph[0], "photo", None
-        for lst in (mine, spare):
-            for u in lst:
-                return take_unit(u, line, "line" if units[u]["found"] == line else "other_line")
-        return None
-
-    def reframe(line, n, moving_only=False):
-        """A different own-line take again, on a camera reframe (the pacing driver moves it): its unplayed seconds inside
-        the take first, at most REFRAME_MAX_S; each take reframed once. moving_only: only a take that moves by content."""
-        prev = out[-1][4] if out else {}
-        for c, ti, take in sorted(played[line], key=lambda q: -take_motion(q[0], q[2])):
-            if (c["path"], ti) in reframed_takes or (prev.get("path") == c["path"] and prev.get("take_i") == ti):
-                continue
-            if moving_only and take_motion(c, take) < MOTION_FLOOR:
-                continue
-            want = min(n, int(REFRAME_MAX_S * FPS)) / FPS
-            room = [(a, b) for a, b in _free_in(sp.took(c), take) if b - a >= 0.2]
-            if room:
-                a, b = max(room, key=lambda q: q[1] - q[0])
-                t0, t1 = a, min(b, a + want)
             else:
-                t0, t1 = Takes.best(c, take, want)
-            reframed_takes.add((c["path"], ti))
-            return c, ti, take, t0, t1
-        return None
-
-    def designed_text(line):
-        """(card, fallback) or (None, True): the line's own display items (each text once in the film), or a workflow's
-        viewer-facing fallback copy (once). Production briefs (see.moment / see.thing) never become the card: on 19 Nov
-        see[0].thing, returned for every slot with no used check, put STEVE JOBS on ten cards in a row and APPLE on 16."""
-        shown = {str(t).strip().upper() for _, t in sp.cards_used}
-        fb = segs[line].get("fallback_text")
-        if fb and str(fb).strip().upper() not in shown:
-            return dict(text=fb, role="key"), True
-        for x in sp.cards.get(line) or []:
-            if str(x["text"]).strip().upper() not in shown:
-                return dict(text=x["text"], role=x.get("role"), big=x.get("big"), small=x.get("small")), False
-        return None, True
-
-    def replay(line, n, f, last):
-        """A fitting picture shown again (Supply.replay's rule, on the fill path before any card): a clip take or a
-        photograph that carries this line, last shown at least REUSE_AFTER_S ago and fewer than MAX_USES times; the least
-        shown, longest ago first, a clip's unplayed seconds inside its take before its best window again. ("clip", c, ti,
-        take, t0, t1), ("photo", rec), or None."""
-        want = min(n, int(SHOT_MAX_S * FPS)) / FPS
-        best = None
-        for lst in sp.footage.values():
-            for c in lst:
-                shows = sp.shown_at.get(c["path"]) or []
-                if c["path"] == last or not shows or len(shows) >= MAX_USES or f - max(shows) < REUSE_AFTER_S * FPS or not sp.ok(c, line):
+                if len({b.get("word_i",0) for b in script["segments"][line].get("see",[])}) > 1 and name not in (brief.get("thing"), brief.get("entity")):
                     continue
-                takes = [(ti, tk) for ti, tk in enumerate(Takes.of(c)) if sp.fits(c["path"], line, ti)]
-                if not takes:
-                    continue
-                ti, tk = max(takes, key=lambda q: (sp.grade(c["path"], q[0], line), take_motion(c, q[1])))
-                k = (len(shows), max(shows))
-                if best is None or k < best[0]:
-                    best = (k, c, ti, tk)
-        if best is not None:
-            _, c, ti, tk = best
-            room = [(a_, b_) for a_, b_ in _free_in(sp.took(c), tk) if b_ - a_ >= 0.2]
-            if room:
-                a_, b_ = max(room, key=lambda q: q[1] - q[0])
-                t0, t1 = a_, min(b_, a_ + want)
-            else:
-                t0, t1 = Takes.best(c, tk, want)
-            return "clip", c, ti, tk, t0, t1
-        ph = [r for lst in sp.pics.values() for r in lst if r["path"] != last and sp.fits(r["path"], line)
-              and 0 < len(sp.uses.get(r["path"]) or []) < MAX_USES and f - max(sp.uses[r["path"]]) >= REUSE_AFTER_S * FPS]
-        if ph:
-            return ("photo", min(ph, key=lambda r: (len(sp.uses[r["path"]]), max(sp.uses[r["path"]]))))
-        return None
+                v = line_fit
+            grade = v.get("grade", sp.grade(path, ti, line))
+            identity = getattr(sp,"identities",{}).get(fit.take_key(path,bounds), {})
+            if identity.get("overlays") and not identity.get("clean_crop"):
+                grade -= 1
+            ranks[index].append((grade, take_motion(rec,bounds) if kind == "clip" else 0., path, ti))
+        ranks[index].sort(reverse=True)
 
-    def again(line, n):
-        """A played take of this line once more, using a different framing: its unplayed seconds inside the take, else its most
-        moving window; another take before the one just shown, and the one just shown only on the other framing (a punch
-        in, or back out from one). A repeat, counted as one. (c, ti, take, t0, t1, punch) or None."""
-        prev = out[-1][4] if out else {}
-        seen_, cands = set(), []
-        for c, ti, take in played[line]:
-            if (c["path"], ti) not in seen_:
-                seen_.add((c["path"], ti))
-                cands.append((c, ti, take))
-        if not cands:
-            return None
-        cands.sort(key=lambda q: (prev.get("path") == q[0]["path"] and prev.get("take_i") == q[1], -take_motion(q[0], q[2])))
-        c, ti, take = cands[0]
-        same = prev.get("path") == c["path"] and prev.get("take_i") == ti
-        want = min(n, int(REFRAME_MAX_S * FPS)) / FPS
-        room = [(a_, b_) for a_, b_ in _free_in(sp.took(c), take) if b_ - a_ >= 0.2]
-        if room:
-            a_, b_ = max(room, key=lambda q: q[1] - q[0])
-            t0, t1 = a_, min(b_, a_ + want)
-        else:
-            t0, t1 = Takes.best(c, take, want)
-        return c, ti, take, t0, t1, same and not prev.get("cutin")
-
-    fill_f = [0]
-    sv = sorted(v for _, v in stress)
-    snap_at = sv[int(SNAP_Q * (len(sv) - 1))] if sv else 0.0            # a cut moves onto a stress only when it is a real one
-    flash_k = [0]                                                        # glimpse flashes alternate white and negative
-
-    proof_clips = [c for c in (proof_fill or []) if c.get("path") and os.path.exists(str(c["path"]))]
-    for c in proof_clips:
-        sp.note_origin(c)
-
-    def proof_fill(n, line):
-        """A marketing film's line with no picture left plays the real export (the proof is always true of the film),
-        never a type page: (clip, t0, t1, shot) or None. `busy`: seconds already shown whole. A clip with a ranking
-        (`ranked`: {line: [[t0, t1, shot id], ...]}, the export's own shots a model ranked for each line's words, best
-        first) plays the line's best-ranked shot no file of the recording has shown any part of yet. A line the model
-        ranked nothing for, or whose ranked shots are all shown, then plays a whole export shot (`shots`: the export's
-        own shots, [[t0, t1, shot id], ...]) no file has shown yet, first those no later line was ranked and no line took
-        as its own file (`owed`), before the cut falls to replaying the line's own pictures (20 Nov: an unanswered
-        ranking left the fill empty, and every recording line looped its one owed shot). Never the export's next seconds in time order (20 Nov: that put
-        'Trash can' under the speaker after the picture had gone). A clip with neither (an older pack): the export's
-        next unplayed seconds."""
-        want = min(n, int(SHOT_MAX_S * FPS)) / FPS
-        for c in proof_clips:
-            took = sp.took(c) + [tuple(x) for x in c.get("busy") or []]
-
-            def fresh(row):
-                a0, b0 = float(row[0]), float(row[1])
-                return b0 - a0 >= 0.4 and not any(a < b0 and b > a0 for a, b in took)
-
-            def play(row):
-                a0, b0 = float(row[0]), float(row[1])
-                return c, a0, min(b0, a0 + want), (row[2] if len(row) > 2 else None, (a0, b0))
-            ranked = c.get("ranked")
-            if isinstance(ranked, dict):
-                for row in ranked.get(line, ranked.get(str(line))) or []:
-                    if fresh(row):
-                        return play(row)
-            own = [r for r in c.get("shots") or [] if isinstance(r, (list, tuple)) and len(r) >= 2 and fresh(r)]
-            if own:
-                later = {r[2] for k_, rows in (ranked or {}).items() if str(k_).lstrip("-").isdigit() and int(k_) > line
-                         for r in rows or [] if len(r) > 2} | set(c.get("owed") or [])
-                return play(min(own, key=lambda r: (len(r) > 2 and r[2] in later, float(r[0]))))
-            if isinstance(ranked, dict) or c.get("shots"):
+    owned = set()
+    order = sorted(ranks, key=lambda i: (len(ranks[i]), i))
+    def reserve(index):
+        for grade, motion, path, ti in ranks[index]:
+            key = sp.group.get(path,path), ti
+            if key in owned:
                 continue
-            room = [(a, b) for a, b in _free_in(took, (0.0, float(c.get("seconds") or 0))) if b - a >= 0.4]
-            if room:
-                a, b = room[0]
-                return c, a, min(b, a + want), None
-        return None
+            if assigned[index] and grade < assigned[index][0][0]:
+                break
+            owned.add(key)
+            assigned[index].append((grade,path,ti))
+            return True
+        return False
 
-    def cut_in(line, n, cutins, planned_n):
-        """The shot just played on this line, again as a tighter framing while its time runs on (a punch on the take):
-        (rec, t0, t1) or None; at most CUTIN_SHARE of the line's planned cuts, only inside the same take."""
-        if not out or cutins >= max(1, int(CUTIN_SHARE * planned_n)):
-            return None
-        prev = out[-1][4]
-        if out[-1][2] != "clip" or prev.get("pick_line") != line or prev.get("cutin") or not prev.get("src") or not prev.get("take"):
-            return None
-        t0 = float(prev["src"][1])
-        t1 = min(float(prev["take"][1]) - 0.02, t0 + n / FPS)
-        if t1 - t0 < max(n / FPS * 0.6, 2 / FPS):
-            return None
-        return prev, t0, t1
-    for line, s in enumerate(segs):
-        a, b = bounds[line]
-        if b - a < 1:
+    for index in order:
+        reserve(index)
+    for index in order:
+        line, wi, lo, hi, brief = slots[index]
+        # A list's named item and a portrait each occupy their whole spoken slot.
+        if script["segments"][line].get("job") == "list" or any(
+                x.get("role") == "name" and x.get("word_i") == wi for x in script["segments"][line].get("show") or [] if isinstance(x,dict)):
             continue
-        k, hi_s = seg_k(s)
-        still_only = bool(s.get("see")) and all(isinstance(x, dict) and x.get("still_only") is True for x in s.get("see") or [])
-        # a line short of distinct pictures spreads what it has (17 Nov): its shots are drawn again from the judge's upper
-        # half (p50-p90), so it cuts fewer times instead of filling with reframes of takes already played. The 15 Nov
-        # Hoover run kept the judge's lengths on short lines: 21.4 cuts a 10 s, 20 s of reframes and 14 s of cards, 31% of
-        # its shots repeating a take. What stays short after the spread takes same-take cut-ins, reframes, then its own
-        # designed cards.
-        burst_at = None
-        if s.get("list") is True and bursts[0] < BURSTS_MAX and sum(1 for u in free if line in units[u]["lines"]) >= 3:
-            burst_at, bursts[0] = a + int(0.25 * (b - a)), bursts[0] + 1
-        burst_left = rng.randint(4, 8) if burst_at is not None else 0
-        lens = list(planned.get(line) or [])
-        if lens and not still_only:
-            have = len({group_of(u) for u in reserved[line] + [v for v in free if line in units[v]["lines"]]}) + len(photos_for(line))
-            if have < len(lens):
-                lens = plan_lengths(random.Random(seed ^ (line + 1) * 7919), b - a, k, hi_s, spread=True)
-                sp.spread[str(line)] = dict(have=have, planned=len(planned.get(line) or []), spread=len(lens))
-        planned_n = max(len(lens), 1)
-        pos, photos_on, shots_on, cutins = a, 0, 0, 0
-        while pos < b:
-            left = b - pos
-            in_burst = burst_at is not None and pos >= burst_at and burst_left > 0
-            glimpse = 0
-            if in_burst:
-                n = rng.randint(*BURST_F)
-            else:
-                n = lens.pop(0) if lens else int(round(shot_draw(rng, k, hi_s=hi_s) * FPS))
-                n = max(n, 1)
-                if n <= GLIMPSE_F and left - n > 6:
-                    # a planned glimpse: the first 1-2 frames of the INCOMING take, a flash, then that take plays on; it
-                    # spends no take of its own
-                    glimpse = min(n, 2)
-                    n2 = lens.pop(0) if lens else int(round(shot_draw(rng, k, hi_s=hi_s) * FPS))
-                    n = n + max(n2, GLIMPSE_F + 1)
-                else:
-                    w0, w1 = pos + n - int(0.15 * FPS), pos + n + int(0.15 * FPS)
-                    st = [(v, f) for f, v in stress if w0 <= f <= w1 and f > pos + GLIMPSE_F and f - pos < int(SHOT_MAX_S * FPS) and v >= snap_at]
-                    if st:
-                        n = max(max(st)[1] - pos, GLIMPSE_F + 1)
-            if left - n < 3:
-                n = left                    # the tail becomes part of this shot (at most two frames more)
-            n = min(n, int(SHOT_MAX_S * FPS) + 2 + glimpse, left)
-            last = out[-1][4]["path"] if out else None
-            lead = shots_on == 0 and s.get("beat") in ("hook", "payoff", "close") and not in_burst
-            rf_move = None
-            if not in_burst and not lead and not still_only and n_static[0] + 1 > STATIC_SHARE * (n_shots[0] + 1) + 1 and \
-                    not any(units[u]["moving"] for u in reserved[line] + [v for v in free if line in units[v]["lines"]] if units[u]["c"]["path"] != last):
-                # past the film's static budget with no moving take left: a moving take of this line again on a reframe,
-                # before any photograph or still take
-                fresh_evidence = prefer_new and (photos_for(line) or any(
-                    units[u]["c"]["path"] != last and units[u]["grades"].get(line, 0) >= 4 and fresh(u)
-                    for u in (*reserved[line], *free)))
-                if not fresh_evidence:
-                    rf_move = reframe(line, min(n, int(REFRAME_MAX_S * FPS)), moving_only=True)
-            got = None if rf_move is not None else pick(line, last, photos_on, shots_on, burst=in_burst, lead=lead)
-            if got is None and in_burst:
-                burst_left = 0
-                continue
-            end = pos + n
-            if rf_move is not None:
-                c, ti, tk, t0, t1 = rf_move
-                end = pos + max(min(n, int(round((t1 - t0) * FPS / 0.8))), 2)
-                sp.take_clip(c, t0, t1, pos)
-                rec = dict(c, src=[round(t0, 3), round(t1, 3)], take=list(tk), take_i=ti, use=2, tier="reframe", pick_line=line)
-                kind, name = "clip", c.get("subject")
-                sp.reframed[line] = sp.reframed.get(line, 0) + (end - pos)
-                static = not moving(rec)
-            elif got is not None:
-                kind, name, rec, tier, take = got
-                if kind == "clip":
-                    ti, tk = take
-                    t0, t1 = Takes.best(rec, sp.fresh_room(rec, tk) or tk, n / FPS)
-                    if t1 - t0 < n / FPS * 0.8 - 1e-3:
-                        end = pos + max(int((t1 - t0) * FPS / 0.8), 2)
-                    sp.use_take(rec["path"], ti)
-                    sp.take_clip(rec, t0, t1, pos)
-                    played[line].append((rec, ti, tk))
-                    rec = dict(rec, src=[round(t0, 3), round(t1, 3)], take=list(tk), take_i=ti, use=1, tier=tier, pick_line=line)
-                    static = not moving(rec)
-                else:
-                    sp.take_photo(rec, pos)
-                    photos_on += 1
-                    rec = dict(rec, use=len(sp.uses[rec["path"]]), tier=tier, pick_line=line)
-                    static = True
-            else:
-                fill_n = min(n, int(REFRAME_MAX_S * FPS))
-                ci = cut_in(line, n, cutins, planned_n)
-                rf = reframe(line, fill_n) if ci is None else None
-                pf = proof_fill(n, line) if ci is None and rf is None else None
-                if ci is not None:
-                    prev, t0, t1 = ci
-                    end = pos + max(min(n, int(round((t1 - t0) * FPS))), 1)
-                    sp.take_clip(prev, t0, t1, pos)
-                    rec = dict(prev, src=[round(t0, 3), round(t1, 3)], use=2, tier="cutin", pick_line=line, cutin=True, cont=True, crop_k=CUTIN_K,
-                               glimpse=None, glimpse_flash=None)
-                    kind, name = "clip", prev.get("subject")
-                    cutins += 1
-                    static = not moving(rec)
-                    glimpse = 0
-                elif rf is not None:
-                    c, ti, tk, t0, t1 = rf
-                    end = pos + max(min(fill_n, int(round((t1 - t0) * FPS / 0.8))), 2)
-                    sp.take_clip(c, t0, t1, pos)
-                    rec = dict(c, src=[round(t0, 3), round(t1, 3)], take=list(tk), take_i=ti, use=2, tier="reframe", pick_line=line)
-                    kind, name = "clip", c.get("subject")
-                    sp.reframed[line] = sp.reframed.get(line, 0) + (end - pos)
-                    sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
-                elif pf is not None:
-                    c, t0, t1, shot = pf
-                    end = pos + max(min(n, int(round((t1 - t0) * FPS))), 2)
-                    sp.take_clip(c, t0, t1, pos)
-                    rec = dict(c, src=[round(t0, 3), round(t1, 3)], use=1, tier="proof", pick_line=line)
-                    if shot is not None:          # the export's own shot: one picture, counted by its id; a cut-in may run on in it
-                        rec.update(take_i=shot[0], take=[round(shot[1][0], 3), round(shot[1][1], 3)])
-                    kind, name = "clip", c.get("subject")
-                # 20 Nov: the line's own supply before any card, each card text once, and never a copy of a card: on
-                # 19 Nov the fill cut a pictureless line into its planned slots and put the brief's name on every one
-                # (STEVE JOBS ten times, APPLE sixteen), each counted as a new picture
-                rp = replay(line, n, pos, last) if ci is None and rf is None and pf is None else None
-                x = fallback = ra = None
-                if ci is None and rf is None and pf is None and rp is None:
-                    ra = again(line, fill_n)
-                    # A related take with real motion can carry the spoken figure under its super.
-                    # A static source still gives way to an authored diagram or figure.
-                    if ra is None or not moving(dict(ra[0], src=[ra[3], ra[4]])):
-                        x, fallback = designed_text(line)
-                if ci is not None or rf is not None or pf is not None:
-                    pass
-                elif rp is not None and rp[0] == "clip":
-                    _, c, ti, tk, t0, t1 = rp
-                    end = pos + max(min(n, int(round((t1 - t0) * FPS / 0.8))), 2)
-                    sp.take_clip(c, t0, t1, pos)
-                    played[line].append((c, ti, tk))
-                    rec = dict(c, src=[round(t0, 3), round(t1, 3)], take=list(tk), take_i=ti, use=len(sp.shown_at[c["path"]]), tier="replay", pick_line=line)
-                    kind, name = "clip", c.get("subject")
-                    sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
-                elif rp is not None:
-                    r_ = rp[1]
-                    sp.take_photo(r_, pos)
-                    rec = dict(r_, use=len(sp.uses[r_["path"]]), tier="replay", pick_line=line)
-                    kind, name = "photo", r_.get("name")
-                    sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
-                elif x is not None:
-                    hold = FIGURE_CARD_S if x.get("role") == "figure" else DESIGNED_MIN_S
-                    end = pos + min(max(n, int(round(hold * FPS))), int(SHOT_MAX_S * FPS), left)
-                    if left - (end - pos) < 3:
-                        end = b
-                    kind, name = "designed", None
-                    rec = dict(path=f"designed:{line}:{len(out)}:{x['text']}", text=x.get("text") or "", role=x.get("role"),
-                               big=x.get("big"), small=x.get("small"), line=line, w=W, h=H, tier="designed", pick_line=line,
-                               fallback=fallback)
-                    sp.cards_used.add((line, rec["text"]))
-                    if fallback:
-                        sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
-                elif ra is not None:
-                    c, ti, tk, t0, t1, punch = ra
-                    end = pos + max(min(fill_n, int(round((t1 - t0) * FPS / 0.8))), 2)
-                    sp.take_clip(c, t0, t1, pos)
-                    rec = dict(c, src=[round(t0, 3), round(t1, 3)], take=list(tk), take_i=ti, use=2, tier="reframe", pick_line=line, again=True,
-                               **(dict(cutin=True, crop_k=CUTIN_K) if punch else {}))
-                    kind, name = "clip", c.get("subject")
-                    sp.again[line] = sp.again.get(line, 0) + (end - pos)
-                    sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
-                elif out and out[-1][2] in ("designed", "photo") and out[-1][4].get("pick_line") == line and out[-1][1] == pos:
-                    # nothing new is left on this line: its card (or photograph) holds on, one shot, never a copy
-                    end = b if left - n < 3 else pos + n
-                    out[-1][1] = end
-                    sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
-                    fill_f[0] += end - pos
-                    sp.fill_by_line[line] = sp.fill_by_line.get(line, 0) + (end - pos)
-                    pos = end
+        while len(assigned[index]) < hi-lo and reserve(index):
+            pass
+    out, plants = [], {}
+    sp.shortfall, sp.fill_by_line, sp.fill_over = {}, {}, {}
+    sp.plan = dict(phrases=[])
+    for index,(line,wi,lo,hi,brief) in enumerate(slots):
+        seg = script["segments"][line]
+        selected = assigned[index]
+        def thread(value):
+            return value[0] if isinstance(value, list) and value else value
+        pays, plant = thread(seg.get("pays")), thread(seg.get("plant"))
+        callback = brief.get("kind") == "callback" and isinstance(pays,str) and pays in plants
+        if callback:
+            selected = [plants[pays]]
+        card = brief.get("kind") == "card" and seg.get("job") in ("time_jump","reveal")
+        if card or not selected:
+            # Record exhausted research on the actual words so score_search can acquire the missing slot.
+            text = str(seg.get("fallback_text") or seg["say"])
+            if not card:
+                sp.shortfall[line] = sp.shortfall.get(line,0) + hi-lo
+            out.append([lo,hi,"designed",None,dict(path=f"spoken:{line}:{wi}",text=text,role="key",
+                       tier="card" if card else "missing",fallback=not card,pick_line=line,word_i=wi)])
+        else:
+            for j,(grade,path,ti) in enumerate(selected):
+                a = lo + round((hi-lo)*j/len(selected))
+                b = lo + round((hi-lo)*(j+1)/len(selected))
+                if a >= b:
                     continue
+                kind,name,original,bounds = catalogue[path,ti]
+                identity = getattr(sp,"identities",{}).get(fit.take_key(path,bounds),{})
+                rec = dict(original, pick_line=line, word_i=wi, grade=grade, identity=identity, use=2 if callback else 1,
+                           keep_full_frame=brief.get("keep_full_frame"), tier="callback" if callback else kind)
+                if kind == "clip":
+                    room = sp.fresh_room(rec,bounds) if not callback else bounds
+                    if not room:
+                        continue
+                    rec.update(src=list(Takes.best(rec,room,(b-a)/FPS)),take_i=ti,take=list(bounds))
+                    sp.take_clip(rec,*rec["src"],a)
+                    sp.use_take(path,ti)
                 else:
-                    # a line with no picture and no new card text: one card, held for the line (the slots after it hold
-                    # on with it); the pace top-up asks footage for the line. Its own viewer-facing fallback_text when it
-                    # has one, even if already shown (a workflow's copy, such as marketing's call to action); the name it
-                    # is about only when it has none, since see.thing is a production label in some workflows (marketing's
-                    # THE EXPORT) that proof.py keeps off the screen
-                    fb_ = str(segs[line].get("fallback_text") or "").strip()
-                    x = dict(text=fb_ or str(((segs[line].get("see") or [{}])[0] or {}).get("thing") or ""), role="key")
-                    end = pos + min(max(n, int(round(DESIGNED_MIN_S * FPS))), left)
-                    if left - (end - pos) < 3:
-                        end = b
-                    kind, name = "designed", None
-                    rec = dict(path=f"designed:{line}:{len(out)}:{x['text']}", text=x["text"], role="key", line=line, w=W, h=H, tier="designed",
-                               pick_line=line, fallback=True)
-                    sp.cards_used.add((line, rec["text"]))
-                    sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
-                if pf is not None or (rp is not None and rp[0] == "clip") or ra is not None:
-                    static = not moving(rec)
-                elif ci is None:
-                    static = True
-                if ci is None and pf is None:
-                    fill_f[0] += end - pos
-                    sp.fill_by_line[line] = sp.fill_by_line.get(line, 0) + (end - pos)
-            if in_burst:
-                burst_left -= 1
-                rec = dict(rec, burst=True)
-            end = min(end, b)
-            if glimpse and kind == "clip" and rec.get("src") and end - pos > glimpse + 2:
-                # the glimpse: the take's first frames, then a white or negative frame and the same take playing on (its
-                # time continuous, so it is never counted as a repeat)
-                tg = float(rec["src"][0]) + glimpse / FPS
-                mode = "fill" if flash_k[0] % 2 == 0 else "neg"
-                flash_k[0] += 1
-                out.append([pos, pos + glimpse, kind, name, dict(rec, src=[rec["src"][0], round(tg, 3)], glimpse=True)])
-                out.append([pos + glimpse, end, kind, name, dict(rec, src=[round(tg, 3), rec["src"][1]], cont=True, glimpse_flash=mode)])
-                n_shots[0] += 2
-                n_static[0] += 2 if static else 0
-                shots_on += 2
-                pos = end
-                continue
-            out.append([pos, end, kind, name, rec])
-            n_shots[0] += 1
-            n_static[0] += 1 if static else 0
-            shots_on += 1
-            pos = end
-    sp.overflow = max(fill_f[0] - int(FILL_SHARE * voice_f), 0)
-    # the lines whose own fill is over FILL_SHARE of their frames: returned to the gates (wf3.stories_gates tops them up)
-    sp.fill_over = {ln: round(v / max(bounds[ln][1] - bounds[ln][0], 1), 3) for ln, v in sp.fill_by_line.items()
-                    if v > FILL_SHARE * max(bounds[ln][1] - bounds[ln][0], 1)}
-    sp.static_share = round(n_static[0] / max(n_shots[0], 1), 3)
-    out.sort(key=lambda r: r[0])
-    return [r for r in out if r[1] - r[0] >= 1]
+                    sp.take_photo(rec,a)
+                out.append([a,b,kind,name,rec])
+                if isinstance(plant,str):
+                    plants.setdefault(plant, (grade,path,ti))
+        sp.plan["phrases"].append(dict(line=line,word_i=wi,f=[lo,hi],pictures=len(selected),brief=brief))
+    return out
 
 
 def fit_grades(verdicts):
@@ -1382,44 +917,6 @@ def grey_lines(timeline, seg_at, nseg):
         if c is not None and c < 8:
             grey[ln] += r[1] - r[0]
     return {i for i in range(nseg) if tot[i] and grey[i] / tot[i] > 0.5}
-
-
-def section_finish(style, seg, i=None, script=None):
-    """mono (black and white), gate (black and white in a film gate), crt (scanlines) or None (colour, under the film's
-    look) for one segment: the writer's device (seg["finish"], writer.annotate), never a mapping from its years. The
-    payoff and the close are always colour, and so is every segment from the script's colour_turn on."""
-    if seg.get("beat") in ("payoff", "close"):
-        return None
-    ct = (script or {}).get("colour_turn")
-    if isinstance(ct, int) and i is not None and i >= ct:
-        return None
-    return FINISH_OF.get(seg.get("finish"))
-
-
-def finish_budget(fin, seg_len, script, top=0.25, grey=()):
-    """The devices held to the judge's budget on the film's own frames: above `top` of the voice only the writer's best
-    ranked (finish_rank) stay; a line whose pictures are already grey (grey) keeps its device first. Returns
-    (finishes, share)."""
-    total = max(sum(seg_len), 1)
-    segs = script["segments"]
-    grey = set(grey)
-    dev = sorted((i for i, f in enumerate(fin) if f), key=lambda i: (i not in grey, segs[i].get("finish_rank") if isinstance(segs[i].get("finish_rank"), (int, float)) else 99, i))
-    out, used = list(fin), 0
-    for i in dev:
-        if (used + seg_len[i]) / total <= top + 1e-9:
-            used += seg_len[i]
-        else:
-            out[i] = None
-    return out, round(used / total, 3)
-
-
-# ----------------------------------------------------------------- the film
-
-POOL_EDGE_Q = 0.4          # the inked words' outer edges sit at this share of the pool's half-width (the Gaussian still
-                           # darkens 58% there), and the pool reaches at least POOL_PAD_X past them
-POOL_PAD_X = 0.06
-POOL_TONE = (0.45, 0.65)   # the picture's tone under the caption (Y', 0-1): no pool at or under the first, the full pool from the second
-                           # (wf3.caption_contrast calls white ink on a median over 0.6 unreadable)
 
 
 def _ink_light(c):
@@ -1634,8 +1131,8 @@ def fit_measures(pictures, timeline, sp, takes, secs, fin, seg_len, device_share
     moving_f = sum(p["f"][1] - p["f"][0] for p in base if p["kind"] == "clip" and float(p.get("motion") or 0) >= MOTION_FLOOR)
     off_line = sum(p["f"][1] - p["f"][0] for p in pictures if p.get("line") is not None and p.get("spoken_line") is not None
                    and p["line"] != p["spoken_line"])
-    fill_f = sum(p["f"][1] - p["f"][0] for p in pictures if p.get("tier") in ("designed", "reframe", "replay"))
-    return dict(tier_s=tiers, shortfall_s={str(k): round(v / FPS, 2) for k, v in sorted(sp.shortfall.items())},
+    fill_f = sum(p["f"][1] - p["f"][0] for p in pictures if p.get("tier") in ("missing", "designed", "reframe", "replay"))
+    return dict(reference_shot_quantiles=SHOT_Q, reference_cuts_per_10s=16, phrase_plan=sp.plan, tier_s=tiers, shortfall_s={str(k): round(v / FPS, 2) for k, v in sorted(sp.shortfall.items())},
                 reframed_s={str(k): round(v / FPS, 2) for k, v in sorted(sp.reframed.items())}, spread_lines=dict(getattr(sp, "spread", None) or {}),
                 again_s={str(k): round(v / FPS, 2) for k, v in sorted((getattr(sp, "again", None) or {}).items())},
                 new_pictures_10s=round(takes["new_pictures_10s_n"] / max(secs, 1) * 10, 2), repeat_share=takes["repeat_share"],
@@ -1983,8 +1480,7 @@ def build(script, sup, style_id, direction=None):
     for i, s_ in enumerate(script["segments"]):
         cards[i] = [dict(text=str(x["text"]), role=x.get("role"), big=x.get("big"), small=x.get("small")) for x in s_.get("show") or []
                     if isinstance(x, dict) and x.get("text") and x.get("role") in ("figure", "key", "chapter", "ordinal")]
-    fin = [section_finish(st, s, i, script) for i, s in enumerate(script["segments"])]
-    fin, device_share = finish_budget(fin, seg_len, script, top=0.25 * float(d.get("device_budget", 1.0)))
+    fin, device_share = [None] * nseg, 0.
     talk_fit = set()
     if fit_on:
         # the talking rule only for live action: the verdict's booleans (a model's reading), never animation or drawings
@@ -1992,15 +1488,11 @@ def build(script, sup, style_id, direction=None):
         talk_fit = {p for p in talk if any(v.get("live_action") is True and v.get("speaking_on_camera") is True for v in _verdict_rows(ver.get(p)))}
         sp = Supply(pics, footage, talk=(), allow=collage, fit=sup.get("fit") or {}, deny=deny, cards=cards, only_ok=d.get("only_ok"),
                     grades=fit_grades(sup.get("fit_verdicts")))
+        sp.verdicts, sp.identities = ver, sup.get("identity") or {}
         timeline = cut_fit(script, clock, sp, f_end, stress, seed=int(d.get("seed", 1114)), device_lines=[i for i, f_ in enumerate(fin) if f_], prefer_new=bool(d.get("prefer_new_pictures", d.get("source_evidence"))),
                            proof_fill=d.get("proof_fill") or ())
         cutter = dict(name="cut_fit", why="every picture carries a verdict for its line and take")
-        # grey footage counts against the black-and-white budget: the devices get what the pictures leave
         intrinsic = intrinsic_grey(timeline, fin, f_voice_end)
-        if intrinsic > 0:
-            fin = [section_finish(st, s, i, script) for i, s in enumerate(script["segments"])]
-            fin, device_share = finish_budget(fin, seg_len, script, top=max(0.25 * float(d.get("device_budget", 1.0)) - intrinsic, 0.0),
-                                              grey=grey_lines(timeline, seg_at, nseg))
     else:
         sp = Supply(pics, footage, talk=talk, allow=collage, deny=deny)
         timeline = cut_story(script, clock, sp, f_end, stress, aim_s=float(d["aim_s"]))
@@ -2008,7 +1500,6 @@ def build(script, sup, style_id, direction=None):
         intrinsic = None
     sourced = bool(fit_on and script.get("facts") and d.get("source_evidence"))
     if sourced:
-        timeline = evidence_cut.retain_checked(timeline, d.get("checked_shots"), sp)
         timeline = evidence_cut.place(script, clock, timeline, sp, sup.get("identity") or {})
     timeline = F.pin_voices(timeline, sup.get("voices") or [])
     by_seg = {}
@@ -2031,7 +1522,7 @@ def build(script, sup, style_id, direction=None):
         played = span_motion(rec, rec["src"][0], rec["src"][1]) if kind == "clip" and rec.get("src") and (rec.get("motion") or {}).get("curve") \
             else (rec.get("motion") or {}).get("p90")
         P.pictures.append(dict(f=[f0, f1], kind=kind, name=name, path=rec["path"], shows=rec.get("shows"), mode=mode,
-                               finish=fin[seg_at(f0)], use=rec.get("use"),
+                               finish=fin[seg_at(f0)], use=rec.get("use"), word_i=rec.get("word_i"), identity=rec.get("identity"),
                                source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"), time_range=rec.get("time_range"),
                                src=rec.get("src"), tier=rec.get("tier") or ("voice" if rec.get("voice") else None), take=rec.get("take_i"),
                                take_bounds=rec.get("take"), take_group=rec.get("take_group"), line=rec.get("pick_line", seg_at(f0)), spoken_line=seg_at(f0),
@@ -2109,17 +1600,22 @@ def build(script, sup, style_id, direction=None):
     def native_window(f0, f1, kind, name, rec, key):
         # With a checked source but no subject bounding box, fit the full image.
         # The window follows the source aspect, including upright portraits.
-        aspect = rec["w"] * H / (rec["h"] * W)
-        portrait = bool(rec.get("depicted_name"))
-        center_y = .55 if portrait else .46
-        w = min(.94, (.56 if portrait else .72) * aspect)
-        h = w / aspect
-        P.page([f0, f1], "#272521", "#141310", grain=.025)
-        kw = dict(src=list(rec["src"])) if kind == "clip" else {}
-        P.card([f0, f1], key, [.5-w/2, center_y-h/2, .5+w/2, center_y+h/2], z=1, crop=[0,0,1,1], **kw)
-        layer_spans.append((f0, f1, 2))
-        note(f0, f1, kind, name, rec, "window")
-        P.pictures[-1]["crop"] = [0,0,1,1]
+        from scene.motion import fit_panel
+        identity = rec.get("identity") or {}
+        area = identity.get("clean_crop") or [0,0,1,1]
+        if rec.get("portrait_repair"):
+            P.shot([f0,f1], key, push_crop(rec,f1-f0,k=.035))
+            note(f0,f1,kind,name,rec,"portrait")
+            return
+        box = identity.get("meaning_box") or area
+        crop = [max(area[0],box[0]-.05),max(area[1],box[1]-.05),min(area[2],box[2]+.05),min(area[3],box[3]+.05)]
+        panel = fit_panel(crop,(rec["w"],rec["h"]),(W,H),[.015,.20,.985,.82])
+        P.page([f0,f1], "#272521", "#141310", grain=.02)
+        kw = dict(src=list(rec["src"])) if kind == "clip" else dict(s=[1+.035*j/max(1,f1-f0-1) for j in range(f1-f0)])
+        P.card([f0,f1],key,panel,z=1,crop=crop,**kw)
+        layer_spans.append((f0,f1,2))
+        note(f0,f1,kind,name,rec,"window")
+        P.pictures[-1].update(crop=crop,meaning_height_px=round(H*(panel[3]-panel[1])*(box[3]-box[1])/(crop[3]-crop[1])))
 
     def bleed(f0, f1, kind, name, rec, key):
         n_win[1] += 1
@@ -2384,7 +1880,7 @@ def build(script, sup, style_id, direction=None):
             return False
         briefs = script["segments"][seg_at(a)].get("see") or []
         aspect = (rec.get("w") or W) / (rec.get("h") or H) / (W / H)
-        return rec.get("keep_full_frame") or rec.get("depicted_name") or rec.get("tier") == "detail" or (abs(aspect - 1) > .05 and any(
+        return (rec.get("identity") or {}).get("meaning_box") or rec.get("keep_full_frame") or rec.get("depicted_name") or rec.get("tier") == "detail" or (abs(aspect - 1) > .05 and any(
             x.get("thing") == name and x.get("keep_full_frame") for x in briefs))
 
     sealed = full_frame | board
@@ -2430,9 +1926,6 @@ def build(script, sup, style_id, direction=None):
                 note(f0, f1, kind, name, rec, "product")
             elif kind == "clip" and rec["path"] in board and not rec.get("voice"):
                 proof_print(f0, f1, kind, name, rec, keys[rec["path"]])
-            elif rec.get("tier") == "exhibit":
-                evidence_cut.source_page(P, f0, f1, rec, clock)
-                grounds.append((f0, f1, .90))
             elif kind == "designed":
                 designed(f0, f1, rec)
             elif needs_native(timeline[run[0]]):

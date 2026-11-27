@@ -38,6 +38,9 @@ def lookup(briefs, writer, catalog=()):
     text, usage = writer.ask_web(
         'Find photographs for documentary editors at the cited publishers and their own press or archival collections. '
         'The supplied numbered catalogue contains pictures actually linked from the film’s cited pages. Select exact matches by catalogue number, including reference-only originals. When the page depicts a different event, search the publisher’s own collection and captioned reports. Read the source page. Return original image URLs actually linked there, not invented URLs or web thumbnails. '
+        'On subsequent rounds widen from cited pages to archive.org catalogue scans and period ads, agency news photos, '
+        'other cuts of commercials, company press kits, Commons categories and Wikidata P18 original portraits. '
+        'For a named document find the actual readable page or scan. For a portrait accept any recognizable age unless specified. '
         'Use each line’s action and required detail. Search the publisher’s history, museum and captioned reports for the prototype, event or documented portrait. Use a captioned report to establish who is pictured and in which order. Seek an original with matching rights. Distinguish the photograph date from the object date. '
         'Look for an explicit asset licence permitting editorial reporting, or a freely licensed original. '
         'If the publisher permits research only or requires permission, retain its image for identification with its '
@@ -148,8 +151,8 @@ def supply(script, subjects, got, out, per):
         if not isinstance(i, int) or any(must in ([r.get("checked_brief")] + (r.get("checked_briefs") or [])) for r in got.get(s["name"], [])):
             continue
         sources = [facts[k] for k in script['segments'][i].get('facts', []) if k in facts]
-        if sources:
-            briefs.append(dict(name=s['name'], must_show=must, line=i, as_of=s.get('as_of'), moment=s.get('moment'), searches=s.get('searches'), sources=sources))
+        if sources or must:
+            briefs.append(dict(name=s['name'], must_show=must, line=i, as_of=s.get('as_of'), moment=s.get('moment'), searches=s.get('searches'), sources=sources, search_round=s.get('search_round',1)))
     if not briefs:
         return [], []
     B = pictures._worker()
