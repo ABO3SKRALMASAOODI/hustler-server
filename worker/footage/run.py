@@ -379,7 +379,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         for sp in os.listdir(work):
             if sp.startswith("sheet_"):
                 shutil.copyfile(os.path.join(work, sp), os.path.join(out_dir, "sheets", sp))
-        good = [c for c in pool_frames if c["ok"] and c["clean"] and c["grade"] >= 3]
+        good = fitting_frames(pool_frames, preserve_source=preserve_source)
         reused = sum(bool(c.get("look_reused")) for c in pool_frames)
         log(f"look: {len(pool_frames)-reused} frames checked, {reused} reused, {len(good)} pass")
         look.dump([{k: v for k, v in c.items() if k not in ("jpg",)} for c in pool_frames], os.path.join(out_dir, "looked.json"))
@@ -584,7 +584,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 clips.append(dict(verification=p.get("verification"), file=p["file"], seconds=round(p["t1"] - p["t0"], 2), subject=p["subject"], shows=p["shows"], grade=p["grade"],
                                   source=dict(url=s["url"], title=s["title"], channel=s.get("channel"), where=s["where"],
                                               **({"description": s["description"][:600]} if s.get("description") else {})),
-                                  rung=s.get("rung"), source_size=[s.get("w"), s.get("h")],
+                                  rung=s.get("rung"), source_needs_framing=p.get("clean") is False, source_size=[s.get("w"), s.get("h")],
                                   time_range=[p["t0"], p["t1"]], frame_at=p["t"], x=p.get("x"), eq=p.get("eq"), trim=p.get("trim"),
                                   how=p.get("how"), sheet=p.get("sheet"), **({"motion_p90": p["motion_p90"]} if "motion_p90" in p else {})))
             out_lines.append(dict(i=r["i"], say=r["say"], show=r["show"], dur=r["dur"], want=r["want"], clips=clips,
@@ -748,6 +748,12 @@ def _keep_sources(sources, log=print):
     return added
 
 
+def fitting_frames(frames, *, preserve_source):
+    """A fitted compositor can frame a relevant part of an otherwise cluttered source."""
+    return [frame for frame in frames if frame["ok"] and frame["grade"] >= 3 and
+            (frame["clean"] or (preserve_source and frame.get("lines")))]
+
+
 def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict=False, motion_of=None, alloc=None):
     """Step 6, clips to lines: [{"i", "say", "show", "dur", "want", "picks"}]. Each slot takes the best frame whose window
     inside its shot overlaps no window already cut (`taken`, updated). Defaults: line by line, a frame named for the line
@@ -801,6 +807,8 @@ def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict
                 score = c["grade"] - 1.0
             else:
                 continue
+            if c.get("clean") is False:
+                score -= 1.0
             if c["source"] == last_src:
                 score -= 0.7
             if any(x["source"] == c["source"] for x in chosen):
