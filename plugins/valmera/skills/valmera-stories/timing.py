@@ -1,5 +1,6 @@
 """Measure the first read for the writer's whole-script revision."""
 import json
+from pathlib import Path
 
 
 HOOK_LAND_S = 3.7          # the hook's collision lands by this many seconds of speech (the judge's median hook end)
@@ -59,3 +60,47 @@ def measure(words, sc, hook_s=HOOK_LAND_S, close_s=CLOSE_S):
 def overage(m):
     """Seconds over budget, summed over the measured beats (0 when every beat fits)."""
     return round(sum(max(0.0, float(v["s"]) - float(v["budget"])) for v in (m.get("over") or {}).values()), 2)
+
+def signature(script):
+    import hashlib
+    payload = [script.get("voice"), script["segments"]]
+    return hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()
+
+
+def read_landing_lines(script, folder):
+    """Measure one real take of each requested line on CPU. The final production read has its own master."""
+    import math
+    import sys
+    import numpy as np
+    import ptts
+    from faster_whisper import WhisperModel
+    from scipy.signal import resample_poly
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"_shell"/"narrate"))
+    import lines
+    model, catalog = lines.phonon_source()
+    engine = lines.ENGINES["phonon"]
+    ptts.set_num_threads(2)
+    voice = lines.phonon_voice(None, script)
+    actor = ptts.TTS(model, device="cpu", lang=engine["lang"], quant=engine["quant"], voice_catalog=catalog)
+    listener = WhisperModel("small.en", device="cpu", compute_type="int8", cpu_threads=2, local_files_only=True)
+    rows, offset = [], 0.0
+    for i, segment in enumerate(script["segments"]):
+        audio = np.asarray(actor.synth(segment["say"], voice=voice, seed=7+i*7), dtype=np.float32)
+        divisor = math.gcd(actor.sample_rate, 16000)
+        samples = resample_poly(audio, 16000//divisor, actor.sample_rate//divisor).astype(np.float32)
+        heard, _ = listener.transcribe(samples, language="en", word_timestamps=True, condition_on_previous_text=False)
+        words = [w for phrase in heard for w in phrase.words or []]
+        if not words:
+            raise ValueError(f"no word clock for timing take {i}")
+        rows.extend(dict(w=w.word.strip(), seg=i, start=round(w.start+offset,3), end=round(w.end+offset,3)) for w in words)
+        offset += len(audio)/actor.sample_rate + float(segment.get("pause_after") or 0.3)
+    result = dict(voice=voice, source="Phonon CPU draft take", words=rows, request=signature(script))
+    output = Path(folder)/"draft-words.json"
+    temporary = output.with_suffix(".tmp")
+    temporary.write_text(json.dumps(result,ensure_ascii=False))
+    temporary.replace(output)
+
+
+if __name__ == "__main__":
+    import sys
+    read_landing_lines(json.loads(Path(sys.argv[1]).read_text()), Path(sys.argv[2]))

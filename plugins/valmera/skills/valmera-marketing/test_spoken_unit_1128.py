@@ -73,3 +73,29 @@ def test_podcast_fragments_keep_both_word_edges_when_the_thought_crosses_a_pause
     assert sentences == [{"i":0, "text":"They wanted the same thing.", "t0":0.4, "t1":4.2},
                          {"i":1, "text":"So they agreed.", "t0":5.2, "t1":6.1}]
     assert edges[2]["t0"] == 5.2
+
+
+def test_no_breath_threshold_uses_measured_sound_inside_the_interword_gap(tmp_path):
+    import wave
+    import numpy as np
+    path = tmp_path / "noise.wav"
+    with wave.open(str(path), "wb") as wav:
+        wav.setparams((1,2,16000,0,"NONE",""))
+        audio = np.full(16000,2000,dtype=np.int16)
+        audio[6350:6470] = 0
+        wav.writeframes(audio.tobytes())
+    point = proof.quiet_gap(str(path), .38, .43)
+    assert .396 <= point <= .407
+
+
+def test_click_blend_preserves_both_words_and_the_cut_clock():
+    import numpy as np
+    rate = 48000
+    audio = np.full((rate,1), .012, dtype="float32")
+    audio[rate//2:] = -.014
+    original = audio.copy()
+    changes = proof.blend_pauses(audio,rate,[dict(start=.1,end=.42),dict(start=.58,end=.9)],
+                                 [dict(t=.5,artefacts=["click"])])
+    assert len(changes)==1 and np.array_equal(audio[:int(.42*rate)],original[:int(.42*rate)])
+    assert np.array_equal(audio[int(.58*rate):],original[int(.58*rate):])
+    assert np.max(abs(np.diff(audio[:,0]))) < .001

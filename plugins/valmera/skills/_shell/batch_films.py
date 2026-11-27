@@ -153,9 +153,10 @@ def edit_film(wf, root, batch, index, idea, until_script):
                     return None
                 return str(next(out.glob("*/film.json")).parent)
             stopped = shell.jload(Path(options.work_root) / rid / "run.json")["stopped"]
-            if wf == "wf3" and attempt == 0 and stopped["stage"] == "script":
-                # A candidate whose facts or recording could not support the film gives way to a reserve.
-                break
+            if wf == "wf3" and stopped["stage"] == "script":
+                banks = [shell.jload(p) for p in directory.glob("spine[0-9]*.json")]
+                if banks and all(bank and bank.get("ok") is False for bank in banks):
+                    break
         raise RuntimeError(f"{rid} stopped in {stopped['stage']}: {stopped['error']}")
 
 

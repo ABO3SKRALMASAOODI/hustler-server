@@ -24,7 +24,7 @@ Nothing here interprets the words by rule; the model rewrites, the model audits,
 15 Nov (the independent check of the fact gate): the rewrite gave lines claims no quote held ("Pixar had never made a
 movie this long"). Each segment now carries the verified quotes it stands on, the rewrite is told to add no fact beyond
 them and the auditor checks against them; both calls are pinned to OpenAI (EAR_MODEL). The ear is never the last word:
-writer.final_support judges every line on its quotes after it (wf3.final_gate).
+The current workflows compose the read with the beat sheet. This standalone rewrite supports older scripts.
 
 15 Nov, later (the spine check): the core segments (hook, turn, payoff, close) also carry `its_point`, the claim the
 story's verified spine gives that beat (writer.spine_points), and the rewrite must say it at least as sharply.
@@ -88,7 +88,7 @@ LONG_SHAPE = (
     "none reminds the listener of what they just heard.\n") + HARD
 SHAPES = {"long-form": LONG_SHAPE}
 
-# the voice a later rewrite keeps (writer.final_support restates an unsupported line in the ear's style)
+# Performance direction for older scripts that were written without a beat sheet
 KEEP_STYLE = ("The line is spoken by a narrator over pictures and was already rewritten for the ear: keep that voice. A "
               "thought runs on with commas and 'and', 'but', 'so' until it lands, a full stop only where it lands (about one "
               "every twelve words, most sentences with a comma); lengths mixed, never three short sentences in a row, never a "
