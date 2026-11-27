@@ -683,3 +683,14 @@ def test_grade_showcase_continues_the_same_thought_after_send(tmp_path, monkeypa
     assert product["hook"] == [1., 128/30]
     assert product["window"] == [128/30, 11.1]
     assert product["marks"]["site"][0] == product["marks"]["export_voice"][1]
+
+def test_recorded_site_occupies_the_brand_join_after_the_last_spoken_frame():
+    marks = D.showcase_marks([0, 4], [8, 18], 3, before=[1, 4], after=[4, 7])
+    begin, end = marks["site"]
+    assert begin == marks["export_voice"][1] == marks["stretch"][1]
+    assert end - begin == D.card_join_frames()
+    scene = reel(f_end=end)
+    photo = dict(path="/x/page.png", w=390, h=844)
+    receipt = D.site(scene, f0=begin, f1=end, page=photo, export=EXPORT, lib=LIB)
+    assert receipt["brand_join"] and receipt["lines"] == []
+    assert [(i["k"], i["f"]) for i in scene["items"] if i["id"].startswith("ct.")] == [("card",[begin,end])]
