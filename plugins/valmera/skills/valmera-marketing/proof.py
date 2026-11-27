@@ -77,7 +77,6 @@ PY = f"{VV}/venv-worker/bin/python"
 SRC_ROOT = os.environ.get("WF2_SOURCES", f"{V}/.tmp/valmera-podcast-shorts")
 REFS = f"{V}/reference-library/2026-11-05/02-editing-tutorials-and-app-marketing"
 ATLAS = f"{VV}/week-1106/atlas/numbers.json"
-FOOTAGE_MORE = 2.6        # clips asked a line: the marketing references cut every 0.58 s, and a wrong picture leaves the film
 CHECK_MODEL = "gpt-6-sol"           # the picture checks: every picture against its words, the export against the sentence
 FORM = dict(words=(55, 85), segments=(7, 12), seconds=(24, 38))
 CAP_PX = 72               # the narration's captions: 56 px read small on a phone beside the references' (owner, 16 Nov: "very not clear")
@@ -1256,10 +1255,9 @@ def write(ctx, idea, card, rc, notes=None, inventory=None, hook=None):
               "of the same talking take masquerading as new shots. Each segment makes one visible claim. "
               "Split comparisons and different named objects across segments: a monitor and a phone, or a lamp "
               "and chairs, need separate lines so the cutter cannot swap their pictures under the wrong words.")
-    system += (" The supplied product assets are the upload and the export only. Do not invent a shot of this export "
-               "playing on a physical phone, a view of its editing timeline, or a product interface recording. "
-               "THE UPLOAD and THE EXPORT play as their actual files. Generic editing footage may illustrate a "
-               "general editing problem, but cannot impersonate this recorded session or the Valmera interface. "
+    system += (" THE UPLOAD and THE EXPORT play the recorded files. THE STUDIO contains the actual "
+               "session photographs in the supplied inventory. Show the composer, sent request and result "
+               "on the words describing those actions. "
                + opening_brief(hook) +
                "Do not describe a finished export as if it were the broken before. Under the Valmera call to action, use the authenticated export; "
                "never show another editing application's interface as the product being offered. "
@@ -1322,8 +1320,7 @@ def write(ctx, idea, card, rc, notes=None, inventory=None, hook=None):
                "VALMERA.IO; [] only where type would crowd the picture, \"beat\": hook|setup|turn|low|payoff|close, "
                "\"pace\": slow|steady|brisk|fast, \"see\": [{\"thing\": exact subject from named or THE UPLOAD or THE EXPORT, "
                "\"as_of\": the version or state the words mean, \"must_show\": what visibly carries these exact words, "
-               "\"moment\": a specific visual action or null, \"still_only\": boolean}], \"pictures\": names from `named` this segment talks about, in order (two or three a "
-               "segment, so the cut can change picture every half second), \"melody\": falling|rising|level|wide, \"emphasis\": [one or "
+               "\"moment\": a specific visual action or null, \"still_only\": boolean}], \"pictures\": names from `named` this segment talks about, in spoken order, \"melody\": falling|rising|level|wide, \"emphasis\": [one or "
                "two words of say], \"pause_after\": 0.18 to 0.3 (0.4 where it turns, at most twice), \"direction\": a few words for the "
                "actor, \"era\": 2026, \"collage\": true on the one or two segments that list several things}], \"named\": [{\"name\": what a "
                "camera filmed and anyone can find on YouTube or Wikimedia Commons (the speaker on stage, an editor at a timeline, a "
@@ -1451,7 +1448,7 @@ def script(ctx, ideas_out):
         rc["opening"] = dict(seconds=hook["t"], says=hook.get("says"), landing=hook.get("landing"),
                              shows="the clip as uploaded and the export side by side, the export's picture landing")
         ctx.log(f"opening beat: export {hook['t'][0]}-{hook['t'][1]} s, lands at {hook.get('landing')}, says {hook.get('says')!r}")
-    inventory = VI.prepare(ctx, idea, rc, ask, PX.pictures, still)
+    inventory = VI.prepare(ctx, idea, rc, ask, PX.pictures, still, studio=VI.studio_photos(rec))
     spend += inventory["spend"]
     ctx.log(f"visual inventory: {sum(map(len, inventory['pictures'].values()))} distinct inspected pictures before writing")
     notes, sc, bad = ctx.args.get("notes"), None, []
@@ -2503,7 +2500,7 @@ def ask_shots(content):
         content, what="product source windows", model=CHECK_MODEL, effort="low", max_tokens=4000)
 
 
-def footage_subjects(ctx, sc, lines):
+def footage_subjects(ctx, sc, lines, context=None):
     """Footage for the lines whose only picture is the recording (20 Nov: seven of nine lines named only THE UPLOAD or THE
     EXPORT, the footage search took one line and the cut looped the export's first seconds): a model reads each such
     line's words beside the film's named subjects and gives the line up to two subjects a camera filmed that show what its
@@ -2512,20 +2509,18 @@ def footage_subjects(ctx, sc, lines):
     spend)."""
     path = os.path.join(ctx.supply, "footage_subjects.json")
     old = jload(path, {}) or {}
-    if set(lines).issubset(old.get("lines") or []):
+    if old.get("context") == context and set(lines).issubset(old.get("lines") or []):
         return {int(k): v for k, v in (old.get("subjects") or {}).items() if int(k) in lines}, []
     have = {n.get("name"): n for n in sc.get("named") or [] if n.get("name")}
-    content = json.dumps(dict(lines=[dict(line=i, say=sc["segments"][i].get("say")) for i in lines],
+    content = json.dumps(dict(story=context, narration=[s.get("say") for s in sc["segments"]], lines=[dict(line=i, say=sc["segments"][i].get("say")) for i in lines],
                               named=[dict(name=n.get("name"), is_a=n.get("is"), must_show=n.get("must_show")) for n in have.values()]),
                          ensure_ascii=False)
     try:
         got, use = ask(
-            "A marketing film for video editors cuts real footage under each narrated line. These lines show the real "
-            "product recording, which is only a few distinct shots, so each also needs footage of what its own words name. "
-            "For each line give at most two subjects a camera filmed and anyone can find on YouTube that literally show what "
-            "the words name (the editor's pain as it happens at a desk or a timeline, a thing the speaker names, a phone "
-            "playing a short): a subject from `named` by its exact name when one shows it, else a new one. Never a metaphor, "
-            "never a celebrity's story, never Valmera's own interface. A line whose words name nothing a camera can show gets []. "
+            "Read the whole story, the speaker's claim and the upload transcript. For each line select subjects "
+            "that depict its action or evidence in that story. Use the real people, service, location or document "
+            "where it matters. When the Studio is the subject use its recorded photographs. Give the archive "
+            "queries that find this specific action. "
             'Return JSON {"lines": [{"line": index, "subjects": [a named name, or {"name", "is": thing|place|person, '
             '"must_show": one plain sentence of what a frame shows, "video_searches": [one to three YouTube searches]}]}]}.',
             content, what="footage subjects", effort="low", max_tokens=3000)
@@ -2548,7 +2543,7 @@ def footage_subjects(ctx, sc, lines):
                                  must_show=str(x.get("must_show") or name),
                                  video_searches=[str(q) for q in x["video_searches"] if isinstance(q, str) and q.strip()][:3]))
         out[int(row["line"])] = subs[:2]
-    jsave(path, dict(lines=list(lines), subjects={str(k): v for k, v in out.items()}, spend=[use]))
+    jsave(path, dict(context=context, lines=list(lines), subjects={str(k): v for k, v in out.items()}, spend=[use]))
     return out, [use]
 
 
@@ -2584,8 +2579,13 @@ def proof_fill_clip(body, after_t, sha, shots, ranked, owed=()):
 def external_footage(ctx, script, pack, durs, anchors, reel_kw, spend):
     """Search uncovered external subjects and retain every proven clip and source observation across passes."""
     sc, sup_dir = script["script"], ctx.supply
-    own = ("THE UPLOAD", "THE EXPORT")
+    own = ("THE UPLOAD", "THE EXPORT", "THE STUDIO")
     fscript = json.loads(json.dumps(script))         # the footage engine searches the web; the recording's own names are ours
+    receipts = script.get("receipts") or {}
+    idea = script.get("idea_full") or {}
+    context = dict(title=sc.get("title"), claim=idea.get("claim"), upload_says=receipts.get("upload_says"),
+                   speaker=idea.get("speaker") or sc.get("speaker"), clip=idea.get("why"), topic=idea.get("technique"))
+    fscript["script"]["title"] = json.dumps(context, ensure_ascii=False)
     for seg in fscript["script"]["segments"]:
         seg["pictures"] = [n for n in seg.get("pictures") or [] if n not in own]
         seg["see"] = [v for v in seg.get("see") or [] if v.get("thing") not in own]
@@ -2593,12 +2593,12 @@ def external_footage(ctx, script, pack, durs, anchors, reel_kw, spend):
     # never a whole line); the typed line and the call to action carry the film's devices
     pr = sc["proof"]
     title_lines = recorded_titles(script)
-    bare = [i for i, seg in enumerate(fscript["script"]["segments"]) if not seg.get("pictures")
+    bare = [i for i, seg in enumerate(fscript["script"]["segments"]) if not seg.get("pictures") and "THE STUDIO" not in (sc["segments"][i].get("pictures") or [])
             and i not in title_lines and i not in (int(pr["after_after"]), len(sc["segments"]) - 1)]
     if bare:
-        subjects, uses = footage_subjects(ctx, fscript["script"], bare)
+        subjects, uses = footage_subjects(ctx, fscript["script"], bare, context)
         spend += uses
-        lend_subjects(fscript["script"], subjects)
+        lend_subjects(fscript["script"], {i:[n for n in ns if n["name"] not in own] for i,ns in subjects.items()})
         ctx.log(f"footage subjects for recording lines: {json.dumps({i: [n['name'] for n in v] for i, v in subjects.items()}, ensure_ascii=False)[:300]}")
     search_lines = [i for i, seg in enumerate(fscript["script"]["segments"]) if seg.get("pictures")]
     foot = chain.footage(ctx, fscript, durs, anchors=anchors, lines=search_lines, **W3.footage_kw(reel_kw)) if search_lines else None
@@ -2609,8 +2609,8 @@ def external_footage(ctx, script, pack, durs, anchors, reel_kw, spend):
         # too little passed: once more with each subject as a plain thing to see (the writer's must_show can be too narrow)
         ctx.log(f"footage: {foot['counts']['lines_with_footage']} of {len(search_lines)} external-footage lines; searching again with plain subjects")
         for n in fscript["script"].get("named") or []:
-            n["must_show"] = f"{n['name']}, plainly visible."
-            n["is"] = "person" if n.get("is") == "person" and len(str(n["name"]).split()) <= 3 else "thing"
+            queries = n.get("video_searches") or []
+            n["video_searches"] = list(dict.fromkeys([*queries, n.get("must_show") or n["name"]]))
         foot2 = chain.footage(ctx, fscript, durs, anchors=anchors, lines=missing, out_name="footage_plain",
                               avoid=[os.path.join(sup_dir, "footage", "footage.json")], **W3.footage_kw(reel_kw))
         if foot2:
@@ -2673,9 +2673,13 @@ def supply(ctx, script):
         pack["credits"] = [dict(name=r["name"], title=r.get("title"), licence=r.get("licence"), credit=r.get("credit"), page=r.get("page"))
                            for v in got.values() for r in v]
         pack["missing"] = [n["name"] for n in named if not got.get(n["name"])]
+    recording = jload(script.get("record"), {}) if script.get("record") else {}
+    if recording:
+        studio = VI.studio_photos(recording)
+        if studio:
+            pack["pictures"]["THE STUDIO"] = studio
     words_all = json.load(open(nar["words"]))["words"]
     durs = chain.seg_durs(words_all, len(sc["segments"]))
-    durs = [round(float(x) * FOOTAGE_MORE, 2) for x in durs] if durs else durs
     anchors = {k: [r["path"] for r in v if r.get("path")] for k, v in (pack.get("pictures") or {}).items()}
     # Illustrative footage is silent. The two real-voice passages come only
     # from our verified Studio recording, so source transcripts are unused.
@@ -2781,13 +2785,12 @@ def supply(ctx, script):
 # ----------------------------------------------------------------- score
 
 def content_pace(pack, sc):
-    """The film's own pace: the references' median shot scaled by how fast this narrator speaks against them."""
-    ref = ref_pace()
-    ws = [w for w in json.load(open(pack["words"]))["words"] if not w.get("voice")]
-    talk = sum(max(float(w["end"]) - float(w["start"]), 0) for w in ws)
-    wps = len(ws) / max(talk, 1e-3) if ws else ref["wps"]
-    aim = min(max(ref["shot_med_s"] * ref["wps"] / max(wps, 1e-3), 0.45), 0.8)
-    return round(aim, 3), dict(ref=ref, narrator_wps=round(wps, 2), aim_s=round(aim, 3))
+    """Describe the available shots and the narration to the compositor."""
+    words = json.load(open(pack["words"]))["words"]
+    span = max((w["end"] for w in words),default=0) - min((w["start"] for w in words),default=0)
+    assets = {c["path"] for ln in pack.get("footage") or [] for c in ln.get("clips") or []}
+    assets.update(r["path"] for photos in (pack.get("pictures") or {}).values() for r in photos)
+    return max(span/max(1,len(assets)),1/F.FPS), dict(supply=len(assets), seconds=span)
 
 
 CAPTION_PIECE_F = 3        # a caption word trimmed around a full-frame recording keeps a piece this long or longer
@@ -3147,7 +3150,7 @@ def repair_candidates(pack, sc, lines, cap=REPAIR_CANDIDATES, l1=None, said=None
         seen.add(k)
         out.append(dict(path=path, kind=kind, name=name, t=round(float(t), 3), seconds=float(c.get("seconds") or 0.0),
                         w=int(c.get("w") or F.W), h=int(c.get("h") or F.H), fps=float(c.get("fps") or F.FPS), faces=c.get("faces") or [],
-                        landings=c.get("landings"), line=line, product=name in ("THE UPLOAD", "THE EXPORT"),
+                        landings=c.get("landings"), line=line, product=name in ("THE UPLOAD", "THE EXPORT", "THE STUDIO"),
                         said=said_in(said, tls.get(path), t, win_s) if kind == "clip" else ""))
     segs = sc.get("segments") or []
     near, rest = [], []
@@ -3161,6 +3164,8 @@ def repair_candidates(pack, sc, lines, cap=REPAIR_CANDIDATES, l1=None, said=None
         on = [i for i, s in enumerate(segs) if name in (s.get("pictures") or [])]
         for r in recs:
             (near if set(on) & set(lines) else rest).append((r, "photo", name, 0.0, on[0] if on else None))
+    for rec in (pack.get("pictures") or {}).get("THE STUDIO", []):
+        add(rec,"photo","THE STUDIO",0.0)
     for row in near:
         add(*row)
     for body in pack.get("proof_fill") or []:
