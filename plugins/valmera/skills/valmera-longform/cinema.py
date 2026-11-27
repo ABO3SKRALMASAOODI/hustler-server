@@ -872,17 +872,18 @@ def encoded_durations(ft):
             if not path.is_file():continue  # Restore the recorded interval when it is selected.
             stat=path.stat();stamp=[stat.st_size,stat.st_mtime_ns]
             rec=seen.get(str(path)) or c.get('encoded')
-            if not rec or rec['file']!=stamp:
+            if not rec or rec['file']!=stamp or 'w' not in rec:
                 try:
                     streams=json.loads(subprocess.check_output([PX.FP,'-v','error','-select_streams','v:0',
-                        '-show_entries','stream=duration,nb_frames,avg_frame_rate','-of','json',str(path)],stderr=subprocess.PIPE))['streams']
+                        '-show_entries','stream=width,height,duration,nb_frames,avg_frame_rate','-of','json',str(path)],stderr=subprocess.PIPE))['streams']
                     if not streams:continue
                     probe=streams[0]
                 except (subprocess.CalledProcessError,ValueError,KeyError):
                     continue
                 num,den=map(float,probe['avg_frame_rate'].split('/'))
                 duration=float(probe['nb_frames'])*den/num if probe.get('nb_frames','N/A')!='N/A' and num else float(probe['duration'])
-                rec=dict(file=stamp,seconds=duration)
+                rec=dict(file=stamp,seconds=duration,w=probe['width'],h=probe['height'])
+            c.update(w=rec['w'],h=rec['h'])
             seen[str(path)]=rec;c['encoded']=rec;c['seconds']=min(c['seconds'],rec['seconds'])
 
 
@@ -1072,43 +1073,10 @@ def still_fill(c):
         return None
 
 
-def marked_detail(clip):
-    """Find the actual underline painted by cited_page or design.document."""
-    import cv2
-    import numpy as np
-    from PIL import Image
-    with Image.open(clip['path']) as im:
-        im.thumbnail((900,1000))
-        rgb=np.asarray(im.convert('RGB'),dtype=np.int16)
-    h,w=rgb.shape[:2]
-    mask=np.zeros((h,w),np.uint8)
-    for ink in ((170,67,42),(200,55,45)):
-        mask |= (np.max(np.abs(rgb-ink),axis=2)<18).astype(np.uint8)
-    strokes=cv2.morphologyEx(mask,cv2.MORPH_OPEN,np.ones((1,max(12,w//45)),np.uint8))
-    ys=np.nonzero(strokes)[0]
-    if not ys.size:return None
-    top=max(0,float(ys.min())/h-.13);bottom=min(1,float(ys.max()+1)/h+.065)
-    # A figure already framed on the complete marked passage needs no second crop.
-    return [0,top,1,bottom] if bottom-top<.72 else None
-
-
-def document_shot(plan, span, key, clip):
-    plan.page(span,'#14161A',grain=.005)
-    frames=span[1]-span[0]
-    detail=marked_detail(clip) if frames>=120 and clip.get('primary_passage') and clip.get('mark') else None
-    cut=span[0]+min(48,frames//3) if detail else span[1]
-    views=[([span[0],cut],[0,0,1,1])]
-    if detail:views.append(([cut,span[1]],detail))
-    for interval,crop in views:
-        n=interval[1]-interval[0]
-        ratio=clip['w']*(crop[2]-crop[0])/(clip['h']*(crop[3]-crop[1]))
-        height=min(.66,.84*W/H/ratio)
-        width=height*ratio/(W/H)
-        growth=.035 if detail else (.12 if frames>240 else .025)
-        plan.card(interval,key,[.5-width/2,.45-height/2,.5+width/2,.45+height/2],
-                  crop=crop,s=[1+growth*q/max(n-1,1) for q in range(n)])
-    label = clip.get('source_label') or archive_label(clip,lambda t:plan.R.width('source',t))
-    plan.word(span,label,'source',.055,.84,note=False,z=3)
+def document_shot(plan, span, key, clip, companion=None):
+    from documentary_layout import document
+    label = clip.get('source_label') or archive_label(clip, lambda t: plan.R.width('source', t))
+    document(plan, span, key, clip, label, companion)
 
 
 def design_window(a,b,shots):
@@ -1117,28 +1085,41 @@ def design_window(a,b,shots):
     cursor=a
     for row in shots:
         lo,hi=row['f']
-        if hi<=a or lo>=b or row['clip'].get('kind')!='diagram':continue
+        if hi<=a or lo>=b or (row['clip'].get('kind')=='image' and not row['clip'].get('document')):continue
         if cursor<lo:open_spans.append((cursor,lo))
         cursor=max(cursor,hi)
     if cursor<b:open_spans.append((cursor,b))
     return max(open_spans,key=lambda span:span[1]-span[0],default=(b,b))
 
 
-def build(sc,pack):
+def build(sc,pack,*,edit=None):
     worker()
     from film_long import Plan
     shots,clock,end=schedule(sc,pack['words'],pack['footage'])
+    if edit:
+        shots = edit(shots, clock)
     chapters=chapter_clock(sc,clock,end)
     voices={'cap':dict(font='InterDisplay-Bold.ttf',px=40,track=0,shadow={'a':0.9}),
+            'excerpt':dict(font='InterDisplay-Bold.ttf',px=43,track=0),
             'chapter':dict(font='InterDisplay-Bold.ttf',px=48,track=0),
             'source':dict(font='InterDisplay-Bold.ttf',px=28,track=0,shadow={'a':0.9})}
     P=Plan(voices,{})
+    from documentary_layout import archive
     for j,row in enumerate(shots):
         c=row['clip']
         if c.get('kind')=='image':
             key=P.image(f'evidence-photo-{j}',c)
             if c.get('document'):
-                document_shot(P, row['f'], key, c)
+                from urllib.parse import urldefrag
+                seg = sc['segments'][row['seg']]
+                design = pack.get('designs', {}).get(str(row['seg']), {})
+                companion = None
+                if (design.get('supplied_passage') and c.get('fact') not in seg.get('facts', [])
+                        and (seg.get('design') or {}).get('fact') in seg.get('facts', [])
+                        and urldefrag(design['source']['url']).url == urldefrag(c['source']['url']).url):
+                    companion = design
+                    row['companion_source'] = design['source']
+                document_shot(P, row['f'], key, c, companion)
             else:
                 n=row['f'][1]-row['f'][0]
                 ratio=c['w']/c['h']
@@ -1163,16 +1144,17 @@ def build(sc,pack):
                            s=[1+growth*q/max(n-1,1) for q in range(n)])
         else:
             key=P.video(f'archive-{j}',c)
-            P.shot(row['f'],key,witness_crop(row),src=row['src'])
-        if c.get('editorial_label') and not c.get('document'):
-            label=archive_label(c,lambda t:P.R.width('source',t)) if c.get('kind')=='image' else c['editorial_label']
-            P.word(row['f'],label,'source',.055,.84 if c.get('kind')=='image' else .78,note=False,z=3)
+            archive(P, row, key, witness_crop(row))
+        if not c.get('document') and c.get('kind')!='diagram' and (c.get('editorial_label') or c.get('kind') != 'image'):
+            label=archive_label(c,lambda t:P.R.width('source',t)) if c.get('editorial_label') else (c['source'].get('channel') or c['source'].get('credit') or archive_label(c,lambda t:P.R.width('source',t)))
+            P.word(row['f'],label,'source',.055,.855,note=False,z=3)
     # Subtitles remain legible and subordinate to the archive. No held number pages.
     for si in range(len(sc['segments'])):
         ws=clock.seg_words(si)
         for j in range(0,len(ws),7):
             chunk=ws[j:j+7]; a=round(chunk[0]['t0']*FPS); b=round(chunk[-1]['t1']*FPS)
             if b>a:
+                P.block([a,b],[0,.877,1,1],'#14191e',z=2)
                 P.word([a,b],' '.join(w['w'] for w in chunk),'cap',0.5,0.89,align='c',role='caption',note=False,z=3)
     for ch in chapters:
         a=round(ch['start']*FPS)
@@ -1206,6 +1188,7 @@ def build(sc,pack):
                s=[round(1.04-0.04*min(1,q/10)**0.5,5) for q in range(n)])
     l1=P.done(pack['sid'],end,1114,dict(grain=0.007,vignette=0.12))
     l1['chapters']=chapters
+    l1['evidence_changes'] = evidence_changes(shots, chapters)
     l1['music_marks']=dict(turn_s=chapters[0]['turn_s'],payoff_s=chapters[-1]['payoff_s'])
     audio=F.audio_scene(l1,pack)
     from score import sound as SD
@@ -1213,17 +1196,41 @@ def build(sc,pack):
     sounds,rep=SD.design(audio,src=pack['narration'],index=dict(words=[dict(t0=w['start'],t1=w['end']) for w in wd['words']],video=dict(duration=wd['duration'])),
                          bed=True,supply=dict(np10=len(shots)/clock.dur*10,bed=True))
     if not sounds or rep.get('fault'): raise RuntimeError('SND3 returned no designed sound')
-    l1['sound']=sounds; l1['sound_design']=rep
+    from chapter_audio import editorial_cues
+    l1['sound']=editorial_cues(sounds,l1['evidence_changes'],FPS)
+    l1['sound_design']=dict(rep,selected_event_frames=[s['event_f'] for s in l1['sound']])
     return l1,shots,chapters
+
+
+def evidence_changes(shots, chapters):
+    """Find a new source or actual diagram at the chapter's authored turning point."""
+    changes = []
+    for previous, row in zip(shots, shots[1:]):
+        source = row['clip']
+        if (source['source']['url'].split('#')[0] != previous['clip']['source']['url'].split('#')[0]
+                or source.get('kind') == 'diagram' and source.get('graphic_id') != previous['clip'].get('graphic_id')):
+            changes.append(row['f'][0])
+    landings = set()
+    for chapter in chapters:
+        for cue in ('turn_s', 'payoff_s'):
+            frame = round(chapter[cue] * FPS)
+            near = [f for f in changes if abs(f - frame) <= 2 * FPS]
+            if near:
+                landings.add(min(near, key=lambda f: abs(f - frame)))
+    return sorted(landings)
+
+
+def builder_version():
+    return ''.join(digest(HERE/name) for name in ('cinema.py','documentary_layout.py','programme_evidence.py'))
 
 
 def score(ctx,script):
     pack=read(Path(ctx.supply)/'pack.json')['pack']
-    l1,shots,chapters=build(script['script'],pack)
-    source_review(ctx,shots)
+    from programme_evidence import assemble
+    l1,shots,chapters=build(script['script'],pack,edit=lambda rows,clock:assemble(ctx,script,rows,clock))
     p=Path(ctx.supply)/'l1.json'; save(p,l1)
     save(Path(ctx.supply)/'shots.json',shots)
-    return dict(builder=digest(HERE/'cinema.py'),l1=str(p),chapters=chapters,picture_time_s=sum((r['f'][1]-r['f'][0])/FPS for r in shots),
+    return dict(builder=builder_version(),l1=str(p),chapters=chapters,picture_time_s=sum((r['f'][1]-r['f'][0])/FPS for r in shots),
                 pictures=len(shots),max_hold_s=max((r['f'][1]-r['f'][0])/FPS for r in shots),spend=[])
 
 
@@ -1300,7 +1307,7 @@ def source_review(ctx,shots,required=True):
 def render(ctx,script,sc):
     # Use the established scene renderer, unchanged brand finish, and SND3 master.
     import film_long as L
-    if sc.get('builder')!=digest(HERE/'cinema.py'):
+    if sc.get('builder')!=builder_version():
         ctx.log('rebuilding the score for the current picture builder')
         sc.clear();sc.update(score(ctx,script))
         save(Path(ctx.run_dir)/'score.json',sc)
@@ -1310,6 +1317,9 @@ def render(ctx,script,sc):
                 stem_capture=digest(HERE/'stem_evidence.py'),music=digest(HERE/'music_chapters.py'),chapter_mix=digest(HERE/'chapter_audio.py'))
     stamp=Path(ctx.supply)/'render-inputs.json'
     if not stamp.exists() or read(stamp)!=inputs:
+        if stamp.exists():
+            from music_chapters import remember_choices
+            remember_choices(ctx.supply,read(stamp),inputs['narration'])
         for name in ('sound.m4a','sound.report.json','film_engine.mp4','film_engine.mp4.log.json','film_scored.mp4','film_scored.mp4.json','film_scored.bed.wav'):
             (Path(ctx.supply)/name).unlink(missing_ok=True)
         save(stamp,inputs)
@@ -1337,26 +1347,33 @@ def duplicate_ranges(shots):
 
 
 def check(ctx,rd,sc):
+    import uuid
     import shutil
     import fcntl
     worker()
     pack=read(Path(ctx.supply)/'pack.json')['pack']
     final=Path(ctx.run_dir)/'final.mp4'
     fs=Path(ctx.run_dir)/'finish-input.json'; programme=digest(rd['film'])
-    finish_inputs=dict(sha256=programme,brand=digest(Path(brand.__file__)),accent=False)
+    from music_chapters import closing_recording
+    chain.use_music_set()
+    card_bed = rd['music'].get('card_bed')
+    if not card_bed or not Path(card_bed['path']).is_file():
+        card_bed = closing_recording(rd['music'],str(Path(ctx.supply)/'music-cache'),Path(rd['film']).with_suffix('.bed.wav'))
+    finish_inputs=dict(sha256=programme,brand=digest(Path(brand.__file__)),accent=False,card_bed=card_bed)
     if not fs.exists() or read(fs)!=finish_inputs:
         final.unlink(missing_ok=True)
     if not final.exists():
         # Brand's own watermark and end card, never recreated or altered here.
         job=Path(ctx.supply)/'finish.py'
-        job.write_text('import sys; sys.path[:0]='+repr([str(HERE.parent/'_shell')])+"; import brand; brand.finish("+repr(rd['film'])+','+repr(str(final))+','+repr(ctx.tmp)+',accent=False)')
+        job.write_text('import sys; sys.path[:0]='+repr([str(HERE.parent/'_shell')])+"; import brand; brand.finish("+repr(rd['film'])+','+repr(str(final))+','+repr(ctx.tmp)+',accent=False,card_bed='+repr(card_bed)+')')
         chain.sh(ctx,[chain.PY,str(job)],label='wf4-brand-'+ctx.run_id,heavy=True,timeout=7200)
         save(fs,finish_inputs)
     base=brand.check(rd['film'],str(final),ctx.tmp)
     duration=brand.probe(str(final))['dur']
     base['recorded_sound_library']=chain.no_music(sc['l1'])
     base['ok']=base['ok'] and base['recorded_sound_library']['ok']
-    from picture_check import check as pictures_check, motion, duplicate_check
+    from picture_check import motion, duplicate_check
+    from rendered_cache import review as pictures_check
     pr=Path(ctx.supply)/'picture_check.json'
     stamp=Path(ctx.supply)/'picture-input.json'
     from encoded_repair import review_shots
@@ -1366,22 +1383,24 @@ def check(ctx,rd,sc):
     inputs=dict(film=digest(final),shots=digest(Path(ctx.supply)/'shots.json'),checker=digest(HERE/'picture_check.py'),
                 presentation=hashlib.sha256(json.dumps(review,sort_keys=True).encode()).hexdigest())
     if not stamp.exists() or read(stamp)!=inputs:
-        for name in ('picture_check.json','motion.json'):(Path(ctx.supply)/name).unlink(missing_ok=True)
-        folder=Path(ctx.supply)/'picture-evidence'
-        if folder.exists():
-            prior=read(stamp)['film'][:12] if stamp.exists() else 'unversioned'
-            rejected=Path(ctx.supply)/('picture-evidence-rejected-'+prior)
-            if rejected.exists():shutil.rmtree(rejected)
-            folder.rename(rejected)
+        previous=read(stamp) if stamp.exists() else {}
+        history=Path(ctx.supply)/'programme-history'/previous.get('film','unversioned')/uuid.uuid4().hex
+        for name in ('picture_check.json','motion.json','picture-evidence'):
+            asset=Path(ctx.supply)/name
+            if asset.exists():
+                history.mkdir(parents=True,exist_ok=True)
+                asset.rename(history/name)
+        if previous:
+            save(history/'picture-input.json',previous)
         save(stamp,inputs)
-    if not pr.exists(): save(pr,pictures_check(str(final),review,Path(ctx.supply)/'picture-evidence',PX.FF))
+    if not pr.exists(): save(pr,pictures_check(str(final),review,Path(ctx.supply)/'picture-evidence',PX.FF,PX.FP))
     pics=read(pr)
     mp=Path(ctx.supply)/'motion.json'
     if not mp.exists(): save(mp,motion(str(final),read(Path(ctx.supply)/'shots.json'),PX.FF))
     measured_motion=read(mp)
     duplicates=duplicate_check(measured_motion,read(Path(ctx.supply)/'shots.json'),Path(ctx.supply)/'picture-evidence')
     shot_rows=read(Path(ctx.supply)/'shots.json')
-    real_ids={int(i) for i,r in pics['evidence'].items() if r.get('real_moving_footage') and shot_rows[int(i)]['clip'].get('kind')!='image'}
+    real_ids={int(i) for i,r in pics['evidence'].items() if r.get('real_moving_footage') and shot_rows[int(i)]['clip'].get('kind') not in ('image','diagram')}
     # The viewer sees the whole encoded film, including its end card.
     measured_real=sum(r['seconds'] for r in measured_motion['rows'] if r['i'] in real_ids and r['moving_samples_share']>=0.25)/duration
     pics['moving_share']=measured_real
@@ -1419,6 +1438,15 @@ def check(ctx,rd,sc):
     targets=dict(hook=hook.get('hook') is True,turns=len(structure['chapters'])==len(sc['chapters']),length=600<=duration<=1200,footage=pics['moving_share']>=0.5,unique=not repeats and duplicates['ok'],holds=actual_picture['holds_ok'],
                  pictures=pics['ok'],sound_fit=heard_sound['verified'],audible_sound=heard_sound['stems']['T2']>0,
                  music=heard_sound['music_share']>=0.8,rises=all(r['rise_db']>=3 for r in heard_sound['chapter_rises']),voice=voice['ok'],mix_wer=mix['ok'])
+    script_record = read(Path(ctx.run_dir)/'script.json')
+    minutes = script_record.get('dossier',{}).get('runtime_minutes')
+    if minutes:
+        checks['longform']['requested_runtime'] = dict(minutes=minutes,actual_seconds=duration,
+                                                      within_range=minutes[0]*60<=duration<=minutes[-1]*60)
+    changes = sum(row['seconds']*row['moving_samples_share'] for row in measured_motion['rows']
+                  if shot_rows[row['i']]['clip'].get('kind')=='diagram' and
+                  pics['evidence'].get(str(row['i']),{}).get('matches') is True)
+    checks['longform']['verified_diagram_changed_sample_seconds']=round(changes,3)
     checks['targets']=targets; checks['ok']=bool(base['ok'] and all(targets.values()))
     save(Path(ctx.run_dir)/'measured.json',checks)
     if not checks['ok']:

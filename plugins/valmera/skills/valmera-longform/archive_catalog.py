@@ -54,7 +54,7 @@ def catalogue(ctx,ft):
             'left, middle and right are successive frames sampled at ten, fifty and ninety percent of ONE source clip. '
             'The contact-sheet panels and Archive heading are review aids, not part of the source video. Still photographs are repeated three times for review. '
             'Do not mistake these review aids for intrusive source graphics or repeated shots. Do not try to make the source fit an existing narration. '
-            'Describe only visible subjects, action, hardware and setting. Distinguish flight footage, ground rehearsal, museum display, original illustration, '
+            'For a third-party presenter describe who the source itself credits and what role is evidenced. A topic title does not establish a witness. Transcribe legible dates and results on build or verification screens, including what was checked. Describe only visible subjects, action, hardware and setting. Distinguish flight footage, ground rehearsal, museum display, original illustration, '
             'still photography and another editor\'s graphics. Source captions may establish provenance; filename labels and requested subjects are not proof. '
             'Do not invent an unseen action, date, identity or repair state. Keep disputed identity or events explicitly uncertain. '
             'Return JSON {visible:string,form:string,real_moving_footage:bool,usable:bool,limitations:[string],verified_context:string}. '

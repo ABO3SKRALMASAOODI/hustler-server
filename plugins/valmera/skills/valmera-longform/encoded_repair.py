@@ -15,6 +15,11 @@ def review_shots(shots,brand_check,programme,words):
     must remain visible, with its actual timing relative to the final words.
     """
     import cinema as C
+    if any(r.get('companion_source') for r in shots):
+        shots=copy.deepcopy(shots)
+        for row in shots:
+            if row.get('companion_source'):
+                row['clip']['source']['displayed_companion_excerpt']=row['companion_source']
     if not brand_check.get('endcard_ok'):return shots
     fps=round(programme['fps']);end=programme['frames']/fps if programme.get('frames') else programme['dur']
     join=C.brand._renderer().outro_join_frames(fps,end)/fps
