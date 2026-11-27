@@ -184,6 +184,8 @@ def edl_changes(before, after):
     if not _same(before.get("frame"), after.get("frame")) or not _same(before.get("canvas"), after.get("canvas")):
         f = after.get("frame") if isinstance(after.get("frame"), dict) else {}
         add("frame", f"set the frame to {f.get('ratio')}" if f.get("ratio") else "changed the frame")
+    if not _same(before.get("source_pitch_semitones"), after.get("source_pitch_semitones")):
+        add("loudness", f"set the source pitch to {after.get('source_pitch_semitones') or 0:+g} semitones")
     if not _same(before.get("master"), after.get("master")) or not _same(before.get("volume"), after.get("volume")):
         add("loudness", "changed the loudness or volume")
     if not _same(before.get("stem_mix"), after.get("stem_mix")):

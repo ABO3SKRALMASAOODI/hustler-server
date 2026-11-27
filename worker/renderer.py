@@ -4526,7 +4526,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         vol_filters = "" if dialogue_probe else "".join(
             f",volume={v['gain_db']}dB:enable='between(t,{v['start']:.2f},{v['end']:.2f})'"
             for v in edl.get("volume", []))
-        parts.append(f"[{asrc}]anull{vol_filters}[asrc]")
+        pitch = float(edl.get("source_pitch_semitones") or 0)
+        pitch_filter = ""
+        if pitch and has_audio:
+            rate = round(48000 * 2 ** (pitch / 12))
+            pitch_filter = (f",aresample=48000,asetrate={rate},aresample=48000,"
+                            f"{_atempo_chain(48000 / rate)}")
+        parts.append(f"[{asrc}]anull{vol_filters}{pitch_filter}[asrc]")
 
     # Payoff holds (round 7): an image insert carrying ``hold`` plays the
     # main source's room tone instead of a silent slice (hold_room_tone).
