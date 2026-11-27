@@ -951,7 +951,7 @@ PROOF_W = 0.84                 # the export card's width once the proof is compl
 PROOF_PUSH_F = 14
 
 
-def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42), land_f=None, proof_f=None):
+def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42), land_f=None, proof_f=None, caption_proof=None):
     """The hook: the clip as uploaded and Valmera's export of it side by side at the same instant (the export's own
     edit list maps every frame), each under its label; the export is the larger, in front. `land_f`: the frame the
     export's picture lands on, given a hit there (the tutorial's opening beat, proof.lay_hook). `proof_f`: the frame
@@ -965,6 +965,28 @@ def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42
     tlb, _ = program(edl_b)
     desk(L, [f0, f1], up_key, upload, focus=focus, src0=src_at(tlb, export_at))
     P.block("veil", [f0, f1], [0.0, 0.0, 1.0, 1.0], "#07080B", z=1, op=0.35)
+    if caption_proof:
+        # Two independent panes. Keep the export at native canvas width so its own glyphs survive.
+        # The lower pane takes the caption-bearing part of the actual portrait frame.
+        up_h = W * upload["h"] / upload["w"] / H
+        up_w = min(.72, .21 / up_h)
+        up_box = [.035, .135, r4(.035 + up_w), r4(.135 + up_w * up_h)]
+        ex_box = [0., .40, 1., 1.]
+        crop_h = min(1., .60 * H * export["w"] / (W * export["h"]))
+        center = caption_proof.get("caption_y")
+        center = center if isinstance(center, (int, float)) and 0 <= center <= 1 else .76
+        # Leave the line low in the pane so the speaker’s face stays in its context.
+        top = max(0., min(1. - crop_h, center - .87 * crop_h))
+        P.synced("up", [f0, f1], tlb, export_at, up_key, up_box, z=2)
+        P.card("ex", [f0, f1], ex_key, ex_box, t0=export_at, z=3, crop=[0., top, 1., top+crop_h])
+        labels = ["RAW CLIP", "STUDIO EXPORT"]
+        for name, label, y in zip(("raw", "export"), labels, (.125, .386)):
+            L.text("lab_" + name, [f0, f1], label, L.k("dv_l"), .045, y)
+        rec = L.lay([f0, f1])
+        rec.update(device="split", frames=[f0, f1], upload_box=up_box, export_box=ex_box,
+                   export_at=r4(export_at), upload_at=r4(src_at(tlb, export_at)), labels=labels,
+                   caption_proof=caption_proof, export_crop=[0., top, 1., top+crop_h])
+        return rec
     ew = 0.55
     eh = ew * W * export["h"] / export["w"] / H
     ex_box = [r4(0.955 - ew), r4(0.255), r4(0.955), r4(0.255 + eh)]
@@ -1073,6 +1095,11 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
     k = P.image("dv_uis", os.path.join(ui["dir"], ui["sent"]), int(iw), int(ih))
     y_all, s_all = ys + [ys[-1]] * PUSH_F, ss + [ss[-1]] * PUSH_F
     f_sent_end = marks["board"][0] if board and marks.get("board") else f_p + PUSH_F
+    # The sent photo and seated export read together. Clear the photo as the export
+    # leaves its seat, before the expanding picture crosses the sentence.
+    screen_end = f_p + PUSH_F
+    if sent_b is not None and not (board and marks.get("board")):
+        screen_end = f_sent_end = f_p + SEAT_F + 1
     P.card("ui_sent", [f_send, f_sent_end], k, box, z=2, x=0.5, y=y_all[f_send - f0:f_sent_end - f0], s=s_all[f_send - f0:f_sent_end - f0])
     if board and marks.get("board"):            # the Shorts board the sentence made: the whole screen, a slow push in
         bw, bh = float(board["w"]), float(board["h"])
@@ -1087,8 +1114,8 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
         pc = (p0 + p1) / 2
         pbox = [0.0, r4(0.5 - (p1 - p0) * ch / 2), 1.0, r4(0.5 + (p1 - p0) * ch / 2)]
         up_key = P.video("dv_up", upload)
-        P.card("player", [f0, f_p + PUSH_F], up_key, pbox, t0=max(float(upload_t0), 0.0), z=3, x=0.5,
-               y=[r4(y + (pc - 0.5) * ch * s) for y, s in zip(y_all, s_all)], s=s_all)
+        P.card("player", [f0, screen_end], up_key, pbox, t0=max(float(upload_t0), 0.0), z=3, x=0.5,
+               y=[r4(y + (pc - 0.5) * ch * s) for y, s in zip(y_all[:screen_end-f0], s_all[:screen_end-f0])], s=s_all[:screen_end-f0])
     # the result grows out of the Studio: the export, a card on its own voice, to full frame
     ex_key = P.video("dv_ex", export)
     sb = [0.35, 0.35, 0.65, 0.65]
@@ -1108,9 +1135,10 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
         lab = LATER_LABEL.format(later)
         cap_l, w_l = R.cap(L.k("dv_l")) / H, R.width(L.k("dv_l"), lab) / W
         y_l = TOP_Y + 0.06 if sent_b is None else sb[1] - 0.02     # between the bubble and the growing result
-        P.block("later.pill", [f_p - 6, f_p + PUSH_F - 2], [0.06, r4(y_l - cap_l - 0.016), r4(0.10 + w_l), r4(y_l + 0.016)], "#07080B", z=5,
+        label_end = min(screen_end, f_p + PUSH_F - 2)
+        P.block("later.pill", [f_p - 6, label_end], [0.06, r4(y_l - cap_l - 0.016), r4(0.10 + w_l), r4(y_l + 0.016)], "#07080B", z=5,
                 op=0.88, radius=0.012)
-        it = L.text("later", [f_p - 6, f_p + PUSH_F - 2], lab, L.k("dv_l"), 0.08, y_l, CYAN, 1.0, rise=True)
+        it = L.text("later", [f_p - 6, label_end], lab, L.k("dv_l"), 0.08, y_l, CYAN, 1.0, rise=True)
         it["z"] = 6
     L.hit("whoosh_soft_1", f0 + 1, "whoosh")
     # the key run starts with the first word and ends as the last lands (its peak placed so its head is on f_t)
@@ -1183,7 +1211,7 @@ def site(l1, *, f0, f1, page, export, lib, src0=0.0, url="valmera.io", action_me
 
 
 def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="wf2", focus=(0.5, 0.42), lead_f=3, later=None,
-             site_s=SITE_S, proof_at=None, over_s=SITE_OVER_S):
+             site_s=SITE_S, proof_at=None, over_s=SITE_OVER_S, caption_proof=None):
     """The whole programme of a film with no narrator (owner, 17 Nov: "an extremely powerful edit ... then the CTA";
     "show the website directly"): split, studio, export, site (see above). `hook` / `window`: export seconds of the
     split and of the export's own stretch; `ui`: the recording's Studio photographs; `page`: its photograph of the
@@ -1198,7 +1226,7 @@ def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="
     l1["items"].append(dict(id="export", k="shot", f=[f_x, f_e], pic="dv_ex", src=[r4(e0 + (f_x - f_p) / FPS), r4(e0 + (f_e - f_p) / FPS)]))
     proof_f = int(round((float(proof_at) - float(hook[0])) * FPS)) if proof_at is not None else None
     rec_s = split(l1, f0=0, f1=mk["split"][1], upload=upload, export=export, edl_b=edl_b, export_at=float(hook[0]), lib=lib, focus=focus,
-                  proof_f=proof_f)
+                  proof_f=proof_f, caption_proof=caption_proof)
     rec_u = studio_screen(l1, marks=dict(mk, export_t0=e0), ui=ui, typed=typed, export=export, lib=lib, later=later, upload=upload,
                           upload_t0=rec_s["upload_at"] + mk["split"][1] / FPS)
     rec_c = site(l1, f0=f_e, f1=mk["dur_f"], page=page, export=export, lib=lib, src0=e0 + (f_e - f_p) / FPS)

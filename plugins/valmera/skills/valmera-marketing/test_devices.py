@@ -486,7 +486,7 @@ def test_the_sent_prompt_stays_under_the_mark_and_clear_of_the_growing_result():
         y, s = sent["y"][f - sent["f"][0]], sent["s"][f - sent["f"][0]]
         top, bot = y + (0.406 - 0.5) * ch * s, y + (0.485 - 0.5) * ch * s
         assert top > D.MARK[3] + 0.02, (f, top)                         # never under the watermark
-        if res["f"][0] <= f < res["f"][0] + D.SEAT_F + 3:      # seated under the sentence, then the reveal takes the frame
+        if res["f"][0] <= f:  # every frame where the prompt and result are both visible
             i = f - res["f"][0]
             sb = beats["devices"][1]["result_seat"]
             h = (sb[3] - sb[1]) * res["s"][i]
@@ -580,3 +580,39 @@ def test_the_showcase_completes_the_comparison_the_diagram_illustrates_before_th
     # the opening split ends on the diagram whole, not on the vertical frame's row (main put it at 22.5-25.3 s)
     hook = P.showcase_hook(ex, body, FILM03_PICS, visible=FILM03_VISIBLE)
     assert 15.5 <= hook[0] and hook[1] <= 22.266 - P.PROOF_LEAD_S + 1e-6
+
+
+def test_showcase_supply_plays_the_checked_caption_on_both_recorded_clocks(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    # Film 04, recorded export-check frames and source ASR on the upload clock.
+    words = [(7.05, 7.68, "And"), (8.08, 8.33, "the"), (8.33, 9.05, "NVIDIA"),
+             (9.05, 10.08, "processors..."), (10.49, 10.64, "Or"), (10.64, 11.2, "GPUs"),
+             (11.2, 11.85, "rather,"), (12.16, 12.41, "you")]
+    visible = [dict(seconds=[4.92, 11.633, 25.766, 37.9], how="The 1080×1920 export frames Cuban."),
+               dict(seconds=[11.633, 25.766, 28.8], how='The on-screen captions show “processors or GPUs rather,” “ASICs right,” and “CPUs that were”.')]
+    edl = dict(keep=[[0, 39.4]], captions=dict(mode="from_transcript", emphasis_words=["GPUs", "ASICs", "CPUs", "AI"]))
+    rec = dict(upload=dict(file="u"), words=[dict(t0=a, t1=b, w=w) for a, b, w in words],
+               exports=[dict(file="e", dur=39.4, tag="final", edl_version=3)])
+    P.jsave(str(tmp_path / "record.json"), rec)
+    (tmp_path / "edl").mkdir()
+    P.jsave(str(tmp_path / "edl/v003.json"), edl)
+    script = dict(record=str(tmp_path / "record.json"), receipts=dict(visible=visible, typed=TYPED))
+    monkeypatch.setattr(P, "cut", lambda *args: None)
+    monkeypatch.setattr(P, "pauses", lambda *args, **kwargs: [])
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, **kwargs: t)
+    monkeypatch.setattr(P.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(P.PX, "sound_facts", lambda *args: {})
+    out = P.showcase_supply(SimpleNamespace(sid="caption"), script, str(tmp_path), str(tmp_path / "pack.json"))
+    prod = out["product"]
+    assert 8.90 <= prod["hook"][0] <= 9.05 and 11.85 <= prod["hook"][1] <= 12.16
+    assert prod["upload_at"] == prod["hook"][0]
+    assert 7.68 <= prod["window"][0] <= 8.08 and prod["window"][1] >= 28.8
+    assert prod["caption_proof"]["seen_s"] == 11.633
+    l1 = reel()
+    split = D.split(l1, f0=0, f1=120, upload=UPLOAD, export=EXPORT, edl_b=edl,
+                    export_at=prod["hook"][0], lib=LIB, caption_proof=prod["caption_proof"])
+    assert split["export_box"][2] - split["export_box"][0] >= .95
+    assert split["upload_box"][3] < split["export_box"][1]
+    assert split["export_at"] == split["upload_at"]
+    assert all(it["k"] != "word" or it["t"] in split["labels"] for it in l1["items"] if it["id"].startswith("sp."))

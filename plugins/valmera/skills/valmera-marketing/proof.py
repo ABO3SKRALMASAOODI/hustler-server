@@ -971,7 +971,7 @@ def export_check(ctx, rec, ask_text, must_see):
               "that is the brand, never a defect, and never part of the after you choose. You also choose the seconds the film will show.")
     content.append(dict(type="text", text=(
         "Return JSON only: {\"elements\": [{\"asked\": a part of the typed sentence, \"visible\": true|false, \"seconds\": [export seconds where "
-        "it shows], \"how\": what is seen}], \"all_visible\": true|false, \"after\": [start, end] export seconds, 2 to 4 s, before the end card: "
+        "it shows], \"how\": what is seen, \"caption_line\": for an asked caption change, transcribe one complete visible line verbatim, else null, \"caption_y\": its vertical centre as a fraction of frame height}], \"all_visible\": true|false, \"after\": [start, end] export seconds, 2 to 4 s, before the end card: "
         "the stretch that holds the most of the asked change landing (each picture, title, caption or cut the sentence asks for, "
         "entered a breath before the first one lands and ended once the last is seen; when not all fit in 4 s, the ones that read "
         "best), so the film's after shows every landing its narration will name, \"tease_s\": the export second of its most striking "
@@ -1008,7 +1008,8 @@ def receipts(rec, chk, ask_text):
                 upload_says=up_words, export_says=ex_words, phase="before the first result", first_result_s=rec.get("first_result_s"), session_s=rec.get("seconds"),
                 upload=dict(seconds=rec["upload"]["dur"], w=rec["upload"]["w"], h=rec["upload"]["h"], sha256=rec["upload"]["sha256"]),
                 export=dict(seconds=ex["dur"], w=ex["w"], h=ex["h"], sha256=ex["sha256"], edl_version=ex.get("edl_version")),
-                visible=[dict(asked=e.get("asked"), how=e.get("how"), seconds=e.get("seconds")) for e in chk.get("elements") or []],
+                visible=[dict(asked=e.get("asked"), how=e.get("how"), seconds=e.get("seconds"),
+                              **{k: e[k] for k in ("caption_line", "caption_y") if e.get(k) is not None}) for e in chk.get("elements") or []],
                 looks=chk.get("looks"), product=dict(name="Valmera", url="valmera.io", be_sha=rec.get("be_sha"), fe_sha=rec.get("fe_sha"),
                                                      edit_model=rec.get("models"), recorded_at=rec.get("recorded_at"),
                                                      stack="local Gauntlet stack, synthetic account", account=rec.get("account")),
@@ -1714,6 +1715,56 @@ def proof_push_at(span, hook):
     return round(min(max(float(span[0]), float(hook[0]) + 6 / F.FPS), float(hook[1]) - f_room), 3)
 
 
+def caption_example(edl, words, visible, body):
+    """Find a checked line of burned captions in the kept speech, on the export clock.
+
+    Older inspectors quote the line in their description. Only use a literal transcription
+    containing a term styled or corrected by this export, at a frame the inspector saw.
+    """
+    import difflib
+
+    caps = edl.get("captions") or {}
+    if not caps or not words:
+        return None
+    spoken = D.program(edl)[0].kept_words(words)
+    tokens = [F.norm_word(w["w"]) for w in spoken]
+    terms = set(norm_words(" ".join(caps.get("emphasis_words") or [])))
+    for change in caps.get("corrections") or []:
+        if isinstance(change, dict):
+            terms.update(norm_words(change.get("to") or ""))
+    examples = []
+    for row in visible:
+        line = row.get("caption_line")
+        printed = norm_words(line or row.get("how") or "")
+        for seen in sorted(t for t in row.get("seconds") or [] if isinstance(t, (int, float)) and 0 <= t < body):
+            # Match each observed occurrence locally, even when the speaker repeats the same words.
+            near = [k for k, w in enumerate(spoken) if w["t0"] <= seen + 4. and w["t1"] >= seen - 4.]
+            if not near:
+                continue
+            matches = difflib.SequenceMatcher(None, tokens[near[0]:near[-1]+1], printed, autojunk=False)
+            candidates = [(near[0]+a, n) for a, _, n in matches.get_matching_blocks() if n]
+            for i, n in candidates:
+                if (line and n != len(printed)) or (not line and (n < 2 or not terms.intersection(tokens[i:i+n]))):
+                    continue
+                j = i + n - 1
+                first, last = spoken[i]["t0"], spoken[j]["t1"]
+                if not first - .12 <= seen <= last + .12:
+                    continue
+                # Include the uninterrupted lead into the quoted line ("the NVIDIA processors").
+                left = i
+                while left and first - spoken[left-1]["t0"] <= 1.5 and spoken[left]["t0"] - spoken[left-1]["t1"] < .28:
+                    left -= 1
+                start = spoken[left]["t0"]
+                prev = spoken[left-1]["t1"] if left else 0.
+                following = spoken[j+1]["t0"] if j+1 < len(spoken) else body
+                context_start = round(max(0., start - min(.2, max(0., start-prev)/2)), 3)
+                hook = [round(max(0., first - F.LEAD_F/F.FPS), 3),
+                        round(min(body, max(last, seen) + min(.15, max(0., following-max(last, seen))/2)), 3)]
+                examples.append(dict(hook=hook, context_start=context_start, seen_s=seen, caption_y=row.get("caption_y"),
+                                     words=" ".join(w["w"] for w in spoken[i:j+1])))
+    return min(examples, key=lambda e: e["seen_s"]) if examples else None
+
+
 def showcase_hook(ex, body, pics, span=None, visible=()):
     """[start, end] export seconds of the split hook. When the export builds a proof (a checklist of three questions, a
     stack), the split ends on it whole: PROOF_LEAD_S inside the last second it is seen whole (proof_span) (26 Nov, the
@@ -1950,8 +2001,23 @@ def showcase_supply(ctx, script, sup_dir, pk):
     pics = [(float(o["start"]), float(o["duration_s"])) for o in D.MF.pictures_of(edl) + D.MF.titles_of(edl)]
     d = W3.direction_of(ctx) if hasattr(ctx, "run_dir") else {}
     visible = (script.get("receipts") or {}).get("visible") or ()
-    win = [float(x) for x in d.get("export_window") or showcase_window(ex, body, pics, asked=asked_spans(visible, body))]
-    hook = [float(x) for x in d.get("hook_window") or showcase_hook(ex, body, pics, visible=visible)]
+    asked = asked_spans(visible, body)
+    words = rec.get("words") or []
+    if not words and edl.get("captions") and rec.get("source"):
+        # Older recordings may only have the source caption clock.
+        timed = upload_words(rec) or []
+        words = [dict(w=w, t0=t, t1=min(t + .5, timed[i+1][0] if i+1 < len(timed) else t+.5))
+                 for i, (t, w) in enumerate(timed)]
+    caption = caption_example(edl, words, visible, body)
+    win = d.get("export_window") or showcase_window(ex, body, pics, asked=asked)
+    if caption and not d.get("export_window"):
+        # Enter on the line's setup; retain the rest of the recorded passage, including later examples.
+        end = max(win[1], caption["hook"][1])
+        win = [min([caption["context_start"]] + [a for a, _ in asked]), body if body - end <= SHOWCASE_S[0] else end]
+    hook = d.get("hook_window") or (caption["hook"] if caption else showcase_hook(ex, body, pics, visible=visible))
+    win, hook = list(map(float, win)), list(map(float, hook))
+    if caption and not hook[0] <= caption["seen_s"] < hook[1]:
+        caption = None
     ui = showcase_ui(rec)
     typed = typed_line(script["receipts"])
     over = site_handover(ex, win, D.SITE_OVER_S)
@@ -1985,7 +2051,7 @@ def showcase_supply(ctx, script, sup_dir, pk):
                 voices=[], work=os.path.join(sup_dir, "finish"), fit=[],
                 product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, over_s=over, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
                              upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None,
-                             proof_at=proof_push_at(proof_span(pics, body, visible), hook)))
+                             caption_proof=caption, proof_at=proof_push_at(proof_span(pics, body, visible), hook)))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
                 format="showcase", studio_ui=bool(ui), site=bool(ui and ui.get("site")))
     jsave(pk, dict(pack=pack, record=rec_))
@@ -3613,7 +3679,7 @@ def showcase_score(ctx, script, pack):
         raise RuntimeError("the showcase needs the recording's Studio photographs (studio.py, phone view): record it again")
     page = ui.get("site") or dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
     l1, beats = D.showcase(upload=upload, export=body, edl_b=edl, typed=typed_line(script["receipts"]), window=prod["window"], hook=prod["hook"],
-                           ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"), proof_at=prod.get("proof_at"),
+                           ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"), proof_at=prod.get("proof_at"), caption_proof=prod.get("caption_proof"),
                            over_s=float(prod.get("over_s") or D.SITE_OVER_S))
     out = os.path.join(ctx.supply, "l1.json")
     jsave(out, l1)
