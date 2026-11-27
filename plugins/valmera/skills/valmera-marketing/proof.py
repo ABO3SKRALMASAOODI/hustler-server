@@ -258,6 +258,29 @@ def source_sentences(ctx, media, tag, lo, hi):
         margin *= 2
 
 
+def local_studio_words(wav):
+    """Use the Studio recording stack's local Whisper service when it can read the excerpt."""
+    from urllib.parse import urlsplit
+    base = os.environ.get("OPENAI_BASE_URL", "").rstrip("/")
+    if os.getenv("CODEX_PROXY_LOCAL") != "1" or urlsplit(base).hostname not in ("localhost", "127.0.0.1"):
+        return None
+    if os.path.getsize(wav) >= 100 * 1024 * 1024 - 8192:  # local service's multipart body limit
+        return None
+    import requests
+    try:
+        with open(wav, "rb") as stream:
+            response = requests.post(base + "/audio/transcriptions", files={"file": ("speech.wav", stream, "audio/wav")},
+                                     data={"model": "whisper-1", "response_format": "verbose_json"},
+                                     timeout=(10, 2 * int(os.getenv("CODEX_PROXY_TIMEOUT_SECONDS", "1200")) + 20))
+        response.raise_for_status()
+        heard = response.json()["words"]
+        if heard and all(isinstance(w["word"], str) and 0 <= w["start"] <= w["end"] for w in heard):
+            return heard
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
 def hear_clock(ctx, media, tag, lo=0.0, hi=None):
     """The actual file's punctuation and both word edges, on its own clock. Cache only in the run."""
     import tempfile
@@ -276,12 +299,17 @@ def hear_clock(ctx, media, tag, lo=0.0, hi=None):
                 "r=mlx_whisper.transcribe(sys.argv[1],path_or_hf_repo=sys.argv[2],word_timestamps=True,"
                 "condition_on_previous_text=False); "
                 "json.dump([w for s in r['segments'] for w in s.get('words',[])],open(sys.argv[3],'w'))")
-        atlas = os.path.join(VV, "week-1106", "atlas")
-        subprocess.run(["zsh", HEAVY, "wf2-hear-podcast", os.path.join(atlas, "venv/bin/python"), "-c",
-                        code, wav, os.path.join(atlas, "models/whisper-large-v3-mlx"), output], check=True)
+        heard = local_studio_words(wav)
+        backend = "studio-local-whisper"
+        if heard is None:
+            atlas = os.path.join(VV, "week-1106", "atlas")
+            subprocess.run(["zsh", HEAVY, "wf2-hear-podcast", os.path.join(atlas, "venv/bin/python"), "-c",
+                            code, wav, os.path.join(atlas, "models/whisper-large-v3-mlx"), output], check=True)
+            heard = jload(output)
+            backend = "mlx-whisper-large-v3"
         words = [dict(w=w["word"].strip(), t0=round(lo+w["start"], 3), t1=round(lo+w["end"], 3))
-                 for w in jload(output) if w["word"].strip()]
-    jsave(cache, dict(signature=signature, words=words))
+                 for w in heard if w["word"].strip()]
+    jsave(cache, dict(signature=signature, words=words, backend=backend))
     return words
 
 
