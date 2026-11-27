@@ -350,10 +350,10 @@ def verify_structure(ctx, script, attempt=0):
     return sc
 
 
-def guarded_voice(ctx, command, label):
+def guarded_voice(ctx, command, label, *, measure_only=False):
     evidence=Path(ctx.supply)/'memory'/label
     return chain.sh(ctx,[chain.PY,str(HERE/'guarded.py'),'--out',str(evidence),
-                         '--label',label,'--',*command])
+                         '--label',label,*(['--measure-only'] if measure_only else []),'--',*command])
 
 
 def splice_voices(ctx,nd,voices,footage_dir):
@@ -1389,9 +1389,9 @@ def check(ctx,rd,sc):
     nar=nd/'narration_narrator.wav'
     if not nar.exists(): nar=Path(pack['narration'])
     metrics=Path(ctx.supply)/'voice-metrics'
-    guarded_voice(ctx,[PX.NARRATE_PY,str(HERE/'measure_voice.py'),str(nar),str(nd/'narration_script.json'),str(metrics)],'wf4-voice-measure-'+ctx.run_id)
+    guarded_voice(ctx,[PX.NARRATE_PY,str(HERE/'measure_voice.py'),str(nar),str(nd/'narration_script.json'),str(metrics),'--reuse',str(nd/'longform-metrics')],'wf4-voice-measure-'+ctx.run_id,measure_only=True)
     guarded_voice(ctx,[PX.NARRATE_PY,str(HERE/'measure_mix.py'),str(final),pack['words'],str(nd/'narration_script.json'),str(metrics),PX.FF,
-                       '--voice',str(Path(ctx.supply)/'audio-stems/voice.flac')],'wf4-mix-listen-'+ctx.run_id)
+                       '--voice',str(Path(ctx.supply)/'audio-stems/voice.flac')],'wf4-mix-listen-'+ctx.run_id,measure_only=True)
     voice=read(metrics/'metrics.json')
     mix=read(metrics/'mix-wer.json')
     sound_metrics=Path(ctx.supply)/'sound-measured.json'
