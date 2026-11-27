@@ -841,6 +841,51 @@ def local_turns(script):
             for t in script.get('speaking_turns') or []]
 
 
+def podcast_word_screen(rows, pack, pictures, turns):
+    """Bind each caption to the source cut, speaker and placement that intersect its word."""
+    coverage = pack.get("coverage") or {}
+    take = pack.get("take") or {}
+    inventory = {p["src"]: p for p in pictures}
+    fields = ("id", "label", *wf1_film._director().PICTURE_FIELDS)
+    for index, word in enumerate(rows):
+        a, b = (round(word[k] * F.FPS) for k in ("t0", "t1"))
+        b = max(a + 1, b)
+        start = (a - F.LEAD_F) / F.FPS
+        end = (b - F.LEAD_F) / F.FPS
+        window_id, window = next(((i,w) for i,w in enumerate(coverage.get("windows") or [])
+                                  if w["first"] <= index <= w["last"]), (None, {}))
+        shown = []
+        for placement in (coverage.get("passed_placements") or {}).get(str(window_id), []):
+            span = placement.get("f")
+            if span and (span[1] <= a or b <= span[0]):
+                continue
+            pic = inventory.get(placement.get("path"), {})
+            if pic:
+                shown.append({k: pic[k] for k in fields if k in pic})
+        on_take = not shown and (not window or window.get("on_take") or window.get("publisher_camera"))
+        faces = []
+        people = []
+        for cut in take.get("cuts") or []:
+            if cut["t1"] <= start or end <= cut["t0"]:
+                continue
+            for span in cut.get("spans") or []:
+                if span["t1"] <= start or end <= span["t0"]:
+                    continue
+                person = span.get("person")
+                if span.get("who") == "speaker" and person is not None and person not in people:
+                    people.append(person)
+                box = span.get("box") or {}
+                box = box.get("box") if isinstance(box, dict) else box
+                faces.append(dict(person=person, role=span.get("who"), box=box))
+            if not cut.get("spans"):
+                faces.extend({k:f[k] for k in ("box","speaker") if k in f} for f in cut.get("faces") or [])
+        voices = [t["speaker"] for t in turns if t["start"] < end and start < t["end"]]
+        word["screen"] = dict(voice=voices or people or ["speaker"], text=[word["w"]], pictures=shown,
+                              picture=window.get("must_show") or window.get("name") or "interview",
+                              role="speaker" if on_take else "planned cutaway", faces=faces if on_take else [],
+                              **{k:window[k] for k in ("meaning_box","identity_year","version","printed_text") if k in window})
+
+
 def direction_of(ctx, script, pack):
     """The film's Director (DIRECTOR_CONTRACT 4, _shell/director.py): one model call that reads the heard words with the
     voice's stress, the supply's pictures on one contact sheet, the take and the style, and the device sequences of the
@@ -884,20 +929,7 @@ def direction_of(ctx, script, pack):
                             and [w["t0"],w["t1"]] == prior.get("clause_t") for w in coverage.get("windows", [])):
                         # The score can read the verified view without opening another tile.
                         pic["path"] = None
-    coverage = pack.get("coverage") or {}
-    turns = local_turns(script) if script.get("speaking_turns") else []
-    for i, word in enumerate(rows):
-        window = next((w for w in coverage.get("windows", []) if w["first"] <= i <= w["last"]), {})
-        speaker = next((t["speaker"] for t in turns if t["start"] <= word["t0"] - F.LEAD_F / F.FPS < t["end"]), None)
-        on_take = not window or window.get("on_take")
-        paths = {row.get("path") for row in coverage.get("passed_placements", {}).get(str(window.get("first")), [])}
-        identified = [{key:pic[key] for key in ("id", "kind", "label", "identity_year", "meaning_box", "version", "people", "overlays", "printed_text")
-                       if key in pic} for pic in pics if pic.get("src") in paths]
-        word["screen"] = dict(voice=speaker or "speaker", text=[word["w"]], pictures=identified,
-                              picture=window.get("must_show") or window.get("name") or "interview",
-                              role="speaker" if on_take else "planned cutaway",
-                              faces=take.get("faces") if on_take else None,
-                              **{k:window[k] for k in ("meaning_box","identity_year","version","printed_text") if k in window})
+    podcast_word_screen(rows, pack, pics, local_turns(script) if script.get("speaking_turns") else [])
     coverage_contract = (pack.get("coverage") or {}).get("contract")
     intent = hashlib.sha256(json.dumps([DR.CONTRACT, coverage_contract, editorial,rows,stress,st,script.get("title"),script.get("direction"),
                                          script.get("hook_line"),script.get("close_line"),take.get("cuts")],

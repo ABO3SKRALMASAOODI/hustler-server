@@ -24,9 +24,11 @@ def test_after_owns_ask_addressed_inside():
 def test_moment_sheet_identifies_who_and_what_is_printed():
     words = [dict(n=0, w="earned", t0=.4, t1=.7, seg=0)]
     pictures = [dict(f=[0, 30], person="Jane", role="speaker", meaning_box=[.1,.1,.8,.8], identity_year=2001)]
-    ink = [dict(k="word", f=[6, 22], t="$17", role="title")]
+    ink = [dict(k="word", f=[6, 22], t="$17", role="title"),
+           dict(k="word", f=[0,30], t="GONE", op=[1]*12+[0]*18)]
     sheet = director.composed_words(words, pictures, ink, [], [dict(f=[0,30], person="Jane")], 30)
     text = director.moment_sheet([dict(i=0, words=sheet)], [], [], None, {}, "story", 1, [])
+    assert "GONE" not in text
     for value in ('"person": "Jane"', '"role": "speaker"', '"text": "$17"', '"voice": ["Jane"]', '"identity_year": 2001'):
         assert value in text
 
@@ -110,3 +112,18 @@ def test_caption_handoff_reads_fallback_ink_not_the_asked_duration():
     rows = palette_menu.caption_handoff([cap,fallback])
     assert [r["f"] for r in rows if r["role"]=="cap"] == [[0,4],[7,12]]
     assert palette_menu.caption_handoff(rows) == rows
+
+
+def test_podcast_word_reads_placement_by_window_and_frame_and_speaker_by_cut():
+    rows = [dict(w=str(i), t0=.1+i, t1=.3+i) for i in range(4)]
+    pack = dict(coverage=dict(windows=[dict(first=0,last=1,on_take=True),dict(first=2,last=3)],
+                passed_placements={"1":[dict(path="paper",f=[63,75]),dict(path="scan",f=[93,105])]}),
+                take=dict(cuts=[dict(t0=0,t1=4,spans=[dict(t0=0,t1=4,person=0,who="speaker",
+                                                           box=dict(box=[0,0,.5,.5]))])]))
+    pics = [dict(src="paper",id="A",printed_text="May 2"),dict(src="scan",id="B",printed_text="June 4")]
+    wf1_short.podcast_word_screen(rows,pack,pics,[])
+    assert rows[0]["screen"]["faces"][0]["person"] == 0
+    assert rows[1]["screen"]["voice"] == [0]
+    assert [p["printed_text"] for p in rows[2]["screen"]["pictures"]] == ["May 2"]
+    assert [p["id"] for p in rows[3]["screen"]["pictures"]] == ["B"]
+    assert rows[2]["screen"]["faces"] == []

@@ -268,6 +268,13 @@ def composed_words(words, pictures, items, owners, voices, fps):
             if span and span[0] < b and a < span[1]:
                 yield row
 
+    def visible_ink(item, a, b):
+        opacity = item.get("op", 1)
+        if isinstance(opacity, list):
+            first = item["f"][0]
+            return any(value > 0 for value in opacity[max(0, a - first):b - first])
+        return opacity > 0
+
     pictures = [picture_identity(p) for p in pictures]
     result = []
     for word in words:
@@ -276,7 +283,7 @@ def composed_words(words, pictures, items, owners, voices, fps):
         pics = [{k: p[k] for k in ("f", "id", *PICTURE_FIELDS) if p.get(k) is not None}
                 for p in visible(pictures, a, b)]
         ink = [dict(f=i["f"], role=i.get("role"), text=i["t"]) for i in visible(items, a, b)
-               if i.get("k") == "word" and i.get("t")]
+               if i.get("k") == "word" and i.get("t") and visible_ink(i, a, b)]
         active = list(visible(owners, a, b))
         for row in active:
             for text in [row.get("title"), row.get("text"), *(row.get("labels") or []), *(row.get("lines") or []),
