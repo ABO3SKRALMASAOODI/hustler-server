@@ -664,8 +664,13 @@ def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None,
         if setback is not None:
             following = [t for t in (turn_s, payoff_s, dur) if t is not None and t > setback]
             joints.append(dict(kind="voice", t0=setback, t1=min(following, default=dur), db=5))
+        if turn_s is not None:
+            joints.append(dict(kind="turn", next_first_word_t=turn_s))
         if payoff_s is not None:
             joints.append(dict(kind="swell", t=payoff_s, rise_s=2.5, db=8))
+        close = authored.get("meaning", authored.get("coda"))
+        if close is not None:
+            joints.append(dict(kind="close", next_first_word_t=close))
         l1 = dict(l1, music_marks=dict(l1.get("music_marks") or {}, joints=joints))
     rep["marks"] = {"given": marks_in, "turn_s": turn_s, "payoff_s": payoff_s, "mood": mood, "lines": len(lines), "turn_drop": turn_drop, "arc": arc}
     choice = None
