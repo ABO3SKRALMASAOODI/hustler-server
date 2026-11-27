@@ -1235,7 +1235,11 @@ def _run_clip_index(worker_db, job, asset):
                     "width": 0, "height": 0, "fps": 0.0, "has_audio": True,
                     "vfr": False}
         elif not streamed_source:
-            info = media.probe(src)
+            # A clip longer than MAX_DURATION_S is analysed for its first
+            # MAX_DURATION_S, exactly like the main video (#396, 27 Nov 2026:
+            # a 4-hour attached recording was refused twice by the Studio and
+            # the clip index had no clamp on its local path).
+            info = clamp_to_duration_limit(media.probe(src))
         worker_db.run(dbx.update_asset_probe, asset["id"], info["duration"],
                       info["width"], info["height"], info["fps"], sha)
         _set_progress(worker_db, job_id, 20)
@@ -1251,9 +1255,17 @@ def _run_clip_index(worker_db, job, asset):
                     "timings": timings}
 
         warnings = []
+        limit_s = None if is_music else info.get("limit_s")
+        if limit_s:
+            warnings.append(
+                f"this clip is {info['source_duration'] / 3600:.1f} hours; "
+                f"the first {limit_s / 3600:.0f} hours were analysed "
+                "and can be edited")
         heavy = not is_music and not streamed_source and \
             perception_is_heavy(info)
-        if streamed_source or heavy:
+        # A clamped clip always reads a proxy cut at the limit, so every sense
+        # (audio, shots, tiles) covers only the analysed span.
+        if streamed_source or heavy or limit_s:
             # Clip perception seeks repeatedly. Give it one local proxy while
             # retaining the original's hash, geometry and clock in the index.
             # A heavy or long clip gets one too (#555): shots, tiles, faces,
@@ -1267,7 +1279,7 @@ def _run_clip_index(worker_db, job, asset):
                 duration=info["duration"],
                 progress_cb=_stage_progress(worker_db, job_id, 20, 25),
                 cancelled_cb=lambda: _cancelled(worker_db),
-                maxrate_kbps=proxy_kbps)
+                maxrate_kbps=proxy_kbps, limit_s=limit_s)
             src = proxy
             timings["perception_proxy_s"] = round(time.monotonic() - t_proxy, 2)
             timings["perception_proxy"] = "heavy" if heavy else "streamed"
