@@ -241,9 +241,21 @@ def _hb(font):
 def font_covers(font, t):
     """Does this font hold a glyph for every letter of t? Read from the font."""
     h = _hb(font)
-    if h is None:
-        return True
-    return all(h[1].get_nominal_glyph(ord(c)) for c in str(t) if not c.isspace() and c.isprintable())
+    points = [ord(c) for c in str(t) if not c.isspace() and c.isprintable()]
+    if h is not None:
+        return all(h[1].get_nominal_glyph(cp) for cp in points)
+    key = ("cmap", font)
+    if key not in _font_cache:
+        from fontTools.ttLib import TTFont
+        path = font_path(font)
+        if not path:
+            return False
+        try:
+            with TTFont(path, lazy=True) as face:
+                _font_cache[key] = frozenset(face.getBestCmap() or ())
+        except (OSError, TypeError):
+            _font_cache[key] = frozenset()
+    return all(cp in _font_cache[key] for cp in points)
 
 
 def shaped(font, t):

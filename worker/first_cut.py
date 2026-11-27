@@ -1877,7 +1877,11 @@ def montage_scout(ctx, windows, spend, title_only=False, boxes=False):
                    'numbers shown), detail (the visible action or object), and query (a specific real '
                    'video or macro detail that explains it). Pick the moments where a distinct picture '
                    'would reveal something new, including on a short clip. Keep the actual people, '
-                   'product, screen and action in the upload. Use [] if unrelated stock would mislead.')
+                   'product, screen and action in the upload. Use [] if unrelated stock would mislead. '
+                   'Give adjustments as small signed exposure, temperature, contrast or saturation changes '
+                   'within -0.15 to 0.15 grounded in these frames. Also give one detail_label {shot,text} '
+                   'when a short factual label in the upload language can reveal a distinct later event. '
+                   'Use null if there is nothing to explain.')
         resp = claude_lane.create(
             model, [{"role": "system", "content": system},
                     {"role": "user", "content": parts}],
@@ -1903,6 +1907,13 @@ def montage_scout(ctx, windows, spend, title_only=False, boxes=False):
             a, b = windows[n - 1]
             moments.append(((a+b)/2, b, str(detail)[:120], str(query)[:100]))
     ctx.first_cut_picture_wishes = moments
+    import continuous_cut
+    ctx.first_cut_grade = continuous_cut._controls(pick.get("adjustments"))
+    label = pick.get("detail_label") or {}
+    n = label.get("shot") if isinstance(label, dict) else None
+    if isinstance(n, int) and 1 <= n <= len(windows) and isinstance(label.get("text"), str):
+        a, b = windows[n - 1]
+        ctx.first_cut_detail = ((a+b)/2, label["text"].strip())
     out = list(windows)
     try:
         end = 0 if title_only else int(pick.get("end") or 0)
@@ -2767,6 +2778,20 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     if q1 and bands:
         import first_cut_visual as fcv
         fcv.refresh_band_crop(ctx, steps, started, _run)
+    if q1 and not cut_speech and not screen_kept and not whole:
+        from timeline import Timeline
+        edl = ctx.latest_edl()["json"]
+        grade = getattr(ctx, "first_cut_grade", {}) or {}
+        if grade and not continuous:
+            _run(ctx, steps, "set_grade_custom", grade, started)
+        detail = getattr(ctx, "first_cut_detail", None)
+        if detail and detail[1] and detail[1] != ctx.first_cut_hook:
+            tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed"))
+            at = tl.src_to_out(detail[0])
+            if at is not None and at >= hook_end and at + 0.8 < tl.out_duration:
+                _run(ctx, steps, "add_text", {"text": detail[1], "template": "lower_third",
+                     "start": at, "end": min(at + 2.2, tl.out_duration), "mute_captions": False}, started)
+        _score_visual_sequence(ctx, steps)
     if q1 and (picked or {}).get("how") == "motion":
         # Q6: the montage ends on its hit with one white flash (R01)
         import montage_cut
@@ -2780,6 +2805,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             style, words_per = fcv.caption_style(
                 style, talking=talking, screen=screen_kept,
                 vertical=vertical_out)
+        from script_words import caption_family
+        family = caption_family(ctx.index.get("language"))
+        if family:
+            style["font"] = family
         if y is not None:
             style["anchor_y"] = y
         if time.monotonic() - started <= config.FIRST_CUT_MAX_S - _RENDER_RESERVE_S:
@@ -3833,7 +3862,7 @@ def run(worker_db, job, project, index_row):
     ctx.credit_budget = None
     ctx.first_cut_db, ctx.first_cut_session = worker_db, session_id
     if getattr(ctx, "index", None) and not payload.get("url"):
-        ctx.first_cut_original_audio = ctx.index.get("video", {}).get("has_audio") is False
+        ctx.first_cut_original_audio = (ctx.index.get("video") or {}).get("has_audio") is False
         import script_words
         ctx.index = script_words.first_cut_index(ctx.index)
         bound_to_source_screen(ctx, index_row, workdir)
@@ -3843,6 +3872,8 @@ def run(worker_db, job, project, index_row):
         start_edl = None
     ctx.turn_start_edl = start_edl
     spend = {"usd": 0.0}
+    ctx.first_cut_spend = spend
+    ctx.first_cut_started = started
     url = payload.get("url")
     if url:
         # Website demos come with Pro and Max (owner, 30 Oct 2026;
@@ -4083,6 +4114,50 @@ def run(worker_db, job, project, index_row):
             "credits_charged": 0.0}
 
 
+def _score_visual_sequence(ctx, steps):
+    """Choose a bed for a wordless fallback from its footage and actual cut rhythm."""
+    import schemas
+    import music_choose
+    from score import bed, perceive
+    edl = ctx.latest_edl()["json"]
+    if edl.get("music") or not bed.available():
+        return
+    try:
+        idx = ctx.index or {}
+        per = (idx.get("director_preparation") or {}).get("perception") or {}
+        audio = per.get("audio") or perceive.audio_facts(ctx.proxy_path(), (idx.get("video") or {}).get("has_audio"))
+        if bed.own_track(audio.get("rms_db"), 0, ctx.duration, audio.get("music")):
+            return
+        prog = float(schemas.program_duration(edl))
+        brief = getattr(ctx, "first_cut_hook", None) or ""
+        cuts = max(0, len(edl.get("keep") or []) - 1)
+        choice = music_choose.choose({"kind":"story", "duration_s":prog, "turns":[],
+            "pace":{"cuts10":10 * cuts / max(prog, 1)}, "speech_share":0.0, "brief":brief}, ctx=ctx)
+        if choice:
+            result = music_choose.place(ctx, choice)
+            steps.append({"tool":"first_film_music", "ok":_ok(result), "note":str(result)[:160]})
+    except Exception as exc:
+        steps.append({"tool":"first_film_music", "ok":False, "note":str(exc)[:160]})
+
+
+def _compose_reading_screen(ctx, steps):
+    import first_cut_visual
+    import schemas
+    edl = ctx.latest_edl()["json"]
+    prog = float(schemas.program_duration(edl))
+    start = ctx.first_cut_started
+    label = getattr(ctx, "first_cut_screen_label", None) or getattr(ctx, "first_cut_hook", None)
+    # Put the label in the fitted margin so the page remains readable.
+    opening = [item for group in ("motion", "texts") for item in edl.get(group) or []
+               if float(item.get("start", 0)) < 1.0]
+    if not opening and isinstance(label, str) and label.strip() and prog > 0:
+        _run(ctx, steps, "add_text", {"text": label.strip(), "template": "title",
+             "y": 0.20, "font_size": 0.066, "start": 0., "end": min(prog, 2.5),
+             "mute_captions": False}, start)
+    if not (edl.get("effects") or {}).get("zooms"):
+        first_cut_visual.screen_follow(ctx, steps, start, _run, ctx.first_cut_spend, 0.0)
+
+
 def _render_cut(ctx, steps, picked):
     """The First cut's preview render (the chain's or the Director's film)."""
     keep_whole = bool(picked and picked.get("how") in {"finished_piece", "continuous"})
@@ -4094,14 +4169,17 @@ def _render_cut(ctx, steps, picked):
     frame = (row.get("json") or {}).get("frame") or {}
     ratio = frame.get("ratio", "source")
     index = getattr(ctx, "index", {}) or {}
-    readable_screen = _text_wider_than_crop(ctx)
+    readable_screen = _text_wider_than_crop(ctx) or _screen_like(index)
     fit = readable_screen and frame.get("mode") not in ("pad", "pad_blur")
     if fit or (ratio != "9:16" and not (ratio == "source" and _orientation(index) == "vertical")):
         result = agent_tools.execute(ctx, "auto_reframe",
                                      {"ratio": "9:16", "mode": "pad_blur" if readable_screen else "crop"})
-        steps.append({"tool": "first_film_frame", "ok": not _failed(result), "note": str(result)[:160]})
-        if _failed(result):
+        framed = str(result).startswith("NO CHANGE") or not _failed(result)
+        steps.append({"tool": "first_film_frame", "ok": framed, "note": str(result)[:160]})
+        if not framed:
             return result
+    if readable_screen and getattr(ctx, "first_cut_started", None) is not None:
+        _compose_reading_screen(ctx, steps)
     if not picked or picked.get("how") != "director":
         _clear_empty_source_bands(ctx, steps)
     import first_cut_spelling
@@ -4339,11 +4417,8 @@ def _director_upgrade(ctx, worker_db, job, session_id, started, steps,
             return
         latest = ctx.latest_edl()
         preview = getattr(ctx, "last_preview", None) or {}
-        named = [str(n) for n in got.get("named") or [] if n]
-        what = ", ".join(named[:3]) if named else "what you talk about"
-        text = (f"I've added real footage of {what} to your film. It's "
-                "playing in the player. If you'd rather have it without, "
-                "tell me and I'll take it out.")
+        import reply_truth
+        text = f"The updated cut is playing now. It's {reply_truth.first_cut_summary(preview)}."
         more = dict(meta, edl_version=latest["version"], preview=preview)
         more["first_cut"] = dict(meta.get("first_cut") or {}, footage={
             "clips": got.get("clips"), "sources": got.get("sources")})

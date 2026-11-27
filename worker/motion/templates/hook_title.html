@@ -64,7 +64,9 @@
     wrap.textContent = ''; words.length = 0;
     ls.forEach(L => {
       const el = MG.el('div', 'line', null, wrap);
-      el.style.fontFamily = `'${P.font}', 'Inter Display', sans-serif`;
+      // Complex marks extend above the Latin cap height and below its baseline.
+      if (/[^\u0000-\u00ff]/u.test(L)) el.style.lineHeight = 'normal';
+      el.style.fontFamily = `'${P.font}', 'Inter Display', 'Noto Sans Thai', 'Noto Sans JP', 'Noto Sans SC', sans-serif`;
       el.style.color = P.color;
       if (P.font === 'Anton' || P.font === 'Bebas Neue') el.style.letterSpacing = '0';
       MG.starWords(L).forEach(({ t: text, acc }) => {

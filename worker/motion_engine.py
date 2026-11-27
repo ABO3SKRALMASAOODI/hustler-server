@@ -65,6 +65,9 @@ CACHE_MAX_BYTES = int(os.getenv("MOTION_CACHE_MAX_BYTES", str(3 * 1024 ** 3)))
 
 # family name used in CSS -> (file, weight, style)
 FONT_FACES = [
+    ("Noto Sans Thai", "NotoSansThai-Variable.ttf", 700, "normal"),
+    ("Noto Sans JP", "NotoSansJP-Variable.ttf", 700, "normal"),
+    ("Noto Sans SC", "NotoSansSC-Variable.ttf", 700, "normal"),
     ("Inter Display", "InterDisplay-Bold.ttf", 700, "normal"),
     ("Inter Display", "InterDisplay-BoldItalic.ttf", 700, "italic"),
     ("Inter Display", "InterDisplay-ExtraBold.ttf", 800, "normal"),

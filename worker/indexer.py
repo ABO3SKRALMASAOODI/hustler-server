@@ -30,6 +30,7 @@ from concurrent import futures
 
 import audit
 import claude_trial
+import script_words
 import config
 import db as dbx
 import llm
@@ -446,8 +447,9 @@ def _finish_proxy_audio(worker_db, job, asset, from_client_proxy, info):
         row = worker_db.run(dbx.latest_edl, job["project_id"])
         if row and row["version"] > 1:
             worker_db.run(dbx.get_or_enqueue_preview_job, job["project_id"], job["user_id"],
-                          {"source": "original_audio_restored", "quality": "approval",
-                           "edl_version": row["version"], "force": True})
+                          {"source": "original_audio_restored", "quality": "approval", "audio_model_review": False,
+                           "edl_version": row["version"], "first_cut_original": True, "force": True,
+                           "render_dependency_key": f"landed_original:{asset['id']}"})
 
 
 def _refuse_unfinished_source(asset):
@@ -1105,7 +1107,7 @@ def run_index_job(worker_db, job):
             tile_keys=tile_keys,
             tile_step_s=tile_step,
             speakers=speakers,
-            language=language, script_word_boundaries=language in ("th", "ja", "zh"),
+            language=language, script_word_boundaries=bool(script_words.caption_family(language)),
             warnings=warnings,
             perception=perception_sidecar,
             motion=motion_sidecar,
@@ -1364,7 +1366,7 @@ def _run_clip_index(worker_db, job, asset):
             tile_keys=tile_keys,
             tile_step_s=tile_step,
             speakers=speakers,
-            language=language, script_word_boundaries=language in ("th", "ja", "zh"),
+            language=language, script_word_boundaries=bool(script_words.caption_family(language)),
             warnings=warnings,
             perception=perception_sidecar,
             motion=motion_sidecar,

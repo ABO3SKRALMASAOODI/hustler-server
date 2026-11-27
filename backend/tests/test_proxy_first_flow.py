@@ -98,6 +98,12 @@ class _Cur:
                 "meta": dict(getattr(meta, "adapted", meta) or {}),
             }
             self._one = {"id": self._next_id}
+        elif "meta->>'proxy_audio_repair'='waiting'" in s:
+            asset = self.assets.get(p[0])
+            self._one = None
+            if asset and asset["meta"].get("proxy_audio_repair") == "waiting":
+                asset["meta"]["proxy_audio_repair"] = "queued"
+                self._one = {"id": p[0]}
         elif s.startswith("UPDATE assets"):
             patch = p[1].adapted if hasattr(p[1], "adapted") else p[1]
             self.updates.append(patch)
@@ -386,6 +392,19 @@ def test_a_matching_original_is_adopted_without_re_indexing(env, monkeypatch, ap
     assert body.get("reindexing") is None
     assert env.assets[aid]["meta"]["upload_state"] == "ready"
     assert not env.enqueued, "a matching original must not re-index"
+
+
+def test_original_replaces_silent_proxy_even_when_duration_matches(env, monkeypatch, app_ctx):
+    aid = _pending_asset(env)
+    env.assets[aid]["meta"]["proxy_audio_repair"] = "waiting"
+    monkeypatch.setattr(video.mp4probe, "duration_of_key", lambda *_: 355.0)
+    for _ in range(2):
+        _, status = app_ctx(aid)
+        assert status == 200
+    job, = env.enqueued
+    assert job["type"] == "index"
+    assert job["payload"]["asset_id"] == aid and job["payload"]["repair_proxy_audio"]
+    assert job["payload"]["reindex"] and "client_proxy_key" not in job["payload"]
 
 
 def test_an_original_that_disagrees_with_the_browser_re_indexes(env, monkeypatch,

@@ -1044,7 +1044,7 @@ def transcript_words(edl, index, tl, mutes=None):
     out = _mark_insert_breaks(kept_program_words(index, tl), tl)
     out = _corrected_rejoined(out, edl.get("captions") or {})
     import script_words
-    if not index.get("script_word_boundaries") and index.get("language") in script_words.LANGUAGES:
+    if not index.get("script_word_boundaries") and script_words.caption_family(index.get("language")):
         out = script_words.timed(out, index["language"])
     return _drop_muted_words(out, mutes) if mutes else out
 

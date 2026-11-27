@@ -180,7 +180,7 @@ def _parse_deepgram(payload):
 
 def _script_words(words, language, transcript):
     import script_words
-    if language not in script_words.LANGUAGES:
+    if not script_words.caption_family(language):
         return words
     return [Word(**row) for row in script_words.timed([w.model_dump() for w in words], language, transcript)]
 

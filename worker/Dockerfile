@@ -18,7 +18,7 @@ FROM python:3.11-slim-bookworm AS worker-base
 # warnings — which used to flood ffmpeg's stderr and deadlock the encoder.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ffmpeg fontconfig fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
+       ffmpeg libicu72 fontconfig fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
        xz-utils \
     && rm -rf /var/lib/apt/lists/*
 

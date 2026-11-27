@@ -265,4 +265,10 @@ def first_cut_summary(preview):
     if not seconds:
         return "your edited video"
     article = "an" if seconds in (8, 11, 18) or 80 <= seconds <= 89 else "a"
-    return f"{article} {seconds}-second edit"
+    width, height = preview.get("width"), preview.get("height")
+    shape = ""
+    if width and height:
+        shape = "vertical " if height > width else "landscape " if width > height else "square "
+    audio = preview.get("craft_report") or {}
+    sound = " with sound" if audio.get("silent") is False else ""
+    return f"{article} {seconds}-second {shape}edit{sound}"

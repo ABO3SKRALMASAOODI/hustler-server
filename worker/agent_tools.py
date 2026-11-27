@@ -952,6 +952,8 @@ def _execution_policy(ctx):
 def _child_payload(ctx, payload=None):
     body = dict(payload or {})
     body.setdefault("execution_policy", _execution_policy(ctx))
+    if getattr(ctx, "first_cut_original_audio", False) and body.get("source") == "agent_preview":
+        body["first_cut_original"] = True
     if getattr(ctx, "first_film_comparison", False):
         body["first_film_comparison"] = True
         if body.get("render_signature"):

@@ -106,7 +106,7 @@ def outline_sprite(text, voice, W, ss, blur_px, note=None, extra_pad=0):
         face = T.Face.of(v)
     except FileNotFoundError:
         fb = _first_fallback()
-        note(f"font {v.get('font') or v.get('family')} is not installed: drew it in {fb}")
+        note(f"Used installed fallback {fb} for {v.get('font') or v.get('family')}")
         v = {**v, "font": fb, "family": None, "var": None}
         face = T.Face.get(fb)
     px = float(v.get("px", 58))
@@ -117,7 +117,7 @@ def outline_sprite(text, voice, W, ss, blur_px, note=None, extra_pad=0):
             except FileNotFoundError:
                 continue
             if not alt.missing(text):
-                note(f"{v.get('font') or v.get('family')} lacks a glyph in {text!r}: drew it in {name}")
+                note(f"Used {name}, which covers the full text run")
                 v = {**v, "font": name, "family": None, "var": None, "track": 0, "shaped": True}
                 face = alt
                 break

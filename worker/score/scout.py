@@ -25,6 +25,7 @@ Answer with one JSON object and nothing else:
  "lang":"ISO code of the language this customer speaks: the upload's speech when the typing is a mix, en when there is nothing to go on",
  "about":"one plain sentence: who this is and what the upload is for, only what the words and frames show",
  "asks":[{{"id":"a1","said":"the clause as typed","probe":"one probe","min":number or null,"note":"a fact a checker needs, or null"}}],
+ "screen_label":"For a screen recording, a short factual title for the action demonstrated, in its language. Otherwise null.",
  "windows":[{{"t0":0,"t1":30,"why":"the story window"}}],
  "wishes":[{{"w":"16-20","at":null,"how":"thing|like","want":"what this moment shows","own":false,"mine":false,"q":["search 1","search 2"],"kind":"video|photo"}}],
  "fixes":[{{"w":7,"t":"corrected text","evidence":"speech|screen","read":"exact visible inscription when evidence is screen"}}]}}

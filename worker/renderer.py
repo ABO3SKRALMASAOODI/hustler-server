@@ -1104,6 +1104,8 @@ def _needs_preview_downscale(H):
     that was needed ships a full-resolution file as the "preview" — slower to
     encode and larger than the final it stands in for.
     """
+    if _FIRST_CUT_ORIGINAL.get() and _PREVIEW_QUALITY.get() == "approval":
+        return False
     cap = (config.APPROVAL_MAX_LONG_EDGE if _PREVIEW_QUALITY.get() == "approval"
            else config.PREVIEW_MAX_HEIGHT)
     if not cap:
@@ -1112,6 +1114,7 @@ def _needs_preview_downscale(H):
 
 
 _PREVIEW_QUALITY = ContextVar("preview_quality", default="draft")
+_FIRST_CUT_ORIGINAL = ContextVar("first_cut_original", default=False)
 # Whether this preview job's programme is long (config.PREVIEW_LONG_PROGRAM_S):
 # set once per job by run_render_job, read by preview_geometry, so every graph
 # and every stitched piece of the job is drawn on the same frame.
@@ -1202,6 +1205,8 @@ def preview_geometry(W, H, fps):
     resampled.
     """
     approval = _PREVIEW_QUALITY.get() == "approval"
+    if approval and _FIRST_CUT_ORIGINAL.get():
+        return W, H, min(fps, config.PREVIEW_MAX_FPS) if config.PREVIEW_MAX_FPS else fps
     cap = config.APPROVAL_MAX_LONG_EDGE if approval else config.PREVIEW_MAX_LONG_EDGE
     if cap and max(W, H) > cap:
         k = cap / float(max(W, H))
@@ -10466,6 +10471,7 @@ def run_render_job(worker_db, job):
     if quality not in ("draft", "approval"):
         raise dbx.PermanentJobError("Unknown preview quality")
     token = _PREVIEW_QUALITY.set(quality)
+    original_token = _FIRST_CUT_ORIGINAL.set(bool((job.get("payload") or {}).get("first_cut_original")))
     paid_token = _PREVIEW_PAID.set(False)
     plan_token = _RENDER_PLAN.set("free")
     long_token = _PREVIEW_LONG.set(False)
@@ -10492,6 +10498,7 @@ def run_render_job(worker_db, job):
             return result
     finally:
         _PREVIEW_QUALITY.reset(token)
+        _FIRST_CUT_ORIGINAL.reset(original_token)
         _PREVIEW_PAID.reset(paid_token)
         _RENDER_PLAN.reset(plan_token)
         _PREVIEW_LONG.reset(long_token)
@@ -10661,7 +10668,7 @@ def _run_render_job(worker_db, job):
     # same EDL is the point: the stored object is what failed them, so serving
     # it back from cache makes every retry a guaranteed no-op. force=1 (set by
     # the studio's "couldn't load" recovery) re-encodes to a FRESH key.
-    force = bool(job["payload"].get("force"))
+    force = bool(job["payload"].get("force") or _FIRST_CUT_ORIGINAL.get())
     # Entitlement is read HERE, once, at render time — not from anything
     # stored on the project. A user who upgraded a minute ago must get a
     # clean file for this export, and a lapsed one must get the mark back.
@@ -10768,6 +10775,7 @@ def _run_render_job(worker_db, job):
                         cached_meta, audio_model_review),
                     "audio_model_review": audio_model_review,
                     "duration_s": cached["duration_s"], "edl_version": version,
+                    "width": cached.get("width"), "height": cached.get("height"),
                     "variant": variant, "render_job_id": cached_meta.get("render_job_id"),
                     "quality": ("final" if variant == "final" else
                                 cached_meta.get("quality", "draft")),
@@ -11784,6 +11792,7 @@ def _run_render_job(worker_db, job):
                 "screening_pages": screening_pages,
                 "screening_frame_count": len(screening_frames),
                 "duration_s": out_dur, "edl_version": version,
+                "width": out_info["width"], "height": out_info["height"],
                 "variant": asset_variant, "timings": timings,
                 **({"changed_ranges": changed_ranges, "proof_segments": proof_segments,
                     "requested_ranges": requested_ranges,

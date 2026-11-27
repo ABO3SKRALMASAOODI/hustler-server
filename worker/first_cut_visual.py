@@ -249,11 +249,11 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None,
     # clip answered
     video = stock.video_available()
     kind = "video" if video else "photo"
-    specs = [{"id": f"b{n}", "query": q, "word": w, "at": a,
+    specs = [{"id": f"b{n}", "query": q, "at": a, **({} if visual else {"word": w}),
               "duration_s": round(b - a, 2), "kind": kind,
               "purpose": f"show {q} during {w}" if visual else f"show {q} as '{w}' is said"}
              for n, (a, b, w, q) in enumerate(wins, 1)]
-    print(f"[first_cut] b-roll moments: {[(s['at'], s['word'], s['query']) for s in specs]}",
+    print(f"[first_cut] b-roll moments: {[(s['at'], s.get('word'), s['query']) for s in specs]}",
           flush=True)
     first = {"moments": specs, "max": len(specs)}
     if video:
@@ -761,6 +761,10 @@ def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
                         target=target or CUT_IN_TARGET_S,
                         hi=hi or CUT_IN_MAX_S)
     levels = levels or (CUT_IN_BANDED if bands else CUT_IN_STRENGTH)
+    from agent_tools import _source_box_to_output
+    from timeline import Timeline
+    timeline = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed"))
+    samples = (ctx.index.get("spatial") or {}).get("samples") or []
     n, held = 0, []
     for a, b, close in segs:
         if not close:
@@ -777,14 +781,11 @@ def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
             continue
         strength = min(0.10, levels[n % len(levels)])
         cx, cy = aim or (0.5, 0.4)
-        from agent_tools import _source_box_to_output
-        from timeline import Timeline
-        source_t = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed")).out_to_src((a+b)/2)
-        samples = (ctx.index.get("spatial") or {}).get("samples") or []
+        source_t = timeline.out_to_src((a + b) / 2)
         if source_t is not None:
             nearby = [row for row in samples if row.get("faces") and abs(row["t"]-source_t) <= 1.0]
             if nearby:
-                row = min(nearby, key=lambda r: abs(r["t"]-source_t))
+                row = min(nearby, key=lambda r: abs(r["t"] - source_t))
                 face = max(row["faces"], key=lambda r: (r[2]-r[0])*(r[3]-r[1]))
                 box = _source_box_to_output(ctx, edl, source_t, face)
                 if box:
@@ -810,7 +811,6 @@ def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
 # --------------------------------------------------------------------------
 
 SCREEN_ZOOM = 2.2       # the window is 1/2.2 of the frame (2-3x, task)
-SCREEN_ZOOM_MIN = 1.8   # the floor: a region, never the page (task: 2-3x)
 SCREEN_MOVE_S = 0.25    # Q6: a snap to each new region, read as a cut-in
                         # (judges, vfr: "cut or snap straight to each section
                         # as it is named", never a drift; Q1's travel was 0.7)
@@ -901,13 +901,13 @@ def column_top(index, src_t, column):
                     and float(b[1]) >= SCREEN_HEADER_Y),
                    key=lambda b: float(b[1]))
     y0 = float(lines[0][1]) if lines else 0.1
-    return [x0, max(0.0, y0 - 0.03), x0 + 0.42, min(1.0, y0 + 0.24)]
+    # Frame the actual width of the lines being read, including their ends.
+    return [x0, max(0.0, y0 - 0.03), x1, min(1.0, y0 + 0.24)]
 
 
 def window_for(box, aspect, zoom=SCREEN_ZOOM):
     """The zoom window ([x0, y0, x1, y1], fractions; the frame's own aspect)
-    that frames ``box`` at ``zoom`` (smaller when the box is bigger, down to
-    SCREEN_ZOOM_MIN), and its zoom."""
+    that fits the entire box at up to the requested zoom, and its zoom."""
     bx0, by0, bx1, by1 = box
     bw, bh = max(0.02, bx1 - bx0), max(0.02, by1 - by0)
     z = max(1.0, min(zoom, 1.0 / (bh * 1.1), 1.0 / (bw * 1.08)))
@@ -1040,7 +1040,7 @@ def _vision_boxes(ctx, frames_at, spend):
                       f"narrator: \"{str(sentence)[:220]}\""})
         parts.append({"type": "image_url", "image_url": {
             "url": "data:image/jpeg;base64," + base64.b64encode(jpg).decode()}})
-    if len(sizes) < 2:
+    if not sizes:
         return {}
     try:
         resp = claude_lane.create(

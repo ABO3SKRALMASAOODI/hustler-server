@@ -4088,7 +4088,7 @@ def _original_ready(user_id, project_id, data):
                     "bytes": nbytes,
                     "subscribe_gated": account_gated,
                     **({"reindexing": True}
-                       if drift and not account_gated else {})}), 200
+                       if (drift or repair_audio) and not account_gated else {})}), 200
 
 
 # ------------------------------------------------------------------ #

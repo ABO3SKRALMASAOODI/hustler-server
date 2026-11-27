@@ -167,3 +167,22 @@ def test_a_landscape_call_fills_more_of_a_portrait_frame():
     assert abs((c[0] + c[2]) / 2 - 0.412) < 1e-6 and ctx.filled == 1
     assert S.fill_floor(ctx, [0.3, 0.0, 0.62, 1.0], target) == [0.3, 0.0, 0.62, 1.0]       # already large: unchanged
     assert S.fill_floor(ctx, [0, -0.2, 1, 1.2], 0.84) == [0, -0.2, 1, 1.2]               # a 4:3 upload: not this rule
+
+
+def test_thai_hook_subtitle_clears_the_ink_of_the_first_line_at_point_three_seconds():
+    from score.compiler import shaped
+    beat = {"k":"b","id":"b00","w":"0-20","job":"opening","cut":[255],"pic":["main"],
+            "do":[{"g":"big","t":[{"t":"ผู้ที่รู้","size":.08},{"t":"หลักการนี้","size":.035}],
+                   "at":"w0..w20.e","seat":[.5,.42]}]}
+    r = compiled([beat])
+    shown = [i for i in r.l1["items"] if i.get("k") == "word" and i["f"][0] <= 9 < i["f"][1]
+             and i.get("t") in {"ผู้ที่รู้","หลักการนี้"}]
+    assert len(shown) == 2
+    bounds = []
+    for item in shown:
+        voice = r.l1["voices"][item["v"]]
+        _, top, below = shaped(voice["font"], item["t"])
+        H = r.l1["frame"][1]
+        bounds.append((item["y"] - top*voice["px"]/H, item["y"] + below*voice["px"]/H))
+    upper, lower = sorted(bounds)
+    assert upper[1] < lower[0]

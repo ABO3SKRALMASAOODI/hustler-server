@@ -147,7 +147,9 @@ def _one_mix(ctx, work, comp):
     """The film's sounds and its bed as one mix, before the film is lowered (score.bed.one_mix). Never raises."""
     try:
         from . import bed
-        return bed.one_mix(work, comp.l1, dict(getattr(ctx, "index", None) or {}, first_film=True))
+        index = dict(getattr(ctx, "index", None) or {})
+        index.setdefault("first_film", {"frame": "9:16"})
+        return bed.one_mix(work, comp.l1, index)
     except Exception as exc:  # noqa: BLE001 - the film keeps the sounds and the bed it had
         print(f"[director] one mix skipped: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
         return None
@@ -1133,6 +1135,7 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
         sc = None
     _stage(rec, "scout", t)
 
+    ctx.first_cut_screen_label = (sc or {}).get("screen_label")
     index = scout.printed_spellings(index, sc)
     if (sc or {}).get("source_typography"):
         index = {**index, "source_typography": sc["source_typography"]}

@@ -354,7 +354,8 @@ def test_the_screen_window_is_2_to_3x_and_inside_the_frame():
     assert abs((win[2] - win[0]) - 1 / z) < 1e-3
     assert win[0] <= 0.3 and win[2] >= 0.45
     big, zb = fcv.window_for([0.1, 0.1, 0.8, 0.7], 1.6)
-    assert zb == fcv.SCREEN_ZOOM_MIN
+    assert 1 < zb < z
+    assert big[0] <= 0.1 and big[2] >= 0.8
 
 
 def test_screen_keyframes_start_wide_push_in_and_travel_eased():
