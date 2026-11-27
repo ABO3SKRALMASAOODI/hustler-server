@@ -51,10 +51,9 @@ def test_the_two_times_are_kept_with_the_verdict():
     assert "story_time" not in FIT._clean(_verdict())
 
 
-def test_the_prompt_states_one_time_rule_and_the_brief_as_wish_list():
-    s = FIT.SYSTEM
-    assert '"story_time"' in s and '"picture_time"' in s and "the same answer as time_ok" in s
-    assert "not the test" in s and "for ranking only" in s
+def test_fit_records_the_period_and_meaning_region_for_each_phrase():
+    assert all(field in FIT.SYSTEM for field in ("story_time", "picture_time", "meaning_box", "word_i"))
+    assert "unless the words specify a time of life" in FIT.SYSTEM
 
 
 def test_the_cache_key_changes_when_the_words_change():
@@ -262,18 +261,19 @@ def _report_pack(n_photo=0, moving=True, shared=False):
     return dict(footage=[dict(i=0, clips=clips)], pictures=pics, fit=fit)
 
 
-def test_fit_report_counts_a_take_that_fits_three_lines_once():
+def test_legacy_fit_counts_one_distinct_take_per_phrase():
     import wf3 as W3
     sc = dict(named=[], segments=[dict(say="a", see=[dict(thing="Toy Story")]) for _ in range(3)])
     rows = W3.fit_report(_report_pack(shared=True), sc, [1.0, 1.0, 1.0])
-    assert sum(r["have"] for r in rows) == 4                               # four takes, each counted on one line only
+    assert [r["have"] for r in rows] == [1, 1, 1]
+    assert not any(r["short"] for r in rows)
 
 
-def test_a_line_with_photographs_and_no_moving_clip_is_short():
+def test_a_fitting_photograph_covers_its_single_phrase():
     import wf3 as W3
     sc = dict(named=[], segments=[dict(say="a", see=[dict(thing="Toy Story")]), dict(say="b", see=[dict(thing="Toy Story")])])
     rows = W3.fit_report(_report_pack(n_photo=8), sc, [1.0, 1.0])
-    assert rows[1]["have"] >= 1 and rows[1]["moving"] == 0 and rows[1]["short"]
+    assert rows[1]["have"] == rows[1]["need"] == 1 and not rows[1]["short"]
 
 
 def test_the_topup_script_names_each_short_lines_moments_and_photo_searches_come_from_the_brief():
@@ -460,31 +460,12 @@ def _words_for(sc, wps=2.6):
     return dict(words=out, duration=round(t, 2))
 
 
-def test_demand_follows_the_cuts_shot_plan_and_moments_and_stills_shape_short():
-    import math
-    import film as F
-    import reel as R
+def test_supply_demand_follows_new_literal_phrases_at_any_reading_pace():
     import wf3 as W3
-    sc = dict(named=[], segments=[dict(say=" ".join(f"w{i}{k}" for k in range(12)), beat="setup",
-                                       see=[dict(thing="Toy Story", as_of="1995", moment="the window fall" if i == 1 else None,
-                                                 still_only=(i == 2))]) for i in range(3)])
-    words = _words_for(sc)
-    clock = F.Clock(words, sc)
-    plan = R.shot_plan(sc, clock, F.Clock.f(clock.dur) + 15, 1114)
-    pack = dict(_report_pack(), words=words)
-    want = {i: max(1, math.ceil(W3.DEMAND_K * sum(1 for x in plan[i] if x > W3.GLIMPSE_MAX_F))) for i in range(3)}
-    assert W3.line_demand(pack, sc, [4.0] * 3) == want
-    # line 1 names a moment: grade-3 takes only keep it short; line 2 is still by nature: no motion asked of it
-    clips = [dict(path=f"/m{k}.mp4", seconds=1.6, cuts=[], take_group=f"/m{k}.mp4", motion=dict(p90=0.1, curve=[0.1] * 24)) for k in range(40)]
-    fit = {c["path"]: {"0": [1, 2]} for c in clips}
-    ver = {c["path"]: {"0": {"1": dict(grade=3), "2": dict(grade=3)}} for c in clips}
-    pack = dict(footage=[dict(i=1, clips=clips)], pictures={}, fit=fit, fit_verdicts=ver, words=words)
-    rows = W3.fit_report(pack, sc, [4.0] * 3)
-    assert rows[1]["moment_ok"] is False and rows[1]["short"]
-    assert rows[2]["still_only"] and rows[2]["moving"] == 0 and not rows[2]["short"] and rows[2]["have"] >= rows[2]["need"]
-    ver[clips[0]["path"]]["0"]["1"]["grade"] = 5
-    rows = W3.fit_report(pack, sc, [4.0] * 3)
-    assert rows[1]["moment_ok"] is True and W3.moment_cover(rows) == 1.0
+    sc = dict(segments=[dict(see=[dict(word_i=0,kind="literal"),dict(word_i=4,kind="literal")]),
+                        dict(see=[dict(word_i=0,kind="callback"),dict(word_i=3,kind="card")])])
+    for durations in ([2.,3.], [8.,12.]):
+        assert W3.line_demand({}, sc, durations) == {0:2, 1:0}
 
 
 def test_failing_shots_get_the_top_up_before_the_fill(tmp_path, monkeypatch):
@@ -689,37 +670,23 @@ def test_joints_keep_three_holes_swell_only_in_narrator_gaps_and_long_voices_kee
         assert g[1] - g[0] >= 0.6 and j["rise_s"] <= g[1] - g[0] + 1e-6
 
 
-def test_a_thin_display_density_asks_the_writer_once_and_builds_again(tmp_path, monkeypatch):
+def test_a_single_fitting_picture_stays_under_its_line_without_extra_type(tmp_path):
     import wf3 as W3
-    calls = []
-    orig = W3.density_repair
-
-    def build(sc, pack, knobs):
-        n = sum(len(s_.get("show") or []) for s_ in sc["segments"])
-        pics = [dict(kind="clip", path="/c/a.mp4", line=0, spoken_line=0, f=[0, 10], take=0, mode="bleed")]
-        return dict(items=[], n=n), dict(pictures=pics, measured=dict(repeat_share=0.0, static_shots=0), voice_f=[0, 30], display=[])
-    monkeypatch.setattr(W3.F, "taste_check", lambda l1, beats: dict(ok=True, problems=[]))
-    monkeypatch.setattr(W3, "type_measures", lambda l1, beats, sc: dict(display_shot_share=0.05 if not l1.get("n") else 0.18))
-
-    def repair(sc, lines, ask=None, verify_fn=None):
-        calls.append(lines)
-        out = json.loads(json.dumps(sc))
-        out["segments"][0]["show"] = [dict(text="Woody", role="name", word_i=0)]
-        return out, [dict(i=0, text="Woody", role="name")], dict(usd=0.001)
-    monkeypatch.setattr(W3, "density_repair", repair)
-    (tmp_path / "pack.json").write_text(json.dumps(dict(record=dict(spend=[]), pack={})))
-    ctx = SimpleNamespace(supply=str(tmp_path), tmp=str(tmp_path), args={"audit": False, "topup": False}, log=lambda m: None)
-    pack = dict(words=dict(duration=1.0, words=[dict(w="a", start=0.0, end=0.5, seg=0)]), fit={}, footage=[])
     sc = dict(segments=[dict(say="Woody fell")])
-    _, beats, _ = W3.stories_gates(ctx, sc, pack, build, {}, *build(sc, pack, {}), dict(ok=True, problems=[]))
-    assert calls == [[0]] and beats["measured"]["display_density"]["after"] == 0.18
-    out, added, _ = orig(dict(segments=[dict(say="the box office", show=[])]), [0],
-                                      ask=lambda system, content: (json.dumps(dict(items=[dict(i=0, text="BOX OFFICE", role="key", word_i=1),
-                                                                                            dict(i=0, text="$362M", role="key", word_i=2)])), {}))
-    assert [a["text"] for a in added] == ["BOX OFFICE"]                       # a number is never added here
+    pack = dict(words=dict(duration=4., words=[dict(w="Woody", start=0., end=4., seg=0)]))
+    l1 = dict(items=[], voices={})
+    beats = dict(pictures=[dict(kind="clip", path="/one.mp4", line=0, f=[0,120], mode="bleed")],
+                 voice_f=[0,120], measured={}, display=[])
+    ctx = _ctx(tmp_path, audit=False)
+    def rebuild(*args):
+        raise AssertionError("The covered phrase already has its picture.")
+    _, result, _ = W3.stories_gates(ctx, sc, pack, rebuild, {}, l1, beats, dict(ok=True, problems=[]))
+    measured = result["measured"]
+    assert measured["pace_plan"]["cuts_10s"] == 2.5
+    assert measured["display_density"]["before"] == 0
+    assert measured["defects"] == []
+    assert sc["segments"] == [dict(say="Woody fell")]
 
-
-# ----------------------------------------------------------------- 20 Nov: an unanswered call is an outage, never a verdict
 
 def _cap(*a, **k):
     raise RuntimeError('openai 503: {"error": {"message": "Claude backend daily call cap reached (1500/1500)"}}')

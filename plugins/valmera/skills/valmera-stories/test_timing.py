@@ -219,20 +219,6 @@ def test_beat_names_are_never_offered_as_chapter_titles():
     assert "private notes" in writer.ANNOTATE_SYSTEM and "never words for the screen" in writer.REEL_DATA
 
 
-def test_the_density_pass_asks_for_chapters_the_way_annotate_does():
-    """The density pass still asked for 'a two-to-four-word chapter title on a segment that opens a section' beside each
-    segment's role: a chapter card on every turn, against ANNOTATE_SYSTEM and FORMS['short'] (no chapters)."""
-    import wf3
-    assert "a two-to-four-word chapter title on a segment that opens a section" not in wf3.DENSITY_SYSTEM
-    assert "truly changes subject" in wf3.DENSITY_SYSTEM and "at most one in the whole film" in wf3.DENSITY_SYSTEM
-    assert "key word" in wf3.DENSITY_SYSTEM and "names" in wf3.DENSITY_SYSTEM and "never becomes words on the screen" in wf3.DENSITY_SYSTEM
-    sc = _sc(SHARP_HOOK, SHORT_CLOSE)
-    sc["segments"][1].update(beat="turn", show=[dict(text="The Edge", role="chapter", word_i=0)])
-    seen = []
-    wf3.density_repair(sc, [1, 2], ask=lambda system, content: (seen.append(content), ('{"items": []}', {}))[1])
-    assert '# The film\'s chapter titles so far\n["The Edge"]' in seen[0] and "role in the story: where the story turns" in seen[0]
-
-
 def test_annotate_keeps_which_prompt_wrote_each_item(monkeypatch):
     sc = _sc(SHARP_HOOK, SHORT_CLOSE)
     sc["named"] = [dict(name="Steve Jobs", **{"is": "person"})]

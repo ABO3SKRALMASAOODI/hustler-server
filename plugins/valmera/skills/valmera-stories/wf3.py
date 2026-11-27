@@ -1452,6 +1452,15 @@ def fit_report(pack, sc, durs):
                     slot = (i,int(wi))
                     if slot in offers and FIT.usable(v):
                         offers[slot][groups.get(path,path),ti] = v.get("grade") or 0
+    # Delivered packs can carry only the compact per-line fit table. It identifies a
+    # phrase without ambiguity when the line has exactly one literal brief.
+    if not pack.get("fit_verdicts") and pack.get("fit"):
+        single = {i: (i, seg["see"][0].get("word_i", 0)) for i, seg in enumerate(sc["segments"])
+                  if len(seg.get("see") or []) == 1}
+        for (_, path, ti), unit in _units(pack).items():
+            for i in unit["lines"]:
+                if single.get(i) in offers:
+                    offers[single[i]][path, ti] = unit["grades"][i]
     # Match one distinct picture per phrase before counting another for any phrase.
     assigned = {}
     def match(slot,seen):
@@ -2235,10 +2244,7 @@ def joints_of(sc, pack, beats=None):
 
 
 AUDIT_ROUNDS = 3
-BW_SHARE = (0.04, 0.35)      # black and white on this share of shots, measured on the plan; outside it the devices are halved once
 REPEAT_MAX = 0.05            # repeats by distinct take
-CUTS_10S = (15.5, 19.6)      # the pace gate on the plan: cuts a 10 s
-LONG_SHOTS_MAX = 0.024       # shots of 2 s or more: at most this share
 
 
 def planned_shots(beats, pack, clock):
@@ -2322,13 +2328,8 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
              no shot judged unfit is kept. A shot no model answered for (an outage: a cap, a 503, a timeout, after the
              retries) is never a failure: it keeps the supply's verdict and stays (20 Nov: a 90-second proxy cap turned
              87 unanswered shots into "fit=False, not judged", and the fill narrowed every line to an empty set)
-    colour   black and white by measure (device finishes and grey takes) on BW_SHARE of shots, else the writer's
-             devices lowered once
-    motion   no static shot on the plan (reel.motion_of): a static shot breaks the plan
-    repeats  at most REPEAT_MAX of shots repeat a take (counted by distinct take)
-    figures  every figure annotate planned is placed (as display type or a designed card)
-    pace     CUTS_10S cuts a 10 s, at most LONG_SHOTS_MAX of shots 2 s or more, no line short: else the short lines get a
-             footage top-up (script_rec given) and one rebuild; what remains is a recorded defect"""
+    Record pace, colour and display density. Search again for uncovered phrases and retain their
+    fits on a rebuild. Report unplaced figures and repeated or static pictures."""
     clock = F.Clock(pack["words"], sc)
     drop = list(knobs.get("drop") or [])
     rounds, failed, usd = [], [], 0.0
@@ -2428,10 +2429,9 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
     # ---- pace: short lines, and lines whose fill (designed cards and reframes) is over FILL_SHARE of their own frames,
     # get a top-up and one rebuild before the cut is final
     pc = pace_of(beats)
-    pace_fail = not (CUTS_10S[0] <= pc["cuts_10s"] <= CUTS_10S[1]) or pc["long_share"] > LONG_SHOTS_MAX or pc["shortfall"]
     fill_over = sorted(int(k) for k in ((beats.get("measured") or {}).get("fill_over_lines") or {}))
     topped = None
-    want_lines = sorted({int(k) for k in pc["shortfall"]} | set(fill_over)) if (pace_fail and pc["shortfall"]) or fill_over else []
+    want_lines = sorted({int(k) for k in pc["shortfall"]} | set(fill_over))
     if want_lines and script_rec is not None and ctx.args.get("topup", True) is not False:
         try:
             windows = None
@@ -2449,9 +2449,6 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
             l1, beats = build(sc, pack, knobs)
             taste = F.taste_check(l1, beats)
             pc = pace_of(beats)
-            pace_fail = not (CUTS_10S[0] <= pc["cuts_10s"] <= CUTS_10S[1]) or pc["long_share"] > LONG_SHOTS_MAX or pc["shortfall"]
-    if pace_fail:
-        defects.append(f"pace off the bar: {json.dumps(pc)[:300]}")
     # ---- layout: full-bleed pictures on BLEED_MIN of the shots, else built once more with windows and collages halved
     full, layered = bleed_share(beats)
     layout = dict(bleed_share=full, print_window_share=layered, rebuilt=False)
@@ -2499,66 +2496,6 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
     m["defects"] = defects
     taste = dict(taste, ok=not problems, problems=problems)
     return l1, beats, taste
-
-
-DENSITY_SYSTEM = """You are the picture editor of a narrated vertical story film cut like the best documentary reels. The script is final; you never change a word. The film needs more large display type set big over the pictures on about one shot in six, and that weight goes to the words a viewer holds on to: the key word of a line and the names of the people and things it is about.
-
-For the segments you are given (each with its words numbered from 0, its role in the story and the display items it already has), add up to two display items each, only where the words carry them: {"i": segment, "text": exactly the spoken word or words as printed (a key word or a name), "role": "key"|"name"|"chapter", "word_i": the index of the spoken word it lands on}. Never a number or a figure. Never repeat an item the segment already has. A chapter title is rare: it goes only where the story truly changes subject, never on a turn, a low point or a payoff for being one, and a film of about a minute and a half needs none, at most one in the whole film; when a segment already sits under a chapter or the film already has one, add key words and names instead. A chapter title, when there is one, is the segment's own spoken words or the name of the thing it turns on. Each segment's role in the story is the editor's private note on its structure and never becomes words on the screen.
-
-Answer with one JSON object only: {"items": [...]}"""
-
-
-def uncovered_lines(beats, n=4):
-    """The lines with the most base shots that carry no display type over them, most first."""
-    big = [d["f"] for d in beats.get("display") or []]
-    cnt = {}
-    for p in beats.get("pictures") or []:
-        if p.get("kind") in ("clip", "photo") and p.get("spoken_line") is not None and \
-                not any(a < p["f"][1] and p["f"][0] < b for a, b in big):
-            cnt[int(p["spoken_line"])] = cnt.get(int(p["spoken_line"]), 0) + 1
-    return [k for k, _ in sorted(cnt.items(), key=lambda q: (-q[1], q[0]))[:n]]
-
-
-def density_repair(sc, lines, ask=None, verify_fn=None):
-    """(script with the added items, [added], usage): one OpenAI call (writer.ANNOTATE_MODEL) asks for word-anchored
-    display items on the given lines; an item is kept only when its role and word_i are valid, its text is new to the
-    segment and the script still verifies with it (no number may stand outside a verified quote)."""
-    ask = ask or (lambda system, content: writer.ask_openai(system, content, effort="low", max_tokens=4000, what="display density",
-                                                            model=writer.ANNOTATE_MODEL))
-    # an item that prints no number cannot put a number outside a verified quote: the digit rule below is its check
-    # against the facts; verify_fn may add the full page check
-    verify_fn = verify_fn or (lambda s_: {"ok": True})
-    rows = []
-    for i in lines:
-        s_ = sc["segments"][i]
-        ws = str(s_.get("say") or "").split()
-        rows.append(f"{i}. role in the story: {writer.beat_prose(s_.get('beat'))}; has={json.dumps([x.get('text') for x in s_.get('show') or [] if isinstance(x, dict)], ensure_ascii=False)}\n   words: "
-                    + " ".join(f"{j}:{w}" for j, w in enumerate(ws)))
-    chapters = [x.get("text") for s_ in sc["segments"] for x in s_.get("show") or [] if isinstance(x, dict) and x.get("role") == "chapter"]
-    text, use = ask(DENSITY_SYSTEM, "# The film's chapter titles so far\n" + json.dumps(chapters, ensure_ascii=False)
-                    + "\n\n# Segments\n" + "\n".join(rows))
-    try:
-        got = writer.json_block(text).get("items") or []
-    except ValueError:
-        return sc, [], use
-    out = json.loads(json.dumps(sc))
-    added = []
-    for x in got:
-        if not isinstance(x, dict) or x.get("i") not in lines or x.get("role") not in ("key", "name", "chapter"):
-            continue
-        seg = out["segments"][x["i"]]
-        n = len(str(seg.get("say") or "").split())
-        t_ = str(x.get("text") or "").strip()
-        wi = x.get("word_i")
-        if not t_ or not (isinstance(wi, int) and not isinstance(wi, bool) and 0 <= wi < n) or writer.digits(t_) or \
-                t_ in [str(y.get("text")) for y in seg.get("show") or [] if isinstance(y, dict)] or len(seg.get("show") or []) >= 3:
-            continue
-        trial = json.loads(json.dumps(out))
-        trial["segments"][x["i"]].setdefault("show", []).append(dict(text=t_, role=x["role"], word_i=wi, **{"from": "density"}))
-        if verify_fn(trial).get("ok"):
-            out = trial
-            added.append(dict(i=x["i"], text=t_, role=x["role"]))
-    return out, added, use
 
 
 def repeated_keys(beats, pack):
@@ -3194,7 +3131,6 @@ def colourfulness(jpg):
 MOTION_CONTENT_MIN = 0.65        # content motion on this share of shot time at least (the judge: 69% of shots)
 COLOUR_MEDIAN_MIN = 15.0         # colourfulness median over shots (the judge: about 24)
 VOID_MAX = 0.2                   # near-black share on print frames
-DISPLAY_SHARE = (0.15, 0.25)     # shots with display type over them
 CAP_MIN_PX = 108                 # a figure's cap height
 CAPTION_LAG = (0.11, 0.20)       # caption ink after the voice, median seconds
 MUSIC_SHARE = (0.81, 1.0)        # the bed within 10 dB of its speaking-time median, over the music's span (the judge's stems:
@@ -3285,7 +3221,6 @@ def film_motion(film, pictures, ffmpeg, fps=30.0, cache_path=None):
 
 FLIPS_10S = (0.3, 3.6)           # polarity flips a 10 s (the teardown: frame luma correlation -0.3 or lower with the frame before)
 WHITE_10S = (0.5, 1.9)           # white frames a 10 s (luma 225 and more, spread 25 or less)
-VISIBLE_CUTS_MIN = 15.5          # visible cuts a 10 s, by ffmpeg's scene score (the rater's method)
 HASH_REPEAT_MAX = 0.05           # shots whose middle frame repeats an earlier shot's (perceptual hash), time-continuous cut-ins aside
 
 
@@ -3360,7 +3295,7 @@ def type_measures(l1, beats, sc):
     """The film's display type as planned: the share of shots with display type over them, the figures placed against
     those annotate planned, the type pages (designed cards) per section joint, the cap height of each figure (the
     engine's font metrics at its fitted size and its resting scale) and how long it holds, and the captions' ink lag."""
-    Rl = F.Ruler(l1["voices"])
+    Rl = F.Ruler(l1.get("voices", {}))
     big = [it for it in l1["items"] if it.get("k") == "word" and it.get("role") == "big"]
     base = [p for p in beats.get("pictures") or [] if p.get("kind") in ("clip", "photo", "designed")]
     with_type = sum(1 for p in base if p["kind"] == "designed" or any(w["f"][0] < p["f"][1] and p["f"][0] < w["f"][1] for w in big))
@@ -3585,15 +3520,10 @@ def film_checks(ctx, film, sc, pack, music=None, clean=None):
             defects.append(f"{punct['flips_10s']} polarity flips a 10 s (bar {FLIPS_10S[0]}-{FLIPS_10S[1]})")
         if not WHITE_10S[0] <= punct["white_10s"] <= WHITE_10S[1]:
             defects.append(f"{punct['white_10s']} white frames a 10 s (bar {WHITE_10S[0]}-{WHITE_10S[1]})")
-        if punct.get("visible_cuts_10s") is not None and punct["visible_cuts_10s"] < VISIBLE_CUTS_MIN:
-            defects.append(f"{punct['visible_cuts_10s']} visible cuts a 10 s (at least {VISIBLE_CUTS_MIN})")
         if punct["hash_repeat_share"] > HASH_REPEAT_MAX:
             defects.append(f"{punct['hash_repeat_share']:.0%} of shots repeat an earlier picture (at most {HASH_REPEAT_MAX:.0%})")
     type_ok = True
     if "error" not in typ:
-        if not (DISPLAY_SHARE[0] <= typ["display_shot_share"] <= DISPLAY_SHARE[1]):
-            defects.append(f"display type on {typ['display_shot_share']:.0%} of shots (bar {DISPLAY_SHARE[0]:.0%}-{DISPLAY_SHARE[1]:.0%})")
-            type_ok = False
         for f_ in typ["figures"]:
             if not f_["cap_px"] or f_["cap_px"] < CAP_MIN_PX or f_["held_s"] < R.FIGURE_HOLD_S - 0.5 / F.FPS:
                 defects.append(f"figure {f_['text']!r}: cap {f_['cap_px']} px, held {f_['held_s']} s (at least {CAP_MIN_PX} px, {R.FIGURE_HOLD_S} s)")

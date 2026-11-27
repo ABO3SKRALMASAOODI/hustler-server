@@ -366,14 +366,16 @@ def test_the_measured_holds_send_their_windows_back_to_research_once(tmp_path, m
     ctx = SimpleNamespace(supply=str(tmp_path), run_dir=str(tmp_path), log=lambda _: None)
     sc = dict(beats=dict(pictures=[dict(window=0), dict(window=1)], coverage=dict(real_seconds=9.0, missing_windows=[2])), spend=[])
     assert wf._rebuild_holds(ctx, {}, sc, dict(film=str(film))) is True
-    assert asked[0]["weak_windows"] == [1] and asked[0]["real_seconds"] == 9.0 and rebuilt == [1]
+    assert asked[0]["weak_windows"] == [2] and asked[0]["real_seconds"] == 9.0 and rebuilt == [1]
     assert sc["beats"]["measured_before_research"] == measured and pack["holds_researched"] is True
     assert wf._rebuild_holds(ctx, {}, sc, dict(film=str(film))) is False             # once a short: the film stands
     assert len(asked) == 1
-    # too few cuts: every window with fewer pictures than its clause wants is researched
-    few = dict(measured, holds=[], cuts_per_10s=1.0)
-    assert wf.hold_windows(few, coverage, [dict(window=0)] * 3 + [dict(window=1)] * 12 + [dict(window=2)]) == [2]
-    assert wf.hold_windows(dict(measured, holds=[], cuts_per_10s=6.0), coverage, []) == []
+    # A continuous, fitting picture covers its full phrase at any programme pace.
+    placed = [dict(window=i, f=[round(w["t0"]*30), round(w["t1"]*30)]) for i,w in enumerate(coverage["windows"])]
+    for rate in (1., 6.):
+        signals = dict(measured, holds=[[0.,30.]], cuts_per_10s=rate)
+        assert wf.hold_windows(signals, coverage, placed, lead=0) == []
+        assert wf.hold_windows(signals, coverage, placed[:2], lead=0) == [2]
 
 
 def test_the_check_names_the_object_a_picture_shows_from_the_sound_sets_own_families(tmp_path, monkeypatch):

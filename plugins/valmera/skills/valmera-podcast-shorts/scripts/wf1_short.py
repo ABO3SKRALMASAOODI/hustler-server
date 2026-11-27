@@ -61,7 +61,6 @@ RECOVERY_PASSES = 2
 # or fewer cuts than this a 10 s, sends the windows under it back to research once a short (never a gate: the film is
 # delivered whatever the second measure says). Round 1, 19 Nov: holds of 34 s and 15 s, and a film with no cut at all.
 RESEARCH_HOLD_S = 6.0
-RESEARCH_CUTS_10S = 4.0
 # Below each coverage window's own depiction, up to this many lower rungs the plan names (wf1_coverage.plan): a window
 # research left empty takes the next rung before the final build (19 Nov: m03 ran 34 s on the speaker once its windows'
 # pictures were rejected, m10 22 s with no cutaway).
@@ -2089,10 +2088,7 @@ def _rescore(ctx, script, sc):
 
 
 def hold_windows(measured, coverage, pictures, fps=None, lead=None):
-    """The windows the measured film leaves short: every window a hold longer than RESEARCH_HOLD_S overlaps, and when
-    the film cuts less than RESEARCH_CUTS_10S a 10 s, every window holding fewer pictures than its clause wants (one a
-    1.25 s, wf1_coverage.proposals)."""
-    import math
+    """Find requested evidence missing from the composed word window."""
     fps = fps or F.FPS
     lead = F.LEAD_F if lead is None else lead
     from wf1_coverage import camera_remainder
@@ -2100,36 +2096,30 @@ def hold_windows(measured, coverage, pictures, fps=None, lead=None):
     for i, w in enumerate(coverage.get("windows") or []):
         if w.get('on_take') or w.get('publisher_camera') or camera_remainder(w):
             continue
-        a, b = (round(w["t0"]*fps)+lead)/fps, (round(w["t1"]*fps)+lead)/fps
+        a = round(w["t0"] * fps) + lead
+        b = round(w["t1"] * fps) + lead
         placed = [p for p in pictures if p.get("window") == i]
-        if any((p.get("selected_archive_view") or p.get("projection")) and p["f"][0] <= round(a*fps)
-               and round(b*fps) <= p["f"][1] for p in placed):
-            continue
-        if w.get("single_action") is True and any(p.get("kind") == "clip" or
+        if w.get("single_action") and any(p.get("kind") == "clip" or
                 (p.get("reading") and (p.get("document") or {}).get("review")) for p in placed):
             continue
-        meaningful = min(1.4,b-a)
-        if any(min(h1,b)-max(h0,a) >= meaningful for h0,h1 in measured.get("holds") or []):
+        covered = sorted((max(a, p["f"][0]), min(b, p["f"][1])) for p in placed if p.get("f"))
+        if placed and not covered:
+            # Older placement reports only identify the window. Its picture was placed.
+            continue
+        cursor = a
+        for start, stop in covered:
+            if stop <= cursor:
+                continue
+            if start > cursor:
+                break
+            cursor = stop
+        if cursor < b:
             out.add(i)
-        elif float(measured.get("cuts_per_10s") or 0) < RESEARCH_CUTS_10S:
-            timed = sorted((max(a,p["f"][0]/fps), min(b,p["f"][1]/fps)) for p in placed if p.get("f"))
-            if timed:
-                # An adjacent speaker hold does not reopen a window already covered by verified pictures.
-                end = a
-                gap = 0
-                for start,stop in timed:
-                    gap = max(gap,start-end)
-                    end = max(end,stop)
-                if max(gap,b-end) >= meaningful:
-                    out.add(i)
-            elif len(placed) < max(1, math.ceil((w["t1"]-w["t0"])*.8)):
-                out.add(i)
     return sorted(out)
 
 
 def _rebuild_holds(ctx, script, sc, rd, defer=False):
-    """Feed the rendered programme's measured cuts back to supply: the windows under a long hold, or under too few
-    cuts, are researched once a short through refill and the film rebuilt. Returns True when it was rebuilt; after the
+    """Refill visual evidence still missing from the composed word windows once per short. Returns True when it was rebuilt; after the
     one pass (or with nothing to research) the film stands, its measure on record."""
     film = rd.get("film")
     if not film or not os.path.isfile(film):
