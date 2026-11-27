@@ -1089,6 +1089,9 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
     L = Layer(l1, lib, "st")
     P, R = L.P, L.R
     f0, f_p = marks["studio"]
+    push_end = marks["push"][1]
+    push_frames = push_end - f_p
+    seat_frames = min(SEAT_F, max(0, push_frames - 1))
     f_t, f_send = marks["typing"]
     iw, ih = float(ui["w"]), float(ui["h"])
     ch = W / iw * ih / H                            # the screen at the frame's width: taller than the frame
@@ -1103,7 +1106,7 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
     if bub and 0.0 <= float(bub[0]) < float(bub[1]) <= 1.0:
         sent_y = TOP_Y + 0.03 - (float(bub[0]) - 0.5) * ch * 1.15
         sent_b = sent_y + (float(bub[1]) - 0.5) * ch * 1.15
-    P.page("ground", [f0, f_p + PUSH_F], "#0A0A0C", "#0A0A0C")     # the base picture under the screen (the screen covers it)
+    P.page("ground", [f0, push_end], "#0A0A0C", "#0A0A0C")     # the base picture under the screen (the screen covers it)
     shots = list(ui["typing"])
     words = typed.split()
     # where each photograph shows: the empty composer, then one per word, then the sent screen
@@ -1139,20 +1142,20 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
         keys.append(k)
         P.card(f"ui{j:02d}", [a, b], k, box, z=2, x=0.5, y=ys[a - f0:b - f0], s=ss[a - f0:b - f0])
     k = P.image("dv_uis", os.path.join(ui["dir"], ui["sent"]), int(iw), int(ih))
-    y_all, s_all = ys + [ys[-1]] * PUSH_F, ss + [ss[-1]] * PUSH_F
-    f_sent_end = marks["board"][0] if board and marks.get("board") else f_p + PUSH_F
+    y_all, s_all = ys + [ys[-1]] * push_frames, ss + [ss[-1]] * push_frames
+    f_sent_end = marks["board"][0] if board and marks.get("board") else push_end
     # The sent photo and seated export read together. Clear the photo as the export
     # leaves its seat, before the expanding picture crosses the sentence.
-    screen_end = f_p + PUSH_F
+    screen_end = push_end
     if sent_b is not None and not (board and marks.get("board")):
-        screen_end = f_sent_end = f_p + SEAT_F + 1
+        screen_end = f_sent_end = min(push_end, f_p + seat_frames + 1)
     P.card("ui_sent", [f_send, f_sent_end], k, box, z=2, x=0.5, y=y_all[f_send - f0:f_sent_end - f0], s=s_all[f_send - f0:f_sent_end - f0])
     if board and marks.get("board"):            # the Shorts board the sentence made: the whole screen, a slow push in
         bw, bh = float(board["w"]), float(board["h"])
         bch = W / bw * bh / H
-        n_b = f_p + PUSH_F - f_sent_end
+        n_b = push_end - f_sent_end
         bk = P.image("dv_board", board["path"], int(bw), int(bh))
-        P.card("board", [f_sent_end, f_p + PUSH_F], bk, [0.0, r4(0.5 - bch / 2), 1.0, r4(0.5 + bch / 2)], z=2, x=0.5, y=0.5,
+        P.card("board", [f_sent_end, push_end], bk, [0.0, r4(0.5 - bch / 2), 1.0, r4(0.5 + bch / 2)], z=2, x=0.5, y=0.5,
                s=[r4(min(1.0, 1.0 / bch) * (1.0 + 0.06 * q)) for q in MF.ease_io(n_b)])
         L.hit("whoosh_soft_1", f_sent_end, "whoosh")      # the screen turns to the board
     if upload and ui.get("player"):
@@ -1171,17 +1174,17 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
         hh = BOTTOM_Y - top
         ww = min(hh * H * float(export["w"]) / float(export["h"]) / W, 0.9)
         sb = [r4(0.5 - ww / 2), r4(top), r4(0.5 + ww / 2), r4(top + ww * W * float(export["h"]) / float(export["w"]) / H)]
-    xs, ys2, zs = MF.pull(sb, PUSH_F - SEAT_F, out=False)
-    xs = [r4((sb[0] + sb[2]) / 2)] * SEAT_F + xs
-    ys2 = [r4((sb[1] + sb[3]) / 2)] * SEAT_F + ys2
-    zs = [r4(v) for v in MF.settle(SEAT_F, 0.9)] + zs
-    P.card("result", [f_p, f_p + PUSH_F], ex_key, sb, t0=float(marks.get("export_t0") or 0.0), z=4, radius=0.01, x=xs, y=ys2, s=zs)
+    xs, ys2, zs = MF.pull(sb, push_frames - seat_frames, out=False)
+    xs = [r4((sb[0] + sb[2]) / 2)] * seat_frames + xs
+    ys2 = [r4((sb[1] + sb[3]) / 2)] * seat_frames + ys2
+    zs = [r4(v) for v in MF.settle(seat_frames, 0.9)] + zs
+    P.card("result", [f_p, push_end], ex_key, sb, t0=float(marks.get("export_t0") or 0.0), z=4, radius=0.01, x=xs, y=ys2, s=zs)
     if later:                                   # on its own dark pill: the screen behind it is busy with the product's own text
         R.voices[L.k("dv_l")]["px"] = 44
         lab = LATER_LABEL.format(later)
         cap_l, w_l = R.cap(L.k("dv_l")) / H, R.width(L.k("dv_l"), lab) / W
         y_l = TOP_Y + 0.06 if sent_b is None else sb[1] - 0.02     # between the bubble and the growing result
-        label_end = min(screen_end, f_p + PUSH_F - 2)
+        label_end = min(screen_end, push_end - 2)
         P.block("later.pill", [f_p - 6, label_end], [0.06, r4(y_l - cap_l - 0.016), r4(0.10 + w_l), r4(y_l + 0.016)], "#07080B", z=5,
                 op=0.88, radius=0.012)
         it = L.text("later", [f_p - 6, label_end], lab, L.k("dv_l"), 0.08, y_l, CYAN, 1.0, rise=True)
@@ -1190,10 +1193,10 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
     # the key run starts with the first word and ends as the last lands (its peak placed so its head is on f_t)
     L.hit("typing_2", starts[0], "typing")
     L.hit("click_1", f_send, "click")
-    L.hit("whoosh_soft_1", f_p + SEAT_F, "whoosh")     # the reveal: the result taking the frame
-    rec = L.lay([f0, f_p + PUSH_F])
-    rec.update(device="studio", frames=[f0, f_p + PUSH_F], board=bool(board), result_seat=[r4(v) for v in sb],
-               bubble=[r4(sent_y), r4(sent_b)] if sent_b is not None else None, typing=[f_t, f_send], send_f=f_send, push=[f_p, f_p + PUSH_F], shots=len(keys) + 1,
+    L.hit("whoosh_soft_1", f_p + seat_frames, "whoosh")     # the reveal: the result taking the frame
+    rec = L.lay([f0, push_end])
+    rec.update(device="studio", frames=[f0, push_end], board=bool(board), result_seat=[r4(v) for v in sb],
+               bubble=[r4(sent_y), r4(sent_b)] if sent_b is not None else None, typing=[f_t, f_send], send_f=f_send, push=[f_p, push_end], shots=len(keys) + 1,
                typed=typed, typed_px=round(32.0 * W / iw * 1.15, 1) if iw <= 800 else round(16.0 * 3 * W / iw * 1.15, 1),
                screen=dict(w=int(iw), h=int(ih), view=ui.get("view")), later=later)
     return rec

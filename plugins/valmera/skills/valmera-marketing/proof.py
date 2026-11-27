@@ -2087,12 +2087,39 @@ def showcase_supply(ctx, script, sup_dir, pk):
     lst = os.path.join(sup_dir, "voice.txt")
     open(lst, "w").write("".join(f"file '{p}'\n" for p in parts))
     subprocess.run([PX.FF, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-ac", "1", "-ar", "48000", voice], check=True, timeout=120)
+    words_on_upload = words
     words = os.path.join(sup_dir, "words.json")
-    shift = (mk["typing"][0] - mk["lead_f"]) / F.FPS
-    jsave(words, dict(voice=read["voice"], duration=(mk["dur_f"] - mk["lead_f"]) / F.FPS,
-                      words=[dict(w, start=w["start"] + shift, end=w["end"] + shift) for w in spoken]))
+    upload_words_timed = words_on_upload
+    cursor = 0.
+    export_words_timed = []
+    for lo, hi in edl.get("keep") or [[0., body]]:
+        for row in upload_words_timed:
+            if lo <= row["t0"] < hi:
+                export_words_timed.append(dict(w=row["w"], t0=cursor+row["t0"]-lo, t1=cursor+min(row["t1"], hi)-lo))
+        cursor += hi-lo
+    turns, clock_rows, voices = [], [], []
+    who = (script.get("idea_full") or {}).get("speaker") or "speaker"
+    for kind, window, timeline in (("split",hook,export_words_timed), ("before",before,upload_words_timed),
+                                   ("typing",None,spoken), ("after",after,export_words_timed), ("stretch",win,export_words_timed)):
+        a, b = mk[kind]
+        if b <= a:
+            continue
+        start = (a-mk["lead_f"])/F.FPS
+        if kind == "typing":
+            rows = [dict(w=row["w"], start=start+row["start"], end=start+row["end"]) for row in timeline]
+        elif window:
+            lo, hi = window
+            rows = [dict(w=row["w"], start=max(0., start+row["t0"]-lo), end=start+min(hi,row["t1"])-lo)
+                    for row in timeline if lo <= row["t0"] < hi and start+row["t1"]-lo > 0.]
+            voices.append(dict(person=who, role=kind, start=start, end=(b-mk["lead_f"])/F.FPS))
+        else:
+            continue
+        clock_rows.extend(dict(row, seg=len(turns)) for row in rows)
+        turns.append(dict(say=" ".join(row["w"] for row in rows), role=kind,
+                          print=typed_segment.get("print", {}) if kind=="typing" else {}))
+    jsave(words, dict(voice=read["voice"], duration=(mk["dur_f"] - mk["lead_f"]) / F.FPS, words=clock_rows))
     pack = dict(sid=ctx.sid, words=words, narration=voice, ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[], footage=[],
-                voices=[], work=os.path.join(sup_dir, "finish"), fit=[],
+                voices=[], screen_voices=voices, programme_segments=turns, work=os.path.join(sup_dir, "finish"), fit=[],
                 product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, before=before, after=after, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
                              upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None,
                              caption_proof=caption, proof_at=proof_push_at(proof_span(pics, body, visible), hook)))

@@ -855,7 +855,8 @@ def music_version(ctx, rd, sc):
             cmd += " --turn-drop"
         # films made together (a podcast's shorts) share a list of the tracks already taken, so no two play the same one:
         # --args '{"music_ledger": "<file>"}'. The choice is made under the file's lock, one film at a time.
-        ledger, lock, used = (ctx.args or {}).get("music_ledger") if not song else None, None, []
+        ledger = ((ctx.args or {}).get("music_ledger") or os.environ.get("VALMERA_MUSIC_LEDGER")) if not song else None
+        lock, used = None, []
         try:
             # A killed attempt may leave either staging file. Never pair it with this attempt.
             for staging in (pending_report, out + ".part.mp4"):

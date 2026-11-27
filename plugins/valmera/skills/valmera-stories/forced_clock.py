@@ -33,10 +33,9 @@ def align(wav, segments, word_file):
         slices.append((start, len(targets)))
     audio, rate = soundfile.read(wav, dtype="float32", always_2d=True)
     audio = resample(torch.from_numpy(audio.mean(axis=1)), rate, bundle.sample_rate)
-    # Keep the model inside this run's temporary directory. All windows share the same 20 ms lattice.
-    cache = os.environ.get("VALMERA_CTC_MODELS") or str(word_file.parent / ".ctc")
+    cache = os.environ.get("VALMERA_CTC_MODELS")
     with torch.inference_mode():
-        model = bundle.get_model(dl_kwargs={"model_dir": cache}).eval()
+        model = bundle.get_model(dl_kwargs={"model_dir": cache} if cache else {}).eval()
         stride, window, context = 320, 16000 * 16, 16000
         emissions = []
         for start in range(0, len(audio), window):

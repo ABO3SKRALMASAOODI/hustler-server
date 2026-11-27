@@ -604,7 +604,6 @@ def narrate_script(ctx, sc, out, previous=None):
         env.pop("STORIES_PREVIOUS_READ", None)
     read = PX.narrate(ns, out, band=band, label=f"wf3-narrate-{ctx.run_id}", env=env, reader=os.path.join(HERE, "voice.py"))
     import subprocess
-    env.setdefault("VALMERA_CTC_MODELS", os.path.join(ctx.tmp, "ctc"))
     subprocess.run([chain.TORCH_PY, os.path.join(HERE, "forced_clock.py"), read["wav"], sp, read["words"]],
                    check=True, env=env)
     return read
@@ -1897,6 +1896,8 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
     pictures the film placed (one contact sheet) and the recent films' sequences, and its asks ride the scene under
     ``devices``. Returns what it chose, for the record."""
     DR = _director()
+    if pack.get("programme_segments"):
+        sc = dict(sc, segments=pack["programme_segments"])
     clock = F.Clock(pack["words"], sc)
     rows = [dict(w=w["w"], t0=w["t0"], t1=w["t1"], seg=w["seg"]) for w in clock.words]
     try:
@@ -1927,7 +1928,7 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
                                 "For an accent on existing type, use its exact visible text as the sound partner.")
     owners = [row if isinstance(row, dict) else dict(frames=row, device="recording") for row in around]
     voices = [dict(v, f=[round(float(v[k]) * F.FPS) + F.LEAD_F for k in ("start", "end")])
-              for v in pack.get("voices") or [] if v.get("start") is not None and v.get("end") is not None]
+              for v in (pack.get("screen_voices") or pack.get("voices") or []) if v.get("start") is not None and v.get("end") is not None]
     owners.extend(dict(v, device=v.get("person") or "soundbite") for v in voices)
     sources = {r.get("path"): r for group in (pack.get("pictures") or {}).values() for r in group}
     sources.update({r.get("path"): r for group in pack.get("footage") or [] for r in group.get("clips") or []})
