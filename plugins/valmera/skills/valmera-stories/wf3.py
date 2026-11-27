@@ -384,6 +384,11 @@ def from_spine(ctx, pick, card, spend, n, verified=()):
         chain_record(ctx, stage, state)
     measures = state["measures"]
     prior = {(f["url"], f["quote"]): f["prior_source"] for f in verified if f.get("prior_source")}
+    for fact in bank["facts"]:
+        # _take retains these records only after checking the exact quote on the cited page.
+        if fact.get("read") and fact.get("how") != "delivered verification":
+            prior[(fact["url"], fact["quote"])] = dict(read="verified bank: " + fact["read"],
+                                                       source=fact.get("verified_source") or fact["url"])
     if "timing" not in measures:
         measures["timing"] = timed(ctx, draft)
         chain_record(ctx, stage, state)
@@ -394,8 +399,10 @@ def from_spine(ctx, pick, card, spend, n, verified=()):
     if "revision" not in state:
         guidance = dict(draft=draft, measurements=measures, instruction=
                         "Return the whole revised script on the same sheet. Keep supported causal links, "
-                        "setups and the conflict. Fix findings in context. Move words between the last two "
-                        "lines if the measured close runs long.")
+                        "setups and the conflict. Write the landing before the rest of the revision: speak the "
+                        "planner's exact hook word again and say how its meaning changed. Move setup or scale to "
+                        "the preceding line when the measured close runs long. The causal resolution takes priority "
+                        "over hitting a reference time.", hook_word=sheet.get("hook_word"), meaning=sheet.get("meaning_line"))
         state["revision"] = write(json.dumps(guidance, ensure_ascii=False))
         chain_record(ctx, stage, state)
     sc = state["revision"]

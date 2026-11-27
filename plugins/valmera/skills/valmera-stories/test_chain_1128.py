@@ -27,13 +27,15 @@ def test_spine_measures_the_meaning_callback_even_when_a_coda_follows():
     sc = {"segments":[{"say":"They refused him a key."}, {"say":"Now he held their key."},
                       {"say":"He opened the door."}],
           "spine":[{"beat":"hook","claim":"The key changed hands","by":[]}],
-          "beats":{"hook":0,"setback":0,"turn":1,"payoff":1,"meaning":1,"coda":2}}
+          "beats":{"hook":0,"setback":0,"turn":1,"payoff":1,"meaning":1,"coda":2},
+          "beat_sheet":{"hook_word":"key","meaning_line":"Now he held their key."}}
 
     def measure(system, content):
         rows = json.loads(content.split("its quotes\n")[1])
         close = next(r for r in rows if r["beat"] == "close")
         assert close["line"] == 1 and close["say"] == "Now he held their key."
         assert "reuse" in close["point"][0] and "reuse" in system
+        assert (close["hook_word"],close["planned_meaning"]) == ("key","Now he held their key.")
         return json.dumps({"beats":[{"beat":"close","carried":True}]}), {}
 
     report, _ = writer.judge_spine(sc, measure)
@@ -83,3 +85,16 @@ def test_timing_reads_only_the_hook_and_meaning_and_keeps_their_positions(tmp_pa
     result = wf3.timed(SimpleNamespace(args={}, supply=str(tmp_path)), sc, narrate=read)
     assert result["segment_indexes"] == [0,2]
     assert result["hook_land_s"] == .9 and result["close_s"] == 1.6
+
+
+def test_verified_bank_quote_remains_attributed_when_the_archived_page_is_unavailable(monkeypatch):
+    fact = {"id":"quote","url":"https://example.org/archive","quote":"The lenders closed the laboratory."}
+    receipt = {"read":"verified bank: wayback","source":fact["url"]}
+    previous = {(fact["url"],fact["quote"]):receipt}
+    sc = {"facts":[fact],"segments":[{"say":fact["quote"],"facts":["quote"]}]}
+    monkeypatch.setattr(writer,"check_fact",lambda f:{"id":f["id"],"found":False,"error":"HTTP 403"})
+    verified = writer.verify(sc, previous)
+    assert verified["ok"] and verified["facts"][0]["read"] == receipt["read"]
+    assert verified["facts"][0]["source"] == fact["url"]
+    monkeypatch.setattr(writer,"check_fact",lambda f:{"id":f["id"],"found":False,"missing":"quote absent"})
+    assert not writer.verify(sc, previous)["ok"]

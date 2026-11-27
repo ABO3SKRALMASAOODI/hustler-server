@@ -41,7 +41,10 @@ with one sheet entry per narrated segment and a consequential turn within each c
 
 WRITE = """Write exactly one segment for each sheet entry in order. Let each sentence depend on the
 one before it; a conjunction need not be spoken where the relation is audible. State a referent
-before a line points back to it. Write the planned meaning line using the hook word. Return on each
+before a line points back to it. Write the hook and the meaning line as a pair. Speak the planner's
+hook_word verbatim in each, in the same grammatical form. In the meaning line, use it to say
+what the outcome changed about the opening conflict. When shortening the landing, move context
+to the preceding beat and keep the meaning intact. Return on each
 segment a print dictionary mapping every voice spelling in say to its printed form (numbers,
 acronyms, web addresses, units and names), or {}. Write the spoken words and their punctuation
 for the actor. The reference lengths describe completed films; end where this story lands."""
