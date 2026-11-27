@@ -1265,7 +1265,8 @@ def verify(script, previous=None):
         r = check_fact(f)
         prior = (previous or {}).get((f.get("url"), f.get("quote")))
         if prior and r.get("error") and not r["found"]:
-            r = dict(r, found=True, read="delivered verification", source=prior, reread_error=r["error"])
+            receipt = prior if isinstance(prior, dict) else dict(read="delivered verification", source=prior)
+            r = dict(r, found=True, read=receipt["read"], source=receipt["source"], reread_error=r["error"])
         if r["found"]:
             ok_quotes.append(norm(f.get("quote", "")))
             by_id[f.get("id")] = str(f.get("quote") or "")
@@ -1561,7 +1562,8 @@ def _take(bank, cands, how, log):
         while f"b{next_id}" in occupied:
             next_id += 1
         f = dict(id=f"b{next_id}", quote=c["quote"], url=c["url"], source=c.get("source") or _host(c["url"]),
-                 speaker=c.get("speaker"), when=c.get("when"), read=row.get("read"), how=how, **{"for": c["for"]})
+                 speaker=c.get("speaker"), when=c.get("when"), read=row.get("read"), verified_source=row.get("source") or c["url"],
+                 how=how, **{"for": c["for"]})
         bank["facts"].append(f)
         added.append(f["id"])
     if cands:
@@ -1878,7 +1880,9 @@ def write_from_bank(idea, card, form, bank, voices=None, notes=None, effort="hig
 
 SPINE_JUDGE_SYSTEM = """Measure the arc of this documentary. Does the hook pose the starting and ending paradox?
 Does the turn follow its cause and does the payoff resolve the conflict? The meaning line should reuse the hook's
-own word with its new significance. Count that callback as carried. Flag a missing setup or an unrelated ending.
+own word with its new significance. Check the specified hook word against both spoken lines and compare their
+meanings: what changed for the person who faced that conflict? Count the return as carried when the meaning line
+voices that connection. Flag a missing setup or a landing that leaves that connection to the listener.
 Return JSON {"beats":[{"beat":"hook|turn|payoff|close","carried":true,"lost":""}]}."""
 
 
@@ -1935,6 +1939,9 @@ def judge_spine(sc, ask=None):
         rows.append(dict(beat=b, point=[p["claim"] for p in points.get(k, []) if p["beat"] == b], line=k,
                          say=segs[k].get("say") if k is not None else None,
                          quotes=[qb[f] for f in (segs[k].get("facts") or []) if f in qb] if k is not None else []))
+    for row in rows:
+        if row["beat"] == "close" and sc.get("beat_sheet"):
+            row.update(hook_word=sc["beat_sheet"].get("hook_word"), planned_meaning=sc["beat_sheet"].get("meaning_line"))
     if not rows:
         return {}, None
     promise = {k: v for k, v in (sc.get("idea_point") or {}).items() if v}
