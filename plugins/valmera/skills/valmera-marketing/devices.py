@@ -951,6 +951,97 @@ PROOF_W = 0.84                 # the export card's width once the proof is compl
 PROOF_PUSH_F = 14
 
 
+def tone_region(edl, start, end):
+    """A stationary local grade covering these export seconds, in the export's own coordinates."""
+    start, end = float(start), float(end)
+    for fx in edl.get("fx") or ():
+        region = fx.get("region") or {}
+        box = region.get("box")
+        if (fx.get("type") == "region" and fx.get("device") == "region_tone"
+                and float(fx.get("start", 0)) <= start and end <= float(fx.get("end") or 0) + .001
+                and box and len(box) == 4 and not region.get("keys")):
+            return box
+    return None
+
+
+def matched_grade(l1, *, f0, f1, upload, export, edl, export_at, region, lib, wipe=False):
+    """Frame the same source pixels twice. For the return, sweep the real export over its ungraded source."""
+    tl, duration = program(edl)
+    import card_geom
+    import renderer
+
+    layer = Layer(l1, lib, "grade" if wipe else "sp")
+    plan = layer.P
+    up, ex = plan.video("dv_up", upload), plan.video("dv_ex", export)
+    span = [f0, f1]
+    plan.page("ground", span, "#000000" if wipe else "#101115")
+    # Compare the treated area together with its surroundings. Equal-width panes on a phone.
+    pane_w, pane_h = .94, .345
+    height = min(1., pane_h * H / (pane_w * W) * export["w"] / export["h"])
+    width = min(1., height * pane_w * W / (pane_h * H) * export["h"] / export["w"])
+    left = min(max(0., (region[0] + region[2] - width) / 2), 1. - width)
+    top = min(max(0., (region[1] + region[3] - height) / 2), 1. - height)
+    detail = [left, top, left + width, top + height]
+    raw_box = [.03, .205, .97, .205 + pane_h]
+    export_box = [.03, .605, .97, .605 + pane_h]
+    labels = ["ORIGINAL", "STUDIO EXPORT"]
+    # At a keep boundary synced starts a new source card. Sample the product camera on that clock,
+    # including frame.picture, focus tracks and zooms; its mapping includes both crop and letterbox.
+    zooms = (edl.get("effects") or {}).get("zooms") or []
+    source_cards = plan.synced("up", span, tl, export_at, up, raw_box)
+    if sum(b - a for a, b in (it["f"] for it in source_cards)) != f1 - f0:
+        return None  # An inserted picture has no corresponding upload frame.
+    for item in source_cards:
+        crops, boxes = [], []
+        for f in range(*item["f"]):
+            t = export_at + (f - f0) / FPS
+            zoom = renderer.zoom_state_at(zooms, t, duration) if zooms else None
+            windows = card_geom.windows(edl, src_at(tl, t), export["w"], export["h"],
+                                        upload["w"], upload["h"], zoom=zoom, t=t)
+            if len(windows) != 1:
+                return None
+            dest, source = windows[0]
+            view = dest if wipe else detail
+            # A pane crossing a letterbox carries the same black margin as the export.
+            visible = [max(view[0], dest[0]), max(view[1], dest[1]),
+                       min(view[2], dest[2]), min(view[3], dest[3])]
+            if visible[2] <= visible[0] or visible[3] <= visible[1]:
+                return None
+            crops.append([r4(v) for v in card_geom.map_rect(visible, dest, source)])
+            boxes.append(plan.seat(dest if wipe else card_geom.map_rect(visible, view, raw_box)))
+        # Card dimensions are static. A change of picture layout starts a new card;
+        # a camera move inside that layout only changes its source crop.
+        plan.items.remove(item)
+        first = 0
+        for end in range(1, len(boxes) + 1):
+            if end < len(boxes) and boxes[end] == boxes[first]:
+                continue
+            start_frame = item["f"][0] + first
+            card = slice_item(item, start_frame, item["f"][0] + end)
+            rects = crops[first:end]
+            card.update(boxes[first], id=f"up.{start_frame}",
+                        crop=rects[0] if all(c == rects[0] for c in rects) else rects)
+            plan.items.append(card)
+            first = end
+    if wipe:
+        sweep = max(f0 + 1, f1 - FPS)
+        plan.items.append(dict(id="wipe", k="join", mode="seam", stage="top", f=[sweep, f1],
+                               pic=ex, src=[r4(export_at + (sweep - f0) / FPS), r4(export_at + (f1 - f0) / FPS)],
+                               x=MF.ease_io(f1 - sweep), lean=0, edge=dict(w=2., a=.85), dim=1., a=1.))
+        layer.text("label", [f0, sweep], labels[0], layer.k("dv_l"), .05, .77)
+    else:
+        plan.card("ex", span, ex, export_box, t0=export_at, z=2, crop=detail)
+        for name, label, box in zip(("up", "ex"), labels, (raw_box, export_box)):
+            layer.text("label_" + name, span, label, layer.k("dv_l"), .04, box[1] - .012)
+    runs = [dict(frames=it["f"], upload_seconds=it["src"]) for it in plan.items if it.get("pic") == up]
+    receipt = dict(layer.lay(span), frames=span, region=region, export_at=r4(export_at),
+                   upload_at=r4(src_at(tl, export_at)), upload_runs=runs)
+    if wipe:
+        return dict(receipt, device="grade_wipe", sweep=[sweep, f1], labels=[labels[0]])
+    return dict(receipt, device="split", upload_box=raw_box, export_box=export_box,
+                labels=labels, export_crop=detail)
+
+
 def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42), land_f=None, proof_f=None, caption_proof=None):
     """The hook: the clip as uploaded and Valmera's export of it side by side at the same instant (the export's own
     edit list maps every frame), each under its label; the export is the larger, in front. `land_f`: the frame the
@@ -959,6 +1050,12 @@ def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42
     pushes in to PROOF_W of the frame, so the split ends on a proof a phone can read (26 Nov: the checklist read at
     25 px in a 0.55-wide card). No sound on frame 0-2: the split is already whole on frame 0 (26 Nov: a whoosh on f2
     over nothing that moved)."""
+    region = tone_region(edl_b, export_at, export_at+(f1-f0)/FPS)
+    if region and not caption_proof and land_f is None:
+        compared = matched_grade(l1, f0=f0, f1=f1, upload=upload, export=export, edl=edl_b,
+                                 export_at=export_at, region=region, lib=lib)
+        if compared:
+            return compared
     L = Layer(l1, lib, "sp")
     P, R = L.P, L.R
     up_key, ex_key = P.video("dv_up", upload), P.video("dv_ex", export)
@@ -1231,12 +1328,26 @@ def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="
                           upload_t0=rec_s["upload_at"] + mk["split"][1] / FPS)
     rec_c = site(l1, f0=f_e, f1=mk["dur_f"], page=page, export=export, lib=lib, src0=e0 + (f_e - f_p) / FPS)
     pictures = [dict(path=export["path"], f=[f_x, f_e], src=[r4(e0 + (f_x - f_p) / FPS), r4(e0 + (f_e - f_p) / FPS)], name="THE EXPORT")]
+    # Return to the matched original on the same moving clock. The last frames of the sweep
+    # give way directly to the untouched export on the speaker's closing words.
+    exchange = None
+    if rec_s.get("region") and f_e-f_x >= 4*FPS:
+        length = 2*FPS
+        start = (f_x+f_e-length)//2
+        at = e0+(start-f_p)/FPS
+        region = tone_region(edl_b, at, at+length/FPS)
+        if region:
+            exchange = matched_grade(l1, f0=start, f1=start+length, upload=upload, export=export,
+                                     edl=edl_b, export_at=at, region=region, lib=lib, wipe=True)
+            if exchange:
+                pictures = [dict(path=export["path"], f=[a,b], src=[r4(e0+(a-f_p)/FPS), r4(e0+(b-f_p)/FPS)],
+                                 name="THE EXPORT") for a,b in ((f_x,start),(start+length,f_e))]
     beats = dict(format="showcase", marks=mk, split=mk["split"], studio=mk["studio"], reveal=mk["push"], export=[f_p, f_e], cta=mk["site"],
                  pictures=pictures, events=sorted({s["event_f"] for s in l1["sound"]}),
                  look=[0, mk["split"][1] - 10, mk["typing"][0] + 20, mk["send"] + 6, f_x + 30, (f_x + f_e) // 2, f_e + 20, mk["dur_f"] - 2],
                  pace=dict(split_s=round(mk["split"][1] / FPS, 2), studio_s=round((f_p - mk["split"][1]) / FPS, 2),
                            export_s=round((f_e - f_p) / FPS, 2), cta_s=round((mk["dur_f"] - f_e) / FPS, 2)),
-                 style="showcase", devices=[rec_s, rec_u, rec_c], export_window=[r4(e0), r4(e1)], hook_window=[r4(hook[0]), r4(hook[1])])
+                 style="showcase", devices=[rec_s, rec_u, *([exchange] if exchange else []), rec_c], export_window=[r4(e0), r4(e1)], hook_window=[r4(hook[0]), r4(hook[1])])
     return l1, beats
 
 

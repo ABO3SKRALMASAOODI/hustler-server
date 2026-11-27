@@ -975,7 +975,9 @@ def export_check(ctx, rec, ask_text, must_see):
         "the stretch that holds the most of the asked change landing (each picture, title, caption or cut the sentence asks for, "
         "entered a breath before the first one lands and ended once the last is seen; when not all fit in 4 s, the ones that read "
         "best), so the film's after shows every landing its narration will name, \"tease_s\": the export second of its most striking "
-        "frame, \"before\": [start, end] upload seconds, 1.5 to 3 s, where the raw clip looks most like raw footage, \"looks\": one "
+        "frame, \"spoken_thought\": for a selective grade, [start, end] on the export clock of a complete spoken thought that shows "
+        "the grade, from its setup through the last word of the payoff, else null, \"before\": [start, end] upload seconds, "
+        "1.5 to 3 s, where the raw clip looks most like raw footage, \"looks\": one "
         "plain, true line on how the export looks to an editor at full size (sharp or soft, clean or carrying a burned-in timecode "
         "or logo, its colour and light, inserted pictures matching it or not), \"defects\": [anything an editor would call broken: a cut face, wrong "
         "framing, unreadable or misspelled captions, a black frame; never the end card, never a planner's note]}")))
@@ -2015,12 +2017,27 @@ def showcase_supply(ctx, script, sup_dir, pk):
         end = max(win[1], caption["hook"][1])
         win = [min([caption["context_start"]] + [a for a, _ in asked]), body if body - end <= SHOWCASE_S[0] else end]
     hook = d.get("hook_window") or (caption["hook"] if caption else showcase_hook(ex, body, pics, visible=visible))
+    thought = d.get("export_window") or (script.get("export_check") or {}).get("spoken_thought")
+    if (not caption and isinstance(thought, (list, tuple)) and len(thought) == 2
+            and all(isinstance(t, (int, float)) for t in thought) and 0 <= thought[0] < thought[1] <= body
+            and D.tone_region(edl, *thought)):
+        win = thought
+        if not d.get("hook_window"):
+            # Let the opening and the payoff share a sentence. The original speaker resumes
+            # after Send at exactly the pause where the matched comparison left off.
+            a, b = thought
+            gaps = pauses(ex["file"], a+1.5, min(a+5., b-2.5), min_s=.15) if b-a >= 5. else []
+            if gaps:
+                gap = min(gaps, key=lambda g: abs(sum(g)/2 - (a+D.SPLIT_S)))
+                cut_at = round(sum(gap)/2*F.FPS)/F.FPS
+                hook, win = [a, cut_at], [cut_at, b]
+    grade = D.tone_region(edl, *hook)
     win, hook = list(map(float, win)), list(map(float, hook))
     if caption and not hook[0] <= caption["seen_s"] < hook[1]:
         caption = None
     ui = showcase_ui(rec)
     typed = typed_line(script["receipts"])
-    over = site_handover(ex, win, D.SITE_OVER_S)
+    over = 0.0 if grade and not caption else site_handover(ex, win, D.SITE_OVER_S)
     mk = D.showcase_marks(hook, win, len(typed.split()), lead_f=F.LEAD_F, over_s=over)
     voice = os.path.join(sup_dir, "voice.wav")
     lead = F.LEAD_F / F.FPS
@@ -3680,7 +3697,7 @@ def showcase_score(ctx, script, pack):
     page = ui.get("site") or dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
     l1, beats = D.showcase(upload=upload, export=body, edl_b=edl, typed=typed_line(script["receipts"]), window=prod["window"], hook=prod["hook"],
                            ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"), proof_at=prod.get("proof_at"), caption_proof=prod.get("caption_proof"),
-                           over_s=float(prod.get("over_s") or D.SITE_OVER_S))
+                           over_s=float(prod["over_s"]) if prod.get("over_s") is not None else D.SITE_OVER_S)
     out = os.path.join(ctx.supply, "l1.json")
     jsave(out, l1)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")

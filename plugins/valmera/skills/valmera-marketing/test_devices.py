@@ -616,3 +616,58 @@ def test_showcase_supply_plays_the_checked_caption_on_both_recorded_clocks(tmp_p
     assert split["upload_box"][3] < split["export_box"][1]
     assert split["export_at"] == split["upload_at"]
     assert all(it["k"] != "word" or it["t"] in split["labels"] for it in l1["items"] if it["id"].startswith("sp."))
+
+
+def test_region_grade_opens_at_equal_scale_and_returns_on_a_registered_wipe():
+    # Film 05, Studio v6. The fitted picture has bars, and the second keep starts after a cut.
+    edl = dict(keep=[[0, 29.27], [34.07, 61.4]],
+               frame=dict(mode="crop", ratio="9:16", focus_x=.67, picture=[0, .035, 1, .965]),
+               fx=[dict(type="region", device="region_tone", effect="exposure", start=0, end=56.6,
+                        region=dict(shape="ellipse", box=[.31, .07, .92, .54]))])
+    l1, beats = D.showcase(upload=dict(UPLOAD, dur=61.4), export=dict(EXPORT, dur=56.6),
+                           edl_b=edl, typed=TYPED, window=[1, 11], hook=[28, 30.8], ui=UI, page=UI["site"], lib=LIB)
+    opening = beats["devices"][0]
+    a, b = opening["upload_box"], opening["export_box"]
+    assert a[2]-a[0] == b[2]-b[0] >= .9
+    assert a[3] <= b[1] and abs((a[3]-a[1]) - (b[3]-b[1])) < .0001
+    raw = [i for i in l1["items"] if i["id"].startswith("sp.up.")]
+    assert [i["f"] for i in raw] == [[0, 38], [38, 84]]
+    assert abs(raw[1]["src"][0] - 34.07) < .02
+    # The same physical feature must land at the same pane coordinate on both sides.
+    crop = raw[0]["crop"]
+    ex = next(i for i in l1["items"] if i["id"] == "sp.ex")["crop"]
+    import renderer
+    src, dst = renderer.picture_mapping(1920, 1080, 1080, 1920, "crop", (.67, None), edl["frame"]["picture"])
+    for axis in (0, 1):
+        for corner in (axis, axis+2):
+            actual = (crop[corner]-src[axis]) / (src[axis+2]-src[axis])
+            expected = (ex[corner]-dst[axis]) / (dst[axis+2]-dst[axis])
+            assert abs(actual-expected) < .001
+    wipe = next(i for i in l1["items"] if i["k"] == "join" and i.get("mode") == "seam")
+    assert beats["reveal"][1] < wipe["f"][0] < wipe["f"][1] < beats["cta"][0]
+    assert wipe["x"][0] <= 0 and wipe["x"][-1] >= 1
+    assert abs(wipe["src"][0] - (1 + (wipe["f"][0]-beats["reveal"][0])/30)) < .001
+
+
+def test_grade_showcase_continues_the_same_thought_after_send(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    edl = dict(keep=[[0, 29.27], [34.07, 61.4]],
+               fx=[dict(type="region", device="region_tone", start=0, end=56.6,
+                        region=dict(box=[.31, .07, .92, .54]))])
+    rec = dict(upload=dict(file="u"), exports=[dict(file="e", dur=56.6, tag="final", edl_version=6)])
+    P.jsave(str(tmp_path / "record.json"), rec)
+    (tmp_path / "edl").mkdir()
+    P.jsave(str(tmp_path / "edl/v006.json"), edl)
+    script = dict(record=str(tmp_path / "record.json"), receipts=dict(typed=TYPED),
+                  export_check=dict(spoken_thought=[1., 11.1]))
+    monkeypatch.setattr(P, "cut", lambda *args: None)
+    monkeypatch.setattr(P, "pauses", lambda path, a, b, **kw: [(3.98, 4.54)] if a < 3.98 < b else [])
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, **kw: t)
+    monkeypatch.setattr(P.subprocess, "run", lambda *args, **kw: None)
+    monkeypatch.setattr(P.PX, "sound_facts", lambda *args: {})
+    result = P.showcase_supply(SimpleNamespace(sid="grade"), script, str(tmp_path), str(tmp_path / "pack.json"))
+    product = result["product"]
+    assert product["hook"] == [1., 128/30]
+    assert product["window"] == [128/30, 11.1]
+    assert product["marks"]["site"][0] == product["marks"]["export_voice"][1]
