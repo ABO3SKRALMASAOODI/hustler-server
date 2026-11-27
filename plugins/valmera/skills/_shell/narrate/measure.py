@@ -163,10 +163,24 @@ def _num_words(tok, year=False):
         return tok
 
 
+_FOLD = str.maketrans({"ß": "ss", "æ": "ae", "œ": "oe", "ø": "o", "ł": "l", "đ": "d", "ð": "d", "þ": "th", "ı": "i"})
+
+
+def fold_letters(text):
+    """Letters without their marks (ö -> o, é -> e, ñ -> n): the listener writes a name in plain letters, and the
+    script's accented spelling is the same word. Until 27 Nov the character filter below turned every accented letter
+    into a space, so "Alpöge" in the script was two words ("alp ge") against the one the listener heard ("alpoge")
+    and each of its 15 mentions cost two word errors (the long-form documentary 11260010 stopped at 2.4%, the true
+    read 0.4%)."""
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(text).translate(_FOLD))
+    return "".join(c for c in t if not unicodedata.combining(c))
+
+
 def norm_words(text, year=False):
-    """Normalise a transcript for word error: lower case, digits spelled out,
+    """Normalise a transcript for word error: lower case, accents folded, digits spelled out,
     punctuation dropped (an apostrophe inside a word is kept)."""
-    t = text.lower().replace("’", "'").replace("%", " percent ")
+    t = fold_letters(text.lower()).replace("’", "'").replace("%", " percent ")
     t = re.sub(r"(\d),(\d)", r"\1\2", t)
     t = re.sub(r"\$(\d+)", r"\1 dollars", t)
     t = re.sub(r"\d+(st|nd|rd|th)\b", lambda m: m.group(0), t)
@@ -204,6 +218,18 @@ def align(ref, hyp):
     return S, D, I, pairs
 
 
+# What a spoken letter is called, as a script spells it for the voice ("em eye tee"); a listener writes the initialism
+# or the name as one word ("MIT", "OpenAI").
+LETTER_NAMES = {"ay": "a", "bee": "b", "cee": "c", "see": "c", "dee": "d", "ee": "e", "eff": "f", "gee": "g",
+                "aitch": "h", "eye": "i", "jay": "j", "kay": "k", "el": "l", "ell": "l", "em": "m", "en": "n",
+                "oh": "o", "pee": "p", "cue": "q", "queue": "q", "are": "r", "ar": "r", "ess": "s", "tee": "t",
+                "you": "u", "vee": "v", "ex": "x", "why": "y", "zee": "z", "zed": "z"}
+
+
+def _letter_spelled(words):
+    return "".join(LETTER_NAMES.get(w, w) for w in words)
+
+
 def compounds(r, h):
     """The listener's words with a compound written the script's way: two heard words whose letters make one script
     word ("retro rockets" for "retrorockets") become that word, and one heard word that is a pair of script words
@@ -212,6 +238,13 @@ def compounds(r, h):
     rset = set(r)
     pairs = {a + b: (a, b) for a, b in zip(r, r[1:])}
     rpairs = set(zip(r, r[1:]))
+    # a run of 2-4 script words in which a spoken letter's name stands for the letter, written by the listener as one word
+    spelled = {}
+    for n in (2, 3, 4):
+        for k in range(len(r) - n + 1):
+            run = r[k:k + n]
+            if any(w in LETTER_NAMES for w in run):
+                spelled.setdefault(_letter_spelled(run), tuple(run))
     out, i = [], 0
     while i < len(h):
         if i + 1 < len(h) and h[i] + h[i + 1] in rset and (h[i], h[i + 1]) not in rpairs:
@@ -220,6 +253,8 @@ def compounds(r, h):
             continue
         if h[i] not in rset and h[i] in pairs:
             out += list(pairs[h[i]])
+        elif h[i] not in rset and h[i] in spelled:
+            out += list(spelled[h[i]])
         else:
             out.append(h[i])
         i += 1
@@ -252,7 +287,7 @@ def wer_detail(ref_text, hyp_text):
     out = []
     for op, a, b, c, d in difflib.SequenceMatcher(a=r, b=h, autojunk=False).get_opcodes():
         if op != "equal":
-            out.append({"op": op, "script": " ".join(r[a:b]), "heard": " ".join(h[c:d])})
+            out.append({"op": op, "script": " ".join(r[a:b]), "heard": " ".join(h[c:d]), "at": a})
     return out
 
 

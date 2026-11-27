@@ -69,14 +69,64 @@ def test_bounded_generation_keeps_the_signature_of_the_method_it_wraps():
     assert _shape(wrapped) == _shape(LV.shared.Read.generate_phonon)
 
 
-def test_bounded_generation_caps_takes_and_passes_the_rest():
-    seen = {}
-    wrapped = LV.bounded_generation(lambda self, job, dest, log, seed0=7: seen.update(job=job, seed0=seed0))
+def test_bounded_generation_caps_takes_and_passes_the_rest(tmp_path):
+    seen = []
+    wrapped = LV.bounded_generation(lambda self, job, dest, log, seed0=7: seen.append((job, seed0)),
+                                    respell=lambda text, approach: text + str(approach))
     logs = []
-    job = dict(takes=6, lines=[dict(id="s01", takes=44), dict(id="s02")])
-    wrapped(None, job, "dest", logs.append, 9)
-    assert [r.get("takes") for r in seen["job"]["lines"]] == [30, 6] and seen["seed0"] == 9
-    assert job["lines"][0]["takes"] == 44 and logs == ["s01: thirty-take retry budget spent; retaining strict gate"]
+    job = dict(takes=6, lines=[dict(id="s01", takes=64, text="a"), dict(id="s02")])
+    wrapped(None, job, tmp_path, logs.append, 9)
+    assert [[r.get("takes") for r in j["lines"]] for j, _ in seen] == [[6], [36], [42], [48]]
+    assert {sd for _, sd in seen} == {9}
+    assert job["lines"][0]["takes"] == 64 and logs == ["s01: thirty-take retry budget spent; retaining strict gate"]
+
+
+def test_a_repeated_round_after_the_budget_is_read_a_different_way(tmp_path):
+    """27 Nov (documentary 11260010): s55 and s65 had spent thirty takes; every later round asked for more, got the same
+    thirty, and came back identical. Now the next six takes are read from a respelled form, then a phrased one, then both."""
+    calls = []
+    def original(self, job, out, log, seed0=7):
+        row = job["lines"][0]
+        calls.append((row["id"], row["takes"], row["text"]))
+    forms = {1: "alp-OH-gay says", 2: "Alpöge, says", 3: "alp-OH-gay, says"}
+    wrapped = LV.bounded_generation(original, respell=lambda text, approach: forms[approach])
+    logs = []
+    for requested in (36, 42, 48):
+        calls.clear()
+        wrapped(None, dict(voice="Easton", takes=6, lines=[dict(id="s55", takes=requested, text="Alpöge says")]), tmp_path, logs.append)
+        assert calls[-1] == ("s55", requested, forms[(requested - 30) // 6]), calls
+        assert all(text != "Alpöge says" for _, _, text in calls)
+    calls.clear()
+    wrapped(None, dict(voice="Easton", takes=6, lines=[dict(id="s55", takes=54, text="Alpöge says")]), tmp_path, logs.append)
+    assert calls[-1][1] == 48 and logs[-1].endswith("retaining strict gate")
+    assert json.loads((tmp_path / "approaches.json").read_text())["s55:1"] == forms[1]   # a resume reuses it
+
+
+def test_a_listener_spelling_a_name_or_letters_differently_is_not_an_error():
+    import measure
+    script = "Levent Alpöge said Alpöge's proof ran at em eye tee and open ay eye, with eff are oh and caf\u00e9 notes."
+    heard = "Levent Alpoge said Alpoge's proof ran at MIT and OpenAI, with FRO and cafe notes."
+    assert measure.wer(script, heard)["wer"] == 0
+    assert measure.wer("the road is clearly open", "the road is clear open")["wer"] > 0     # a real misread still counts
+
+
+def test_a_cached_take_is_counted_again_from_the_words_it_was_heard_saying(tmp_path):
+    import lines as LN
+    seg = dict(text="Alpöge says hello.")
+    assert LN.errs_of(None, seg["text"], "Alpoge says hello.", []) == 0
+
+
+def test_residual_spelling_variants_are_judged_by_a_model_and_the_film_goes_on(tmp_path):
+    import measure_voice as MV
+    script = "Alpöge said the river is clearly wide. " + " ".join(["word"] * 40)
+    seen = []
+    def judge(system, user):
+        seen.append(user)
+        return json.dumps(dict(same=[i for i, row in enumerate(user.splitlines()) if "nenoda" in row]))
+    details = [dict(op="replace", script="nanoda", heard="nenoda", at=6), dict(op="replace", script="clearly", heard="clear", at=5)]
+    assert MV.judged_equivalents(details, script, tmp_path, judge) == {0}
+    assert MV.judged_equivalents(details, script, tmp_path, lambda *a: 1 / 0) == {0}      # answered once, read back
+    assert MV.line_of(3, [dict(text="a b"), dict(text="c d e")]) == 1
 
 
 def test_judged_take_hook_keeps_the_signature_of_the_function_it_replaces(tmp_path):
