@@ -67,3 +67,19 @@ def test_measurements_share_one_draft_and_only_writer_revises(tmp_path, monkeypa
     assert revision["draft"] == draft and calls[1][1] == sheet
     assert set(revision["measurements"]) == {"support","repeats","spine","timing","facts"}
     assert revision["measurements"]["timing"]["close_s"] == 6
+    again = wf3.from_spine(ctx, {"title":"The toll"}, {}, [], 0)
+    assert again["script"] == draft and len(calls) == 2
+
+
+def test_timing_reads_only_the_hook_and_meaning_and_keeps_their_positions(tmp_path):
+    sc = {"beats":{"meaning":2}, "segments":[{"say":"A key.","lands":"key"},{"say":"He left."},
+                                            {"say":"He held the key."},{"say":"The door opened."}]}
+    def read(ctx, sample, out):
+        assert [s["say"] for s in sample["segments"]] == ["A key.","He held the key."]
+        return {"words": {"words": [{"seg":0, "w":"A", "start":0.2,"end":0.5},
+                                    {"seg":0, "w":"key.","start":0.6,"end":1.1},
+                                    {"seg":1, "w":"He","start":1.8,"end":2.0},
+                                    {"seg":1, "w":"key.","start":3.0,"end":3.4}]}}
+    result = wf3.timed(SimpleNamespace(args={}, supply=str(tmp_path)), sc, narrate=read)
+    assert result["segment_indexes"] == [0,2]
+    assert result["hook_land_s"] == .9 and result["close_s"] == 1.6

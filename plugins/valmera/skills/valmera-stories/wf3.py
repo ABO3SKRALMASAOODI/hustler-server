@@ -155,7 +155,7 @@ def idea_rank(i):
 
 def remake_of(ctx):
     """A delivered film's record when this run re-makes it (--args '{"remake": "<its folder or film.json>"}'): the
-    same story and script on today's engines. No model writes anything: the facts are fetched and checked again."""
+    same story on today's engines. With rewrite, retain its idea and facts for fresh causal research."""
     p = ctx.args.get("remake")
     if not p:
         return None
@@ -346,37 +346,77 @@ def from_spine(ctx, pick, card, spend, n, verified=()):
     tried = dict(title=pick.get("title"), why=bank.get("why"))
     if not bank["ok"]:
         return dict(ok=False, tried=tried)
-    sheet, usage = story_chain.plan("story", pick, dict(facts=writer.bank_facts(bank), spine=writer.spine_view(bank)))
-    spend.append(dict(stage="sheet", **usage))
+    notes = ctx.args.get("notes")
+    fingerprint = hashlib.sha256(json.dumps([source_key, card, notes, writer.bank_facts(bank), writer.spine_view(bank)],
+                                            sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    stage = f"story-work{n}"
+    state = chain_read(ctx, stage)
+    if state.get("request") != fingerprint:
+        state = {"request": fingerprint}
+        # Recover an interrupted earlier writer from its own exact sources and idea.
+        previous = chain_read(ctx, "script_draft")
+        if (previous.get("facts") == writer.bank_facts(bank) and isinstance(previous.get("chain"), str)
+                and previous.get("idea_point") == {k: pick[k] for k in ("hook","turn","payoff") if pick.get(k)}
+                and previous.get("beat_sheet") == chain_read(ctx, "beat_sheet") and not notes):
+            state.update(sheet=previous["beat_sheet"], draft=previous)
+        chain_record(ctx, stage, state)
+
+    if "sheet" not in state:
+        state["sheet"], usage = story_chain.plan("story", pick, dict(facts=writer.bank_facts(bank), spine=writer.spine_view(bank)))
+        spend.append(dict(stage="sheet", **usage))
+        chain_record(ctx, stage, state)
+    sheet = state["sheet"]
     chain_record(ctx, "beat_sheet", sheet)
 
-    def write(notes):
-        sc, use = writer.write_from_bank(pick, card, FORM, bank, notes=notes, sheet=sheet)
+    def write(instructions):
+        sc, use = writer.write_from_bank(pick, card, FORM, bank, notes=instructions, sheet=sheet)
         spend.append(dict(stage="script", **use))
         return sc
 
-    draft = write(ctx.args.get("notes"))
+    if "draft" not in state:
+        state["draft"] = write(notes)
+        chain_record(ctx, stage, state)
+    draft = state["draft"]
     chain_record(ctx, "script_draft", draft)
-    verified_quotes = {f["id"]: f["quote"] for f in bank["facts"]}
-    measures, more = writer.measurements(draft, verified_quotes)
-    spend.extend(dict(stage="measurement", **u) for u in more)
-    measures["timing"] = timed(ctx, draft)
+    if "measures" not in state:
+        state["measures"], more = writer.measurements(draft, {f["id"]: f["quote"] for f in bank["facts"]})
+        spend.extend(dict(stage="measurement", **u) for u in more)
+        chain_record(ctx, stage, state)
+    measures = state["measures"]
     prior = {(f["url"], f["quote"]): f["prior_source"] for f in verified if f.get("prior_source")}
-    measures["facts"] = script_problems(writer.verify(draft, previous=prior))
+    if "timing" not in measures:
+        measures["timing"] = timed(ctx, draft)
+        chain_record(ctx, stage, state)
+    if "facts" not in measures:
+        measures["facts"] = script_problems(writer.verify(draft, previous=prior))
+        chain_record(ctx, stage, state)
     chain_record(ctx, "script_measurements", measures)
-    guidance = dict(draft=draft, measurements=measures, instruction=
-                    "Return the whole revised script on the same sheet. Keep supported causal links, "
-                    "setups and the conflict. Fix findings in context. Move words between the last two "
-                    "lines if the measured close runs long.")
-    sc = write(json.dumps(guidance, ensure_ascii=False))
+    if "revision" not in state:
+        guidance = dict(draft=draft, measurements=measures, instruction=
+                        "Return the whole revised script on the same sheet. Keep supported causal links, "
+                        "setups and the conflict. Fix findings in context. Move words between the last two "
+                        "lines if the measured close runs long.")
+        state["revision"] = write(json.dumps(guidance, ensure_ascii=False))
+        chain_record(ctx, stage, state)
+    sc = state["revision"]
     rep = writer.verify(sc, previous=prior)
     chain_record(ctx, "script_final", dict(script=sc, report=rep))
     return dict(ok=True, script=sc, bank=bank, verify=rep, tried=tried)
 
 
+def chain_read(ctx, name):
+    try:
+        with open(os.path.join(ctx.run_dir, name + ".json")) as src:
+            return json.load(src)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
 def chain_record(ctx, name, value):
-    with open(os.path.join(ctx.run_dir, name + ".json"), "w") as out:
+    path = os.path.join(ctx.run_dir, name + ".json")
+    with open(path + ".part", "w") as out:
         json.dump(value, out, ensure_ascii=False, indent=1)
+    os.replace(path + ".part", path)
 
 
 def script_problems(report):
@@ -531,8 +571,31 @@ def timed(ctx, sc, narrate=None):
         meaning = sc.get("beats", {}).get("meaning", len(sc["segments"])-1)
         indexes = sorted({0, meaning})
         sample = dict(sc, segments=[sc["segments"][i] for i in indexes], beats={"meaning": indexes.index(meaning)})
-        read = (narrate or narrate_script)(ctx, sample, os.path.join(ctx.supply, "narration_draft"))
-        return dict(timing.measure(read["words"], sample), segment_indexes=indexes)
+        folder = os.path.join(ctx.supply, "narration_draft")
+        if narrate is None:
+            os.makedirs(folder, exist_ok=True)
+            sample_path = os.path.join(folder, "landing-lines.json")
+            with open(sample_path, "w") as stream:
+                json.dump(sample, stream, ensure_ascii=False)
+            try:
+                clock_path = os.path.join(folder, "draft-words.json")
+                try:
+                    with open(clock_path) as clock:
+                        measured = json.load(clock)
+                except (FileNotFoundError, ValueError):
+                    measured = {}
+                if measured.get("request") != timing.signature(sample):
+                    subprocess.run(["zsh", PX.HEAVY, f"wf3-timing-{ctx.run_id}", PX.NARRATE_PY, timing.__file__,
+                                    sample_path, folder], env=dict(os.environ, HF_HUB_OFFLINE="1"),
+                                   check=True, capture_output=True, timeout=3600)
+                    with open(clock_path) as clock:
+                        measured = json.load(clock)
+                return dict(timing.measure(measured, sample), segment_indexes=indexes,
+                            source=measured["source"], voice=measured["voice"])
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                ctx.log(f"CPU timing take unavailable, using the production reader: {exc}")
+        read = (narrate or narrate_script)(ctx, sample, folder)
+        return dict(timing.measure(read["words"], sample), segment_indexes=indexes, source="production reader")
     except (OSError, RuntimeError, ValueError) as exc:
         ctx.log(f"draft read unavailable: {exc}")
         return {"available": False, "reason": str(exc)[:300]}

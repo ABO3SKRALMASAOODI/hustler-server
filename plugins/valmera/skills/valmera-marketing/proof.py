@@ -279,7 +279,9 @@ def snap_window(rows, choice, path, duration, *, clock=None, silence=None):
         gaps = (silence or pauses)(path, max(0, a-0.5), min(duration, b+0.5), min_s=0.04)
         quiet = [(max(a, x), min(b, y)) for x, y in gaps if max(a, x) < min(b, y)]
         if not quiet:
-            return word_edge
+            # A continuous noise floor can mask a breath. Measure the lowest-energy samples
+            # strictly inside the inter-word gap, then cut at the nearest zero crossing.
+            return quiet_gap(path, a, b) if silence is None else word_edge
         start, stop = min(quiet, key=lambda pair: abs(sum(pair)/2-word_edge))
         return round((start+stop)/2, 3)
 
@@ -1853,17 +1855,24 @@ def cut(src, t0, t1, out, audio=True):
         subprocess.run([PX.FF, "-v", "error", "-y", "-i", out, "-vn", "-ac", "1", "-ar", "48000", out[:-4] + ".wav"], check=True, timeout=120)
 
 
-def quiet_snap(path, t, span=0.45):
-    """The quietest 40 ms of the clip's sound within span of t (a cut between words, not through one)."""
+def quiet_gap(path, start, end):
     import numpy as np
-    r = subprocess.run([PX.FF, "-v", "error", "-ss", f"{max(t - span, 0):.3f}", "-i", path, "-t", f"{2 * span:.3f}", "-ac", "1", "-ar", "8000",
-                        "-f", "s16le", "-"], capture_output=True, timeout=60)
-    x = np.frombuffer(r.stdout, np.int16).astype(np.float32)
-    n = 320
-    if len(x) < 4 * n:
-        return t
-    e = np.sqrt((x[: len(x) // n * n].reshape(-1, n) ** 2).mean(1))
-    return round(max(t - span, 0) + (int(np.argmin(e)) + 0.5) * n / 8000, 3)
+    rate = 16000
+    middle = (start + end) / 2
+    if end-start < .002:
+        return middle
+    result = subprocess.run([PX.FF, "-v", "error", "-ss", str(start), "-i", path, "-t", str(end-start),
+                             "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"], capture_output=True, timeout=60)
+    samples = np.frombuffer(result.stdout, np.float32)
+    if len(samples) < 2:
+        return middle
+    width = min(len(samples), max(2, min(rate//100, len(samples)//4)))
+    power = np.convolve(samples**2, np.ones(width)/width, mode="valid")
+    first = int(np.argmin(power))
+    window = samples[first:first+width]
+    crossings = np.flatnonzero(np.signbit(window[1:]) != np.signbit(window[:-1]))
+    offset = int(min(crossings, key=lambda k: abs(k-width/2))) if len(crossings) else int(np.argmin(abs(window)))
+    return min(end, max(start, round(start+(first+offset)/rate, 4)))
 
 
 def endcard_s():
@@ -1970,38 +1979,92 @@ def product_crop(record_path, rec, t):
     return [round(x0, 4), round(y0, 4), round(x0 + cw, 4), round(y0 + ch, 4)]
 
 
+def blend_pauses(audio, rate, words, boundaries):
+    """Blend the two sides of measured joins within their inter-word silence; preserve the word clock."""
+    import numpy as np
+    changed = []
+    for boundary in boundaries:
+        if not boundary.get("artefacts"):
+            continue
+        t = boundary["t"]
+        if any(w["start"] < t < w["end"] for w in words):
+            continue
+        left = max((w["end"] for w in words if w["end"] <= t), default=t)
+        right = min((w["start"] for w in words if w["start"] >= t), default=t)
+        mid = int(round(t*rate))
+        radius = min(int(.006*rate), int((t-left)*rate/3), int((right-t)*rate/3))
+        if radius < 2:
+            continue
+        probe = audio[mid-radius:mid+radius].mean(axis=1)
+        crossings = np.flatnonzero(np.signbit(probe[1:]) != np.signbit(probe[:-1]))
+        k = min(crossings, key=lambda x: abs(x-radius)) if len(crossings) else np.argmin(abs(probe))
+        center = mid-radius+int(k)
+        half = min(int(.018*rate), center-int(np.ceil(left*rate)), int(right*rate)-center)
+        if half < 2:
+            continue
+        before, after = audio[center-half:center].copy(), audio[center:center+half].copy()
+        axis = np.linspace(0,half-1,2*half)
+        phase = (.5-.5*np.cos(np.linspace(0,np.pi,2*half)))
+        for channel in range(audio.shape[1]):
+            a = np.interp(axis, np.arange(half), before[:,channel])
+            b = np.interp(axis, np.arange(half), after[:,channel])
+            audio[center-half:center+half,channel] = (1-phase)*a+phase*b
+        changed.append(dict(second=round(center/rate,5), crossfade_s=round(2*half/rate,5)))
+    return changed
+
+
 def repair_narration_joins(ctx, narration, env):
-    """Re-take audible boundary artifacts using the native actor and its measured neighbors."""
+    """Re-take pitch and level mismatches, then blend remaining waveform seams inside the measured pauses."""
     import fcntl
     import tempfile
-    parent = os.path.dirname(narration["wav"])
-    check = jload(os.path.join(parent, "check.json"), {})
+    import wave
+    import numpy as np
+    from pathlib import Path
+    parent = Path(narration["wav"]).parent
+    check = jload(parent/"check.json", {})
     if not (check.get("joins") or {}).get("with_artefact"):
         return narration
-    out = os.path.join(parent, "joined")
-    if not os.path.isfile(os.path.join(out, "check.json")):
+    out = parent/"joined"
+    if not (out/"check.json").is_file():
         with tempfile.TemporaryDirectory(dir=parent) as temporary, open(PX.NARRATE_LOCK, "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            target = os.path.join(temporary, "master")
-            os.mkdir(target)
-            subprocess.run(["zsh", HEAVY, f"wf2-voice-joins-{ctx.run_id}", PX.NARRATE_PY,
-                            os.path.join(STORIES, "voice.py"), "match-joins", parent, target],
-                           cwd=os.path.dirname(PX.NARRATE), env=env, check=True)
-            if os.path.exists(os.path.join(target, "check.json")):
-                os.replace(target, out)
-    repaired = jload(os.path.join(out, "check.json"), {})
+            dest = Path(temporary)/"master"
+            dest.mkdir()
+            cmd = ["zsh", HEAVY, f"wf2-voice-joins-{ctx.run_id}", PX.NARRATE_PY]
+            subprocess.run([*cmd, os.path.join(STORIES, "voice.py"), "match-joins", str(parent), str(dest)],
+                           cwd=os.path.dirname(PX.NARRATE), env=env, stdout=subprocess.DEVNULL)
+            native = jload(dest/"check.json", {})
+            use = dest if native else parent
+            remaining = (native or check)["joins"]
+            if remaining["with_artefact"]:
+                with wave.open(str(use/"narration.wav"), "rb") as wav:
+                    rate, channels = wav.getframerate(), wav.getnchannels()
+                raw = subprocess.check_output([PX.FF,"-v","error","-i",str(use/"narration.wav"),"-f","f32le","-"])
+                audio = np.frombuffer(raw, dtype="<f4").reshape(-1, channels).copy()
+                changes = blend_pauses(audio, rate, jload(use/"words.json")["words"], remaining["boundaries"])
+                if changes:
+                    if use != dest:
+                        for name in ("words.json", "render.json", "narration_script.json"):
+                            shutil.copy2(use/name, dest/name)
+                    subprocess.run([PX.FF,"-v","error","-y","-f","f32le","-ar",str(rate),"-ac",str(channels),
+                                    "-i","pipe:0","-c:a","pcm_s24le",str(dest/"narration.wav")],
+                                   input=audio.tobytes(), check=True)
+                    jsave(str(dest/"crossfades.json"), changes)
+                    subprocess.run([*cmd, PX.NARRATE, "check", str(dest), "--band", "03"],
+                                   cwd=os.path.dirname(PX.NARRATE), env=env, check=True, stdout=subprocess.DEVNULL)
+            if (dest/"check.json").is_file():
+                os.replace(dest,out)
+    repaired = jload(out/"check.json", {})
     if not repaired:
         return narration
-    words = os.path.join(out, "words.json")
-    return dict(narration, words=words, wav=os.path.join(out, "narration.wav"),
+    words = str(out/"words.json")
+    return dict(narration, words=words, wav=str(out/"narration.wav"),
                 duration=jload(words)["duration"], gate=dict(narration["gate"],
                 ok=repaired["gate"]["pass"], checks=repaired["gate"], wer=repaired["wer"]["wer"]))
 
 
 def product_clips(script, out):
-    """The before and the after as clips with their own sound, and the opening beat's export seconds with theirs
-    (script["hook"], hook_beat): cut from LEAD_F frames in, so the voice that starts on frame LEAD_F is the sound of
-    the picture devices.split shows there."""
+    """Cut the checked upload and export at their independently measured sentence boundaries."""
     rec = json.load(open(script["record"]))
     chk = script["export_check"]
     ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
