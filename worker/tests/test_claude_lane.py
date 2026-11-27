@@ -725,3 +725,16 @@ def test_trial_planner_reuses_fixed_trial_instructions_across_projects():
         claude_lane._mark_cache(system, [], [], "claude-opus-5-5", "trial_planner")
         assert [i for i, block in enumerate(system) if "cache_control" in block] == [2]
         assert system[2]["cache_control"]["ttl"] == "1h"
+
+
+@pytest.mark.parametrize("model", ["claude-haiku-5-5", "claude-opus-5-5"])
+def test_long_render_wait_protects_the_conversation_through_the_latest_result(model):
+    for ttl in ("5m", "1h"):
+        system, msgs, tools = claude_lane.to_anthropic(
+            [{"role": "system", "content": "kernel"},
+             {"role": "user", "content": "first request"},
+             {"role": "assistant", "content": "reviewed"},
+             {"role": "user", "content": "check the new preview"}], TOOLS, model)
+        claude_lane._mark_cache(system, msgs, tools, model, prefix_ttl=ttl)
+        assert msgs[-1]["content"][-1]["cache_control"].get("ttl", "5m") == ttl
+        assert system[0]["cache_control"]["ttl"] == "1h"

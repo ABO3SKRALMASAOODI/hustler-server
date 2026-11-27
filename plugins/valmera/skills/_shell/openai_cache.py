@@ -156,7 +156,8 @@ def responses(body, role, *, conversation=False, static_messages=2):
             msg["content"] = parts
         for part in reversed(parts):
             if part.get("type") == "input_text":
-                part["prompt_cache_breakpoint"] = {"mode": "explicit", "ttl": ttl}
+                part["prompt_cache_breakpoint"] = {"mode": "explicit",
+                                                   "ttl": ttl if index < 2 else "30m"}
                 break
     return b
 

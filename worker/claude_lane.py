@@ -609,43 +609,30 @@ def _mark_cache(system, msgs, tools, model="", cache_policy=None, prefix_ttl=Non
     # write beyond Anthropic's 20-position lookback. Keep an explicit read
     # anchor there in that case, using the otherwise redundant tools slot.
     anchor = _released_pixels_anchor(msgs) or _previous_cache_anchor(msgs)
-    if prefix_ttl:
-        # Paid Opus edits can wait on a render or a preview between tool calls.
-        stable = {"type": "ephemeral", "ttl": "1h"}
+    shared_control = {"type": "ephemeral", "ttl": "1h"}
+    history_control = {"type": "ephemeral"}
+    if prefix_ttl == "1h":
+        history_control["ttl"] = "1h"
+    if tools and anchor is None:
         last = next((i for i in reversed(range(len(tools))) if not tools[i].get("defer_loading")), None)
-        if last is not None and anchor is None:
-            tools[last] = dict(tools[last], cache_control=stable)
-        if system:
-            shared = min(1, len(system) - 1)
-            system[shared] = dict(system[shared], cache_control=stable)
-            if len(system) - 1 != shared:
-                system[-1] = dict(system[-1], cache_control={"type": "ephemeral", "ttl": prefix_ttl})
-    else:
-        if tools and anchor is None:
-            last = max((i for i, tool in enumerate(tools)
-                        if not tool.get("defer_loading")), default=None)
-            if last is not None:
-                tools[last] = dict(tools[last], cache_control={"type": "ephemeral", "ttl": "1h"})
-        if system:
-            # The editor kernel + capability directory are identical for every
-            # project; one breakpoint after them is a cross-account read point,
-            # the last leading block caches this project's context.
-            stable = min(1, len(system) - 1)
-            system[stable] = dict(system[stable],
-                                  cache_control={"type": "ephemeral", "ttl": "1h"})
-            if len(system) - 1 != stable:
-                system[-1] = dict(system[-1], cache_control={"type": "ephemeral"})
+        if last is not None:
+            tools[last] = dict(tools[last], cache_control=shared_control)
+    if system:
+        shared = min(1, len(system) - 1)
+        system[shared] = dict(system[shared], cache_control=shared_control)
+        if len(system) - 1 != shared:
+            system[-1] = dict(system[-1], cache_control=history_control)
     for msg in reversed(msgs):
         if msg["role"] == "system":
-            continue             # a mid-conversation note cannot carry one
+            continue
         content = msg["content"]
         if content:
             at = _last_kept_block(content)
-            content[at] = dict(content[at], cache_control={"type": "ephemeral"})
+            content[at] = dict(content[at], cache_control=history_control)
         break
     if anchor is not None:
         content, index = anchor
-        content[index] = dict(content[index], cache_control={"type": "ephemeral"})
+        content[index] = dict(content[index], cache_control=history_control)
 
 
 _PIXELS_FROM = ("FILMSTRIPS & STILLS", "Frames for your own eyes")
@@ -951,7 +938,7 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
         if active:
             tool_defs = _plan_tools(active, model)
         _mark_cache(system, msgs, tool_defs, model, cache_policy,
-                    active.get("prefix_ttl", "1h") if long_prefix else None)
+                    active.get("prefix_ttl") if active else None)
         body = {"model": model, "max_tokens": int(max_tokens or 8000),
                 "messages": msgs}
         if system:

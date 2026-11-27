@@ -439,3 +439,11 @@ def test_missing_sol_cache_counter_stays_unknown_in_reporting(monkeypatch):
     llm.record("agent", {"model": "gpt-6.2-sol"}, {}, usage)
     assert rows[0][2]["cached_in"] is None
     assert rows[0][2]["uncached_in"] is None
+
+
+def test_session_specific_static_content_uses_the_short_write_rate():
+    import openai_cache
+    inputs = [{"role": "developer", "content": s} for s in ("kernel", "tools manual", "project index")]
+    body = openai_cache.responses({"model": "gpt-6.2-sol", "input": inputs}, "edit:2:3",
+                                  conversation=True, static_messages=3)
+    assert [m["content"][0]["prompt_cache_breakpoint"]["ttl"] for m in body["input"]] == ["12h", "12h", "30m"]
