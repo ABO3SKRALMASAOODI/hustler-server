@@ -248,6 +248,10 @@ def repeated(out_segs, old_segs, kept):
 
 def for_ear(script, form="story", effort="medium", log=print):
     """(script for the ear, report). The original segment stands wherever the rewrite fails a check."""
+    if script.get("beat_sheet"):
+        # The writer composed the performance and its spoken-to-printed pairs together.
+        return script, dict(ok=True, spend=[], source="beat sheet")
+
     segs = script.get("segments") or []
     names = list(script.get("names") or [])
     try:
