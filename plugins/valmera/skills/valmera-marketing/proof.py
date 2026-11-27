@@ -184,6 +184,33 @@ def sources():
     return out
 
 
+def podcast_clock(media, lo, hi):
+    """Load existing word-timed podcast speech if the export covers the requested excerpt."""
+    from pathlib import Path
+    folder = Path(media).parent
+    for path in (folder / "words.json", folder / "hearing_full.json", folder.parent / "words.json"):
+        data = jload(path)
+        if isinstance(data, dict):
+            data = data.get("words")
+        if not data or not isinstance(data, list):
+            continue
+        words = []
+        for row in data:
+            if not isinstance(row, dict):
+                break
+            start, end = row.get("t0", row.get("start")), row.get("t1", row.get("end"))
+            word = row.get("w") or row.get("word") or row.get("text")
+            if start is None or end is None or not word:
+                break
+            words.append(dict(w=word.strip(), t0=float(start), t1=float(end)))
+        else:
+            if words and words[0]["t0"] < hi and words[-1]["t1"] >= hi-1:
+                excerpt = [w for w in words if lo <= w["t0"] < hi]
+                if numbered_sentences(excerpt):
+                    return excerpt
+    return []
+
+
 def hear_clock(ctx, media, tag, lo=0.0, hi=None):
     """The actual file's punctuation and both word edges, on its own clock. Cache only in the run."""
     import tempfile
@@ -513,7 +540,7 @@ def ideas(ctx):
     for src in srcs:
         dur = probe_wh(src["file"])[2]
         lo, hi = (max(0, old["t0"]-45), min(dur, old["t1"]+45)) if old else (0., dur)
-        words = hear_clock(ctx, src["file"], src["id"], lo, hi)
+        words = podcast_clock(src["file"], lo, hi) or hear_clock(ctx, src["file"], src["id"], lo, hi)
         rows = numbered_sentences(words)
         clocks[src["id"]], sentences[src["id"]] = words, rows
         # A partial first/last sentence at an excerpt edge is context for the model.
@@ -555,7 +582,7 @@ def restore_window(ctx, idea):
     src = idea["file"]
     duration = probe_wh(src)[2]
     lo, hi = max(0, idea["t0"]-45), min(duration, idea["t1"]+45)
-    words = hear_clock(ctx, src, "prior-idea", lo, hi)
+    words = podcast_clock(src, lo, hi) or hear_clock(ctx, src, "prior-idea", lo, hi)
     rows = numbered_sentences(words)
     got, _ = ask("Locate the complete claim for this existing edit in the numbered sentences. "
                  "Give first_sentence,last_sentence,speaker and ask. Preserve the editing idea and cover the "
@@ -1224,8 +1251,10 @@ export plays. The voice leaves the recorded passages clear."""
     content = [dict(type="text", text=json.dumps(content, ensure_ascii=False))]
     if inventory["pictures"]:
         content.extend(VI.writer_content(inventory, still))
-    got, use = ask(system, content, what="write recorded story", effort="high")
-    sc = story_chain.attach(got, sheet)
+    def request(repair):
+        prompt = content + [dict(type="text", text=repair)] if repair else content
+        return ask(system, prompt, what="write recorded story", effort="high")
+    sc, use = story_chain.write_segments(sheet, request)
     sc["recording_pictures_only"] = mode == "showcase" or not inventory["pictures"]
     roles = {seg["role"]: i for i, seg in enumerate(sc["segments"])}
     sc.update(format=mode, hook_line=sc["segments"][0]["say"], close_line=sc["segments"][-1]["say"],

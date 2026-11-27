@@ -229,10 +229,14 @@ def write(idea, dos, card, voices=None, notes=None, effort="high", line=None):
     else:
         planner_use = {}
     content += "\n# Beat sheet\n" + json.dumps(dos["beat_sheet"], ensure_ascii=False)
-    text, use = writer.ask_web(system + "\n" + story_chain.WRITE, content, effort=effort, max_tokens=64000,
-                               searches=0, fetches=0, what="write")
+    def request(repair):
+        text, usage = writer.ask_web(system + "\n" + story_chain.WRITE, content + "\n" + repair,
+                                     effort=effort, max_tokens=64000, searches=0, fetches=0, what="write")
+        return writer.json_block(text), usage
+
+    script, use = story_chain.write_segments(dos["beat_sheet"], request)
     use = dict(use, planner=planner_use, usd=float(use.get("usd", 0)) + float(planner_use.get("usd", 0)))
-    return story_chain.attach(writer.json_block(text), dos["beat_sheet"]), use
+    return script, use
 
 
 def printed_strings(script):
