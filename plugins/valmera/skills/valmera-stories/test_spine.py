@@ -462,6 +462,7 @@ def stage(web, tmp_path, monkeypatch, banks):
     monkeypatch.setattr(writer, "hold_spine", lambda sc, bank, idea=None, log=print, again=None, **k: (sc, dict(ok=True, verify=writer.verify(sc), spine=[]), [], bank))
     monkeypatch.setattr(writer, "final_support", lambda sc, log=print, style=None, **k: (sc, dict(ok=True, verify=writer.verify(sc)), []))
     monkeypatch.setattr(wf3, "able_cards", lambda ctx: [dict(id="window", name="Window", look="framed", buildable=True)])
+    monkeypatch.setattr(wf3, "replacement_ideas", lambda *a, **k: [])          # no search for a replacement idea in these tests
     ctx = types.SimpleNamespace(run_dir=str(tmp_path), log=quiet, args={"ear": False, "annotate": False, "timing": False})
     ideas_out = dict(ideas=[dict(title="A dead end", style="window", supply=dict(ok=True)), dict(IDEA, supply=dict(ok=True))])
     return wf3, ctx, ideas_out, calls

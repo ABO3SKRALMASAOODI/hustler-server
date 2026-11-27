@@ -37,7 +37,8 @@ def measure(final,clean,plan,words,out,ffmpeg,stem_dir=None,music_stem=None):
     if not stem_dir or not music_stem:raise ValueError('actual mixer stems are required for the rater audibility test')
     stem_files=[Path(stem_dir)/'voice.flac',Path(stem_dir)/'sfx.flac',Path(music_stem)]
     fingerprint=hashlib.sha256(Path(__file__).read_bytes())
-    for source in (final,clean,plan,words,Path(__file__).with_name('stem_evidence.py'),*stem_files):
+    final_cues = Path(plan).with_name('sound-final.json')
+    for source in (final,clean,plan,words,Path(__file__).with_name('stem_evidence.py'),*stem_files,*([final_cues] if final_cues.exists() else [])):
         with open(source,'rb') as f:fingerprint.update(hashlib.file_digest(f,'sha256').digest())
     signature=fingerprint.hexdigest()
     if Path(out).exists():
@@ -60,6 +61,9 @@ def measure(final,clean,plan,words,out,ffmpeg,stem_dir=None,music_stem=None):
         chapters.append(dict(chapter=ch['id'],rise_db=round(rise[0],2),at_s=rise[1],span_s=rise[2]))
     sd=plan['sound_design']
     evs=sorted([e for kind in ('placed','body','ticks') for e in sd.get(kind,[])],key=lambda e:e['t'])
+    if final_cues.exists():
+        evs=[dict(t=cue['event_f']/plan['fps'],kind=cue.get('for'),part=cue.get('part'))
+             for cue in json.loads(final_cues.read_text())['final_sounds']]
     fl,cl=levels(m),levels(cc)
     placed=[]
     def step(ls,x,t):

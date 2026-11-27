@@ -218,18 +218,19 @@ def test_music_moments_need_a_track_the_user_added():
     assert out.startswith("REJECTED") and "no music" in out
 
 
-def test_flash_safety_counts_the_flashes_already_in_the_edit():
+def test_flash_safety_counts_the_flashes_already_in_the_edit_and_informs():
+    # p5968 (19 Nov 2026): the fill was refused ("nothing left to write
+    # after flash safety") unless a word rule found "flash" in the message
     edl = schemas.default_edl(DUR)
     edl["effects"] = {"stylize": [
         {"id": f"fl{i}", "kind": "flash", "start": round(4.0 + i * 0.1, 2),
          "end": round(4.05 + i * 0.1, 2), "intensity": 0.8}
         for i in range(3)]}
-    ctx = Ctx(edl)
-    out = st.add_subject_effect(ctx, kind="fill", start=4.15)
-    assert out.startswith("REJECTED: nothing left"), out
-    ctx = Ctx(edl, message="make it flash and strobe hard")
-    assert st.add_subject_effect(ctx, kind="fill",
-                                 start=4.15).startswith("EDL")
+    for msg in ("", "make it flash and strobe hard"):
+        ctx = Ctx(edl, message=msg)
+        out = st.add_subject_effect(ctx, kind="fill", start=4.15)
+        assert out.startswith("EDL"), out
+        assert "4 full-frame flashes in one second" in out, out
 
 
 def test_colour_roles_stay_roles_and_kinds_take_their_fields():
@@ -315,11 +316,11 @@ def test_background_warmer_reads_the_written_effect_not_the_old_edl(monkeypatch)
     assert seen[0] == ctx.edl
 
 
-def test_a_fast_plate_strobe_needs_the_users_opt_in():
+def test_a_fast_plate_strobe_is_written_and_its_flashing_said():
     srcs = ["media/p1/plate.png", 2.0, "#ff0000", "media/p1/clip.mp4"]
     out = st.set_background(Ctx(), kind="strobe", start=3.0, end=4.0,
                             sources=srcs, style={"hold_f": 2})
-    assert out.startswith("REJECTED") and "flashes" in out
+    assert out.startswith("EDL") and "contains_flashing" in out, out
     ctx = Ctx(message="strobe the background behind him")
     out = st.set_background(ctx, kind="strobe", start=3.0, end=4.0,
                             sources=srcs, style={"hold_f": 2})
@@ -333,7 +334,8 @@ def test_remove_takes_only_subject_and_background_ids():
     ctx = Ctx()
     st.add_subject_effect(ctx, kind="glow", start=1.0, end=2.0)
     st.set_background(ctx, kind="solid", start=3.0, end=4.0, colour="black")
-    assert st.remove_subject_effect(ctx, ids=["nope"]).startswith("REJECTED")
+    # #1690: an id already gone is the asked-for absence, not a refusal.
+    assert "already absent" in st.remove_subject_effect(ctx, ids=["nope"])
     out = st.remove_subject_effect(ctx, ids=["sx1", "bg1"])
     assert out.startswith("EDL") and _fx(ctx) == []
 

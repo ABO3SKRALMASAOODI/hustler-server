@@ -258,7 +258,7 @@ def checked_research(*args,**kwargs):
         raise
 run.look.check=checked_research
 result=find(j['lines'],j['named'],j['about'],sys.argv[2],1920,1080,
-     max_sources=10, per=2, avoid=j.get('avoid'), strict_lines=True, motion_first=True, scout_motion=True,
+     preserve_source=True, max_sources=10, per=2, avoid=j.get('avoid'), strict_lines=True, motion_first=True, scout_motion=True,
      alloc='round', reassign_lost=True, whole_first=True, want_voices=False, log=lambda s:print(s,flush=True))
 result['research_errors']=review_errors
 result['rank_rounds']=rank_rounds
@@ -482,6 +482,8 @@ def fetch(payload, out, log=print, _port=None):
         if payload.get('verification_owner'):
             result['verification_owner']=payload['verification_owner']
             result['research_candidates_only']=True
+        if payload.get('interval_targets'):
+            result['interval_targets']=payload['interval_targets']
         if payload.get('narration_context'):
             result['narration_context']=payload['narration_context']
         pending = rec.with_suffix('.tmp')

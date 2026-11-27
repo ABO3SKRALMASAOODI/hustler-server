@@ -18,7 +18,8 @@ def prepare_takes(nd,ns,backup,old=None):
     new=voice.group_script(ns,voice.groups_of(ns['segments']))
     if [s['members'] for s in old['segments']]!=[s['members'] for s in new['segments']]:
         raise ValueError('Sentence repair changed generation grouping; revise it before applying')
-    version=hashlib.sha256(b''.join(Path(m.__file__).read_bytes() for m in (lines,prosody,perform,voice))).digest()
+    from read_cache import analysis_version
+    version=analysis_version((lines,prosody,perform,voice))
     band=json.loads((HERE.parent/'_shell/narrate/voice_ref.json').read_text())['band']['04']
     cache=nd/'take-analysis';changed=[];copied=0
     for i,(before,after) in enumerate(zip(old['segments'],new['segments'])):

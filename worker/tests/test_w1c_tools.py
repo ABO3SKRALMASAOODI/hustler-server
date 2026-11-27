@@ -183,17 +183,21 @@ def test_add_region_effect_and_remove():
     out = ct.remove_region_effect(ctx, ["rg1", "rg2"])
     assert out.startswith("EDL"), out
     assert [i["id"] for i in ctx.edl["fx"]] == ["rg3"]
-    assert ct.remove_region_effect(ctx, "m1").startswith("REJECTED")
+    # #1690: not a region effect id: nothing of that kind to remove.
+    assert "already absent" in ct.remove_region_effect(ctx, "m1")
 
 
-def test_flash_safety_refuses_a_fourth_flash_in_a_second():
+def test_a_fourth_flash_in_a_second_is_written_and_said():
+    # p5968 (19 Nov 2026): the fourth full-frame negate was refused; flash
+    # safety informs now, and the export is marked contains_flashing
     ctx = Ctx(_base())
     for k in range(3):
         out = ct.add_region_effect(ctx, "negate", "rect:0,0,1,1",
                                    1.0 + 0.25 * k, 1.1 + 0.25 * k)
-        assert out.startswith("EDL"), out
+        assert out.startswith("EDL") and "contains_flashing" not in out, out
     out = ct.add_region_effect(ctx, "negate", "rect:0,0,1,1", 1.8, 1.9)
-    assert out.startswith("REJECTED") and "flashes in one second" in out
+    assert out.startswith("EDL") and "4 full-frame flashes in one second" \
+        in out, out
     # a small region is no flash
     out = ct.add_region_effect(ctx, "negate", "rect:0.4,0.4,0.5,0.5",
                                1.8, 1.9)

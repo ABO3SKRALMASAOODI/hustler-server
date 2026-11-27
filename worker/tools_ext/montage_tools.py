@@ -116,7 +116,11 @@ def _clock(ctx, edl, music_id=None, clock="auto"):
 
 def _project_assets(ctx, kinds):
     import db as dbx
-    return ctx.db.run(dbx.assets_by_kinds, ctx.project_id, list(kinds)) or []
+    import read_tools
+    # the First cut director's own plates are never montage material (#1838)
+    return [r for r in ctx.db.run(dbx.assets_by_kinds, ctx.project_id,
+                                  list(kinds)) or []
+            if not read_tools.product_design_plate(r)]
 
 
 def pool_from_assets(rows, library=None):
@@ -301,11 +305,6 @@ def slot_text(ws, max_words=4):
     return " ".join(core).strip(" ,;:")
 
 
-def _opted_in(ctx):
-    import flash_safety
-    return flash_safety.opted_in(getattr(ctx, "user_message", "") or "")
-
-
 def plan(ctx, edl, start, end, *, music_id=None, shots=None, modes=None,
          lead_f=1, on="auto", style="broll", seed=0, every=1, prefix=None,
          clock="auto", pool=None):
@@ -356,19 +355,7 @@ def plan(ctx, edl, start, end, *, music_id=None, shots=None, modes=None,
     # (best shots first), so a re-plan or a song swap is deterministic
     pool = unpack_pool(pack_pool(sorted(pool, key=lambda sh: -float(
         sh.get("score", 0.5)))))
-    opted = _opted_in(ctx)
     notes = []
-    if not opted and any(x["mode"] == "strobe" for x in sl):
-        for x in sl:
-            if x["mode"] == "strobe":
-                x["mode"] = "pulse"
-        notes.append("strobe sections cut as pulses: the user did not ask "
-                     "for strobing (flash safety)")
-        sl = montage.slots(rmap, s, e, fps=fps, lead_f=int(lead_f),
-                           modes={k: ("pulse" if v == "strobe" else v)
-                                  for k, v in dict(montage.SECTION_MODE,
-                                                   **(modes or {})).items()},
-                           on=on, every=max(1, int(every or 1)))
     rl = montage.roles(sl, style, rmap.get("sections"))
     words = _program_words(ctx, edl) if style != "broll" else []
     prefix = prefix or _prefix(edl)
@@ -593,23 +580,27 @@ def _swap_resolver(edl, intents, new_music_id):
         pool = unpack_pool(p.get("pool"))
         sl = montage.slots(prog, p.get("t0", 0.0), p.get("t1", 1e9),
                            fps=fps, lead_f=p.get("lead_f", 1),
-                           modes={k: ("pulse" if v == "strobe" else v)
-                                  for k, v in dict(montage.SECTION_MODE,
-                                                   **(p.get("modes") or {})
-                                                   ).items()},
+                           modes=p.get("modes"),
                            on=p.get("on", "kick"), every=p.get("every", 1))
-        asg = montage.assign(sl, pool, seed=p.get("seed", 0))
+        assignments = {id(slot): (shot, t) for slot, shot, t in montage.assign(
+            [x for x in sl if x["mode"] != "strobe"], pool, seed=p.get("seed", 0))}
         owned = set(iid for _l, iid in montage.owned(edl, prefix))
         for layer in ("overlays", "motion", "fx"):
             edl[layer] = [i for i in edl.get(layer) or []
                           if i.get("id") not in owned]
-        for k, (x, sh, src_t) in enumerate(asg, 1):
+        for k, x in enumerate(sl, 1):
+            if x["mode"] == "strobe":
+                edl.setdefault("fx", []).append(montage.strobe_item(x, f"{prefix}_{k}", fps, pool))
+                continue
+            if id(x) not in assignments:
+                continue
+            sh, src_t = assignments[id(x)]
             layer, val = montage.broll_value(x, sh, src_t, f"{prefix}_{k}")
             edl.setdefault(layer, []).append(val)
         edl.setdefault("fx", []).append(
             montage.intent(prefix, new_music_id, {k: v for k, v in p.items()
                                                   if k != "prefix"}))
-        notes.append(f"montage {prefix} re-cut on the new track: {len(asg)} "
+        notes.append(f"montage {prefix} re-cut on the new track: {len(sl)} "
                      "cuts, 1 frame before each hit")
     return edl, notes
 
@@ -839,9 +830,80 @@ def _ramp_insert(ctx, ins_id, low_f, hold, curve, allow_duplicates):
     return res
 
 
+def _duration_kept_ramp(ramps, a, b, low, curve, fps_src, fps_out, prefix,
+                        allow_duplicates):
+    """Slow motion that keeps the window's length (#1656, p5968: "slow
+    motion and speed effects without changing the duration"): ease into
+    ``low``, then catch up faster than 1x, solved so the window plays in
+    exactly its source length. (spans, report) like ramps.plan."""
+    L = b - a
+
+    def build(high):
+        keys = [(0.0, 1.0), (0.08, low), (0.32, low), (0.44, high),
+                (0.94, high), (1.0, 1.0)]
+        return ramps.plan(a, b, ramps.curve_fn(keys, curve), fps_src=fps_src,
+                          fps_out=fps_out, prefix=prefix,
+                          allow_duplicates=allow_duplicates)
+
+    def out_len(spans):
+        return sum((float(x["end"]) - float(x["start"])) / float(x["factor"])
+                   for x in spans) + (L - sum(float(x["end"]) - float(x["start"])
+                                              for x in spans))
+    lo_h, hi_h = 1.0, 4.0
+    best = build(hi_h)
+    if out_len(best[0]) > L + 1e-3:
+        best[1]["duration_note"] = "the catch-up reached 4x; the window runs longer"
+        return best
+    for _ in range(24):
+        mid = (lo_h + hi_h) / 2.0
+        got = build(mid)
+        if out_len(got[0]) > L:
+            lo_h = mid
+        else:
+            hi_h, best = mid, got
+        if hi_h - lo_h < 0.005:
+            break
+    return best
+
+
+def _ramp_window(tl, s, e):
+    """Where a program window [s, e] can ramp: ("shot", s', e') inside the one
+    kept shot it overlaps most, ("insert", id) when it sits on a spliced
+    insert, or None when the film has no kept footage."""
+    import timeline as _timeline
+    s, e = min(s, e), max(s, e)
+    if e - s < 0.05:
+        e = s + 0.05
+    best = None
+    for off, L in zip(tl.offsets, tl.seg_out_len):
+        lo, hi = max(s, off), min(e, off + L)
+        if hi - lo > 1e-3 and (best is None or hi - lo > best[0]):
+            best = (hi - lo, lo, hi)
+    if best:
+        return ("shot", round(best[1], 3), round(best[2] - 1e-3, 3))
+    try:
+        items = sorted(tl.items, key=_timeline._ins_sort_key)
+        for item, (at, dur) in zip(items, tl.insert_positions()):
+            if at - 1e-3 <= s < at + dur and item.get("id"):
+                return ("insert", item["id"])
+    except Exception:  # noqa: BLE001 - fall through to the nearest shot
+        pass
+    if not tl.seg_out_len:
+        return None
+    # Past the end or on a gap: the same length on the nearest kept shot.
+    span = e - s
+    off, L = min(zip(tl.offsets, tl.seg_out_len),
+                 key=lambda r: min(abs(r[0] - s), abs(r[0] + r[1] - s)))
+    if s >= off + L:
+        lo = max(off, off + L - span)
+        return ("shot", round(lo, 3), round(off + L - 1e-3, 3))
+    return ("shot", round(off, 3), round(min(off + L, off + span) - 1e-3, 3))
+
+
 def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
                    curve="ease_in_out", allow_duplicates=False, id=None,
-                   insert=None, allow_speech=False, ease_out=True):
+                   insert=None, allow_speech=False, ease_out=True,
+                   keep_duration=False):
     """An eased speed swing over a program window as contiguous spans (or
     over a whole b-roll insert as constant-rate pieces)."""
     import ramps
@@ -877,13 +939,29 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
                     "joins are audible. Ramp B-roll (insert=id), a gesture, "
                     "a walk or a pause — or pass allow_speech true if the "
                     "user wants it there.")
+    # The window lands on the footage it means (p6238, 24 Nov: "window is not
+    # on kept footage" refused the ramp and the turn ended partial): over a
+    # spliced insert it ramps that insert; across a cut or past the end it is
+    # fitted to the kept shot it overlaps most.
+    snap = _ramp_window(tl, s, e)
+    if snap is None:
+        return "REJECTED: the film has no kept footage to ramp."
+    if snap[0] == "insert":
+        try:
+            res = _ramp_insert(ctx, str(snap[1]), low_f, float(hold),
+                               curve, allow_duplicates)
+        except (TypeError, ValueError) as err:
+            return f"REJECTED: {err}"
+        return (f"{s:.2f}-{e:.2f}s is on insert {snap[1]}: ramped that "
+                f"insert. {res}")
+    snapped_note = ""
+    if abs(snap[1] - s) > 0.02 or abs(snap[2] - e) > 0.02:
+        snapped_note = (f"The window {s:.2f}-{e:.2f}s was fitted to the kept "
+                        f"shot it covers: {snap[1]:.2f}-{snap[2]:.2f}s.")
+        s, e = snap[1], snap[2]
     a, b = tl.out_to_src(s), tl.out_to_src(max(s, e - 1e-3))
     if a is None or b is None:
-        return "REJECTED: that window is not on kept footage."
-    seg = tl.seg_program_range(a)
-    if seg and e > seg[1] + 0.02:
-        return ("REJECTED: a ramp stays inside one shot; that window crosses "
-                f"a cut at {seg[1]:.2f}s.")
+        return "REJECTED: the film has no kept footage to ramp."
     vid = (getattr(ctx, "index", None) or {}).get("video") or {}
     fps_src = float(vid.get("fps") or 30.0)
     fps_out = _fps(ctx, edl)
@@ -896,10 +974,15 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
                  else ramps.curve_fn([(0.0, 1.0), (min(
                      0.5, 1.2 / max(1.2, e - s)), low_f), (1.0, low_f)],
                      curve))
-        spans, rep = ramps.plan(a, b, shape,
-                                fps_src=fps_src, fps_out=fps_out,
-                                prefix=prefix + "_",
-                                allow_duplicates=bool(allow_duplicates))
+        if keep_duration:
+            spans, rep = _duration_kept_ramp(
+                ramps, a, b, low_f, curve, fps_src, fps_out, prefix + "_",
+                bool(allow_duplicates))
+        else:
+            spans, rep = ramps.plan(a, b, shape,
+                                    fps_src=fps_src, fps_out=fps_out,
+                                    prefix=prefix + "_",
+                                    allow_duplicates=bool(allow_duplicates))
     except ValueError as err:
         return f"REJECTED: {err}"
     if not spans:
@@ -908,8 +991,16 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
            if not str(sp.get("id", "")).startswith(prefix + "_")]
     clash = ramps.fits(old, spans)
     if clash:
-        return ("REJECTED: the ramp overlaps speed span(s) " +
-                ", ".join(map(str, clash)) + "; remove_speed them first.")
+        # The newer ramp is what is asked on that footage: the spans under it
+        # give way (a refusal here cost a remove_speed round trip each time).
+        gone = {str(c) for c in clash}
+        old = [sp for sp in old if str(sp.get("id")) not in gone]
+        snapped_note = (snapped_note + " " if snapped_note else "") + (
+            "Replaced the speed span(s) under it: " + ", ".join(sorted(gone)) + ".")
+        if ramps.fits(old, spans):
+            return ("REJECTED: the ramp overlaps speed span(s) " +
+                    ", ".join(map(str, ramps.fits(old, spans))) +
+                    "; remove_speed them first.")
     prev = ctx.latest_edl()
     new = dict(prev["json"])
     new["speed"] = sorted(old + spans, key=lambda x: float(x["start"]))
@@ -928,6 +1019,8 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
                  "stepping)")
     elif rep["dup_frames"]:
         tail += f"; {rep['dup_frames']} output frames repeat"
+    if snapped_note:
+        tail += "\n" + snapped_note
     return res + tail
 
 
@@ -1078,7 +1171,8 @@ TOOL_SPECS = {
         "as constant-rate pieces. The low is held where the source still "
         "shows a fresh frame each output frame (a 60p clip in a 30p program "
         "reaches 0.5x) unless allow_duplicates. Refused over speech "
-        "unless allow_speech.",
+        "unless allow_speech. keep_duration: slow motion then a catch-up, "
+        "the window keeps its length.",
         {"start": {"type": "number"}, "end": {"type": "number"},
          "low": {"type": "number", "minimum": 0.25, "maximum": 0.95},
          "hold": {"type": "number", "minimum": 0, "maximum": 0.8},
@@ -1086,6 +1180,7 @@ TOOL_SPECS = {
                                                    "ease_out", "linear"))},
          "allow_duplicates": {"type": "boolean"},
          "allow_speech": {"type": "boolean"},
+         "keep_duration": {"type": "boolean"},
          "id": {"type": "string"}, "insert": {"type": "string"}}),
     "animate_still": (
         animate_still,

@@ -562,6 +562,34 @@ def lower_pictures(l1, work, bake, rep):
     return overlays, zooms, fx, runs
 
 
+def spine_probes(l1, runs, rep):
+    """The spine's shots of the upload shown through the base crop window with no camera of the Score's, as
+    silent video overlays of main at the same source time carrying that window (score.panels measures
+    them). A shot with the Score's camera keeps it."""
+    if (rep.get("frame") or {}).get("mode") != "crop":
+        return []
+    win = base_window(l1)[0]
+    if full(win):
+        return []
+    fps, out = float(l1["fps"]), []
+    for it, a, b, _merged in runs:
+        if it.get("pic") != "main" or "src" not in it or not it.get("crop") or not on_spine(l1, it, fps):
+            continue
+        c = it["crop"]
+        if not full(in_window(rect_mid(c), win)) or animated([tuple(x) for x in c] if isinstance(c[0], (list, tuple)) else []):
+            continue
+        dur = r2((b - a) / fps)
+        if dur < OV_MIN_S:
+            continue
+        t0, t1 = (it.get("src") or [0, 0])[:2]
+        ov = {"id": f"pn.{it['id']}"[:60], "asset_key": "main", "kind": "video", "start": r2(a / fps), "duration_s": dur,
+              "fit": "cover", "source_start_s": r2(t0), "source_crop": [round(float(v), 4) for v in win]}
+        if dur > 0 and t1 > t0 and abs((t1 - t0) - dur) > .005:
+            ov["rate"] = (t1 - t0) / dur
+        out.append(ov)
+    return out
+
+
 REEL_WORKERS, REEL_S = 3, 40.0     # stills baked side by side, and the longest one bake may take
 REEL_ALL_S = 24.0                  # the longest a film's bakes may take together (about twenty stills take 8 s on a slot's 2 CPUs)
 FINISH_AS = {"archive": "mono", "tape": None}      # what a finish is on a picture the bake does not reach (a clip): black and white, or left clean
@@ -1122,6 +1150,18 @@ def lower(l1, work):
     fps = float(l1["fps"])
     keep, inserts = lower_spine(l1, bake, rep)
     overlays, zooms, tr_fx, runs = lower_pictures(l1, work, bake, rep)
+    # #1830: a window over a collage slideshow fills the frame with one of its photos, never the page between
+    # them: the main upload's overlays, then the spine's own shots seen through the base window
+    from . import panels
+    main_path = ((l1.get("assets") or {}).get("main") or {}).get("path")
+    main_path = bake.locals.get("main") or (os.path.join(work, main_path) if main_path else None)
+    path_of = lambda k: main_path if k == "main" else None  # noqa: E731
+    seen, t_pan = {}, time.monotonic()
+    panels.repair_windows(overlays, path_of, rep, frames=seen, t_start=t_pan)
+    spine_fills = panels.repair_spine(spine_probes(l1, runs, rep), path_of, rep, frames=seen, t_start=t_pan)
+    if spine_fills:
+        bake.locals["main"] = main_path
+        overlays += spine_fills
     flash_fx, vectors, pool_ov = lower_flashes(l1, bake, rep)
     cards = lower_cards(l1, work, bake, rep)
     grade = (l1.get("film") or {}).get("grade") or {}
@@ -1222,8 +1262,10 @@ def lower(l1, work):
         rep["bed_error"] = f"{type(e).__name__}: {str(e)[:160]}"
     if look:
         # the keyed tone grades the take's own stream; a cutaway takes plain windows only (renderer.cutaway_look_chain).
-        # A film that cuts its take in as a picture would come out in two colours, so that film goes without it
-        keyed = not any(o.get("asset_key") == "main" for o in edl["overlays"])
+        # The take shown full-frame as a picture (the collage spine's photo fills, #1830) takes the keyed windows too
+        # (renderer.takes_tone); a film that shows its take any other way would come out in two colours, so it goes without
+        import renderer
+        keyed = not any(o.get("asset_key") == "main" and not renderer.takes_tone(o) for o in edl["overlays"])
         edl["fx"] = grade.windows(look, 0.0, lim, keyed) + edl["fx"]
         rep["look"] = dict({k: look.get(k) for k in ("name", "card", "amount", "de", "skin_de")}, keyed=bool(keyed and look.get("key")),
                            **({"de": look.get("key_de"), "skin_de": look.get("key_skin_de")} if keyed and look.get("key") else {}))

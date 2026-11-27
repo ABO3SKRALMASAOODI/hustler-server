@@ -384,12 +384,14 @@ class JunctionFx(FxItemBase):
                                      or self.origin.kind != "glyph"):
             raise ValueError("letter_window names its letters: origin kind "
                              "glyph with the motion item id")
+        # A field this style does not draw is left out, not refused (p6238
+        # gate, 27 Nov: set_junction refused "colour belongs to hit_flash"
+        # and the asked-for transitions were not made).
         if self.count is not None and s not in ("columns", "bands",
                                                 "box_steps", "slices"):
-            raise ValueError("count belongs to columns, bands, box_steps or "
-                             "slices")
+            self.count = None
         if self.colour is not None and s != "hit_flash":
-            raise ValueError("colour belongs to hit_flash")
+            self.colour = None
         return self
 
     def check(self, ctx):

@@ -102,6 +102,8 @@ def find_ideas(card, avoid=(), line=None, n=6, effort="high", delivered=""):
                "(protagonist, question, stakes, turn, payoff; 9-10 only when all five are strong and true to the sources), "
                "never how much footage exists}."))
     system += f"\n\n# The bar\n{references()}\n\n"
+    system += (" In the top-level JSON include runtime_minutes, either [minimum,aim,maximum] for the "
+               "requested main film in minutes, or null for the default. For a single duration repeat it.")
     content = ((f"# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
                f"# Already made\n{json.dumps(list(avoid), ensure_ascii=False)}\nThe owner's rule: never the exact same idea told the same "
                "way as one of these (the same story through the same beats, even under a new title or a new look). A new angle "
@@ -109,7 +111,11 @@ def find_ideas(card, avoid=(), line=None, n=6, effort="high", delivered=""):
                (f"# A line from the owner\n{line}\n\n" if line else ""))
     text, use = writer.ask_web(system, content, effort=effort, max_tokens=40000, searches=16, fetches=8, what="find ideas")
     got = writer.json_block(text)
-    return (got.get("ideas") if isinstance(got, dict) else got) or [], use
+    ideas = (got.get("ideas") if isinstance(got, dict) else got) or []
+    if isinstance(got, dict) and 'runtime_minutes' in got:
+        for idea in ideas:
+            idea['runtime_minutes'] = got['runtime_minutes']
+    return ideas, use
 
 
 # ----------------------------------------------------------------- the dossier
@@ -175,7 +181,7 @@ def write(idea, dos, card, voices=None, notes=None, effort="high", line=None):
               "in them, and you never round or dramatise beyond them. For document beats use the retained dated exhibit facts. Reserve archive faces and demos for what the recordings show. When citing an X post, paper or direct quotation choose design kind document or quote and its exact fact id. Choose the canonical status URL or actual paper PDF. You direct the actor too: pace, energy, melody, emphasis "
               "and pauses per segment. Write for the ear: concrete nouns, numbers a listener can hold, the "
               "voice of a storyteller who knows where the story goes and makes the viewer want the next minute.")
-    lo, hi = FORM["words"]
+    lo, hi = (dos["runtime_words"][::2] if dos.get("runtime_words") else FORM["words"])
     system += "\n\n" + ((f"# Form\n{FORM['name']}: {lo}-{hi} spoken words in {FORM['segments'][0]}-{FORM['segments'][1]} segments (at about "
                f"175 words a minute that is {lo // 175}-{hi // 175} minutes). {FORM['shape']}.\n\n"
                "How it holds (a story, not an explainer): " + STORY_SHAPE + " Every chapter has its own consequential turn, "
@@ -215,7 +221,8 @@ def write(idea, dos, card, voices=None, notes=None, effort="high", line=None):
                f"# Documents\n{json.dumps(dos.get('documents') or [], ensure_ascii=False)}\n\n"
                f"# Voices\n{json.dumps({k: VOICES[k] for k in voices if k in VOICES})}\n\n") +
                (f"# Notes from the last attempt (fix every one)\n{notes}\n\n" if notes else ""))
-    content += production_brief(line)
+    from runtime_plan import budget
+    content += production_brief(line) + "\n" + budget(dos)
     text, use = writer.ask_web(system, content, effort=effort, max_tokens=64000, searches=0, fetches=0, what="write")
     return writer.json_block(text), use
 
@@ -268,7 +275,8 @@ def check_script(script, dos):
         problems.append(f"these printed figures stand in no verified quote: {unbacked}")
     n = writer.words_of(script)
     lo, hi = FORM["words"]
-    if not lo <= n <= hi * 1.1:
+    # An explicit brief drives sourced development on the inspected archive.
+    if not dos.get("runtime_words") and not lo <= n <= hi * 1.1:
         problems.append(f"{n} spoken words; the form wants {lo}-{hi}")
     for c in script.get("chapters") or []:
         if not any(s.get("chapter")==c.get("id") and s.get("beat")=="turn" for s in script.get("segments",[])):

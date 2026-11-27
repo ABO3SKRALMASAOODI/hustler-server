@@ -342,39 +342,22 @@ def _ensure_matte(ctx, edl, tl, windows, wait_s=0):
         return ""
 
 
-def _flash_thin(ctx, items, fps, edl=None):
-    """Automatic picks keep <= 3 full-frame flashes per second unless the
-    user asked for flashing, counting the flashes ALREADY in the edit (a
-    flash transition, an accent): only the new items can be dropped.
-    Returns (kept items, dropped ids)."""
+def _flash_note(ctx, items, edl=None):
+    """How fast the film flashes with ``items`` written, when that passes
+    the photosensitivity limit ("" otherwise). Information only: the
+    editor's effects are kept as written. They used to be dropped, or a
+    plate strobe refused, unless a word rule found "strobe" or "flash" in
+    this one message (p5968, 19 Nov 2026: the strobes a paying user asked
+    for were taken out)."""
     import flash_safety
-    import schemas
-    cls = {c.model_fields["type"].default: c for c in schemas.FX_MEMBERS}
-    new_ids = {it["id"] for it in items}
-    events = []
-    try:
-        for e in flash_safety.flash_events(edl or {}, getattr(ctx, "index",
-                                                              None)):
-            if e.get("id") not in new_ids:
-                events.append({"t": e["t"], "id": None, "strength": 1e9})
-    except Exception:  # noqa: BLE001 — a reading never blocks a write
-        pass
-    for it in items:
-        c = cls.get(it["type"])
-        try:
-            times = c.model_validate(it).flash_times() if c else []
-        except Exception:  # noqa: BLE001 — validation reports it later
-            times = []
-        for t in times or []:
-            events.append({"t": t, "id": it["id"],
-                           "strength": float(it.get("_strength", 1.0))})
-    if not any(e["id"] for e in events):
-        return items, []
-    _kept, thinned = flash_safety.plan(
-        events, fps, opted_in=flash_safety.opted_in(
-            getattr(ctx, "user_message", "")))
-    drop = {e["id"] for e in thinned if e["id"]}
-    return [it for it in items if it["id"] not in drop], sorted(drop)
+    ids = {it.get("id") for it in items}
+    rest = [i for i in (edl or {}).get("fx") or []
+            if not (isinstance(i, dict) and i.get("id") in ids)]
+    clean = [{k: v for k, v in it.items() if not k.startswith("_")}
+             for it in items]
+    line = flash_safety.notice(dict(edl or {}, fx=rest + clean),
+                               getattr(ctx, "index", None) or {})
+    return (line[:1].upper() + line[1:] + ".") if line else ""
 
 
 # ------------------------------------------------------------------ verbs
@@ -491,15 +474,11 @@ def add_subject_effect(ctx, kind, start=None, end=None, on=None, count=None,
             note = _solve_hue(ctx, it)
             if note and note not in notes:
                 notes.append(note)
-    items, thinned = _flash_thin(ctx, items, fps, edl)
-    if thinned:
-        notes.append(f"flash safety kept {len(items)}; dropped "
-                     + ", ".join(thinned) + " (more than 3 flashes in a "
-                     "second; the user did not ask for flashing).")
     for it in items:
         it.pop("_strength", None)
-    if not items:
-        return "REJECTED: nothing left to write after flash safety."
+    flash = _flash_note(ctx, items, edl)
+    if flash:
+        notes.append(flash)
     ops = [_write.upsert_fx(it) for it in items]
     what = f"{len(items)} subject {kind} effect" + ("s" if len(items) > 1
                                                     else "")
@@ -687,7 +666,6 @@ def set_background(ctx, kind, start, end, colour=None, colour2=None,
     row = ctx.latest_edl()
     edl = row["json"]
     tl = _timeline(edl)
-    fps = _fps(ctx)
     try:
         a = round(_num(start, "start"), 2)
         b = round(_num(end, "end"), 2)
@@ -736,11 +714,9 @@ def set_background(ctx, kind, start, end, colour=None, colour2=None,
                     if kind in ("blur", "radial_blur")
                     else BACKGROUND_CARDS["swap"])
     notes = []
-    _kept, thinned = _flash_thin(ctx, [it], fps, edl)
-    if thinned:
-        return ("REJECTED: that plate strobe flashes more than 3 times a "
-                "second and the user did not ask for flashing. Use a longer "
-                "hold (hold_f) or fewer plates, or ask the user.")
+    flash = _flash_note(ctx, [it], edl)
+    if flash:
+        notes.append(flash)
     held = f", subject held at {it.get('hold_t', a):g}s" \
         if it.get("hold_subject") else ""
     out = _write.commit(ctx, [_write.upsert_fx(it)],
@@ -762,14 +738,13 @@ def remove_subject_effect(ctx, ids):
     if not ids:
         return "REJECTED: name the ids to remove (get_edl lists them)."
     edl = ctx.latest_edl()["json"]
-    have = {str(i.get("id")): i.get("type") for i in edl.get("fx") or []
-            if isinstance(i, dict)}
-    bad = [i for i in ids if have.get(i) not in ("subject", "background")]
-    if bad:
-        return ("REJECTED: not subject effects or backgrounds in this edit: "
-                + ", ".join(bad) + ". get_edl lists the fx ids.")
+    from tools_ext._write import removal_targets
+    current = [i["id"] for i in edl.get("fx") or [] if i.get("type") in ("subject", "background")]
+    ids, note = removal_targets(ids, current, "subject effect")
+    if not ids:
+        return note
     return _write.commit(ctx, [_write.remove_fx(i) for i in ids],
-                         "removed " + ", ".join(ids))
+                         "removed " + ", ".join(ids)) + (" " + note if note else "")
 
 
 # ------------------------------------------------------------------ specs

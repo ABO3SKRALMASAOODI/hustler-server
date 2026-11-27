@@ -13,8 +13,8 @@ Lenses (each finding: {code, lens, severity, t, id, message, fix, op?}):
 
   brand      the Valmera end card and the free-tier corner mark are there
              and unchanged (render_qc's exact-geometry correlations)
-  flash      Harding-style flashes on the RENDERED frames (photosens); the
-             fix is the flash-safe plan (downbeat hits kept)
+  flash      Harding-style flashes on the RENDERED frames (photosens), as
+             information: the export is marked contains_flashing
   colour     black-and-white is a DEVICE, never a look: B&W picture over
              most of the short without the user asking is a finding
   rhythm     visual events (cuts, punctuation, graphic and device
@@ -210,40 +210,28 @@ def features(path, program_s=None, feat_w=FEAT_W):
 # ── lenses ───────────────────────────────────────────────────────────────
 
 def lens_flash(view, edl, index, request_text, maps=None):
+    """How fast the render flashes, as information. It was a blocking
+    finding with remove ops whenever a word rule found no "strobe" or
+    "flash" in this one request, and the editor removed strobes a paying
+    customer asked for (p5968, 19 Nov 2026). The export is marked
+    contains_flashing; the editor, who reads the whole conversation,
+    decides."""
     import photosens
-    res = photosens.analyse(view.frames, view.fps,
-                            opted_in=_flash_opted(request_text))
+    res = photosens.analyse(view.frames, view.fps, opted_in=True)
     out = []
-    if res["over_limit"] and not res["opted_in"]:
-        plan = photosens.safe_plan(edl, index, request_text=request_text,
-                                   fps=view.fps, maps=maps)
+    if res["over_limit"]:
         spans = ", ".join(f"{o['t0']:.2f}-{o['t1']:.2f}s ({o['count']}/s)"
                           for o in res["over"][:3])
-        keep = (f", keeping {plan['kept_downbeats']} downbeat hits of your "
-                "track" if plan.get("downbeats") else "")
         out.append(_f(
-            "blocking", "flash", "flash_rate",
+            "advisory", "flash", "flash_rate",
             f"{res['peak_per_s']} full-frame flashes in one second on the "
-            f"render ({spans}); the limit is {res['max_per_s']}/s unless the "
-            "user asked for strobing.",
-            fix=(f"thin to the flash-safe plan: remove "
-                 f"{len(plan['ops'])} flash item(s){keep} (peak "
-                 f"{plan['peak_before']}/s -> {plan['peak_after']}/s on the "
-                 "edit)" if plan["ops"] else
-                 "the render flashes where the edit has no flash device "
-                 "(a cut rhythm or the footage itself): space the cuts or "
-                 "soften the brightest hits"),
-            t=res["over"][0]["t0"] if res["over"] else None,
-            ops=plan["ops"] or None))
+            f"render ({spans}); the photosensitivity guideline is "
+            f"{res['max_per_s']}/s and the export is marked "
+            "contains_flashing.",
+            fix=("keep flashes or strobes the customer asked for; space "
+                 "out only flashes nobody asked for"),
+            t=res["over"][0]["t0"] if res["over"] else None))
     return out, res
-
-
-def _flash_opted(request_text):
-    try:
-        import flash_safety
-        return flash_safety.opted_in(request_text)
-    except Exception:  # noqa: BLE001
-        return False
 
 
 def lens_colour(view, edl, index, request_text, payoff=None):

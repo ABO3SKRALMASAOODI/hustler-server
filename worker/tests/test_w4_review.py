@@ -316,7 +316,12 @@ def test_wave4_department_shares_stay_within_their_pins():
     saved_search = sorted(search_place_tools.WRITE_TOOLS)
     assert saved_search == ["place_scenes", "place_search_result"]
     assert size(saved_search) <= 2_600
-    assert set(world) | set(photo) | set(saved_search) == set(agent_tools.TOOL_DOMAINS["picture"])
+    from tools_ext import steady_tools
+    steady = sorted(steady_tools.TOOL_SPECS)
+    assert steady == ["find_meme", "stabilize_video"]
+    assert size(steady) <= 1_800
+    assert set(world) | set(photo) | set(saved_search) | set(steady) == \
+        set(agent_tools.TOOL_DOMAINS["picture"])
     assert size(critic_tools.VERBS) <= 1_200
     for name in world + photo + saved_search + list(critic_tools.VERBS):
         assert len(agent_tools.TOOLS[name][1]) <= 900, name

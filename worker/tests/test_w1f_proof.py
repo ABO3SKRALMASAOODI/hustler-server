@@ -48,7 +48,9 @@ def test_proof_measures_each_landing_frame_exactly(report, rate):
         assert d["basis"] == "without_device"
         assert d["event_f"] == d["planned_f"] == d["landing_f"], (rate, d)
         assert d["metrics"]["land_err_f"]["value"] == 0.0
-        assert d["metrics"]["flash_risk"]["pass"] is True
+        # flash risk is information (p5968, held vetoes branch): measured, never a fail
+        assert d["metrics"]["flash_risk"]["pass"] is not False
+        assert d["metrics"]["flash_risk"]["value"] is not None
         assert d["strip"] and d["onion"]
     j = r["devices"]["j1"]
     assert abs(j["event_f"] - j["planned_f"]) <= 1, j

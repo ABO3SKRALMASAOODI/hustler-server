@@ -1,5 +1,27 @@
 # compositing — blend modes, footage inside letters, letters as windows, ghost outlines, additive light and region effects
 
+## Green / blue screen
+
+A request to remove a green (or blue) screen is `chroma_key`. It measures
+the footage and does what that footage needs:
+
+- A screen still stands behind the subject (bright or dim, evenly lit or
+  not): it is keyed, the edges next to it are despilled, and everything
+  that is not the screen (the presenter, candles, props, the desk) goes over
+  the new background (`background=solid|gradient|asset`, `colour`,
+  `colour2`, `asset_key`). The result says how much of the screen still
+  shows and how much of the subject was keyed away: repeat those numbers.
+- The footage was keyed before and a green line or halo is left round the
+  subject and props: the leftover is cleaned and the footage's own
+  backgrounds stay. Only when the user asks for a new background, pass one:
+  it then goes behind the person cut-out, and props in front of the old
+  background go with it; say so.
+
+Pass `screen='green'` or `'blue'` when the user names the colour. When the
+user leaves the background open on a real screen, pick one that fits the
+film's mood (a gradient in its colours, or a picture from list_assets) and
+say which you chose.
+
 ## Editorial decision principles
 
 The best reels composite instead of stacking layers: a word is blended into

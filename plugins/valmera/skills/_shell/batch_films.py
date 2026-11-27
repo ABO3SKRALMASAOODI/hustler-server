@@ -94,15 +94,17 @@ def make_film(wf, root, batch, index, idea, until_script=False):
         return None
     # A coordinator can restart while a child still owns a recording or a render.
     with DL._locked(str(batch / "locks" / rid)):
-        wait_for_editor(batch, rid)
+        wait_for_editor(batch, rid, until_script)
         return edit_film(wf, root, batch, index, idea, until_script)
 
 
-def wait_for_editor(batch, rid):
+def wait_for_editor(batch, rid, until_script=False):
     for work in ("work", "recuts"):
         state_path = batch / work / rid / "run.json"
         while True:
             state = shell.jload(state_path) or {}
+            if until_script and "script" in state.get("done", []):
+                return
             pid = state.get("pid")
             if pid == os.getpid() or not shell.alive(pid):
                 break
@@ -115,7 +117,9 @@ def edit_film(wf, root, batch, index, idea, until_script):
     from contextlib import redirect_stdout, redirect_stderr
     from types import SimpleNamespace
     rid = film_id(batch, index)
-    os.environ.update(CODEX_PROXY_PROOF=rid, VALMERA_RUN=rid)
+    os.environ.update(CODEX_PROXY_PROOF=rid, VALMERA_RUN=rid, VALMERA_FILM_BATCH=batch.name)
+    if wf == "wf3":
+        os.environ["VALMERA_BATCH_HEARING_LOCK"] = str(batch / "hearing.lock")
     directory = batch / "work" / rid
     out = batch / "masters" / rid
     ready = next(out.glob("*/film.json"), None)
@@ -255,7 +259,9 @@ def build_wave(wf, root, batch, target, slots, tried, recorded_only=False):
             # Keep writing and recording while completed scripts move through supply, score and render.
             occupied = set(films) | {pos for _, _, _, pos in pending.values()}
             for pos in (n for n in range(target) if n not in occupied):
-                if writing >= slots or len(pending) >= 2 * slots:
+                # Script/record workers can prepare the remaining delivery positions while all finishing slots are busy.
+                # The collection size bounds queued work.
+                if writing >= slots:
                     break
                 needed = order[pos]
                 job = next((j for j in todo if j[2] == needed["style"]), None)
@@ -312,7 +318,9 @@ def build(wf, root, batch, target, slots):
             raise RuntimeError(f"Discovery returned only previously tried subjects or unavailable sources; see {batch}/plan.json")
 
 
-def cost(batch, tags, films, calls_path=None):
+def cost(batch, tags, films, calls_path=None, started=None):
+    if started is None:
+        started = float((batch / "started").read_text())
     path = Path(calls_path or Path(shell.V) / "tools/codex-proxy/calls.jsonl")
     calls, requests, models = 0, 0, set()
     if path.exists():
@@ -322,11 +330,11 @@ def cost(batch, tags, films, calls_path=None):
                     row = json.loads(line)
                 except ValueError:
                     continue
-                if row.get("run") in tags:
+                if row.get("run") in tags and row.get("ts", started) >= started:
                     requests += 1
                     calls += int(row.get("codex_calls") or 0)
                     models.add(row.get("model") or "unknown")
-    seconds = round(time.time() - float((batch / "started").read_text()), 1)
+    seconds = round(time.time() - started, 1)
     return dict(wall_seconds=seconds, seconds_per_film=round(seconds / films, 1),
                 proxy_calls=calls if models else None, proxy_calls_per_film=round(calls / films, 2) if models else None,
                 proxy_requests=requests if models else None, models=sorted(models))
@@ -335,6 +343,21 @@ def cost(batch, tags, films, calls_path=None):
 def safe_name(value, length):
     name = "".join(" " if c in '/:\\' or ord(c) < 32 else c for c in str(value))
     return " ".join(name.split())[:length].strip(". ") or "Film"
+
+
+def story_lines(path):
+    """{setup, turn, payoff} (or the arc's own labels) from a film's STORY.md, the lines its delivery wrote from the
+    saved script and recording; {} when it has none."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    out = {}
+    for line in text.splitlines():
+        head, sep, body = line.partition("** — ")
+        if sep and head.startswith("- **"):
+            out[head[4:].strip().lower()] = body.strip()
+    return out
 
 
 def copy_master(src, dst):
@@ -382,6 +405,9 @@ def handoff(wf, batch, folders, out, sidecar, topic):
             song = dict(rec["platform_music"], upload=item["clean"])
             item["platform_music"] = song
             songs.append(dict(song, n=n))
+        arc = story_lines(folder / "STORY.md")
+        if arc:                     # the opening, turn and payoff in the collection's own summary (26 Nov: none there)
+            item["arc"] = arc
         for extra in ("STORY.md", "film_song.mp4"):
             if (folder / extra).is_file():
                 copy_master(folder / extra, part / "records" / f"{n:02d}-{extra}")
@@ -395,7 +421,8 @@ def handoff(wf, batch, folders, out, sidecar, topic):
     if songs:
         shell.jsave(str(part / "platform_music.json"), dict(contract=1, how=songs[0].get("how"), shorts=songs))
     (part / "SOURCES.md").write_text("\n\n".join(sources))
-    (part / "README.md").write_text(f"# {name}\n\n" + "\n".join(x["file"] for x in listing) + "\n")
+    (part / "README.md").write_text(f"# {name}\n\n" + "\n".join(
+        x["file"] + "".join(f"\n  - **{k.capitalize()}** — {v}" for k, v in (x.get("arc") or {}).items()) for x in listing) + "\n")
     DL.deliver_collection(rows, part, final, batch.name)
     shutil.rmtree(part, ignore_errors=True)
     return dict(delivered=str(final), films=len(listing), topic=topic, cost=shell.jload(final / "shorts.json")["cost"])

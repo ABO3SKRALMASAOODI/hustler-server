@@ -130,6 +130,8 @@ def script(ctx, ideas_out):
     ctx.log(f"dossier: {drep['verified']}/{drep['total']} facts verified on their pages")
     if drep["verified"] < 25:
         raise RuntimeError(f"only {drep['verified']} facts verified; a long film needs at least 25")
+    from runtime_plan import minutes, plan
+    plan(dos, pick['runtime_minutes'] if 'runtime_minutes' in pick else minutes(ctx))
     notes, sc, rep = ctx.args.get("notes"), None, None
     for attempt in range(3):
         sc, use = story.write(pick, dos, card, voices=card.get("voice"), notes=notes, line=ctx.args.get("line"))

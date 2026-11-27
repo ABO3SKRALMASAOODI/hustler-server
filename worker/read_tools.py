@@ -103,6 +103,30 @@ def asset_by_key(conn, project_id, storage_key):
         return cur.fetchone()
 
 
+def _spoken_upload_key(ctx):
+    """The storage_key of the project's newest audio upload (a narration
+    uploaded as music or voiceover) when the project has no main recording
+    to read; None otherwise. A narration-only project's get_transcript
+    answered "end must be greater than start" (19 Nov, found proving #1103)."""
+    if float(getattr(ctx, "duration", 0) or 0) > 0:
+        return None
+
+    def _q(conn):
+        with conn.cursor() as cur:
+            cur.execute("""SELECT storage_key FROM assets
+                           WHERE project_id = %s
+                             AND kind IN ('music', 'voiceover', 'audio')
+                           ORDER BY id DESC LIMIT 1""", (ctx.project_id,))
+            return cur.fetchone()
+    try:
+        row = ctx.db.run(_q)
+    except Exception:  # noqa: BLE001 - the plain answer below stands
+        return None
+    if not row:
+        return None
+    return row.get("storage_key") if isinstance(row, dict) else row[0]
+
+
 def listener_policy(meta):
     """Whether a render is deterministic-only MCP evidence, judged by the FACT.
 
@@ -137,6 +161,29 @@ def find_render_asset(conn, project_id, variant, edl_version):
                        ORDER BY id DESC LIMIT 1""",
                     (project_id, variant, int(edl_version)))
         return cur.fetchone()
+
+
+def product_design_plate(asset):
+    """Is this asset a still the First cut's director drew for its own
+    layers (a black plate, a vignette mask, a matte: score/film.py writes
+    them with meta director=true, made_from='design')? It is the product's
+    working material, not media the customer gave or asked for (#1838: the
+    agent read a 1080x1920 black plate and a radial vignette mask as the
+    customer's 'empty' images and dropped the meme they asked for)."""
+    meta = (asset or {}).get("meta") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except ValueError:
+            return False
+    return (asset or {}).get("kind") == "image_ref" and \
+        meta.get("director") in (True, "true") and \
+        meta.get("made_from") == "design"
+
+
+# The SQL twin of product_design_plate, for queries that list media.
+NOT_DESIGN_PLATE_SQL = ("NOT (COALESCE(meta->>'director', '') = 'true' "
+                        "AND COALESCE(meta->>'made_from', '') = 'design')")
 
 
 def assets_by_kinds(conn, project_id, kinds, limit=200):
@@ -459,6 +506,10 @@ def get_transcript(ctx, start=0, end=None, asset_key=None):
         return _cap(f"Transcript of {asset_key} (CLIP seconds):\n"
                     + "\n".join(out),
                     budget=TRANSCRIPT_CHAR_BUDGET)
+    if not asset_key:
+        spoken = _spoken_upload_key(ctx)
+        if spoken:
+            return get_transcript(ctx, start, end, asset_key=spoken)
     start = ctx.clamp(start or 0)
     end = ctx.clamp(end if end is not None else ctx.duration)
     if end <= start:
@@ -644,6 +695,9 @@ def get_words(ctx, start=0, end=None, asset_key=None):
         end = min(duration, max(0.0, float(end if end is not None else duration)))
         prefix = f"Words of {asset_key} (CLIP seconds, not output seconds):\n"
     else:
+        spoken = _spoken_upload_key(ctx)
+        if spoken:
+            return get_words(ctx, start, end, asset_key=spoken)
         start = ctx.clamp(start or 0)
         end = ctx.clamp(end if end is not None else ctx.duration)
     if end <= start:
@@ -830,7 +884,8 @@ def list_assets(ctx, kind=None):
     if not sel:
         return ("REJECTED: kind must be one of "
                 f"{', '.join(sorted(kinds))}.")
-    rows = ctx.db.run(assets_by_kinds, ctx.project_id, sel)
+    rows = [a for a in ctx.db.run(assets_by_kinds, ctx.project_id, sel)
+            or [] if not product_design_plate(a)]
     if not rows:
         if sel == kinds["music"]:
             return ("No audio uploaded to this project. fetch_url ingests a "

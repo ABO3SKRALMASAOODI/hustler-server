@@ -133,3 +133,15 @@ def test_a_worker_without_the_palette_lays_the_alien_bank_from_the_directors_ask
     chain.lay_devices(SimpleNamespace(run_id="t", supply=str(tmp_path), log=print), str(l1))
     assert seen["mod"] == "scene.alien.run" and "devices" not in seen["scene"]
     assert [(a["dev"], a["at"]) for a in seen["scene"]["alien"]] == [("arc", [0, 90]), ("lamp", [10, 40]), ("diecut", [50, 70])]
+
+
+def test_an_analogy_dial_keeps_its_own_end_and_leaves_the_row_in_the_caption():
+    """analogy_dial (worker scene/palette/instrument.py, 60a31204) draws a dial beside the row and none of its words:
+    the ask keeps the `until` the model named for its needle, bounded by the sentence, and the caption keeps every word."""
+    a, b, limit = 250, 284, 330
+    until = {"seg": 1, "word": "here"}
+    ask = palette_menu.ask_for({"perform": {"dev": "analogy_dial", "until": until, "change": 7, "trend": "up"}},
+                               1, "wouldn't be here", a, b, 0, limit=limit)
+    assert ask["until"] == until and ask["bound"] == limit and ask["args"]["trend"] == "up"
+    assert palette_menu.drawn(ask, "wouldn't be here") == [False, False, False]
+    assert "analogy_dial" not in palette_menu.REPLACES

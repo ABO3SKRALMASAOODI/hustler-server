@@ -6,6 +6,11 @@ outward (the keep tools), ``nearest`` moves it to the word's nearest edge
 seconds each edge moved."""
 import math
 
+# The editor reads and writes times on a 0.01 s grid (get_words prints two
+# decimals, ToolContext.clamp rounds to them): an edge this close to a word's
+# edge is that edge.
+ON_EDGE_S = 0.0055
+
 
 def introduced(before, after, words, duration=None):
     old = {(round(float(t), 6), side) for a, b in before or []
@@ -41,8 +46,21 @@ without swallowing an adjacent word that begins at a millisecond boundary.
             break
         for h in hits:
             old, side = h['boundary'], h['kind']
-            edge = h['t0'] if side == 'start' else h['t1']
-            if pad:
+            t0, t1 = float(h['t0']), float(h['t1'])
+            # An edge within the editor's 0.01 s grid of the word's FAR edge
+            # is on that edge, not inside the word (#1841): get_words shows
+            # 'con' 484.495-484.815 as 484.50-484.81, so a cut of exactly
+            # that word arrives 5 ms inside it on both sides. Keeping the
+            # whole word there restored the very word the cut removed, and
+            # every short stutter cut came back NO CHANGE. Such an edge
+            # leaves the word out whole.
+            if side == 'end' and old - t0 <= ON_EDGE_S and old - t0 < t1 - old:
+                edge, leave_out = t0, True
+            elif side == 'start' and t1 - old <= ON_EDGE_S and t1 - old < old - t0:
+                edge, leave_out = t1, True
+            else:
+                edge, leave_out = (t0 if side == 'start' else t1), False
+            if pad and not leave_out:
                 # Leave room for consonants outside ASR's voiced-core times,
                 # without entering the neighboring word on the removed side.
                 import cut_audio
@@ -52,14 +70,19 @@ without swallowing an adjacent word that begins at a millisecond boundary.
                 else:
                     nxt = min((float(w['t0']) for w in words if float(w['t0']) >= edge), default=float(duration))
                     edge = min(nxt, edge + cut_audio.PAD_END_S)
-            new = (math.floor(edge * 1000000 + 1e-7) / 1000000 if side == 'start'
-                   else math.ceil(edge * 1000000 - 1e-7) / 1000000)
+            if leave_out:
+                # rounded away from the word it leaves
+                new = _edge(edge, side == 'start')
+            else:
+                new = (math.floor(edge * 1000000 + 1e-7) / 1000000 if side == 'start'
+                       else math.ceil(edge * 1000000 - 1e-7) / 1000000)
             new = max(0., min(float(duration), new))
             for span in spans:
                 k = 0 if side == 'start' else 1
                 if abs(span[k] - old) < 1e-7:
                     span[k] = new
-            moves.append(f"Kept the whole word '{h['word']}': {side} {old:.3f}s → {new:.3f}s "
+            what = "Left the word '{}' out whole" if leave_out else "Kept the whole word '{}'"
+            moves.append(what.format(h['word']) + f": {side} {old:.3f}s → {new:.3f}s "
                          f"({abs(new - old):.3f} s {'later' if new > old else 'earlier'}).")
         merged = []
         for a, b in sorted(spans):

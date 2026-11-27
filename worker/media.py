@@ -1308,6 +1308,26 @@ def probe_audio_duration(path):
         raise MediaError(f"Could not determine audio duration of {path}")
 
 
+def has_video_stream(path):
+    """True if the file carries at least one real picture stream.
+
+    A sound-only .mp4 (a music mix exported without picture) placed on the
+    overlay track made every render's graph bind [idx:v] to nothing (p6336,
+    27 Nov 2026). Cover art (an attached_pic) is not a picture track either.
+    Permissive on probe failure: a flaky probe keeps today's behaviour."""
+    try:
+        out = run(["ffprobe", "-v", "error", "-select_streams", "v",
+                   "-show_entries", "stream=index:stream_disposition=attached_pic",
+                   "-of", "csv=p=0", path], timeout=60)
+    except Exception:
+        return True
+    for line in str(out).splitlines():
+        cells = [c.strip() for c in line.split(",") if c.strip()]
+        if cells and (len(cells) < 2 or cells[1] != "1"):
+            return True
+    return False
+
+
 def has_audio_stream(path):
     """True if the file carries at least one audio stream.
 

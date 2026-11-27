@@ -21,8 +21,9 @@ noise; a talking head with two well-placed devices beats one with ten.
   effects, one type-in-depth hero every 6-8 s; transitions only at scene
   changes. On the user's own track punctuation follows the track (8ths only
   inside drop sections).
-- Flash safety is on: never more than 3 full-frame flashes in any second
-  unless the user asked for strobing; the export is then flagged.
+- Flash safety: suggestions keep to 3 full-frame flashes a second; what the
+  customer asked for (strobes, flashes) stays past it, and the export is
+  then flagged contains_flashing.
 - Never add music only to get a beat grid; devices bind to speech (the
   prosody grid) unless the edit has a track.
 - The Valmera end card and the free-tier watermark are untouchable: every
@@ -196,7 +197,8 @@ at the landings → `audit_motion` before handing over.
 3. Over budget or too busy: `set_intensity` one step down removes the
    lowest-ranked devices in one write that lists their ids; or remove the
    weakest by id.
-4. Flash risk: remove the weakest flashes until at most 3 sit in any second.
+4. Flash risk: when nobody asked for flashing, remove the weakest flashes
+   until at most 3 sit in any second; flashes the customer asked for stay.
 5. Illegible type: a different blend or colour, a scrim, or move it into the
    free space (`look_at(overlay='free_space')`).
 6. A device that still does not serve the story: remove it. Zero is fine.

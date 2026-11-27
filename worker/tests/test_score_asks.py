@@ -87,6 +87,17 @@ def test_the_ledger_is_one_model_call(monkeypatch):
     assert ledger["route"] == "patch" and ledger["lang"] == "es"
 
 
+def test_ledger_resolves_a_soundtrack_change_with_available_library_titles(monkeypatch):
+    import music_library
+    monkeypatch.setattr(music_library, "catalog", lambda: [{"title": "Northern Lights"}])
+    def read(ctx, name, schema, system, content, **kw):
+        assert '"Northern Lights"' in content
+        return {"asks": [_ask(want="Use the selected track.")]}, {}
+    monkeypatch.setattr(asks, "_call", read)
+    ledger = asks.build(NS(duration=10), "That one", edl={"music": [{"id": "m1"}]})
+    assert ledger["soundtrack_options"] == ["Northern Lights"]
+
+
 # ------------------------------------------------------------------ the Patch
 
 def test_ops_merge_remove_and_refuse_unknown_ids():
@@ -201,8 +212,12 @@ def test_a_repair_then_an_unchanged_film_the_reply_says_what_is_open(monkeypatch
     ctx = _loop_ctx(ledger)
     note = agent_loop._asks_check(ctx, "Done!")
     assert note and "not done" in note and ledger["repairs"] == 1
-    # the same film again: the editor answered the note without changing it, its reply stands
-    assert agent_loop._asks_check(ctx, "Done again!") is None
+    # the same film again: the editor answered the note without changing it. One follow-up
+    # says the film did not move and the ask is still open (p5993, #1725) ...
+    push = agent_loop._asks_check(ctx, "Done again!")
+    assert push and "changed nothing" in push and ledger["repairs"] == 1
+    # ... and a pass that still changes nothing is its answer: its reply stands
+    assert agent_loop._asks_check(ctx, "Done a third time!") is None
     final, outcome = agent_loop._asks_settle(ctx, "Done!", "fulfilled")
     assert outcome == "partial" and "line 1" in final
 

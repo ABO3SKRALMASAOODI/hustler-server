@@ -13,10 +13,10 @@ Every item carries its device card id and, when a moment earned it, its
 
 Owner rules held here: no verb adds music, a sound or a zoom; moments come
 from the speaker's prosody grid or the beat grid of a track the USER put in
-the edit, never from music chosen for the purpose; automatic placements pass
-``flash_safety.plan`` (≤ 3 full-frame flashes a second) unless the user
-asked for strobing, in which case the export is flagged
-``contains_flashing``.
+the edit, never from music chosen for the purpose. Flash safety informs a
+verb, never thins or refuses it (p5968, 19 Nov 2026): what the editor writes
+is kept, and past 3 full-frame flashes a second the result says so and the
+export is marked ``contains_flashing`` (``flash_safety.notice``).
 
 Its skill is ``skills/punctuation.md``; it documents every verb AND the
 exact apply_edit_batch operations that write and remove the same items (the
@@ -135,33 +135,21 @@ def _new_id(edl, prefix, taken):
     return f"{prefix}{n}"
 
 
-def _opted_in(ctx):
+def _flash_note(ctx, edl, new_items, replaced=()):
+    """'; <how fast the film flashes>' when the edit with ``new_items``
+    passes the photosensitivity limit, else ''. Information only: every
+    placement the editor writes is kept. The verbs used to thin to 3
+    full-frame flashes a second, or refuse a strobe, unless a word rule
+    found "strobe" or "flash" in this one message (p5968, 19 Nov 2026: a
+    paying user's strobes went; a request in another language or in an
+    earlier message never opted in). The editor reads the whole
+    conversation."""
     import flash_safety
-    return flash_safety.opted_in(getattr(ctx, "user_message", "") or "")
-
-
-def _thin(ctx, edl, events, fps, replaced=()):
-    """flash_safety.plan over ``events`` with every flash the edit ALREADY
-    plays held fixed (the export gate counts them all together): a second
-    write never lands a hit where the program already flashes 3 times in
-    that second. The user's ask for flashing keeps everything."""
-    import flash_safety
-    if _opted_in(ctx):
-        return list(events), []
-    rest = dict(edl, fx=[i for i in edl.get("fx") or []
-                         if not (isinstance(i, dict)
-                                 and i.get("id") in set(replaced))])
-    try:
-        have = flash_safety.flash_events(rest,
-                                         getattr(ctx, "index", None) or {})
-    except Exception:  # noqa: BLE001 — a reading failure thins alone
-        have = []
-    fixed = [{"t": float(e["t"]), "strength": 1e9, "_fixed": True}
-             for e in have]
-    kept, thinned = flash_safety.plan(fixed + list(events), fps,
-                                      opted_in=False)
-    return ([e for e in kept if not e.get("_fixed")],
-            [e for e in thinned if not e.get("_fixed")])
+    rest = [i for i in edl.get("fx") or []
+            if not (isinstance(i, dict) and i.get("id") in set(replaced))]
+    line = flash_safety.notice(dict(edl, fx=rest + list(new_items)),
+                               getattr(ctx, "index", None) or {})
+    return f"; {line}" if line else ""
 
 
 # ── moments ──────────────────────────────────────────────────────────────
@@ -423,25 +411,13 @@ def add_accent(ctx, kind, at=None, on=None, start=None, end=None, count=None,
         return _r("scope is 'picture' (type untouched) or 'all' (the type "
                   "inverts too).")
     stage = "over_type" if scope == "all" else "pre_captions"
-    # flash safety (automatic placements): <= 3 full-frame flashes a second
+    # a flash kind is read against the photosensitivity limit after it is
+    # placed (information, never a thinning: _flash_note)
     from fx_schemas.accents import FLASH_KINDS
     flashes = kind in FLASH_KINDS + ("matte_flash",) or \
         (kind == "box_invert" and reg is None)
-    # the same reading the export gate makes (AccentFx.flash_times): a hit
-    # is local only when its region is known to cover under a quarter of
-    # the frame; a card, a face or a glyph (anchors solved at render) and a
-    # large box count as full-frame
-    full = _region_is_full(reg)
-    events = [{"t": m[0], "strength": m[1], "i": i,
-               "full_frame": bool(flashes and full)}
-              for i, m in enumerate(moments)]
-    opted = _opted_in(ctx)
-    kept, thinned = _thin(ctx, edl, events, fps)
-    keep_idx = {e["i"] for e in kept}
     taken, items, seen_frames = set(), [], set()
-    for i, (t, _s, bind) in enumerate(moments):
-        if i not in keep_idx:
-            continue
+    for t, _s, bind in moments:
         f0 = _frame(t, fps)
         if f0 in seen_frames:
             continue
@@ -480,18 +456,13 @@ def add_accent(ctx, kind, at=None, on=None, start=None, end=None, count=None,
                 item["region"] = reg
         items.append(item)
     if not items:
-        return _r("every placement was removed by flash safety; space the "
-                  "accents out or ask the user whether they want strobing.")
+        return _r(f"no {kind} lands inside the program between {a:g}s and "
+                  f"{b:g}s; give at= with program seconds.")
     import tools_ext._write as w
     ops = [w.upsert_fx(it) for it in items]
     when = ", ".join(f"{it['start']:g}" for it in items[:8]) + \
         ("..." if len(items) > 8 else "")
-    note = ""
-    if thinned:
-        note = (f"; flash safety held {len(thinned)} back (≤3 full-frame "
-                "flashes a second; the user did not ask for strobing)")
-    elif opted and len(items) > 1 and flashes:
-        note = "; the user asked for flashing: the export is flagged"
+    note = _flash_note(ctx, edl, items) if flashes else ""
     summary = (f"add_accent: {len(items)} {kind} at {when}s "
                f"({'scope all' if stage == 'over_type' else 'picture'})"
                f"{note}")
@@ -500,21 +471,6 @@ def add_accent(ctx, kind, at=None, on=None, start=None, end=None, count=None,
         return out
     ids = ", ".join(it["id"] for it in items)
     return f"{out}\nids: {ids}{note}"
-
-
-def _region_is_full(reg):
-    """Does a hit inside ``reg`` count as a full-frame flash? The schema's
-    own reading (fx_schemas.accents.region_share / LOCAL_FLASH_SHARE), so
-    the verb thins exactly what the export gate would count."""
-    if reg is None:
-        return True
-    try:
-        from fx_schemas import FxRegion
-        from fx_schemas.accents import LOCAL_FLASH_SHARE, region_share
-        share = region_share(FxRegion.model_validate(reg))
-    except Exception:  # noqa: BLE001 — unreadable: count it (safe side)
-        return True
-    return share is None or share >= LOCAL_FLASH_SHARE
 
 
 def _card_exists(card_id):
@@ -628,43 +584,16 @@ def add_strobe(ctx, start, end, frames=None, variant_set=None, hold=2,
             item["seed"] = 1
     if fit:
         item["fit"] = fit
-    # flash safety: a strobe is a train of full-frame changes
-    per_s = 0
-    try:
-        from fx_schemas.accents import StrobeFx
-        times = StrobeFx.model_validate(item).flash_times() or []
-        per_s = _peak_per_s(times, fps)
-    except Exception:  # noqa: BLE001 — the commit names the rule
-        per_s = 0
-    import flash_safety
-    cap = flash_safety.default_max_per_s()
-    if per_s > cap and not _opted_in(ctx):
-        return _r(f"this strobe changes the whole frame {per_s} times "
-                  "inside one second. Flash safety allows more than 3 a second "
-                  "only when the user asked for strobing or flashing: ask "
-                  "them first (or strobe at most 3 images in a second).")
+    # flash safety informs (p5968): a strobe is a train of full-frame
+    # changes; past the limit the result says how fast, the strobe stays
     import tools_ext._write as w
-    note = "; the user asked for strobing: the export is flagged " \
-        "contains_flashing" if per_s > cap else ""
+    note = _flash_note(ctx, edl, [item])
     out = w.commit(ctx, [w.upsert_fx(item)],
                    f"add_strobe: {len(fr_items)} images, {hold}-frame holds, "
                    f"{item['start']:g}-{item['end']:g}s{note}")
     if out.startswith("REJECTED"):
         return out
     return f"{out}\nid: {item['id']}{note}"
-
-
-def _peak_per_s(times, fps):
-    """The most events inside any one-second window (flash_safety's
-    counting, on frames)."""
-    frames = sorted(int(round(float(t) * fps)) for t in times)
-    win = max(1, int(round(fps)))
-    peak, j = 0, 0
-    for i in range(len(frames)):
-        while frames[i] - frames[j] >= win:
-            j += 1
-        peak = max(peak, i - j + 1)
-    return peak
 
 
 # ── set_junction ─────────────────────────────────────────────────────────
@@ -919,34 +848,12 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
         return (f"NO CHANGE: {style} is already on those cuts. If a preview "
                 "is rendering, wait for it. Do NOT tell the user you changed "
                 "anything.")
-    # flash safety on the cuts that flash (hit_flash, box_steps, and
-    # matte_cut, whose substitute is a flash on the cut): each
-    # item's own reading (JunctionFx.flash_times — box steps flash once per
-    # large step), against the flashes the edit already plays; an item is
-    # kept only when every one of its flashes is
+    # the cuts that flash (hit_flash, box_steps, and matte_cut, whose
+    # substitute is a flash on the cut) are kept as written; past the
+    # photosensitivity limit the result says how fast the film flashes
     note = ""
     if style in ("hit_flash", "box_steps", "matte_cut"):
-        from fx_schemas.accents import JunctionFx
-        evs = []
-        for k, it in enumerate(items):
-            try:
-                times = JunctionFx.model_validate(it).flash_times() or []
-            except Exception:  # noqa: BLE001 — the commit names the rule
-                times = [it["at"]]
-            evs += [{"t": t, "i": k} for t in times]
-        kept, thinned = _thin(ctx, edl, evs, fps, replaced=removed)
-        drop = {e["i"] for e in thinned}
-        held = [it for k, it in enumerate(items) if k in drop]
-        items = [it for k, it in enumerate(items) if k not in drop]
-        if held:
-            note = (f"; flash safety held {len(held)} back (≤3 full-frame "
-                    "flashes a second with the edit's other flashes; the "
-                    "user did not ask for flashing)")
-        if not items and not ops:
-            return _r("every placement was removed by flash safety: the "
-                      "program already flashes there. Use a style that "
-                      "does not flash, or ask the user whether they want "
-                      "flashing.")
+        note = _flash_note(ctx, edl, items, replaced=removed)
     ops = keep_ops + ops + [w.upsert_fx(it) for it in items]
     where = ", ".join(f"{it['at']:g}" for it in items[:10])
     if len(items) > 10:
@@ -1079,17 +986,14 @@ def remove_punctuation(ctx, ids):
     if isinstance(ids, str):
         ids = [ids]
     ids = [str(i) for i in ids or []]
-    missing = [i for i in ids if i not in mine]
-    if missing:
-        have = ", ".join(sorted(mine)) or "none"
-        return _r(f"{', '.join(missing)} is not punctuation in this edit "
-                  f"(accents, strobes, junctions: {have}).")
+    from tools_ext._write import removal_targets
+    current = mine
+    ids, note = removal_targets(ids, current, "punctuation")
     if not ids:
-        return ("NO CHANGE: nothing to remove. Do NOT tell the user you "
-                "changed anything.")
+        return note
     import tools_ext._write as w
     return w.commit(ctx, [w.remove_fx(i) for i in ids],
-                    f"remove_punctuation: {', '.join(ids)}")
+                    f"remove_punctuation: {', '.join(ids)}") + (" " + note if note else "")
 
 
 # ── re-solve on a keep change (hooks.on_keep_change) ────────────────────

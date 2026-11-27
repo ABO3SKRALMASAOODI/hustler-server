@@ -7,9 +7,9 @@ the sound the viewer gets and answers the questions an editor asks before
 anything ships. Use it after every meaningful render, and believe it over
 your own description of the edit.
 
-- Blocking findings (a cut through a word, a flash rate over 3 per second
-  without the user's opt-in, the end card or watermark disturbed, type on
-  a face) are fixed before anything else.
+- Blocking findings (a cut through a word, the end card or watermark
+  disturbed, type on a face) are fixed before anything else. A flash rate
+  over 3 per second is information: flashes the customer asked for stay.
 - Fix findings are craft: a dead stretch, a late word, a flickering matte,
   a stuttering slow motion, a payoff that does not hold.
 - Advisory findings are taste: a house style (the same devices as the
@@ -47,8 +47,8 @@ your own description of the edit.
 - Treating the score as the goal: the findings are the work.
 - Applying every OPS line blindly: read each; apply the ones you agree
   with in one batch.
-- Fixing a flash rate by deleting every hit: the flash-safe plan keeps the
-  downbeat hits and thins the rest.
+- Removing flashes or strobes the customer asked for because the flash
+  lens reports them.
 
 ## Verification procedure
 
@@ -63,8 +63,9 @@ your own description of the edit.
 
 1. A cut through a word: move the join to the pause (the OPS line).
 2. A late word: shift the item onto the word (OPS).
-3. Too many flashes: the flash-safe plan (keeps downbeats), or the
-   user's explicit opt-in (flags the export).
+3. Too many flashes nobody asked for: space them out, keeping the hits on
+   the downbeats; flashes the customer asked for stay (the export is
+   flagged contains_flashing).
 4. Type on a face: move the graphic or let the caption plan re-place it.
 5. A house style: replace the repeated device with one this story earns.
 

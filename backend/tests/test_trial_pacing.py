@@ -149,6 +149,8 @@ class Cur:
             self.row = None if v is None else {"value": v}
         elif "pg_advisory_xact_lock" in s:
             self.row = None
+        elif "to_regclass('public.spend_ledger') AS t" in s:
+            self.row = {"t": None}
         elif "to_regclass('public.trial_budgets') AS t" in s:
             self.row = {"t": "trial_budgets"}
         elif "to_regclass('public.trial_budgets')" in s:
@@ -246,3 +248,80 @@ def test_the_scheduler_never_starts_on_a_stub_database():
     tp._scheduler = None
     tp.start_scheduler(App())
     assert tp._scheduler is None
+
+
+# ------------------------------------------------------------------ #
+#  The wallet bounds the trial (owner, 27 Nov 2026)                    #
+# ------------------------------------------------------------------ #
+
+def test_a_smaller_wallet_bounds_the_trial_and_keeps_whole_trials():
+    end = datetime(2026, 12, 8, tzinfo=timezone.utc)
+    now = datetime(2026, 11, 27, 11, 30, tzinfo=timezone.utc)
+    days = (end - now).total_seconds() / 86400
+    p = tp.compute(139.14, 10, 22.11, end, now, 27, 27, ON,
+                   wallet_usd=55.05, reserve_usd=14.0)
+    assert p["limit"] == "wallet" and p["bound"] == "wallet"
+    assert p["usable_usd"] == pytest.approx(55.05 - 14.0 - 10)
+    assert p["daily_usd_cap"] == int((55.05 - 14.0 - 10) / days * 100) / 100
+    # each admitted account keeps a whole trial; the daily cap admits fewer
+    assert p["per_account_usd_cap"] == tp.CEILING_USD
+    assert "wallet" in p["why"] and "paying subscribers" in p["why"]
+    assert p["why"].endswith(".")
+
+
+def test_a_larger_wallet_changes_nothing():
+    plain = tp.compute(100.84, 10, 3.0, END, NOW, 9, 9, ON)
+    rich = tp.compute(100.84, 10, 3.0, END, NOW, 9, 9, ON,
+                      wallet_usd=500.0, reserve_usd=10.0)
+    assert rich["limit"] == "cycle"
+    for key in ("daily_usd_cap", "per_account_usd_cap", "usable_usd", "bound", "why"):
+        assert rich[key] == plain[key]
+
+
+def test_an_empty_wallet_admits_no_new_trials():
+    p = tp.compute(139.14, 10, 22.0, END, NOW, 9, 9, ON,
+                   wallet_usd=12.0, reserve_usd=10.0)
+    assert p["daily_usd_cap"] == 0.0
+
+
+def test_the_wallet_never_runs_dry_for_paying_subscribers():
+    """Hour by hour to the refill, every admitted account spends its whole
+    allowance at once and subscribers spend their trailing rate: the wallet
+    never goes below the paying subscribers' need."""
+    end = datetime(2026, 12, 8, tzinfo=timezone.utc)
+    t = datetime(2026, 11, 27, 12, tzinfo=timezone.utc)
+    wallet, paid_daily, spent = 55.0, 0.9, 22.0
+    grants = []
+    while t < end:
+        d1 = sum(1 for g in grants if g > t - timedelta(hours=24))
+        d3 = sum(1 for g in grants if g > t - timedelta(hours=72))
+        days_left = max(1.0, (end - t).total_seconds() / 86400)
+        reserve = max(tp.PAID_RESERVE_FLOOR_USD, paid_daily * days_left * tp.PAID_RESERVE_FACTOR)
+        p = tp.compute(139.14, 10, spent, end, t, d1, d3, ON,
+                       wallet_usd=wallet, reserve_usd=reserve)
+        today = sum(1 for g in grants if g.date() == t.date()) * p["per_account_usd_cap"]
+        for _ in range(3):                      # a flood of signups every hour
+            if today >= p["daily_usd_cap"]:
+                break
+            grants.append(t)
+            wallet -= p["per_account_usd_cap"]
+            spent += p["per_account_usd_cap"]
+            today += p["per_account_usd_cap"]
+        wallet -= paid_daily / 24
+        assert wallet > paid_daily * ((end - t).total_seconds() / 86400) - 1e-9
+        t += timedelta(hours=1)
+    assert grants
+
+
+def test_current_reads_the_confirmed_wallet_and_the_paid_reserve():
+    conn = Conn(dict(PROD_FLAG), CREDIT, spent=1.6, grants=(9, 9))
+    conn.kv["anthropic_wallet"] = json.dumps(
+        {"confirmed_balance_usd": 40.0, "meter_baseline_usd": 0.0,
+         "confirmed_at": NOW.isoformat(), "episode": "e1"})
+    p = tp.current(conn, now=NOW)
+    assert p["wallet_usd"] == pytest.approx(38.4)        # 40 minus the metered 1.6
+    assert p["reserve_usd"] == tp.PAID_RESERVE_FLOOR_USD
+    assert p["limit"] == "wallet" and p["per_account_usd_cap"] == 0.40
+    # no confirmed balance: the cycle alone, as before
+    plain = tp.current(Conn(dict(PROD_FLAG), CREDIT, spent=1.6, grants=(9, 9)), now=NOW)
+    assert plain["limit"] == "cycle" and plain["wallet_usd"] is None

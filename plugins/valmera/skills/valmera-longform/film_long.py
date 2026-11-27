@@ -95,6 +95,15 @@ def _designs(ctx, sc, dos, world, out_dir, supplied=()):
                 fact = facts[d["fact"]]
                 # The dossier selected this qualified proposition for the cited fact ID.
                 words = fact["quote"]
+                from chapter_exhibits import retained_design
+                try:
+                    retained_page=retained_design(ctx,fact,d.get('mark'))
+                except (OSError,ValueError,RuntimeError) as exc:
+                    ctx.log(f"retained design {i} needs the original again: {exc}")
+                    retained_page=None
+                if retained_page:
+                    made[str(i)]=dict(retained_page,seg=i)
+                    continue
                 F._engines()  # use the workflow worker's public-source fetch and browser route
                 try:
                     original = cited_page.capture(dict(fact, quote=words), p)

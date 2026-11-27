@@ -34,7 +34,9 @@ import subprocess
 
 import numpy as np
 
-VERSION = 1
+# 2: cuts measured over the footage's drawn steps (p6311, ticket 1844); a
+# version-1 map is measured again.
+VERSION = 2
 # The analysis frame. Rectangles are read on it, so its width is what they
 # are good to: 1/640 of the frame, under two pixels of a 1080p export.
 ANALYSIS_W = 640
@@ -47,6 +49,32 @@ CUT_FLOOR_MOVING = 12.0         # moving footage changes this much by itself
 MOVING_BASE = 0.3               # neighbours differing this much are moving
 CUT_OVER_NEIGHBOURS = 4.0       # and on it a cut towers over them
 NEIGHBOURS = 15                 # frames either side of the candidate
+# Footage drawn at a lower rate than its file's clock (an animation on twos,
+# a 12-24 fps motion graphic in a 60 fps file) changes in STEPS: one frame
+# moves, the next few only carry codec noise. Its motion is measured over
+# this many steps a second (the frames one drawing at 12 a second covers),
+# and a cut must tower over those steps, not over the noise between them.
+STEPS_PER_S = 12.0
+CUT_OVER_STEPS = 2.5
+# Only footage that IS drawn in steps takes that test: there most frames
+# between two drawings change at codec-noise level against the drawing's
+# own change (p6311: 0.1-1.5 against 13-25, at most 0.12 of it), while
+# footage moving at its file's rate changes on every frame. A frame is quiet
+# when it changes less than STEP_QUIET of the largest change of its step
+# (itself a visible change, STEP_VISIBLE); the footage around a candidate
+# is drawn in steps when STEPPED_SHARE of its frames are quiet. Fast
+# handheld footage at its own rate, whose frame changes come in bursts,
+# keeps the neighbours' test alone and so every cut that test finds.
+STEP_QUIET = 0.2
+STEP_VISIBLE = 2.0
+STEPPED_SHARE = 1.0 / 3.0
+# A change of most of the picture is a cut whatever steps surround it (a fast
+# montage of different pictures is also one picture every few frames): the
+# share of the frame's pixels that change by more than CUT_PIXEL levels.
+# Measured on p6311: the animation's steps change at most 45% of the pixels
+# by that much (99th percentile 40%); a montage of different shots, 68%+.
+CUT_PIXEL = 25
+CUT_WHOLE = 0.6
 # The picture stays changed two frames on: a flash comes back.
 CUT_STAYS = 0.5
 # Changes of picture this close are one change (a blended frame on the join).
@@ -73,30 +101,70 @@ def cut_grid(frame, fps):
     return round(grid, 2)
 
 
-def find_cuts(diffs, away):
+def step_frames(fps):
+    """Frames one step of the slowest drawn motion spans (STEPS_PER_S)."""
+    try:
+        return max(1, int(math.ceil(float(fps) / STEPS_PER_S - 1e-9)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _moving_base(values):
+    """The median change of the frames that moved, or 0.0 when too few
+    did: repeated frames (a variable-rate source on a fixed clock) are no
+    measure of how much this footage moves."""
+    moved = values[values >= STILL_FRAME]
+    return float(np.median(moved)) if moved.size * 3 >= values.size \
+        and moved.size else 0.0
+
+
+def find_cuts(diffs, away, step=1, whole=None):
     """Frame indices that start a new picture.
 
     ``diffs[i]``: frame i against i-1 (``diffs[0]`` unused). ``away[i]``:
-    frame i+2 against i-1 where known, else ``diffs[i]``."""
+    frame i+2 against i-1 where known, else ``diffs[i]``. ``step``: the
+    frames of one drawing at the slowest drawn rate (``step_frames``).
+    ``whole[i]``: the share of frame i's pixels that changed by more than
+    CUT_PIXEL (None: unknown, every candidate takes the step test).
+
+    A cut towers over its neighbours' frame-to-frame change, and in footage
+    drawn in steps (most frames between drawings quiet, STEPPED_SHARE) a
+    change of part of the picture also over the steps the footage moves in
+    (each neighbour's largest change within ``step`` frames). p6311: a snow
+    animation drawn at ~24 a second in a 60 fps greeting moves 13-25 a step
+    with 0.1-1.5 of codec noise between, so the frame median sat on the
+    noise and every step read as a cut: 154 cuts in a 17-shot clip."""
     d = np.asarray(diffs, dtype=np.float32)
     a = np.asarray(away, dtype=np.float32)
     n = len(d)
     if n < 3:
         return []
+    step = max(1, int(step or 1))
+    if step > 1:
+        # env[j]: the largest change among frames j-step+1 .. j
+        pad = np.concatenate((np.zeros(step - 1, np.float32), d))
+        env = np.lib.stride_tricks.sliding_window_view(pad, step).max(axis=1)
+    else:
+        env = d
+    quiet = (env >= STEP_VISIBLE) & (d < STEP_QUIET * env)
     hits = []
     for i in np.nonzero(d >= CUT_FLOOR)[0].tolist():
         if i == 0:
             continue
         lo, hi = max(1, i - NEIGHBOURS), min(n, i + NEIGHBOURS + 1)
         around = np.concatenate((d[lo:i], d[i + 1:hi]))
-        # Repeated frames (a variable-rate source on a fixed clock) are no
-        # measure of how much this footage moves.
-        moved = around[around >= STILL_FRAME]
-        base = float(np.median(moved)) if moved.size * 3 >= around.size \
-            and moved.size else 0.0
+        base = _moving_base(around)
         floor = CUT_FLOOR_MOVING if base >= MOVING_BASE else CUT_FLOOR
         if d[i] < max(floor, CUT_OVER_NEIGHBOURS * base):
             continue
+        if step > 1 and (whole is None or whole[i] < CUT_WHOLE):
+            # the steps around it: no window that holds frame i itself
+            far = slice(min(n, i + step), min(n, hi + step - 1))
+            q = np.concatenate((quiet[lo:i], quiet[far]))
+            if q.size and float(q.mean()) >= STEPPED_SHARE:
+                steps = _moving_base(np.concatenate((env[lo:i], env[far])))
+                if d[i] < CUT_OVER_STEPS * steps:
+                    continue                # a drawn step, not a new shot
         if d[i] < d[i - 1] or (i + 1 < n and d[i] < d[i + 1]):
             continue                        # the climb of a baked whip
         if a[i] < CUT_STAYS * d[i]:
@@ -185,7 +253,7 @@ def measure(src, *, ffmpeg=None, info=None):
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL)
     try:
-        diffs, away, tiny = [], [], []
+        diffs, away, tiny, whole = [], [], [], []
         samples = []                    # (frame index, full analysis frame)
         i = 0
         while True:
@@ -194,8 +262,13 @@ def measure(src, *, ffmpeg=None, info=None):
                 break
             frame = np.frombuffer(raw, np.uint8).reshape(ah, aw)
             small = frame[::4, ::4].astype(np.int16)
-            diffs.append(float(np.abs(small - tiny[-1]).mean())
-                         if tiny else 0.0)
+            if tiny:
+                change = np.abs(small - tiny[-1])
+                diffs.append(float(change.mean()))
+                whole.append(float((change > CUT_PIXEL).mean()))
+            else:
+                diffs.append(0.0)
+                whole.append(0.0)
             if len(tiny) >= 3:
                 # frame i-3 against this one: what diffs[i-2] looks like
                 # two frames after the change
@@ -214,7 +287,7 @@ def measure(src, *, ffmpeg=None, info=None):
     for k, v in enumerate(away):
         if k + 1 < len(aligned):
             aligned[k + 1] = v
-    cuts = find_cuts(diffs, aligned)
+    cuts = find_cuts(diffs, aligned, step=step_frames(fps), whole=whole)
     duration = float(info.get("duration") or i / fps)
     edges = [0] + cuts + [i]
     d = np.asarray(diffs, dtype=np.float32)

@@ -971,11 +971,13 @@ def export_check(ctx, rec, ask_text, must_see):
               "that is the brand, never a defect, and never part of the after you choose. You also choose the seconds the film will show.")
     content.append(dict(type="text", text=(
         "Return JSON only: {\"elements\": [{\"asked\": a part of the typed sentence, \"visible\": true|false, \"seconds\": [export seconds where "
-        "it shows], \"how\": what is seen}], \"all_visible\": true|false, \"after\": [start, end] export seconds, 2 to 4 s, before the end card: "
+        "it shows], \"how\": what is seen, \"caption_line\": for an asked caption change, transcribe one complete visible line verbatim, else null, \"caption_y\": its vertical centre as a fraction of frame height}], \"all_visible\": true|false, \"after\": [start, end] export seconds, 2 to 4 s, before the end card: "
         "the stretch that holds the most of the asked change landing (each picture, title, caption or cut the sentence asks for, "
         "entered a breath before the first one lands and ended once the last is seen; when not all fit in 4 s, the ones that read "
         "best), so the film's after shows every landing its narration will name, \"tease_s\": the export second of its most striking "
-        "frame, \"before\": [start, end] upload seconds, 1.5 to 3 s, where the raw clip looks most like raw footage, \"looks\": one "
+        "frame, \"spoken_thought\": for a selective grade, [start, end] on the export clock of a complete spoken thought that shows "
+        "the grade, from its setup through the last word of the payoff, else null, \"before\": [start, end] upload seconds, "
+        "1.5 to 3 s, where the raw clip looks most like raw footage, \"looks\": one "
         "plain, true line on how the export looks to an editor at full size (sharp or soft, clean or carrying a burned-in timecode "
         "or logo, its colour and light, inserted pictures matching it or not), \"defects\": [anything an editor would call broken: a cut face, wrong "
         "framing, unreadable or misspelled captions, a black frame; never the end card, never a planner's note]}")))
@@ -1008,7 +1010,8 @@ def receipts(rec, chk, ask_text):
                 upload_says=up_words, export_says=ex_words, phase="before the first result", first_result_s=rec.get("first_result_s"), session_s=rec.get("seconds"),
                 upload=dict(seconds=rec["upload"]["dur"], w=rec["upload"]["w"], h=rec["upload"]["h"], sha256=rec["upload"]["sha256"]),
                 export=dict(seconds=ex["dur"], w=ex["w"], h=ex["h"], sha256=ex["sha256"], edl_version=ex.get("edl_version")),
-                visible=[dict(asked=e.get("asked"), how=e.get("how"), seconds=e.get("seconds")) for e in chk.get("elements") or []],
+                visible=[dict(asked=e.get("asked"), how=e.get("how"), seconds=e.get("seconds"),
+                              **{k: e[k] for k in ("caption_line", "caption_y") if e.get(k) is not None}) for e in chk.get("elements") or []],
                 looks=chk.get("looks"), product=dict(name="Valmera", url="valmera.io", be_sha=rec.get("be_sha"), fe_sha=rec.get("fe_sha"),
                                                      edit_model=rec.get("models"), recorded_at=rec.get("recorded_at"),
                                                      stack="local Gauntlet stack, synthetic account", account=rec.get("account")),
@@ -1588,12 +1591,29 @@ def pauses(path, lo, hi, min_s=0.15, below_db=28.0):
     return out
 
 
-def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach=4.0):
+SENTENCE_PAUSE_S = 0.3          # a pause this long between two words ends a sentence, not a breath inside one
+
+
+def site_handover(ex, win, over_s):
+    """Seconds before the export's stretch ends at which the website takes the picture: SITE_OVER_S, moved into the
+    nearest pause between words within 0.6 s of it, so the picture never gives way inside a word (27 Nov, film 03: the
+    site cut in on "look at the"). The voice runs on to the stretch's end either way."""
+    t = float(win[1]) - over_s
+    near = [p for p in pauses(ex["file"], max(float(win[0]), t - 1.5), min(float(win[1]), t + 1.5), min_s=0.1)
+            if p[1] >= t - 0.6 and p[0] <= t + 0.6]
+    if not near:
+        return over_s
+    a, b = min(near, key=lambda p: abs((p[0] + p[1]) / 2 - t))
+    return round(min(max(float(win[1]) - (a + min(0.1, (b - a) / 2)), 1.0), over_s + 0.6), 3)
+
+
+def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach=4.0, asked=()):
     """[start, end] export seconds: from the export's first frame (the product's own opening, growing out of the Studio)
     to the end of a spoken thought between lo and hi seconds: the longest pause the speaker
     makes there, measured on the export's own sound (the captions' clock is not the voice's). `pics`: the export's
     pictures and titles, (start, seconds) from its edit list; the film never ends inside one (17 Nov: a chair cut 0.4 s
-    in), so a pause inside a picture is passed over and the search reaches up to `reach` s past hi for one after it."""
+    in), so a pause inside a picture is passed over and the search reaches up to `reach` s past hi for one after it.
+    `asked`: asked_spans of the export check's receipt; the stretch never ends before the last of them."""
     hi = min(hi, body - 0.2)
     inside = lambda t: any(a - 0.2 <= t <= a + d + 0.1 for a, d in pics)  # noqa: E731
     ps = [p for p in pauses(ex["file"], lo, min(hi + reach, body - 0.2) + 0.5) if not inside(p[0])]
@@ -1603,14 +1623,162 @@ def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach
         end = a + min(0.25, (b - a) / 2)
     else:
         end = quiet_snap(ex["file"], hi, span=0.25)
-    return [0.0, round(end, 3)]
+    start = 0.0
+    if asked and asked[-1][1] > end - 0.1:
+        # the stretch holds every asked moment the export check saw (27 Nov, film 02: the PC landed at 34.2 s of a 41 s
+        # export and the stretch ended at 17.6 s, so the film showed the setup and never the turn): it ends in the
+        # longest pause after the last one and, when that is longer than a showcase holds, opens in the longest pause
+        # before the first one, both between words and never inside a picture
+        last, first = asked[-1][1], asked[0][0]
+        found = [p for p in pauses(ex["file"], last, min(last + reach, body - 0.2) + 0.5) if not inside(p[0]) and last < p[0]]
+        # the export's own close: when the Studio's edit ends within reach of the last asked moment, in the silence after
+        # its last sentence, the stretch ends there (27 Nov, film 03: the longest pause after the diagram was a breath
+        # inside "at the same time | for anybody to realize it", and the export ends 0.15 s after that sentence)
+        closing = [p for p in found if p[1] >= body - 0.25]
+        ps = [p for p in found if p[0] <= body - 0.2]
+        if closing:
+            a, b = closing[-1]
+            end = min(a + min(0.25, (b - a) / 2), body - 0.05)
+        elif ps:
+            a, b = max(ps, key=lambda p: (p[1] - p[0], -p[0]))
+            end = a + min(0.25, (b - a) / 2)
+        else:
+            end = min(quiet_snap(ex["file"], min(last + 0.6, body - 0.2), span=0.25), body - 0.1)
+        if end > hi + reach:
+            ps = [p for p in pauses(ex["file"], max(first - 6.0, 0.0), first) if not inside(p[1]) and p[1] <= first - 0.1]
+            # the earliest sentence-length pause that keeps the stretch within a showcase's hold, so the asked moment
+            # arrives with the line that sets it up (film 03: "we would both look at the same page", not a hesitation
+            # between "And" and "if"); else, as before, the longest one
+            held = [p for p in ps if p[1] >= end - hi and p[1] - p[0] >= SENTENCE_PAUSE_S]
+            near = [p for p in ps if p[1] >= end - hi - reach] or ps
+            if held:
+                a, b = held[0]
+                start = b - min(0.25, (b - a) / 2)
+            elif near:
+                a, b = max(near, key=lambda p: (p[1] - p[0], p[1]))
+                start = b - min(0.25, (b - a) / 2)
+            else:
+                start = quiet_snap(ex["file"], max(first - 1.0, 0.0), span=0.25)
+            start = min(max(start, 0.0), first)
+    return [round(start, 3), round(end, 3)]
 
 
-def showcase_hook(ex, body, pics, span=None):
-    """[start, end] export seconds of the split hook: the export's most visible change, its longest picture or title
-    (read from its edit list, `pics` (start, seconds)), entered a breath before it lands, SPLIT_S long; without one, the
-    stretch of the same length at two fifths of the body. Snapped to the quietest point near each end (between words)."""
+def asked_spans(visible, body):
+    """(first, last) export seconds of each asked thing the export check saw at one moment (its receipt's `visible` rows:
+    [{seconds}], measured on the export's pixels), in export order. A row seen across more than a showcase's stretch (the
+    vertical frame itself, seen from start to end) is the whole export's, not a moment."""
+    out = []
+    for row in visible or ():
+        secs = sorted(float(t) for t in (row.get("seconds") or []) if isinstance(t, (int, float)) and t >= 0)
+        inside = [t for t in secs if t < body - 0.2]
+        if len(inside) >= 2 and secs[-1] - secs[0] <= SHOWCASE_S[1]:
+            out.append((inside[0], inside[-1]))
+    return sorted(out)
+
+
+PROOF_LEAD_S = 0.1              # the split ends this far inside the last second the proof was seen whole
+
+
+def proof_span(pics, body, visible=()):
+    """(start, end) export seconds over which the export's proof is complete, or None. Two readings: the edit list
+    (`pics` (start, seconds)), where the most pictures and titles are on screen together (a stack's last card) until the
+    first of them ends; and the export check's own receipt (`visible`: [{seconds}], what it saw on the export pixels),
+    the last two seconds of its latest moment (the turn: a sentence asking for a cassette and then a PC builds to the
+    PC), the asked element seen whole; a row seen across the whole export is its frame, not a moment. The receipt is the measured one and
+    wins its end (26 Nov: a Studio checklist drawn as ONE title showed no stack in the edit list; another cut away from
+    the list 0.2 s after the check's last sight of it, so nothing may be held past that second)."""
+    pics = [(float(a), float(d)) for a, d in pics if a < body - 0.2 and d > 0]
+    best, span = 1, None
+    for a, _ in sorted(pics):
+        cover = [b + e for b, e in pics if b <= a + 0.05 < b + e]
+        if len(cover) > best:
+            best, span = len(cover), (a, min(cover))
+    moments = []
+    for row in visible or ():
+        every = sorted(float(t) for t in (row.get("seconds") or []) if isinstance(t, (int, float)) and t >= 0)
+        secs = [t for t in every if t < body - 0.2]
+        # a row seen from the export's start to its end is the vertical frame itself, not a proof (27 Nov, film 03: that
+        # row put the split at 22.5-25.3 s, after the diagram); an element seen twice is one (film 03's diagram: 15.5
+        # and 22.266 s)
+        if len(secs) >= 2 and every[-1] - every[0] <= SHOWCASE_S[1]:
+            moments.append((secs[-1], secs[-2]))
+    if moments:            # the last asked moment is the turn the sentence builds to (27 Nov, film 02: cassette, then PC)
+        b, a = max(moments)
+        span = (max(span[0], a) if span and span[0] <= b else a, b)
+    return (round(span[0], 3), round(span[1], 3)) if span else None
+
+
+def proof_push_at(span, hook):
+    """Export second the split's push onto the proof starts from: inside the proof's whole stretch, with room for the
+    push and a hold before the split ends (devices.split)."""
+    if not span:
+        return None
+    f_room = (D.PROOF_PUSH_F + 8) / F.FPS
+    return round(min(max(float(span[0]), float(hook[0]) + 6 / F.FPS), float(hook[1]) - f_room), 3)
+
+
+def caption_example(edl, words, visible, body):
+    """Find a checked line of burned captions in the kept speech, on the export clock.
+
+    Older inspectors quote the line in their description. Only use a literal transcription
+    containing a term styled or corrected by this export, at a frame the inspector saw.
+    """
+    import difflib
+
+    caps = edl.get("captions") or {}
+    if not caps or not words:
+        return None
+    spoken = D.program(edl)[0].kept_words(words)
+    tokens = [F.norm_word(w["w"]) for w in spoken]
+    terms = set(norm_words(" ".join(caps.get("emphasis_words") or [])))
+    for change in caps.get("corrections") or []:
+        if isinstance(change, dict):
+            terms.update(norm_words(change.get("to") or ""))
+    examples = []
+    for row in visible:
+        line = row.get("caption_line")
+        printed = norm_words(line or row.get("how") or "")
+        for seen in sorted(t for t in row.get("seconds") or [] if isinstance(t, (int, float)) and 0 <= t < body):
+            # Match each observed occurrence locally, even when the speaker repeats the same words.
+            near = [k for k, w in enumerate(spoken) if w["t0"] <= seen + 4. and w["t1"] >= seen - 4.]
+            if not near:
+                continue
+            matches = difflib.SequenceMatcher(None, tokens[near[0]:near[-1]+1], printed, autojunk=False)
+            candidates = [(near[0]+a, n) for a, _, n in matches.get_matching_blocks() if n]
+            for i, n in candidates:
+                if (line and n != len(printed)) or (not line and (n < 2 or not terms.intersection(tokens[i:i+n]))):
+                    continue
+                j = i + n - 1
+                first, last = spoken[i]["t0"], spoken[j]["t1"]
+                if not first - .12 <= seen <= last + .12:
+                    continue
+                # Include the uninterrupted lead into the quoted line ("the NVIDIA processors").
+                left = i
+                while left and first - spoken[left-1]["t0"] <= 1.5 and spoken[left]["t0"] - spoken[left-1]["t1"] < .28:
+                    left -= 1
+                start = spoken[left]["t0"]
+                prev = spoken[left-1]["t1"] if left else 0.
+                following = spoken[j+1]["t0"] if j+1 < len(spoken) else body
+                context_start = round(max(0., start - min(.2, max(0., start-prev)/2)), 3)
+                hook = [round(max(0., first - F.LEAD_F/F.FPS), 3),
+                        round(min(body, max(last, seen) + min(.15, max(0., following-max(last, seen))/2)), 3)]
+                examples.append(dict(hook=hook, context_start=context_start, seen_s=seen, caption_y=row.get("caption_y"),
+                                     words=" ".join(w["w"] for w in spoken[i:j+1])))
+    return min(examples, key=lambda e: e["seen_s"]) if examples else None
+
+
+def showcase_hook(ex, body, pics, span=None, visible=()):
+    """[start, end] export seconds of the split hook. When the export builds a proof (a checklist of three questions, a
+    stack), the split ends on it whole: PROOF_LEAD_S inside the last second it is seen whole (proof_span) (26 Nov, the
+    checklist film: the split entered on the first item and ended before the third, so the opening never showed the
+    checklist it sells). Otherwise the export's longest picture or title, entered a breath before it lands, SPLIT_S
+    long; without one, the stretch of the same length at two fifths of the body. Snapped to the quietest point near
+    each end (between words)."""
     span = float(span or D.SPLIT_S)
+    whole = proof_span(pics, body, visible)
+    if whole and whole[1] - PROOF_LEAD_S - span >= 0.0:
+        t1 = whole[1] - PROOF_LEAD_S
+        return [round(t1 - span, 3), round(t1, 3)]
     fit = [(a, d) for a, d in pics if a + min(d, span) <= body - 0.2]
     if fit:
         a, d = max(fit, key=lambda p: (p[1], p[0]))
@@ -1636,6 +1804,7 @@ def ui_shots(rec):
     with Image.open(os.path.join(d, typing[0])) as im:
         w, h = im.size
     out = dict(dir=d, w=w, h=h, typing=typing, sent=sent, view=u.get("view"), player=player_rect(os.path.join(d, typing[0]), rec["upload"]))
+    out["bubble"] = sent_bubble(os.path.join(d, sent), out["player"])
     board = next((f for f in ("board_01.png", "board_00.png") if f in files), None)
     if board:
         with Image.open(os.path.join(d, board)) as im:
@@ -1666,6 +1835,34 @@ def showcase_ui(rec):
         if i + 1 < len(asks):
             sequence.append(sent)
     return dict(ui, typing=sequence, sent=sent)
+
+
+def sent_bubble(png, player=None, composer_y=0.942):
+    """[top, bottom] of the sent sentence's bubble on the sent photograph, as fractions of its height: the first run of
+    rows below the Studio's player (and its controls) where a filled panel spans most of the width, measured against
+    the screen's own ground. None when no such panel is found. The Studio frames it under the watermark with it
+    (devices.studio_screen)."""
+    import numpy as np
+    from PIL import Image
+    try:
+        with Image.open(png) as im:
+            g = np.asarray(im.convert("L"), np.float32)
+    except (OSError, ValueError):
+        return None
+    h, w = g.shape
+    ground = float(np.median(g[:, : max(w // 40, 2)]))        # the screen's own ground, at its left margin
+    filled = (np.abs(g[:, w // 10: w - w // 10] - ground) > 4.0).mean(1)
+    lo = int(((player or [0.0, 0.0])[1] + 0.035) * h) if player else int(0.04 * h)
+    hi = int((composer_y - 0.06) * h)
+    run, start = int(0.015 * h), None
+    for y in range(max(lo, 0), max(hi, 0)):
+        if filled[y] >= 0.45:
+            start = y if start is None else start
+        elif start is not None:
+            if y - start >= run:
+                return [round(start / h, 4), round(y / h, 4)]
+            start = None
+    return None
 
 
 def player_rect(png, upload):
@@ -1801,15 +1998,47 @@ def showcase_supply(ctx, script, sup_dir, pk):
     edl = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
     prod = os.path.join(sup_dir, "footage", "product")
     os.makedirs(prod, exist_ok=True)
-    body = ex["dur"] - endcard_s()
+    body = export_program_seconds(ex, edl)    # 27 Nov: a Pro export ends on the edit, not on a card (41.2 s cut to 35.6)
     cut(ex["file"], 0.0, body, os.path.join(prod, "export_body.mp4"))
     pics = [(float(o["start"]), float(o["duration_s"])) for o in D.MF.pictures_of(edl) + D.MF.titles_of(edl)]
     d = W3.direction_of(ctx) if hasattr(ctx, "run_dir") else {}
-    win = [float(x) for x in d.get("export_window") or showcase_window(ex, body, pics)]
-    hook = [float(x) for x in d.get("hook_window") or showcase_hook(ex, body, pics)]
+    visible = (script.get("receipts") or {}).get("visible") or ()
+    asked = asked_spans(visible, body)
+    words = rec.get("words") or []
+    if not words and edl.get("captions") and rec.get("source"):
+        # Older recordings may only have the source caption clock.
+        timed = upload_words(rec) or []
+        words = [dict(w=w, t0=t, t1=min(t + .5, timed[i+1][0] if i+1 < len(timed) else t+.5))
+                 for i, (t, w) in enumerate(timed)]
+    caption = caption_example(edl, words, visible, body)
+    win = d.get("export_window") or showcase_window(ex, body, pics, asked=asked)
+    if caption and not d.get("export_window"):
+        # Enter on the line's setup; retain the rest of the recorded passage, including later examples.
+        end = max(win[1], caption["hook"][1])
+        win = [min([caption["context_start"]] + [a for a, _ in asked]), body if body - end <= SHOWCASE_S[0] else end]
+    hook = d.get("hook_window") or (caption["hook"] if caption else showcase_hook(ex, body, pics, visible=visible))
+    thought = d.get("export_window") or (script.get("export_check") or {}).get("spoken_thought")
+    if (not caption and isinstance(thought, (list, tuple)) and len(thought) == 2
+            and all(isinstance(t, (int, float)) for t in thought) and 0 <= thought[0] < thought[1] <= body
+            and D.tone_region(edl, *thought)):
+        win = thought
+        if not d.get("hook_window"):
+            # Let the opening and the payoff share a sentence. The original speaker resumes
+            # after Send at exactly the pause where the matched comparison left off.
+            a, b = thought
+            gaps = pauses(ex["file"], a+1.5, min(a+5., b-2.5), min_s=.15) if b-a >= 5. else []
+            if gaps:
+                gap = min(gaps, key=lambda g: abs(sum(g)/2 - (a+D.SPLIT_S)))
+                cut_at = round(sum(gap)/2*F.FPS)/F.FPS
+                hook, win = [a, cut_at], [cut_at, b]
+    grade = D.tone_region(edl, *hook)
+    win, hook = list(map(float, win)), list(map(float, hook))
+    if caption and not hook[0] <= caption["seen_s"] < hook[1]:
+        caption = None
     ui = showcase_ui(rec)
     typed = typed_line(script["receipts"])
-    mk = D.showcase_marks(hook, win, len(typed.split()), lead_f=F.LEAD_F)
+    over = 0.0 if grade and not caption else site_handover(ex, win, D.SITE_OVER_S)
+    mk = D.showcase_marks(hook, win, len(typed.split()), lead_f=F.LEAD_F, over_s=over)
     voice = os.path.join(sup_dir, "voice.wav")
     lead = F.LEAD_F / F.FPS
     parts = []
@@ -1837,8 +2066,9 @@ def showcase_supply(ctx, script, sup_dir, pk):
     jsave(words, dict(voice="the recording", duration=round((mk["dur_f"] - mk["lead_f"]) / F.FPS, 3), words=[]))
     pack = dict(sid=ctx.sid, words=words, narration=voice, ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[], footage=[],
                 voices=[], work=os.path.join(sup_dir, "finish"), fit=[],
-                product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
-                             upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None))
+                product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, over_s=over, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
+                             upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None,
+                             caption_proof=caption, proof_at=proof_push_at(proof_span(pics, body, visible), hook)))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
                 format="showcase", studio_ui=bool(ui), site=bool(ui and ui.get("site")))
     jsave(pk, dict(pack=pack, record=rec_))
@@ -3466,7 +3696,8 @@ def showcase_score(ctx, script, pack):
         raise RuntimeError("the showcase needs the recording's Studio photographs (studio.py, phone view): record it again")
     page = ui.get("site") or dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
     l1, beats = D.showcase(upload=upload, export=body, edl_b=edl, typed=typed_line(script["receipts"]), window=prod["window"], hook=prod["hook"],
-                           ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"))
+                           ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"), proof_at=prod.get("proof_at"), caption_proof=prod.get("caption_proof"),
+                           over_s=float(prod["over_s"]) if prod.get("over_s") is not None else D.SITE_OVER_S)
     out = os.path.join(ctx.supply, "l1.json")
     jsave(out, l1)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")

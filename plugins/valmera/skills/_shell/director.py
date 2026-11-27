@@ -56,6 +56,10 @@ PRINCIPLES = """How the best vertical edits keep a stranger watching (principles
 - A fixed figure lands whole on its word. Count between two sourced endpoints when the passage describes that change.
   Keep the unit, relation and any qualification together with the figure.
 - Every turn changes something you can see: the surface, the polarity, the pace, or a type card.
+- Cover each thought with its actual subject. When a search yields one photograph, move from its
+  establishing frame into a meaningful detail, then return to the moving speaker at a phrase boundary.
+  Use the speaker's other verified footage where it depicts this beat. Give a still or type page only
+  the time its information takes to read. Avoid prolonged windows on a held screen-share.
 - Lists burst: one picture or one hit per item, fast, for as long as the list is said (about a second), then it lands.
 - The pace alternates fast against hold: some 3 s windows carry one cut, others six to ten. Use a brief dip or held image to separate two thoughts when the pause,
   change of subject or new picture gives it a purpose. Carry an unbroken spoken turn on the moving picture.
@@ -1017,6 +1021,14 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
         args = dict(a.get("args") or {})
         dev = str(a["dev"])
         row = dict(args, dev=dev, id=f"dr{k}", beat=a.get("beat"))
+        # A factual reading lands on its stated figure: a counter without a sourced progression shows only that
+        # figure, never fictional values on the way, and first shows it on its spoken word (run 0, from its lands
+        # frame below). A sourced progression (wf1_display.bind) keeps its counted start.
+        flat = dev == "counter" and "to" in row and not any(
+            isinstance(x, dict) and isinstance(x.get("progression"), dict) for x in args.get("facts") or [])
+        if flat:
+            row["from"] = row["to"]
+            row["run"] = 0
         row.pop("at", None)  # the word address above has already been resolved
         row.pop("until", None)
         row.pop("f", None)                                # the ask's own place is its at/until word, set below
@@ -1041,6 +1053,9 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
         if inner and (g is not None or spanning):         # a stretch reaches every step, section and cut it names
             g = max(g or f, max(inner) + (12 if pal and pal.spans(dev) else 0))
         row["f"] = [f, min(max(int(g), f + 2), dur_f)] if g is not None else f
+        land = row.get("lands")
+        if flat and type(land) is int and f < land < dur_f:
+            row["f"] = [land, min(max(row["f"][1], land + 2), dur_f)] if isinstance(row["f"], list) else land
         if isinstance(row.get("pool"), list) and pic_key:
             row["pool"] = [pic_key(str(p)) or p for p in row["pool"]]
         pics = [p for p in ([pic_key(p) for p in a.get("pics") or []] if pic_key else []) if p]

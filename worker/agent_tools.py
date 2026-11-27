@@ -130,7 +130,7 @@ from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      custom_chain_error, patch_clip_key, patch_fingerprint,
                      EDLValidationError, Frame, PictureCard,
-                     HEX_COLOR,
+                     HEX_COLOR, coerce_hex,
                      canvas_edl, clip_anim, default_edl, describe_edl,
                      DEFAULT_CANVAS_FPS,
                      edl_signature, is_canvas_program, keep_boundaries,
@@ -2104,6 +2104,55 @@ def open_visual_page(ctx, pages=None):
            "All persisted storyboard pages have now been opened this turn."))
 
 
+def _seconds_one(v):
+    """One time as seconds: a number, '3.2', '3.2s', '1:05' or '00:01:05.5'."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, dict):
+        for k in ("t", "time", "at", "s", "seconds", "start"):
+            if k in v:
+                return _seconds_one(v[k])
+        return None
+    t = str(v).strip().lower().rstrip("s").strip()
+    if not t:
+        return None
+    try:
+        if ":" in t:
+            total = 0.0
+            for part in t.split(":"):
+                total = total * 60.0 + float(part)
+            return total
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _seconds_list(value):
+    """A times argument in any shape a model writes (an array, one number, a
+    JSON or comma-separated string, mm:ss) as a list of seconds; the value
+    unchanged when it holds no time at all (an empty list stays empty)."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+    elif isinstance(value, (int, float, dict)):
+        items = [value]
+    elif isinstance(value, str):
+        raw = value.strip()
+        try:
+            parsed = json.loads(raw)
+            items = parsed if isinstance(parsed, list) else [parsed]
+        except ValueError:
+            items = [p for chunk in raw.strip("[]()").split(",")
+                     for p in chunk.split()]
+    else:
+        return value
+    out = [x for x in (_seconds_one(i) for i in items) if x is not None]
+    return out if out or not items else value
+
+
 def look_at(ctx, times=None, question="", start=None, end=None,
             output_times=None, rendered=False, native_resolution=False,
             overlay=None):
@@ -2117,6 +2166,9 @@ def look_at(ctx, times=None, question="", start=None, end=None,
     missing chunk and says "measuring" meanwhile), `free_space` what type
     must avoid and the free rectangles, `beats` a ruler of stresses, cuts,
     the user's beats and device landings around each frame."""
+    # Times arrive as the model writes them (#1124, p5745 13 Nov: a string
+    # "3.2, 17.8" was refused twice): read every shape as seconds.
+    times, output_times = _seconds_list(times), _seconds_list(output_times)
     if overlay in ("", "none", None):
         overlay = None
     elif overlay not in motion_qa.OVERLAYS:
@@ -3302,7 +3354,7 @@ def _index_fps(index):
     return fps if 1.0 <= fps <= 240.0 else 30.0
 
 
-def _snap_keep_to_shots(keep, index, words=None):
+def _snap_keep_to_shots(keep, index, words=None, prev_keep=None, ctx=None):
     """(keep, notes) with every keep edge pulled off a nearby camera cut.
 
     An indexed cut is the new shot's first frame index over the frame rate,
@@ -3316,7 +3368,16 @@ def _snap_keep_to_shots(keep, index, words=None):
     touch are one continuous source run, not a cut, and are left alone.
     Speech takes priority: never remove an indexed word or part of one to
     hide a visual sliver. Retain that edge and report the visual tradeoff.
-    notes is empty when no edge moved or needed speech protection."""
+    notes is empty when no edge moved or needed speech protection.
+    With ctx, a move is also checked against the source's measured sound
+    (_measured_edge_moves, the write boundary's own measurement): an edge
+    that would cut a word whose sound still runs stays, like one that would
+    cut an indexed word (#1841: the boundary had moved the end 1040.22 ->
+    1040.26 because the word's sound still ran there, and this pass moved it
+    back on every later write). Every edge is placed, old ones included, so
+    a sliver an exact write or an earlier cut left is cleaned on the next
+    write; with prev_keep, an edge the previous keep already had that stays
+    for speech is not reported again."""
     cuts = _shot_cuts(index)
     if not cuts or not keep:
         return keep, []
@@ -3327,6 +3388,11 @@ def _snap_keep_to_shots(keep, index, words=None):
     moved = []
     protected = []
     speech = words if words is not None else (index or {}).get("words", [])
+    old_starts = [float(a) for a, _b in prev_keep or []]
+    old_ends = [float(b) for _a, b in prev_keep or []]
+
+    def kept_before(t, edges):
+        return any(abs(t - x) <= 1e-3 for x in edges)
 
     def trimmed_words(lo, hi):
         return [str(w.get("w") or "").strip() for w in speech or []
@@ -3365,6 +3431,31 @@ def _snap_keep_to_shots(keep, index, words=None):
                     moved.append(("end", e, last, b))
                     e = last
         span[0], span[1] = s, e
+    if moved and ctx is not None:
+        # The write boundary moves an edge that cuts a word's measured sound
+        # back out of it; a move it would undo is speech, kept like a word.
+        try:
+            sounding = _measured_edge_moves(ctx, out, src, speech)
+        except Exception:  # noqa: BLE001 - no measurement: the moves stand
+            sounding = []
+        for m in sounding:
+            k = 0 if m["side"] == "start" else 1
+            for mv in list(moved):
+                side, old, new, cut = mv
+                if side != m["side"] or abs(new - float(m["from"])) > 1e-6:
+                    continue
+                for j, span in enumerate(out):
+                    if abs(span[k] - new) <= 1e-6 and \
+                            abs(src[j][k] - old) <= 1e-6:
+                        span[k] = old
+                moved.remove(mv)
+                protected.append((side, old, cut,
+                                  [str(m.get("word") or "the word's sound")]))
+    # an edge the previous keep had that stays for speech was reported when
+    # it was placed; saying it again on every write is noise (#1841)
+    protected = [p for p in protected
+                 if not kept_before(p[1], old_starts if p[0] == "start"
+                                    else old_ends)]
     if not moved and not protected:
         return keep, []
     notes = []
@@ -3697,7 +3788,7 @@ def _within_keep(new_keep, prev_keep):
 
 def _write_keep(ctx, new_keep, desc, snap_to_words=None,
                 check_regression=False, place_all=False, never_grow=False,
-                repetition_repair=False):
+                repetition_repair=False, in_sentence=False):
     """Shared tail for every keep-modifying write: audio-safe cut edges
     (snap_to_words None/True; True first snaps outward to word edges),
     insert re-snap + program-item re-anchoring (the shared remap above,
@@ -3705,7 +3796,10 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     for full replacements, mechanical regression warnings) appended to a
     still SUCCESSFUL result. snap_to_words=False writes the exact times.
     place_all (keep_segments, which restates every edge): every cut edge of
-    the list is placed, not only those the previous keep lacked."""
+    the list is placed, not only those the previous keep lacked.
+    in_sentence: the cut is a trim inside a sentence on purpose, so its
+    edges are not moved to sentence ends (word, sound and shot placement
+    still run)."""
     words = ctx.index.get("words", [])
     silences = ctx.index.get("silences", [])
     prev = ctx.latest_edl()
@@ -3718,7 +3812,7 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     if not new_keep:
         return "REJECTED: nothing would survive that keep list."
     sentence_line = ""
-    if words and not repetition_repair and _sentence_snap_on(ctx, snap_to_words):
+    if words and not (repetition_repair or in_sentence) and _sentence_snap_on(ctx, snap_to_words):
         # TRIAL_QUALITY_BUILD: the Claude lanes' editor never starts or ends
         # a piece mid-sentence (sentence_snap; new edges only)
         import sentence_snap
@@ -3741,7 +3835,11 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     # including shot hygiene. Warnings may explain a rough edge, not move it.
     shot_notes = []
     if snap_to_words is not False:
-        new_keep, shot_notes = _snap_keep_to_shots(new_keep, ctx.index, words)
+        # keep_segments (place_all) restates every edge: each is placed,
+        # old ones included, exactly as the acoustic pass above does
+        new_keep, shot_notes = _snap_keep_to_shots(
+            new_keep, ctx.index, words,
+            prev_keep=None if place_all else prev_keep, ctx=ctx)
     if never_grow:
         clipped = _within_keep(new_keep, prev_keep)
         if clipped:
@@ -4362,6 +4460,25 @@ def _blind_grid_note(ctx, keep):
         "look_at(times=[...]) and rewrite the keep list around what you saw.")
 
 
+def _spoken_repetition_note(spoken):
+    """The render's note on phrases the speaker says more than once that
+    survive the cut. p6307: "Elimina repeticiones" was asked, and the note
+    said these "should not be cut automatically" without naming a place, so
+    the condense kept them. It informs: what repeats, where, and how to take
+    a repeat out."""
+    where = "; ".join(
+        f"'{r['phrase']}' at source " + ", ".join(
+            f"{o['source_s']:g}s" for o in r["occurrences"]
+            if o.get("source_s") is not None)
+        for r in spoken[:4])
+    return (f" SPOKEN-REPETITION NOTE: {len(spoken)} phrase(s) the speaker "
+            f"says more than once survive at distinct source moments ({where}"
+            + (" ..." if len(spoken) > 4 else "") + "). Not an edit "
+            "duplicate: they stay unless the request asks to remove "
+            "repetitions; then cut_range the weaker saying (get_words for "
+            "its exact span).")
+
+
 def cut_range(ctx, start, end, snap_to_words=None):
     try:
         s, e = ctx.clamp(start), ctx.clamp(end)
@@ -4389,9 +4506,31 @@ def cut_range(ctx, start, end, snap_to_words=None):
         repeats = []  # uncertain alignment retains the ordinary clause guard
     repetition_repair = any(abs(s - r["cut"][0]) <= 0.02 and
                             abs(e - r["cut"][1]) <= 0.02 for r in repeats)
-    return _write_keep(ctx, new, f"cut {s}-{e}s ({e - s:.2f}s removed)",
-                       snap_to_words=_snap_choice(snap_to_words),
-                       repetition_repair=repetition_repair)
+    desc = f"cut {s}-{e}s ({e - s:.2f}s removed)"
+    snap = _snap_choice(snap_to_words)
+    res = _write_keep(ctx, new, desc, snap_to_words=snap,
+                      repetition_repair=repetition_repair)
+    if snap is not False and str(res).startswith("NO CHANGE"):
+        # The range is in the edit, yet the edge placement passes closed the
+        # cut up again (#1841). First keep the word, consonant and sound
+        # placement and leave the sentence ends alone (a short trim inside a
+        # sentence); only when that still closes it, place it at the asked
+        # times (the write boundary keeps every edge off a spoken word).
+        placed = _write_keep(ctx, new, desc, snap_to_words=snap,
+                             repetition_repair=repetition_repair,
+                             in_sentence=True)
+        if str(placed).startswith("EDL v"):
+            return (placed + "\nPLACED INSIDE THE SENTENCE: moving the edges "
+                    "to sentence ends closed this cut up again, so it was "
+                    "placed on the words around the asked times "
+                    f"({s:g}-{e:g}s).")
+        exact = _write_keep(ctx, new, desc, snap_to_words=False,
+                            repetition_repair=repetition_repair)
+        if str(exact).startswith("EDL v"):
+            return (exact + "\nPLACED EXACTLY: snapping the edges to word, "
+                    "sentence and shot boundaries closed this cut up again, "
+                    f"so it was placed at {s:g}-{e:g}s as asked.")
+    return res
 
 
 def restore_range(ctx, start, end, snap_to_words=None):
@@ -8540,14 +8679,18 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
     return res
 
 
+def _already_absent(kind, item_id, current_ids):
+    return (f"{kind} {item_id} is already absent; nothing to remove; "
+            f"current {kind} ids: {current_ids or 'none'}.")
+
+
 def remove_music(ctx, id):
     edl = dict(ctx.latest_edl()["json"])
     items = [dict(m) for m in (edl.get("music") or [])]
     hit = next((m for m in items if m.get("id") == id), None)
     if not hit:
         have = ", ".join(m.get("id") or "?" for m in items) or "none"
-        return (f"REJECTED: no music with id '{id}'. Existing music ids: "
-                f"{have}. Call get_edl to see them.")
+        return _already_absent("music", id, have)
     edl["music"] = [m for m in items if m.get("id") != id]
     # The upload's own sound set under this track (score.bed's ambience duck)
     # goes with it: removing the bed must not leave the film's sound ducked.
@@ -8922,8 +9065,7 @@ def remove_sfx(ctx, id):
     hit = next((s for s in items if s.get("id") == id), None)
     if not hit:
         have = ", ".join(s.get("id") or "?" for s in items) or "none"
-        return (f"REJECTED: no sfx with id '{id}'. Existing sfx ids: {have}. "
-                "Call get_edl to see them.")
+        return _already_absent("sfx", id, have)
     edl["sfx"] = [s for s in items if s.get("id") != id]
     return ctx.write_edl(
         edl, f"removed sfx {id} ('{_track_name(ctx, hit['storage_key'])}' "
@@ -8943,7 +9085,11 @@ def move_sfx(ctx, id, at):
     hit = next((s for s in items if s.get("id") == id), None)
     if not hit:
         have = ", ".join(s.get("id") or "?" for s in items) or "none"
-        return (f"REJECTED: no sfx with id '{id}'. Existing sfx ids: {have}.")
+        nearest = min(items, key=lambda item: abs(sound_library.hit_at(item) - at),
+                      default=None)
+        hint = (f" Nearest sound to {at:g}s: {nearest['id']} at "
+                f"{sound_library.hit_at(nearest):g}s." if nearest else "")
+        return f"No sound moved. Current sfx ids: {have}.{hint}"
     prog = program_duration(edl)
     if at < 0 or at > max(0.0, prog - 0.05):
         return (f"REJECTED: at={at}s is outside the program "
@@ -11904,8 +12050,7 @@ def remove_zoom(ctx, id):
     hit = next((z for z in zooms if z.get("id") == id), None)
     if not hit:
         have = ", ".join(z.get("id", "?") for z in zooms) or "none"
-        return (f"REJECTED: no zoom with id '{id}'. Existing zooms: {have}. "
-                "Call get_edl to see them.")
+        return _already_absent("zoom", id, have)
     fx["zooms"] = [z for z in zooms if z.get("id") != id]
     edl["effects"] = fx
     return ctx.write_edl(
@@ -12109,8 +12254,7 @@ def remove_zoom_path(ctx, id):
     if not hit:
         paths = [z.get("id", "?") for z in zooms if z.get("mode") == "path"]
         have = ", ".join(paths) or "none"
-        return (f"REJECTED: no keyframed zoom with id '{id}'. Existing "
-                f"keyframed zooms: {have}. Call get_edl to see them.")
+        return _already_absent("keyframed zoom", id, have)
     if hit.get("mode") != "path":
         return (f"REJECTED: '{id}' is a {hit.get('mode') or 'punch'} zoom, "
                 "not a keyframed path. Remove it with remove_zoom.")
@@ -13610,9 +13754,7 @@ def remove_erase(ctx, id=None):
         if not hit:
             have = ([r.get("id", "?") for r in regions]
                     + [p.get("id", "?") for p in patches])
-            return (f"REJECTED: no erased region with id '{id}'. Existing: "
-                    f"{', '.join(have)}. Call get_edl to see them, or omit "
-                    "id to restore the whole original picture.")
+            return _already_absent("erased region", id, ", ".join(have))
         regions = [r for r in regions if r.get("id") != id]
         try:
             return _apply_clean(ctx, regions,
@@ -13783,9 +13925,7 @@ def remove_blur(ctx, id=None):
         hit = next((r for r in regions if r.get("id") == id), None)
         if not hit:
             have = ", ".join(r.get("id", "?") for r in regions)
-            return (f"REJECTED: no censor region with id '{id}'. Existing: "
-                    f"{have}. Call get_edl to see them, or omit id to "
-                    "remove all.")
+            return _already_absent("censor region", id, have)
         fx["regions"] = [r for r in regions if r.get("id") != id]
         desc = f"removed censor region {id}"
     else:
@@ -14520,8 +14660,7 @@ def remove_insert(ctx, id):
     hit = next((i for i in inserts if i.get("id") == id), None)
     if not hit:
         have = ", ".join(i.get("id", "?") for i in inserts) or "none"
-        return (f"REJECTED: no insert with id '{id}'. Existing inserts: "
-                f"{have}. Call get_edl to see them.")
+        return _already_absent("insert", id, have)
     edl["inserts"] = [i for i in inserts if i.get("id") != id]
     # Removing an insert shifts everything after it earlier and shortens the
     # program — the SAME re-anchoring as a keep cut. The old sfx-only drop
@@ -14637,7 +14776,8 @@ def cut_output_range(ctx, start, end):
         new_keep, audio_notes, _quiet = _audio_safe_keep(
             ctx, new_keep, keep, ctx.index.get("words") or [])
         new_keep, shot_notes = _snap_keep_to_shots(
-            new_keep, ctx.index, ctx.index.get("words"))
+            new_keep, ctx.index, ctx.index.get("words"), prev_keep=keep,
+            ctx=ctx)
         shot_notes = audio_notes + shot_notes
     else:
         shot_notes = []
@@ -14759,7 +14899,7 @@ def remove_voiceover(ctx, id):
     hit = next((v for v in vos if v.get("id") == id), None)
     if not hit:
         have = ", ".join(v.get("id", "?") for v in vos) or "none"
-        return (f"REJECTED: no voiceover with id '{id}'. Existing: {have}.")
+        return _already_absent("voiceover", id, have)
     edl["voiceover"] = [v for v in vos if v.get("id") != id]
     return ctx.write_edl(
         edl, f"removed voiceover {id} "
@@ -14864,8 +15004,7 @@ def remove_speed(ctx, id):
     hit = next((sp for sp in spans if sp.get("id") == id), None)
     if not hit:
         have = ", ".join(sp.get("id") or "?" for sp in spans) or "none"
-        return (f"REJECTED: no speed span with id '{id}'. Existing speed "
-                f"spans: {have}. Call get_edl to see them.")
+        return _already_absent("speed span", id, have)
     edl["speed"] = [sp for sp in spans if sp.get("id") != id]
     return _write_speed(
         ctx, prev, edl,
@@ -15324,8 +15463,7 @@ def remove_overlay(ctx, id):
     hit = next((o for o in items if o.get("id") == id), None)
     if not hit:
         have = ", ".join(o.get("id") or "?" for o in items) or "none"
-        return (f"REJECTED: no overlay with id '{id}'. Existing overlays: "
-                f"{have}. Call get_edl to see them.")
+        return _already_absent("overlay", id, have)
     if hit.get("screen"):
         # Dropping the pin alone leaves the handoff clip cutting in cold, with
         # no push into it — a jump cut the user never asked for, from a tool
@@ -16741,9 +16879,7 @@ def remove_screen_takeover(ctx, id, keep_clip=False):
                None)
     if not hit:
         have = ", ".join(o.get("id") or "?" for o in items if o.get("screen"))
-        return (f"REJECTED: no screen takeover with id '{id}'. Existing "
-                f"takeovers: {have or 'none'}. (Use remove_overlay for an "
-                "ordinary overlay.) Call get_edl to see them.")
+        return _already_absent("screen takeover", id, have)
     hand = round(float(hit["start"]) + float(hit["duration_s"]), 2)
     edl["overlays"] = [o for o in items if o.get("id") != id]
     dropped = ""
@@ -17970,8 +18106,7 @@ def remove_text(ctx, id):
     hit = next((tx for tx in items if tx.get("id") == id), None)
     if not hit:
         have = ", ".join(tx.get("id") or "?" for tx in items) or "none"
-        return (f"REJECTED: no text with id '{id}'. Existing texts: {have}. "
-                "Call get_edl to see them.")
+        return _already_absent("text", id, have)
     edl["texts"] = [tx for tx in items if tx.get("id") != id]
     return ctx.write_edl(
         edl, f"removed {hit.get('template', 'text')} text "
@@ -18155,8 +18290,7 @@ def remove_vector_graphic(ctx, id):
     hit = next((v for v in items if v.get("id") == id), None)
     if not hit:
         have = ", ".join(v.get("id") or "?" for v in items) or "none"
-        return (f"REJECTED: no vector graphic with id '{id}'. Existing "
-                f"vectors: {have}. Call get_edl to see them.")
+        return _already_absent("vector graphic", id, have)
     edl["vectors"] = [v for v in items if v.get("id") != id]
     return ctx.write_edl(
         edl, f"removed {hit.get('kind', 'vector')} graphic ({id})")
@@ -18290,12 +18424,12 @@ def add_color_screen(ctx, at_output_s, duration_s=2.0, color="#000000",
                      color2=None, direction="vertical", motion=None):
     """Cut to a full-frame SOLID or GRADIENT colour screen for a moment, then
     return to the footage — no text, no image generation. Built locally."""
-    c1 = (color or "#000000").strip().upper()
+    c1 = coerce_hex(color or "#000000") or str(color)
     if not HEX_COLOR.match(c1):
         return "REJECTED: color must be #RRGGBB hex, e.g. #FFFFFF for white."
     c2 = None
     if color2:
-        c2 = str(color2).strip().upper()
+        c2 = coerce_hex(color2) or str(color2)
         if not HEX_COLOR.match(c2):
             return ("REJECTED: color2 must be #RRGGBB hex (the gradient's "
                     "second colour), or omit it for a flat fill.")
@@ -19891,7 +20025,15 @@ def _set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             panels=rows_panels, source_track=card_track,
             follow=card_follow)).model_dump()
         if row["end"]-row["start"] < .5:
-            raise ValueError("Allow at least 0.5 seconds for a footage card")
+            # A card shorter than it can read is lengthened to the shortest
+            # that reads, inside the programme (p6238 gate, 27 Nov: refused
+            # "Allow at least 0.5 seconds for a footage card").
+            prog = round(program_duration(edl), 2)
+            new_end = min(round(row["start"] + .5, 3), prog) if prog > .5 else round(row["start"] + .5, 3)
+            new_start = round(max(0.0, new_end - .5), 3)
+            report.append(f"{row['start']:g}-{row['end']:g}s is under the 0.5 s a footage card needs "
+                          f"to read; it plays {new_start:g}-{new_end:g}s.")
+            row["start"], row["end"] = new_start, new_end
     except (ValueError,TypeError) as exc:
         return "REJECTED: " + str(exc)[:400]
     fx = edl.setdefault("effects", None) or {}
@@ -20184,6 +20326,8 @@ def set_screen_frame(ctx, inset=None, radius=None, shadow=None,
         if val is None:
             continue
         v = str(val).strip().upper()
+        if v not in ("", "NONE"):
+            v = coerce_hex(val) or v
         if v in ("", "NONE") and name == "background2":
             spec["background2"] = None      # explicit "make it flat again"
             continue
@@ -20249,7 +20393,7 @@ def add_aspect_shift(ctx, at_output_s, ratio, duration_s=0.8, zoom=True,
     except (TypeError, ValueError):
         return (f"REJECTED: duration_s must be a number of seconds "
                 f"({FRAME_SHIFT_MIN_S}-{FRAME_SHIFT_MAX_S}).")
-    col = str(color or "#000000").strip().upper()
+    col = coerce_hex(color or "#000000") or str(color)
     if not HEX_COLOR.match(col):
         return "REJECTED: color must be #RRGGBB hex (the bars' colour)."
     motif, motif_err = _motion_motif_value(ctx, motion_motif)
@@ -20312,8 +20456,7 @@ def remove_aspect_shift(ctx, id):
     hit = next((s for s in shifts if s.get("id") == id), None)
     if not hit:
         have = ", ".join(s.get("id", "?") for s in shifts) or "none"
-        return (f"REJECTED: no aspect shift with id '{id}'. Existing: "
-                f"{have}. Call get_edl to see them.")
+        return _already_absent("aspect shift", id, have)
     rest = [s for s in shifts if s.get("id") != id]
     fx["frame_shifts"] = rest or None
     edl["effects"] = fx
@@ -20561,7 +20704,7 @@ def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
     if tpl not in TEXT_TEMPLATES:
         return (f"REJECTED: template must be one of "
                 f"{', '.join(TEXT_TEMPLATES)}.")
-    bg = (bg_color or "#000000").strip().upper()
+    bg = coerce_hex(bg_color or "#000000") or str(bg_color)
     if not HEX_COLOR.match(bg):
         return "REJECTED: bg_color must be #RRGGBB hex, e.g. #000000."
     try:
@@ -21286,8 +21429,7 @@ def remove_stylize(ctx, id):
     hit = next((sx for sx in sts if sx.get("id") == id), None)
     if not hit:
         have = ", ".join(sx.get("id") or "?" for sx in sts) or "none"
-        return (f"REJECTED: no stylize effect with id '{id}'. Existing: "
-                f"{have}. Call get_edl to see them.")
+        return _already_absent("stylize effect", id, have)
     fx["stylize"] = [sx for sx in sts if sx.get("id") != id]
     edl["effects"] = fx
     return ctx.write_edl(edl, f"removed stylize {hit['kind']} ({id})")
@@ -21608,8 +21750,7 @@ def remove_custom_filter(ctx, id):
     hit = next((c for c in cfs if c.get("id") == id), None)
     if not hit:
         have = ", ".join(c.get("id") or "?" for c in cfs) or "none"
-        return (f"REJECTED: no custom filter with id '{id}'. Existing: "
-                f"{have}. Call get_edl to see them.")
+        return _already_absent("custom filter", id, have)
     fx["custom"] = [c for c in cfs if c.get("id") != id]
     edl["effects"] = fx
     name = hit.get("label") or (hit.get("chain") or "")[:40]
@@ -25644,10 +25785,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                     repetition_repairs.append(
                         "edit duplication: same source phrase appears twice")
                 if spoken:
-                    note += (f" SPOKEN-REPETITION NOTE: {len(spoken)} phrase(s) "
-                             "repeat at distinct source moments; this is not "
-                             "an edit-duplication defect and should not be cut "
-                             "automatically.")
+                    note += _spoken_repetition_note(spoken)
             except Exception:
                 pass
             # An edit can be visually clean and sonically balanced while its
@@ -28675,6 +28813,9 @@ def apply_edit_recipe(ctx, operations, brief=None, completes_steps=None):
             return _recipe_abort(
                 ctx, f"RECIPE ABORTED at operation {i} ({name}); no EDL "
                 f"version was created.\n{result}")
+        if "is already absent; nothing to remove" in result:
+            notes.append(f"{i}) {name}: already absent")
+            continue
         if result.startswith("NO CHANGE"):
             notes.append(f"{i}) {name}: no change"
                          + (f" ({'; '.join(repairs)})" if repairs else ""))
@@ -29684,7 +29825,7 @@ def _music_program_beats(ctx, edl, bpm=None, every_s=None, key=None):
                                 f"({str(e)[:160]}).")
         ctx._asset_perception[item["storage_key"]] = p
     conf = float(p.get("bpm_conf") or 0.0)
-    track_beats = p.get("beats") or []
+    track_beats = p.get("beats") or _tempo_grid(p)
     if not track_beats:
         return None, None, (
             f"REJECTED: the music's own pulse is not clear enough to cut to "
@@ -29794,6 +29935,31 @@ def _beat_align_to_music(ctx, edl, beats, label, tol):
     return res
 
 
+def _tempo_grid(p):
+    """A beat grid from a MEASURED tempo whose confidence was too low for the
+    analysis to lay its own grid (perception keeps beats only at >= 0.3):
+    the tempo's period, phased to the first loud moment of the audio. p6238
+    (24 Nov): beat_align_cuts refused a 0.28-confidence song and the turn
+    ended partial. The caller reports the confidence. [] with no tempo."""
+    try:
+        bpm = float(p.get("bpm") or 0.0)
+        if not 30.0 <= bpm <= 300.0:
+            return []
+        period = 60.0 / bpm
+        bin_s = float(p.get("energy_bin_s") or 0.5)
+        energy = p.get("energy") or []
+        dur = float(p.get("duration_s") or len(energy) * bin_s or 0.0)
+        if dur <= period:
+            return []
+        phase = next((i * bin_s for i, v in enumerate(energy)
+                      if v is not None and float(v) > -12.0), 0.0) % period
+        n = int((dur - phase) / period) + 1
+        return [round(phase + k * period, 3) for k in range(n)
+                if phase + k * period <= dur]
+    except (TypeError, ValueError):
+        return []
+
+
 def beat_align_cuts(ctx, tolerance_s=0.35, source=None, bpm=None,
                     every_s=None):
     """Move each INTERNAL keep boundary to the nearest beat within tolerance
@@ -29822,7 +29988,7 @@ def beat_align_cuts(ctx, tolerance_s=0.35, source=None, bpm=None,
     except Exception as e:
         return f"Audio analysis unavailable ({str(e)[:160]})."
     bpm, conf = p.get("bpm"), float(p.get("bpm_conf") or 0.0)
-    beats = p.get("beats") or []
+    beats = p.get("beats") or _tempo_grid(p)
     if not bpm or not beats:
         return ("REJECTED: the footage's own audio has no pulse clear enough "
                 f"to cut to (bpm {bpm or 'none'}, confidence {conf:.2f}; "
@@ -32656,7 +32822,7 @@ TOOLS = {
                      "clips), then fetch_url(url, as_kind='clip'), "
                      "look_at_asset for the right seconds, and a cutaway "
                      "or insert at the mention. Tell the user what footage "
-                     "you used (title + channel).",
+                     "you used (title + channel). Memes: find_meme.",
                      {"query": {"type": "string"}}),
     "search_sfx": (search_sfx, "Search the web for a REAL recorded sound "
                    "effect — the editor's whoosh, camera shutter, UI "
@@ -34461,7 +34627,8 @@ TOOLS = {
                     "quality — prefer enhance_video, which orders them "
                     "correctly), 'motion_blur' (real frame blending; only "
                     "reads on movement, does nothing on a static shot), "
-                    "'stabilize' (smooths modest HANDHELD wobble via deshake; "
+                    "'stabilize' (prefer stabilize_video, which measures it; "
+                    "smooths modest HANDHELD wobble via deshake; "
                     "mirrored edges may soften and it cannot fix a whip, a "
                     "walk or rolling shutter; say that rather than promising "
                     "stabilization). Stabilize is whole-video only. For other "
@@ -34485,7 +34652,7 @@ TOOLS = {
                       "start/end are PROGRAM seconds; omit both for the whole "
                       "video. resolution '2k' or '4k' makes the EXPORTED "
                       "file that size (2560x1440 / 3840x2160 class, lanczos "
-                      "upscale of the whole edit; 'hd' goes back): use it "
+                      "upscale plus a detail pass; 'hd' goes back): use it "
                       "when the user asks for 2K, 1440p, 4K or UHD. "
                       "Sharpening alone never adds resolution, and an "
                       "upscale adds pixels, not detail the source never had "

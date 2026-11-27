@@ -921,7 +921,8 @@ STUDIO_IN_F = 16               # the Studio arriving: 6 frames whole (the clip i
 WORD_F = 5                     # a typed word every 5 frames: a fast typist, every word still seen
 READ_F = 12                    # the whole sentence held before Send
 SENT_F = 14                    # Send, the sentence in its bubble
-PUSH_F = 12                    # the result growing out of the Studio to full frame
+PUSH_F = 18                    # the result: seated under the sent sentence (SEAT_F), then growing out of the Studio to full frame
+SEAT_F = 6                     # the sentence and its result read together before the result takes the frame (26 Nov)
 SITE_S = 3.4                   # the website: its name and a page to recognise, with the landing
 SITE_OVER_S = 2.0              # the website lands under the speaker's last line (his payoff is said over valmera.io), and the
                                # programme ends 1.4 s after his last word: no dead air before the brand's card
@@ -946,16 +947,143 @@ def showcase_marks(hook, window, n_words, lead_f=3, site_s=SITE_S, over_s=SITE_O
                 export_voice=[f_p, f_v], site=[f_s, f_end], dur_f=max(f_end, f_v), lead_f=lead_f)
 
 
-def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42), land_f=None):
+PROOF_W = 0.84                 # the export card's width once the proof is complete: its titles read at phone size
+PROOF_PUSH_F = 14
+
+
+def tone_region(edl, start, end):
+    """A stationary local grade covering these export seconds, in the export's own coordinates."""
+    start, end = float(start), float(end)
+    for fx in edl.get("fx") or ():
+        region = fx.get("region") or {}
+        box = region.get("box")
+        if (fx.get("type") == "region" and fx.get("device") == "region_tone"
+                and float(fx.get("start", 0)) <= start and end <= float(fx.get("end") or 0) + .001
+                and box and len(box) == 4 and not region.get("keys")):
+            return box
+    return None
+
+
+def matched_grade(l1, *, f0, f1, upload, export, edl, export_at, region, lib, wipe=False):
+    """Frame the same source pixels twice. For the return, sweep the real export over its ungraded source."""
+    tl, duration = program(edl)
+    import card_geom
+    import renderer
+
+    layer = Layer(l1, lib, "grade" if wipe else "sp")
+    plan = layer.P
+    up, ex = plan.video("dv_up", upload), plan.video("dv_ex", export)
+    span = [f0, f1]
+    plan.page("ground", span, "#000000" if wipe else "#101115")
+    # Compare the treated area together with its surroundings. Equal-width panes on a phone.
+    pane_w, pane_h = .94, .345
+    height = min(1., pane_h * H / (pane_w * W) * export["w"] / export["h"])
+    width = min(1., height * pane_w * W / (pane_h * H) * export["h"] / export["w"])
+    left = min(max(0., (region[0] + region[2] - width) / 2), 1. - width)
+    top = min(max(0., (region[1] + region[3] - height) / 2), 1. - height)
+    detail = [left, top, left + width, top + height]
+    raw_box = [.03, .205, .97, .205 + pane_h]
+    export_box = [.03, .605, .97, .605 + pane_h]
+    labels = ["ORIGINAL", "STUDIO EXPORT"]
+    # At a keep boundary synced starts a new source card. Sample the product camera on that clock,
+    # including frame.picture, focus tracks and zooms; its mapping includes both crop and letterbox.
+    zooms = (edl.get("effects") or {}).get("zooms") or []
+    source_cards = plan.synced("up", span, tl, export_at, up, raw_box)
+    if sum(b - a for a, b in (it["f"] for it in source_cards)) != f1 - f0:
+        return None  # An inserted picture has no corresponding upload frame.
+    for item in source_cards:
+        crops, boxes = [], []
+        for f in range(*item["f"]):
+            t = export_at + (f - f0) / FPS
+            zoom = renderer.zoom_state_at(zooms, t, duration) if zooms else None
+            windows = card_geom.windows(edl, src_at(tl, t), export["w"], export["h"],
+                                        upload["w"], upload["h"], zoom=zoom, t=t)
+            if len(windows) != 1:
+                return None
+            dest, source = windows[0]
+            view = dest if wipe else detail
+            # A pane crossing a letterbox carries the same black margin as the export.
+            visible = [max(view[0], dest[0]), max(view[1], dest[1]),
+                       min(view[2], dest[2]), min(view[3], dest[3])]
+            if visible[2] <= visible[0] or visible[3] <= visible[1]:
+                return None
+            crops.append([r4(v) for v in card_geom.map_rect(visible, dest, source)])
+            boxes.append(plan.seat(dest if wipe else card_geom.map_rect(visible, view, raw_box)))
+        # Card dimensions are static. A change of picture layout starts a new card;
+        # a camera move inside that layout only changes its source crop.
+        plan.items.remove(item)
+        first = 0
+        for end in range(1, len(boxes) + 1):
+            if end < len(boxes) and boxes[end] == boxes[first]:
+                continue
+            start_frame = item["f"][0] + first
+            card = slice_item(item, start_frame, item["f"][0] + end)
+            rects = crops[first:end]
+            card.update(boxes[first], id=f"up.{start_frame}",
+                        crop=rects[0] if all(c == rects[0] for c in rects) else rects)
+            plan.items.append(card)
+            first = end
+    if wipe:
+        sweep = max(f0 + 1, f1 - FPS)
+        plan.items.append(dict(id="wipe", k="join", mode="seam", stage="top", f=[sweep, f1],
+                               pic=ex, src=[r4(export_at + (sweep - f0) / FPS), r4(export_at + (f1 - f0) / FPS)],
+                               x=MF.ease_io(f1 - sweep), lean=0, edge=dict(w=2., a=.85), dim=1., a=1.))
+        layer.text("label", [f0, sweep], labels[0], layer.k("dv_l"), .05, .77)
+    else:
+        plan.card("ex", span, ex, export_box, t0=export_at, z=2, crop=detail)
+        for name, label, box in zip(("up", "ex"), labels, (raw_box, export_box)):
+            layer.text("label_" + name, span, label, layer.k("dv_l"), .04, box[1] - .012)
+    runs = [dict(frames=it["f"], upload_seconds=it["src"]) for it in plan.items if it.get("pic") == up]
+    receipt = dict(layer.lay(span), frames=span, region=region, export_at=r4(export_at),
+                   upload_at=r4(src_at(tl, export_at)), upload_runs=runs)
+    if wipe:
+        return dict(receipt, device="grade_wipe", sweep=[sweep, f1], labels=[labels[0]])
+    return dict(receipt, device="split", upload_box=raw_box, export_box=export_box,
+                labels=labels, export_crop=detail)
+
+
+def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42), land_f=None, proof_f=None, caption_proof=None):
     """The hook: the clip as uploaded and Valmera's export of it side by side at the same instant (the export's own
     edit list maps every frame), each under its label; the export is the larger, in front. `land_f`: the frame the
-    export's picture lands on, given a hit there (the tutorial's opening beat, proof.lay_hook)."""
+    export's picture lands on, given a hit there (the tutorial's opening beat, proof.lay_hook). `proof_f`: the frame
+    the export's proof is complete (proof.proof_landing: the checklist's last item); from there the export card
+    pushes in to PROOF_W of the frame, so the split ends on a proof a phone can read (26 Nov: the checklist read at
+    25 px in a 0.55-wide card). No sound on frame 0-2: the split is already whole on frame 0 (26 Nov: a whoosh on f2
+    over nothing that moved)."""
+    region = tone_region(edl_b, export_at, export_at+(f1-f0)/FPS)
+    if region and not caption_proof and land_f is None:
+        compared = matched_grade(l1, f0=f0, f1=f1, upload=upload, export=export, edl=edl_b,
+                                 export_at=export_at, region=region, lib=lib)
+        if compared:
+            return compared
     L = Layer(l1, lib, "sp")
     P, R = L.P, L.R
     up_key, ex_key = P.video("dv_up", upload), P.video("dv_ex", export)
     tlb, _ = program(edl_b)
     desk(L, [f0, f1], up_key, upload, focus=focus, src0=src_at(tlb, export_at))
     P.block("veil", [f0, f1], [0.0, 0.0, 1.0, 1.0], "#07080B", z=1, op=0.35)
+    if caption_proof:
+        # Two independent panes. Keep the export at native canvas width so its own glyphs survive.
+        # The lower pane takes the caption-bearing part of the actual portrait frame.
+        up_h = W * upload["h"] / upload["w"] / H
+        up_w = min(.72, .21 / up_h)
+        up_box = [.035, .135, r4(.035 + up_w), r4(.135 + up_w * up_h)]
+        ex_box = [0., .40, 1., 1.]
+        crop_h = min(1., .60 * H * export["w"] / (W * export["h"]))
+        center = caption_proof.get("caption_y")
+        center = center if isinstance(center, (int, float)) and 0 <= center <= 1 else .76
+        # Leave the line low in the pane so the speaker’s face stays in its context.
+        top = max(0., min(1. - crop_h, center - .87 * crop_h))
+        P.synced("up", [f0, f1], tlb, export_at, up_key, up_box, z=2)
+        P.card("ex", [f0, f1], ex_key, ex_box, t0=export_at, z=3, crop=[0., top, 1., top+crop_h])
+        labels = ["RAW CLIP", "STUDIO EXPORT"]
+        for name, label, y in zip(("raw", "export"), labels, (.125, .386)):
+            L.text("lab_" + name, [f0, f1], label, L.k("dv_l"), .045, y)
+        rec = L.lay([f0, f1])
+        rec.update(device="split", frames=[f0, f1], upload_box=up_box, export_box=ex_box,
+                   export_at=r4(export_at), upload_at=r4(src_at(tlb, export_at)), labels=labels,
+                   caption_proof=caption_proof, export_crop=[0., top, 1., top+crop_h])
+        return rec
     ew = 0.55
     eh = ew * W * export["h"] / export["w"] / H
     ex_box = [r4(0.955 - ew), r4(0.255), r4(0.955), r4(0.255 + eh)]
@@ -966,17 +1094,33 @@ def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42
     n = f1 - f0
     land = [r4(v) for v in MF.settle(8, 0.94)] + [1.0] * max(n - 8, 0)     # frame 0 already reads: both cards whole, both labels set
     P.synced("up", [f0, f1], tlb, export_at, up_key, up_box, z=2, radius=0.008, shadow=dict(a=0.40, blur=0.03, dx=0, dy=0.012))
-    P.card("ex", [f0, f1], ex_key, ex_box, t0=export_at, z=3, radius=0.012, shadow=dict(a=0.5, blur=0.035, dx=0, dy=0.014), s=land)
+    push = None
+    if proof_f is not None and f0 + 6 <= f0 + int(proof_f) <= f1 - PROOF_PUSH_F - 6:
+        p0 = f0 + int(proof_f) + 2
+        ease = MF.ease_io(PROOF_PUSH_F)
+        u = [0.0] * (p0 - f0) + list(ease) + [1.0] * max(f1 - p0 - PROOF_PUSH_F, 0)
+        u = u[:n]
+        k = PROOF_W / ew
+        cx, cy = (ex_box[0] + ex_box[2]) / 2, (ex_box[1] + ex_box[3]) / 2
+        land = [r4(a * (1 + (k - 1) * q)) for a, q in zip(land, u)]
+        push = dict(f=[p0, p0 + PROOF_PUSH_F], x=[r4(cx + (0.5 - cx) * q) for q in u], y=[r4(cy + (0.5 - cy) * q) for q in u],
+                    fade=[r4(1.0 - min(1.0, q * 2.5)) for q in u])
+    P.card("ex", [f0, f1], ex_key, ex_box, t0=export_at, z=3, radius=0.012, shadow=dict(a=0.5, blur=0.035, dx=0, dy=0.014), s=land,
+           **(dict(x=push["x"], y=push["y"]) if push else {}))
     R.voices[L.k("dv_l")]["px"] = 44
     lab_cap = R.cap(L.k("dv_l")) / H
-    L.text("lab_up", [f0, f1], SPLIT_LABELS[0], L.k("dv_l"), up_box[0] + 0.01, up_box[1] - 0.014, DIM, 1.0)
+    labs = [L.text("lab_up", [f0, f1], SPLIT_LABELS[0], L.k("dv_l"), up_box[0] + 0.01, up_box[1] - 0.014, DIM, 1.0)]
     R.voices[L.k("dv_u")]["px"] = R.fit_px(L.k("dv_u"), SPLIT_LABELS[1], (ex_box[2] - ex_box[0]) * W, 46)
-    L.text("lab_ex", [f0, f1], SPLIT_LABELS[1], L.k("dv_u"), ex_box[0], ex_box[1] - 0.014, INK, 1.0)
-    L.hit("whoosh_soft_1", f0 + 2, "whoosh")
+    labs.append(L.text("lab_ex", [f0, f1], SPLIT_LABELS[1], L.k("dv_u"), ex_box[0], ex_box[1] - 0.014, INK, 1.0))
+    if push:                                   # the labels step back as the proof fills the frame
+        for it in labs:
+            if isinstance(it, dict):
+                it["op"] = push["fade"]
     if land_f is not None and f0 + 4 <= land_f < f1 - 2:
         L.hit("impact_1", land_f, "impact")
     rec = L.lay([f0, f1])
     rec.update(device="split", land_f=land_f, frames=[f0, f1], upload_box=up_box, export_box=ex_box, export_at=r4(export_at),
+               proof_push=push["f"] if push else None, proof_w=PROOF_W if push else r4(ew),
                upload_at=r4(src_at(tlb, export_at)), labels=list(SPLIT_LABELS), label_cap=r4(lab_cap))
     return rec
 
@@ -998,6 +1142,14 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
     comp = float(ui.get("composer_y") or 0.942)     # the typed line's height on the screen (fraction of its height)
     seat = lambda s, at: r4(at - (comp - 0.5) * ch * s)  # noqa: E731   the card's centre that keeps the composer at `at`
     box = [0.0, r4(-ch / 2 + 0.5), 1.0, r4(ch / 2 + 0.5)]
+    # Sent: the sentence's bubble (proof.sent_bubble, measured on the sent photograph) is framed under the watermark and
+    # settles up into place from below, so it never passes under the mark (26 Nov: the old fixed 0.30 rise carried the
+    # bubble from above the frame down through the mark at f178-180); the result then grows from a seat below it.
+    bub = ui.get("bubble")
+    sent_y = sent_b = None
+    if bub and 0.0 <= float(bub[0]) < float(bub[1]) <= 1.0:
+        sent_y = TOP_Y + 0.03 - (float(bub[0]) - 0.5) * ch * 1.15
+        sent_b = sent_y + (float(bub[1]) - 0.5) * ch * 1.15
     P.page("ground", [f0, f_p + PUSH_F], "#0A0A0C", "#0A0A0C")     # the base picture under the screen (the screen covers it)
     shots = list(ui["typing"])
     words = typed.split()
@@ -1016,6 +1168,10 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
             q = (f - f_t) / max(f_send - f_t, 1)
             s = 1.0 + 0.15 * (0.5 - 0.5 * math.cos(math.pi * q))     # to 1.15: the sentence at ~51 px, its lines still whole
             ys.append(seat(s, 0.74))
+        elif sent_y is not None:                    # sent: the bubble settles up into its place under the mark
+            q = MF.ease_io(8)[min(f - f_send, 7)]
+            s = 1.15
+            ys.append(r4(sent_y + 0.04 * (1.0 - q)))
         else:                                       # sent: the frame rises to the bubble
             q = MF.ease_io(8)[min(f - f_send, 7)]
             s = 1.15
@@ -1036,6 +1192,11 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
     k = P.image("dv_uis", os.path.join(ui["dir"], ui["sent"]), int(iw), int(ih))
     y_all, s_all = ys + [ys[-1]] * PUSH_F, ss + [ss[-1]] * PUSH_F
     f_sent_end = marks["board"][0] if board and marks.get("board") else f_p + PUSH_F
+    # The sent photo and seated export read together. Clear the photo as the export
+    # leaves its seat, before the expanding picture crosses the sentence.
+    screen_end = f_p + PUSH_F
+    if sent_b is not None and not (board and marks.get("board")):
+        screen_end = f_sent_end = f_p + SEAT_F + 1
     P.card("ui_sent", [f_send, f_sent_end], k, box, z=2, x=0.5, y=y_all[f_send - f0:f_sent_end - f0], s=s_all[f_send - f0:f_sent_end - f0])
     if board and marks.get("board"):            # the Shorts board the sentence made: the whole screen, a slow push in
         bw, bh = float(board["w"]), float(board["h"])
@@ -1050,29 +1211,40 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
         pc = (p0 + p1) / 2
         pbox = [0.0, r4(0.5 - (p1 - p0) * ch / 2), 1.0, r4(0.5 + (p1 - p0) * ch / 2)]
         up_key = P.video("dv_up", upload)
-        P.card("player", [f0, f_p + PUSH_F], up_key, pbox, t0=max(float(upload_t0), 0.0), z=3, x=0.5,
-               y=[r4(y + (pc - 0.5) * ch * s) for y, s in zip(y_all, s_all)], s=s_all)
+        P.card("player", [f0, screen_end], up_key, pbox, t0=max(float(upload_t0), 0.0), z=3, x=0.5,
+               y=[r4(y + (pc - 0.5) * ch * s) for y, s in zip(y_all[:screen_end-f0], s_all[:screen_end-f0])], s=s_all[:screen_end-f0])
     # the result grows out of the Studio: the export, a card on its own voice, to full frame
     ex_key = P.video("dv_ex", export)
     sb = [0.35, 0.35, 0.65, 0.65]
-    xs, ys2, zs = MF.pull(sb, PUSH_F, out=False)
+    if sent_b is not None and BOTTOM_Y - (sent_b + 0.075) >= 0.2:
+        # below the bubble, the export's own shape: the sentence stays readable while its result grows
+        top = sent_b + 0.075
+        hh = BOTTOM_Y - top
+        ww = min(hh * H * float(export["w"]) / float(export["h"]) / W, 0.9)
+        sb = [r4(0.5 - ww / 2), r4(top), r4(0.5 + ww / 2), r4(top + ww * W * float(export["h"]) / float(export["w"]) / H)]
+    xs, ys2, zs = MF.pull(sb, PUSH_F - SEAT_F, out=False)
+    xs = [r4((sb[0] + sb[2]) / 2)] * SEAT_F + xs
+    ys2 = [r4((sb[1] + sb[3]) / 2)] * SEAT_F + ys2
+    zs = [r4(v) for v in MF.settle(SEAT_F, 0.9)] + zs
     P.card("result", [f_p, f_p + PUSH_F], ex_key, sb, t0=float(marks.get("export_t0") or 0.0), z=4, radius=0.01, x=xs, y=ys2, s=zs)
     if later:                                   # on its own dark pill: the screen behind it is busy with the product's own text
         R.voices[L.k("dv_l")]["px"] = 44
         lab = LATER_LABEL.format(later)
         cap_l, w_l = R.cap(L.k("dv_l")) / H, R.width(L.k("dv_l"), lab) / W
-        y_l = TOP_Y + 0.06
-        P.block("later.pill", [f_p - 6, f_p + PUSH_F - 2], [0.06, r4(y_l - cap_l - 0.016), r4(0.10 + w_l), r4(y_l + 0.016)], "#07080B", z=5,
+        y_l = TOP_Y + 0.06 if sent_b is None else sb[1] - 0.02     # between the bubble and the growing result
+        label_end = min(screen_end, f_p + PUSH_F - 2)
+        P.block("later.pill", [f_p - 6, label_end], [0.06, r4(y_l - cap_l - 0.016), r4(0.10 + w_l), r4(y_l + 0.016)], "#07080B", z=5,
                 op=0.88, radius=0.012)
-        it = L.text("later", [f_p - 6, f_p + PUSH_F - 2], lab, L.k("dv_l"), 0.08, y_l, CYAN, 1.0, rise=True)
+        it = L.text("later", [f_p - 6, label_end], lab, L.k("dv_l"), 0.08, y_l, CYAN, 1.0, rise=True)
         it["z"] = 6
     L.hit("whoosh_soft_1", f0 + 1, "whoosh")
     # the key run starts with the first word and ends as the last lands (its peak placed so its head is on f_t)
     L.hit("typing_2", f_t + int(round(float((P.lib.get("typing_2") or {}).get("peak_s") or 0.0) * FPS)), "typing")
     L.hit("click_1", f_send + 1, "click")
-    L.hit("whoosh_soft_1", f_p + PUSH_F // 2, "whoosh")
+    L.hit("whoosh_soft_1", f_p + SEAT_F + (PUSH_F - SEAT_F) // 2, "whoosh")     # the reveal: the result taking the frame
     rec = L.lay([f0, f_p + PUSH_F])
-    rec.update(device="studio", frames=[f0, f_p + PUSH_F], board=bool(board), typing=[f_t, f_send], send_f=f_send, push=[f_p, f_p + PUSH_F], shots=len(keys) + 1,
+    rec.update(device="studio", frames=[f0, f_p + PUSH_F], board=bool(board), result_seat=[r4(v) for v in sb],
+               bubble=[r4(sent_y), r4(sent_b)] if sent_b is not None else None, typing=[f_t, f_send], send_f=f_send, push=[f_p, f_p + PUSH_F], shots=len(keys) + 1,
                typed=typed, typed_px=round(32.0 * W / iw * 1.15, 1) if iw <= 800 else round(16.0 * 3 * W / iw * 1.15, 1),
                screen=dict(w=int(iw), h=int(ih), view=ui.get("view")), later=later)
     return rec
@@ -1136,12 +1308,12 @@ def site(l1, *, f0, f1, page, export, lib, src0=0.0, url="valmera.io", action_me
 
 
 def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="wf2", focus=(0.5, 0.42), lead_f=3, later=None,
-             site_s=SITE_S):
+             site_s=SITE_S, proof_at=None, over_s=SITE_OVER_S, caption_proof=None):
     """The whole programme of a film with no narrator (owner, 17 Nov: "an extremely powerful edit ... then the CTA";
     "show the website directly"): split, studio, export, site (see above). `hook` / `window`: export seconds of the
     split and of the export's own stretch; `ui`: the recording's Studio photographs; `page`: its photograph of the
     site. Returns (l1, beats)."""
-    mk = showcase_marks(hook, window, len(typed.split()), lead_f=lead_f, site_s=site_s)
+    mk = showcase_marks(hook, window, len(typed.split()), lead_f=lead_f, site_s=site_s, over_s=over_s)
     e0, e1 = float(window[0]), float(window[1])
     l1 = dict(l1=1, sid=sid, seed=1117, fps=FPS, frame=[W, H], dur_f=mk["dur_f"], spine=[], voices={}, assets={}, items=[], sound=[],
               film=dict(grain=0.0, vignette=0.0, over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0)))
@@ -1149,17 +1321,33 @@ def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="
     f_p, f_x = mk["push"]
     f_e = mk["export"][1]                       # the picture gives way to the website here; the voice runs on to e1
     l1["items"].append(dict(id="export", k="shot", f=[f_x, f_e], pic="dv_ex", src=[r4(e0 + (f_x - f_p) / FPS), r4(e0 + (f_e - f_p) / FPS)]))
-    rec_s = split(l1, f0=0, f1=mk["split"][1], upload=upload, export=export, edl_b=edl_b, export_at=float(hook[0]), lib=lib, focus=focus)
+    proof_f = int(round((float(proof_at) - float(hook[0])) * FPS)) if proof_at is not None else None
+    rec_s = split(l1, f0=0, f1=mk["split"][1], upload=upload, export=export, edl_b=edl_b, export_at=float(hook[0]), lib=lib, focus=focus,
+                  proof_f=proof_f, caption_proof=caption_proof)
     rec_u = studio_screen(l1, marks=dict(mk, export_t0=e0), ui=ui, typed=typed, export=export, lib=lib, later=later, upload=upload,
                           upload_t0=rec_s["upload_at"] + mk["split"][1] / FPS)
     rec_c = site(l1, f0=f_e, f1=mk["dur_f"], page=page, export=export, lib=lib, src0=e0 + (f_e - f_p) / FPS)
     pictures = [dict(path=export["path"], f=[f_x, f_e], src=[r4(e0 + (f_x - f_p) / FPS), r4(e0 + (f_e - f_p) / FPS)], name="THE EXPORT")]
+    # Return to the matched original on the same moving clock. The last frames of the sweep
+    # give way directly to the untouched export on the speaker's closing words.
+    exchange = None
+    if rec_s.get("region") and f_e-f_x >= 4*FPS:
+        length = 2*FPS
+        start = (f_x+f_e-length)//2
+        at = e0+(start-f_p)/FPS
+        region = tone_region(edl_b, at, at+length/FPS)
+        if region:
+            exchange = matched_grade(l1, f0=start, f1=start+length, upload=upload, export=export,
+                                     edl=edl_b, export_at=at, region=region, lib=lib, wipe=True)
+            if exchange:
+                pictures = [dict(path=export["path"], f=[a,b], src=[r4(e0+(a-f_p)/FPS), r4(e0+(b-f_p)/FPS)],
+                                 name="THE EXPORT") for a,b in ((f_x,start),(start+length,f_e))]
     beats = dict(format="showcase", marks=mk, split=mk["split"], studio=mk["studio"], reveal=mk["push"], export=[f_p, f_e], cta=mk["site"],
                  pictures=pictures, events=sorted({s["event_f"] for s in l1["sound"]}),
                  look=[0, mk["split"][1] - 10, mk["typing"][0] + 20, mk["send"] + 6, f_x + 30, (f_x + f_e) // 2, f_e + 20, mk["dur_f"] - 2],
                  pace=dict(split_s=round(mk["split"][1] / FPS, 2), studio_s=round((f_p - mk["split"][1]) / FPS, 2),
                            export_s=round((f_e - f_p) / FPS, 2), cta_s=round((mk["dur_f"] - f_e) / FPS, 2)),
-                 style="showcase", devices=[rec_s, rec_u, rec_c], export_window=[r4(e0), r4(e1)], hook_window=[r4(hook[0]), r4(hook[1])])
+                 style="showcase", devices=[rec_s, rec_u, *([exchange] if exchange else []), rec_c], export_window=[r4(e0), r4(e1)], hook_window=[r4(hook[0]), r4(hook[1])])
     return l1, beats
 
 

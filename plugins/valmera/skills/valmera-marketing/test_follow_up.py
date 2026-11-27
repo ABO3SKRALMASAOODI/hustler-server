@@ -339,6 +339,8 @@ def test_marketing_story_sidecar(tmp_path, monkeypatch):
     lines = (tmp_path / "STORY.md").read_text().splitlines()
     assert len(lines) == 3
     assert all(s["say"] in line for s, line in zip(story["segments"], lines))
+    sources = (tmp_path / "SOURCES.md").read_text()                # the sourced receipt carries the same arc (26 Nov)
+    assert "## Story" in sources and all(line in sources for line in lines)
 
 
 def test_missing_display_phrases_use_authored_copy_without_rewriting_the_script():

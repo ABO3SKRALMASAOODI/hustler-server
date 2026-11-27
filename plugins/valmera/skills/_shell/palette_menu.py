@@ -16,8 +16,9 @@ TYPE_FAMILIES = ("type", "behind", "hud")
 REPLACES = ("counter", "staircase", "name", "ladder", "brackets", "typewriter", "redact", "type_run", "verb", "behind", "marquee",
             "chapter")
 # devices that act on the row as set (a marker behind it, a flip on its hit) or beside it (a box on the face, fine print,
-# the caption line read along)
-DECORATES = ("highlight", "flip", "track", "fineprint", "donut", "bar", "readalong")
+# the caption line read along, an analogy's dial whose needle moves on the spoken change): they draw none of the row's
+# words, so the row and its caption keep them
+DECORATES = ("highlight", "flip", "track", "fineprint", "donut", "bar", "readalong", "analogy_dial")
 # decorations that live as long as the row they mark; the others live to the end of the row's sentence
 ON_THE_ROW = ("highlight", "flip", "donut", "bar")
 # a figure device draws the whole row: the row is the figure and its unit, set by the device's own format
@@ -64,7 +65,8 @@ def ask_for(row, seg, text, a, b, n, limit=None):
     ``b`` is the row's window end (the film already clamps it before the next documentary subject); ``limit`` the end
     of the row's sentence, never past the next subject. A device that draws the row's words ends by ``b`` unless the
     model named its own end (then by ``limit``); a decoration ends with its row (``b``) or with its sentence
-    (``limit``): the caption line read along is that one sentence, never the rest of the film."""
+    (``limit``): the caption line read along is that one sentence, never the rest of the film. A decoration beside the
+    row (not ON_THE_ROW) keeps the end the model named for it (an analogy dial's ``until``), bounded by ``limit``."""
     perf = dict(row.get("perform") or {})
     dev = str(perf.pop("dev", "") or "")
     args = {k: v for k, v in perf.items() if k not in ("at", "until", "lands")}
@@ -78,8 +80,11 @@ def ask_for(row, seg, text, a, b, n, limit=None):
     end = int(limit) if limit is not None else int(b)
     end = max(end, int(b))
     if dev in DECORATES:
-        ask["until"] = int(b) if dev in ON_THE_ROW else end
-        ask["bound"] = ask["until"]
+        if dev in ON_THE_ROW or "until" not in ask:
+            ask["until"] = int(b) if dev in ON_THE_ROW else end
+            ask["bound"] = ask["until"]
+        else:
+            ask["bound"] = end
     else:
         ask["bound"] = int(b) if "until" not in ask else end
     return ask
@@ -90,6 +95,8 @@ def drawn(ask, text):
     draws its whole row; another draws the words it was handed (its text, name, title, small line, label, kicker,
     lines and words). A word it does not draw stays in the caption."""
     toks = str(text or "").split()
+    if ask.get("dev") in DECORATES:
+        return [False] * len(toks)
     if ask.get("dev") in FIGURES:
         return [True] * len(toks)
     args = dict(ask.get("args") or {})

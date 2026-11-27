@@ -70,6 +70,10 @@ def propose(ctx,script,catalogue,coverage=None):
     for fact in supplement['facts']:
         if fact['id'] in existing_ids:raise ValueError('additional fact ID collides with the dossier')
         dossier['facts'].append(fact);existing_ids.add(fact['id'])
+    from runtime_plan import minutes, plan, budget, develop
+    if not dossier.get('runtime_words'):
+        idea = script.get('idea_full', {})
+        plan(dossier, idea['runtime_minutes'] if 'runtime_minutes' in idea else minutes(ctx))
     old_script=dict(title=script['script']['title'],chapters=script['script']['chapters'],
                     segments=[{k:s[k] for k in ('say','chapter','beat','facts') if k in s} for s in script['script']['segments']])
     for i,segment in enumerate(old_script['segments']):
@@ -117,7 +121,9 @@ def propose(ctx,script,catalogue,coverage=None):
                 'Default to 10–20 minutes and 1900–2200 spoken words. A running time in the production brief takes precedence. '
                 'Write in 55–90 complete-sentence segments, with a hook in the first ten seconds and a real turn in each story chapter. '
                 'Each chapter comes from this story. Do not announce a question mechanically at every chapter or repeatedly explain what the audience will understand. '
-                'For draft lines with retained_archive_ids, use those verified alternatives where they fit. A primary passage can show the claim directly. '
+                'For draft lines with retained_archive_ids, use those verified alternatives where they fit. Show actual motion when it explains a mechanism. '
+                'When reporting a specific build, date, or statement from a primary record, set primary_fact to that fact ID on its word beat. '
+                'A presenter in third-party coverage cannot represent the subject. Follow an attributable firsthand source or use the original exhibit. '
                 'A requested_visual describes a search, never an acquired shot. For uncovered words choose a precise inspected replacement or rewrite around available evidence. '
                 'Use the actual available moving archive for most of the picture time, with original illustrations and cited records only where they genuinely explain an unfilmed event. '
                 'A picture may supply truthful context without visibly proving an invisible cause or motive; never imply that it depicts the wrong person, action, hardware, era or repair state. '
@@ -132,18 +138,20 @@ def propose(ctx,script,catalogue,coverage=None):
                 'facts:[verified fact IDs],pictures:[named subjects],design:null or a cited document {kind:"document",fact,title,mark} '
                 'or quotation {kind:"quote",fact,who,text} to show the original on the line invoking it,pace:"slow"|"steady"|"brisk",melody:"falling"|"rising"|"level"|"wide", '
                 'emphasis:[one or two spoken words],pause_after:0.22,direction:string, '
-                'visual_beats:[{word_start:zero-based whitespace-word index in this say,archive_ids:[catalogue IDs in intended order],label:optional truthful source-context label}]}]},why:string}. '
+                'visual_beats:[{word_start:zero-based whitespace-word index in this say,archive_ids:[catalogue IDs in intended order],label:optional truthful source-context label,primary_fact:optional cited fact id for a primary-source beat}]}]},why:string}. '
                 'Every segment begins with a visual beat at word_start 0. Introduce a new beat when the pictured subject changes. '
                 'Choose enough unseen source seconds for each beat at about three spoken words per second; each individual picture plays at most 7.8 seconds. '
                 'Use unique actual source intervals, not new crops of one still. Prefer the moving clips when they fit. A label clarifies a verified source, never manufactures its identity. '
                 'Keep archive_ids as literal catalogue IDs. Do not invent them. A segment facts list must support all its factual claims. '
                 'Return the full revised script, not editing notes.',
                 json.dumps(dict(idea={k:script.get('idea_full',{}).get(k) for k in ('title','protagonist','question','stakes','hook','turn','payoff','arc')},
-                                old_script=old_script,facts=dossier['facts'],archive=material,editorial_review=critique,repair_notes=notes)) + story.production_brief(ctx.args.get('line')),
+                                old_script=old_script,facts=dossier['facts'],archive=material,editorial_review=critique,repair_notes=notes)) + story.production_brief(ctx.args.get('line')) + '\n' + budget(dossier),
                 effort='high',max_tokens=36000,what='WF4 archive-conformed screenplay')
             if use.get('stop')!='completed':raise ValueError('archive screenplay response incomplete; preserved for diagnosis')
             proposal=story.writer.json_block(text)
-        sc=proposal['script'];check,issues=repair.check(sc,dossier,usable)
+        sc=develop(root,proposal['script'],dossier,usable)
+        proposal['script']=sc
+        check,issues=repair.check(sc,dossier,usable)
         if not checkpoint.exists():
             C.save(checkpoint,dict(proposal,usage=use,check=check,issues=issues))
         if issues:notes=issues;continue
@@ -185,15 +193,24 @@ def apply(ctx,script,ft,proposal,catalogue):
         updated['hook_line']=proposal['script']['segments'][0]['say'];updated['close_line']=proposal['script']['segments'][-1]['say']
         used={fid for s in proposal['script']['segments'] for fid in s['facts']}
         updated['facts_cited']=[f for f in proposal['dossier']['facts'] if f['id'] in used]
-        available={r['id']:r['clip'] for r in catalogue if r['usable']}
+        usable={r['id']:r for r in catalogue if r['usable']}
+        from archive_repair import exhibit_facts
+        bindings=exhibit_facts(usable, proposal['dossier']['facts'])
+        available={k:r['clip'] for k,r in usable.items()}
         conformed=dict(lines=[],voices=[],credits=[],spend=ft.get('spend',[]),
                        editorial=dict(pins=[],rejected=[],bank=list(available.values())))
         for i,segment in enumerate(proposal['script']['segments']):
             clips=[]
             for beat in segment['visual_beats']:
+                fact = beat.get('primary_fact')
+                if fact and fact in segment.get('facts', []):
+                    verified = [k for k in available if fact in bindings[k]]
+                    beat['archive_ids'] = list(dict.fromkeys([*verified,*beat['archive_ids']]))
                 for key in beat['archive_ids']:
                     c=copy.deepcopy(available[key]);c['catalogue_id']=key
-                    if beat.get('label'):c['editorial_label']=beat['label']
+                    if fact and fact in bindings[key]:
+                        c['editorial_label']=c.get('source_label') or c['source'].get('title','')
+                    elif beat.get('label'):c['editorial_label']=beat['label']
                     clips.append(c);conformed['credits'].append(dict(line=i,**c['source']))
             conformed['lines'].append(dict(i=i,clips=clips))
         pool=copy.deepcopy(ft['voices'])

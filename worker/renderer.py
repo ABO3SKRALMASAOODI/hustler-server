@@ -32,6 +32,7 @@ import engine_branch
 import audit
 import camera
 import captions as caplib
+import chroma_key
 import config
 import execution_inputs
 import db as dbx
@@ -369,6 +370,45 @@ def vignette_filter(intensity, aspect=None, en=""):
         except (TypeError, ValueError):
             asp = ""
     return f"vignette=a={0.30 + 0.55 * i_:.3f}{asp}{en}"
+
+
+def takes_tone(item):
+    """Whether an overlay is the take itself shown full-frame (the main
+    upload, fit cover or picture, opacity not animated): the render grades
+    it with the take's own keyed grade windows (take_tone_windows), so a
+    film that cuts its take in as a picture keeps one colour."""
+    return (item or {}).get("asset_key") == "main" \
+        and item.get("fit") in ("cover", "picture") \
+        and item.get("kind") in ("video", "image") \
+        and not isinstance(item.get("opacity"), list)
+
+
+def take_tone_windows(edl, o_start, o_dur):
+    """The grade windows cutaway_look_chain leaves to the footage (a keyed
+    tone, a hue isolate, skin protection: gradewin.grade_graph), whole over
+    [o_start, o_start + o_dur], with no region, LUT or ramp. A take overlay
+    (takes_tone) takes them too."""
+    a0, a1 = float(o_start), float(o_start) + float(o_dur)
+    out = []
+    try:
+        import gradewin
+        for it in (edl or {}).get("fx") or []:
+            if not isinstance(it, dict) or it.get("type") != "grade_window" \
+                    or it.get("region") or it.get("lut") \
+                    or it.get("start") is None \
+                    or it.get("ramp_in_f") or it.get("ramp_out_f"):
+                continue
+            need = gradewin._needs(it, it.get("brand_hue"))
+            if not (need.get("iso") or need.get("protect")
+                    or need.get("tone")):
+                continue
+            if float(it["start"]) <= a0 + 1e-3 and \
+                    float(it["end"]) >= a1 - 1e-3:
+                out.append(it)
+    except Exception as e:  # noqa: BLE001 - the overlay keeps the plain look
+        print(f"[render] take tone windows skipped ({str(e)[:120]})",
+              flush=True)
+    return out
 
 
 def cutaway_look_chain(edl, o_start, o_dur, aspect=None):
@@ -1035,6 +1075,17 @@ def frame_dims(src_w, src_h, ratio, *, delivery=False):
 DELIVERY_BOX = {"2k": (1440, 2560), "4k": (2160, 3840)}
 
 
+def stabilize_filter(intensity=0.5):
+    """The stabilize stylize's deshake chain. FFmpeg accepts only multiples
+    of 16 for the search radii (#1199); ``edge=mirror`` hides the small
+    transformed borders without a permanent crop. stabilize_video dry-runs
+    this exact chain to measure the jitter it removes."""
+    i_ = max(0.0, min(1.0, float(0.5 if intensity is None else intensity)))
+    radius = max(16, 16 * int(round((8 + 40 * i_) / 16)))
+    return (f"deshake=rx={radius}:ry={radius}:edge=mirror:"
+            "blocksize=8:search=less")
+
+
 def delivery_resolution_dims(W, H, resolution):
     """(W, H) of a final export at ``resolution`` ("2k" / "4k"): the HD master
     scaled up, aspect kept, until it fills that class's box (a 9:16 master
@@ -1047,6 +1098,32 @@ def delivery_resolution_dims(W, H, resolution):
     if k <= 1.0:
         return int(W), int(H)
     return _even(W * k), _even(H * k)
+
+
+# Contrast-adaptive sharpening at the upscaled size (p6311: "sharpen,
+# denoise, improve the detail (upscale)" got a plain lanczos 2K whose frames
+# read soft). Measured at 0.6 (26 Nov) on three p6311 frames scaled
+# 540->270 and back, against the real 540 frames: Laplacian detail 9.7 ->
+# 12.0, 10.7 -> 12.9, 7.8 -> 10.3 and PSNR 28.05 -> 28.21, 28.33 -> 28.49,
+# 28.31 -> 28.43 dB against plain lanczos: closer to the true picture, not
+# merely crisper. A malformed UPSCALE_DETAIL falls back to 0.6.
+def _upscale_detail(raw):
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0.6
+    return v if v == v and v >= 0 else 0.6
+
+
+UPSCALE_DETAIL = _upscale_detail(os.getenv("UPSCALE_DETAIL", "0.6"))
+
+
+def upscale_filter(W2, H2):
+    """The 2K/4K delivery scale: lanczos, then the detail step."""
+    chain = f"scale={W2}:{H2}:flags=lanczos"
+    if UPSCALE_DETAIL > 0:
+        chain += f",cas=strength={min(1.0, UPSCALE_DETAIL):.2f}"
+    return chain + ",setsar=1"
 
 
 def delivery_upscale(edl, out_path, workdir, cancelled_cb=None):
@@ -1066,7 +1143,7 @@ def delivery_upscale(edl, out_path, workdir, cancelled_cb=None):
     target = export_video_kbps(edl, float(info.get("duration") or 0.0))
     media.run(["ffmpeg", "-y", "-v", "error", "-i", out_path,
                "-map", "0:v:0", "-map", "0:a?",
-               "-vf", f"scale={W2}:{H2}:flags=lanczos,setsar=1",
+               "-vf", upscale_filter(W2, H2),
                *final_video_encode(W2, H2, fps, target), "-pix_fmt", "yuv420p",
                "-c:a", "copy", "-movflags", "+faststart", tmp],
               cancelled_cb=cancelled_cb)
@@ -4020,6 +4097,13 @@ def _fx_cuts(order, keep, edl_keep, blk_frames):
 # dissolves on a 348 s slideshow took 505 s, 350 of them in the kernel.
 WEAVE_MIN_WINDOWS = 4
 
+# Kept blocks that draw the same picture share one picture chain from this
+# many blocks on (renderer.build_filtergraph's _shared_picture): each chain
+# keeps its frame pools for the whole render, so per-block chains made peak
+# memory grow with the number of cuts (p6311: 156 spans, 2.4-2.8 GB, OOM).
+# Below it a programme's graph is the per-block one, byte for byte.
+SHARED_PICTURE_MIN_BLOCKS = 8
+
 
 # A scale filter starts one thread per core for itself, on top of the graph's
 # pool, and keeps them for the life of the graph: 300 scalers measured 4,537
@@ -4099,12 +4183,15 @@ def _weave_windows(parts, blocks, frames, windows, fps):
             woven.append((vlab, alab, bd))
             continue
         pieces = [halves[k - 1][1]] if head else []
-        if head + tail >= nb:
-            parts.append(f"[{vlab}]nullsink")
-        else:
-            parts.append(f"[{vlab}]trim=start_frame={head}:end_frame="
-                         f"{nb - tail},setpts=PTS-STARTPTS[fxk{k}]")
-            pieces.append(f"fxk{k}")
+        # A block the two windows cover whole still drains through its own
+        # piece, as an empty trim: a nullsink here is a sink of the graph,
+        # and ffmpeg asks the sink with the oldest stamp for frames first,
+        # which pulled the source to that block's place at the very start
+        # and held every frame before it in the other branches (p6311:
+        # 135 dissolves, 1.4-3.0 GB, the executor's OOM killer).
+        parts.append(f"[{vlab}]trim=start_frame={head}:end_frame="
+                     f"{max(head, nb - tail)},setpts=PTS-STARTPTS[fxk{k}]")
+        pieces.append(f"fxk{k}")
         if tail:
             pieces.append(halves[k][0])
         chain = ("".join(f"[{p}]" for p in pieces)
@@ -4192,6 +4279,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       wm_anchor_y=None,
                       plate_idx=None, plate_box=None, behind_inputs=None,
                       patch_inputs=None, cap_burn_offset=None,
+                      key_input=None,
                       picture_card_inputs=None, main_video_inputs=None,
                       loudness="auto", dialogue_gain=None,
                       dialogue_probe=False, focus_origin=None,
@@ -5042,10 +5130,39 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          f"[vptc{pj}]")
             vsrc = f"vptc{pj}"
     # Distant keep clusters read from their own bounded inputs (render_edl
-    # opens them only when nothing touches the [0:v] stream before the trims:
-    # no repaint patches, no picture-track pad). Each segment's video tap
-    # comes from the input that holds it; every frame it receives carries
-    # the same source timestamp (-copyts) the single split delivered.
+    # opens them only when nothing touches the [0:v] stream before the trims
+    # except a key on a still background). Decided here, before the key: a
+    # key then runs once per cluster input instead of on the whole source.
+    owners = None
+    if main_video_inputs and n > 1 and not patch_inputs and src_pad <= 0 \
+            and not fx_taps and (key_input is None
+                                 or chroma_key.per_input_ok(key_input[1])):
+        owners = []
+        for seg_a, seg_b in keep:
+            hit = [ix for ix, a, b in main_video_inputs
+                   if a - 0.01 <= seg_a and seg_b <= b + 0.01]
+            if not hit:
+                owners = None
+                break
+            owners.append(hit[0])
+    if n >= 1 and key_input is not None and owners is None:
+        # Chroma key (worker/chroma_key.py): the screen keyed out of the
+        # SOURCE picture and the new background laid under it, so every
+        # trim, framing, grade and caption downstream sees the composite.
+        # Only the frames the edit keeps (and its fx handles) go through
+        # it: a 60-minute upload cut to 10 keys 10 minutes, not 60.
+        handle_s = max([float(sp.get("h") or 0) / float(fps or 30.0)
+                        for sp in fx_juncs] or [0.0])
+        sel = chroma_key.kept_select(keep, 1.0 + handle_s)
+        if sel:
+            parts.append(f"[{vsrc}]{sel}[vkeysel]")
+            vsrc = "vkeysel"
+        kparts, vsrc = chroma_key.graph_parts(
+            vsrc, key_input[1], key_input[0], src_w or W, src_h or H)
+        parts.extend(kparts)
+    # With owners, each segment's video tap comes from the cluster input that
+    # holds it; every frame it receives carries the same source timestamp
+    # (-copyts) the single split delivered.
     if fx_taps:
         # Source handles for fx junctions read the main picture like the
         # blocks do: one more tap each (the bounded per-cluster reads stay
@@ -5061,25 +5178,29 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             for key in ("a_src", "b_src"):
                 if sp.get(key):
                     sp[key]["tap"] = next(t_iter)
-    owners = None
-    if main_video_inputs and n > 1 and not patch_inputs and src_pad <= 0 \
-            and not fx_taps:
-        owners = []
-        for seg_a, seg_b in keep:
-            hit = [ix for ix, a, b in main_video_inputs
-                   if a - 0.01 <= seg_a and seg_b <= b + 0.01]
-            if not hit:
-                owners = None
-                break
-            owners.append(hit[0])
 
     def _video_taps():
-        for ix in dict.fromkeys(owners):
+        uniq = list(dict.fromkeys(owners))
+        bgs = {}
+        if key_input is not None and key_input[0] is not None:
+            # one still background, one copy per cluster's key
+            bgs = {ix: f"kbg{ix}" for ix in uniq}
+            parts.append(f"[{key_input[0]}:v]split={len(uniq)}"
+                         + "".join(f"[{b}]" for b in bgs.values())
+                         if len(uniq) > 1 else
+                         f"[{key_input[0]}:v]null[{bgs[uniq[0]]}]")
+        for ix in uniq:
             segs = [i for i, o in enumerate(owners) if o == ix]
+            src = f"{ix}:v"
+            if key_input is not None:
+                kparts, src = chroma_key.graph_parts(
+                    src, key_input[1], bgs.get(ix), src_w or W, src_h or H,
+                    tag=f"ck{ix}_")
+                parts.extend(kparts)
             if len(segs) == 1:
-                parts.append(f"[{ix}:v]null[vin{segs[0]}]")
+                parts.append(f"[{src}]null[vin{segs[0]}]")
             else:
-                parts.append(f"[{ix}:v]split={len(segs)}"
+                parts.append(f"[{src}]split={len(segs)}"
                              + "".join(f"[vin{i}]" for i in segs))
 
     if speed and n >= 1:
@@ -5238,10 +5359,81 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 panel_conceal=(None if mask else card_layout[i][6]
                                if len(card_layout[i]) > 6 else None))
 
+        def _shared_key(i):
+            """What block i's picture chain depends on, when it is the plain
+            _normalize_video chain on the block clock (else None): blocks
+            with the same key draw the same picture from the same frames."""
+            if i in card_layout or blk_frames.get(("seg", i)) is None \
+                    or seg_out_len[i] is None or _fill_of(i):
+                return None
+            seg_focus, seg_mode = _frame_for(*keep[i])
+            if _fspans and seg_mode == "crop" and \
+                    follow.span_at(_fspans, _block_mid(*keep[i])):
+                return None
+            return (seg_focus, seg_mode)
+
+        def _shared_picture(run, key):
+            """Blocks ``run`` through ONE picture chain (p6311, ticket 1844).
+
+            Every block's chain (scale, crop, blurred backdrop, grade) keeps
+            its frame pools for the life of the graph, so memory grew with
+            the number of cuts: 156 spans of one 41 s upload peaked at 2.4-
+            2.8 GB and the executor's OOM killer took every dissolve. Here
+            each block is first put on its exact frames (block_tail's clock,
+            at source size: same frames, same count), the run is joined, the
+            picture is drawn once, and each block is cut back out by frame
+            count. The same frames meet the same per-frame filters, so the
+            picture is identical; the chain is one, however many cuts."""
+            seg_focus, seg_mode = key
+            u = f"sp{run[0]}"
+            for i in run:
+                nf = max(1, int(blk_frames[("seg", i)]))
+                parts.append(f"[segv{i}]tpad=stop_mode=clone:stop=2,"
+                             f"fps={fps:.3f},trim=end_frame={nf},"
+                             f"setpts=PTS-STARTPTS[{u}c{i}]")
+            # Restamped by frame number: the blocks are already exactly
+            # their frames, and concat's own offsets (a 1-frame block's
+            # length) must not let `fps` drop or repeat one.
+            parts.append("".join(f"[{u}c{i}]" for i in run)
+                         + f"concat=n={len(run)}:v=1:a=0,settb=AVTB,"
+                         f"setpts='round(N/{fxprims.fps3(fps):.3f}/TB)'"
+                         f"[{u}r]")
+            _normalize_video(parts, f"{u}r", f"{u}p", W, H, fps, seg_mode, u,
+                             focus=seg_focus,
+                             picture=(edl.get("frame") or {}).get("picture"),
+                             grade=block_grade, src_size=main_src_size)
+            parts.append(f"[{u}p]split={len(run)}"
+                         + "".join(f"[{u}s{i}]" for i in run))
+            at = 0
+            for i in run:
+                nf = max(1, int(blk_frames[("seg", i)]))
+                parts.append(f"[{u}s{i}]trim=start_frame={at}:end_frame="
+                             f"{at + nf},setpts=PTS-STARTPTS[v_seg{i}]")
+                at += nf
+
+        shared = {}
+        if n >= SHARED_PICTURE_MIN_BLOCKS:
+            keys = [_shared_key(i) for i in range(n)]
+            i = 0
+            while i < n:
+                j = i
+                while keys[i] is not None and j + 1 < n \
+                        and keys[j + 1] == keys[i]:
+                    j += 1
+                if j > i:
+                    shared[i] = list(range(i, j + 1))
+                    for k in range(i + 1, j + 1):
+                        shared[k] = None
+                i = j + 1
+
         for i in range(n):
             # frame_focus reaches ONLY the main footage: the focus point was
             # measured on the source video, so inserts (below) keep the
             # center crop.
+            if i in shared:
+                if shared[i]:
+                    _shared_picture(shared[i], _shared_key(i))
+                continue
             if i in card_layout:
                 cspan = card_layout[i][2] if len(card_layout[i]) > 2 else None
                 pspans = card_layout[i][4] if len(card_layout[i]) > 4 else None
@@ -5726,6 +5918,54 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"{pair}concat=n=2:v=1:a=0,{tail},format=gray[{uu}m]")
         return f"{uu}m"
 
+    # Many windows are drawn through shared chains (fxgraph.batch_junctions):
+    # a chain per window held its frame pools for the whole render.
+    batching = len(fx_juncs) >= SHARED_PICTURE_MIN_BLOCKS
+    if batching:
+        fxgraph.batch_junctions(parts, fx_plan)
+    # [key, [(raw label, out label, h)]]: source handles drawn through one
+    # picture chain per side and look (_shared_handles)
+    handle_batch = [] if batching else None
+
+    def _shared_handles(groups):
+        """Source handles through ONE picture chain per side and look
+        (ticket 1844, after review).
+
+        Each handle is h frames of the source past a cut, drawn through its
+        own scale, crop, blurred backdrop and grade: two chains a window,
+        each keeping its frame pools for the whole render (80 dissolves on
+        jump cuts: 159 backdrops, 1.8 GB at 1080x1920). Here a group's
+        handles, each already exactly its h frames on the render clock, are
+        joined in program order, drawn once and cut back out by frame
+        count: the same frames meet the same per-frame filters, so every
+        handle is the picture it was alone."""
+        picture = (edl.get("frame") or {}).get("picture")
+        f3s = fxprims.fps3(fps)
+        for g, ((side, seg_mode, seg_focus), rows) in enumerate(groups):
+            if len(rows) == 1:
+                raw, out, hh = rows[0]
+                _normalize_video(parts, raw, out, W, H, fps, seg_mode,
+                                 out[:-1] + "n", focus=seg_focus,
+                                 seg_dur=hh / f3s, frames=hh,
+                                 picture=picture, grade=block_grade,
+                                 src_size=main_src_size)
+                continue
+            u = f"hs{side}{g}"
+            total = sum(hh for _r, _o, hh in rows)
+            parts.append("".join(f"[{raw}]" for raw, _o, _h in rows)
+                         + f"concat=n={len(rows)}:v=1:a=0,settb=AVTB,"
+                         f"setpts='round(N/{f3s:.3f}/TB)'[{u}r]")
+            _normalize_video(parts, f"{u}r", f"{u}p", W, H, fps, seg_mode, u,
+                             focus=seg_focus, seg_dur=total / f3s,
+                             frames=total, picture=picture,
+                             grade=block_grade, src_size=main_src_size)
+            parts.append(f"[{u}p]split={len(rows)}"
+                         + "".join(f"[{u}s{k}]" for k in range(len(rows))))
+            at = 0
+            for k, (_raw, out, hh) in enumerate(rows):
+                parts.append(f"[{u}s{k}]trim=start_frame={at}:end_frame="
+                             f"{at + hh},setpts=PTS-STARTPTS[{out}]")
+                at += hh
     for spec in fx_juncs:
         h, ka, kb = spec["h"], spec["k"], spec["k"] + 1
         u = f"fxj{ka}"
@@ -5769,6 +6009,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 edge = float(keep[i][1]) if side == "a" else float(keep[i][0])
                 seg_focus = follow.centre_at(fspan, edge)
             hfill = _fill_of(i)
+            if handle_batch is not None and not hfill:
+                key = (side, seg_mode, seg_focus)
+                row = (f"{u}{side}r", f"{u}{side}h", h)
+                for group in handle_batch:
+                    if group[0] == key:
+                        group[1].append(row)
+                        break
+                else:
+                    handle_batch.append([key, [row]])
+                return f"{u}{side}h"
             _normalize_video(parts, f"{u}{side}r", f"{u}{side}h", W, H, fps,
                              seg_mode, f"{u}{side}n", focus=seg_focus,
                              seg_dur=h / f3, frames=h,
@@ -5827,6 +6077,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             fx_plan)
         if jw:
             fx_windows.append((spec["frame"], h, jw, ka))
+    if batching:
+        _shared_handles(handle_batch)
+        fxgraph.flush_junctions(parts, fx_plan)
 
     if _weaves_windows(fx_windows, pm, card_runs):
         # Many windows are woven in, not laid over: see _weave_windows.
@@ -6168,10 +6421,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # FFmpeg accepts only multiples of 16 here, despite exposing
             # rx/ry as integer options. Intermediate strengths used to
             # compile (e.g. 28 at .5) but fail at filter initialization.
-            radius = max(16, 16 * int(round((8 + 40 * i_) / 16)))
-            parts.append(
-                f"[{vlabel}]deshake=rx={radius}:ry={radius}:edge=mirror:"
-                f"blocksize=8:search=less[{out_lab}]")
+            parts.append(f"[{vlabel}]{stabilize_filter(i_)}[{out_lab}]")
         else:
             continue
         if card_runs and kind in ("shake", "motion_blur"):
@@ -6655,6 +6905,20 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         if look:
             # the Look of the footage it replaces, at the cutaway's own size
             chain += ["format=yuv420p"] + look
+        ov_src = f"{idx}:v"
+        tone = take_tone_windows(edl, o_start, o_dur) \
+            if takes_tone(item) else []
+        if tone:
+            # The take shown as a picture takes the take's own keyed grade,
+            # exactly the windows the footage under it gets (gradewin).
+            import gradewin
+            parts.append(f"[{idx}:v]{','.join(chain + ['format=yuv420p'])}"
+                         f"[ovt{j}]")
+            ov_src = f"ovt{j}"
+            for k, it in enumerate(tone):
+                ov_src = gradewin.grade_graph(parts, ov_src, f"ovt{j}_{k}",
+                                              it, rect[2], rect[3])
+            chain = []
         if not opacity_animated:
             chain.append("format=rgba")
         if not opacity_animated and op is not None and float(op) < 0.999:
@@ -6709,7 +6973,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             chain.append(f"rotate={rad:.4f}:c=black@0.0"
                          f":ow=rotw({rad:.4f}):oh=roth({rad:.4f})")
         chain.append(f"setpts=PTS+{o_start:.3f}/TB")
-        parts.append(f"[{idx}:v]{','.join(chain)}[ovp{j}]")
+        parts.append(f"[{ov_src}]{','.join(chain)}[ovp{j}]")
         # position: keyframed fractions of the MAIN frame, center-anchored.
         # Slide entrance/exit rides the position expression (quadratic ease
         # from/to one frame-width/height away).
@@ -7368,6 +7632,65 @@ def _plate_probe(edl, tl, src_path, src_size, W, H, frame_mode, frame_focus,
                        insert_locals=insert_locals)
 
 
+def has_picture(path):
+    """True if the file carries a video stream. Permissive on a probe
+    failure: a flaky probe must not drop a layer that has a picture."""
+    try:
+        out = media.run(["ffprobe", "-v", "error", "-select_streams", "v",
+                         "-show_entries", "stream=index", "-of", "csv=p=0",
+                         path], timeout=60)
+        return bool(str(out).strip())
+    except Exception:  # noqa: BLE001 - permissive, see above
+        return True
+
+
+def _sound_only_overlays(edl_dict, workdir, asset_locals=None):
+    """A video overlay whose file has NO picture plays as sound.
+
+    p6336 (27 Nov 2026, ticket #1938): a customer dropped a 4-hour lofi mix,
+    an audio-only .mp4, on the Studio timeline as a video layer. The graph
+    asked for that input's [N:v], which does not exist, so every preview of
+    every later version failed ("No video stream found in file", ffmpeg exit
+    234) and the project could not be rendered at all. The file is music: it
+    now sounds at the overlay's window on the music lane (offset by its
+    source start, under the speech like any bed), and the picture is the
+    programme's own. A file with neither picture nor sound adds nothing. The
+    stored EDL is untouched; only this render's copy changes, and the log
+    says what it did."""
+    overlays = (edl_dict or {}).get("overlays") or []
+    if not overlays:
+        return edl_dict
+    kept, moved = [], []
+    for item in overlays:
+        key = str(item.get("asset_key") or "")
+        if item.get("kind") != "video" or not key \
+                or key.lower().endswith(IMAGE_EXTS):
+            kept.append(item)
+            continue
+        local = _render_asset_source(key, "overlay", 0, workdir, asset_locals)
+        if asset_locals is not None and os.path.exists(local):
+            asset_locals[key] = local      # the render reads these bytes once
+        if has_picture(local):
+            kept.append(item)
+            continue
+        start = max(0.0, float(item.get("start") or 0.0))
+        end = start + max(0.0, float(item.get("duration_s") or 0.0))
+        print(f"[render] overlay {item.get('id')} ({key}) has no picture: "
+              f"it plays as sound at {start:.2f}-{end:.2f}s", flush=True)
+        if end - start > 0.001 and media.has_audio_stream(local):
+            moved.append({
+                "id": f"{item.get('id') or 'ov'}-sound", "storage_key": key,
+                "start": start, "end": end,
+                "offset_s": max(0.0, float(item.get("source_start_s") or 0.0)),
+                "provenance": "user_upload"})
+    if not moved and len(kept) == len(overlays):
+        return edl_dict
+    out = dict(edl_dict)
+    out["overlays"] = kept
+    out["music"] = list(out.get("music") or []) + moved
+    return out
+
+
 def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                        want_wm=False, wm_settings=None, cancelled_cb=None,
                        audio_only=False, asset_locals=None, suppress_outro=False,
@@ -7384,7 +7707,9 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     discard_audio, program_edges: see render_edl."""
     if program_edges is None:
         program_edges = (not render_fragment, not render_fragment)
-    canvas_dict, fx_dropped = strip_unknown_fx(edl_dict)
+    asset_locals = dict(asset_locals or {})
+    canvas_dict, fx_dropped = strip_unknown_fx(
+        _sound_only_overlays(edl_dict, workdir, asset_locals))
     if fx_dropped:
         fxgraph.note_dropped(edl_dict, fx_dropped)
     edl = validate_edl(canvas_dict,
@@ -7431,6 +7756,9 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
 
     def _fetch(key, tag, idx):
         return _render_asset_source(key, tag, idx, workdir, asset_locals)
+
+    edl, _ = _sound_only_overlays_to_music(
+        edl, lambda k: _fetch(k, "overlay", 0))
 
     music_inputs, insert_inputs, vo_inputs, sfx_inputs = [], [], [], []
     extra_inputs = []
@@ -8053,6 +8381,56 @@ def _noise_clean_local(nc, audio_path, index, workdir, fetch, applies_to):
         return None
 
 
+def _sound_only_overlays_to_music(edl, fetch):
+    """A video overlay whose file has no picture plays as sound.
+
+    A sound-only .mp4 (p6336, 27 Nov 2026: a lofi music mix) dropped on the
+    overlay track bound [idx:v] to nothing and every preview and export
+    failed with "Error binding filtergraph inputs/outputs". What the person
+    placed is a sound, so it is heard exactly where it sits: a music cue on
+    the overlay's own window (start, length, source offset), at the music
+    lane's default level and ducking. A file with neither picture nor sound
+    contributes nothing. Returns (edl, notes); the EDL is a copy and is only
+    rebuilt when something moved."""
+    overlays = edl.get("overlays") or []
+    kept, cues, notes = [], [], []
+    for item in overlays:
+        key = item.get("asset_key")
+        if item.get("kind") != "video" or not key or item.get("screen"):
+            kept.append(item)
+            continue
+        try:
+            local = fetch(key)
+        except Exception:  # noqa: BLE001 - the normal staging reports it
+            kept.append(item)
+            continue
+        if media.has_video_stream(local):
+            kept.append(item)
+            continue
+        start = max(0.0, float(item.get("start") or 0.0))
+        dur = max(0.0, float(item.get("duration_s") or 0.0))
+        if dur > 0.0 and media.has_audio_stream(local):
+            cue = {"id": f"{item.get('id') or 'ov'}_sound",
+                   "storage_key": key, "start": round(start, 3),
+                   "end": round(start + dur, 3),
+                   "offset_s": max(0.0, float(item.get("source_start_s")
+                                              or 0.0))}
+            cues.append(cue)
+            notes.append(f"overlay {item.get('id')} has sound but no picture: "
+                         "played as sound on its window")
+        else:
+            notes.append(f"overlay {item.get('id')} has no picture or sound: "
+                         "nothing to show")
+    if not notes:
+        return edl, notes
+    out = dict(edl)
+    out["overlays"] = kept
+    out["music"] = list(edl.get("music") or []) + cues
+    for n in notes:
+        print(f"[render] {n}", flush=True)
+    return out, notes
+
+
 def _render_asset_source(key, tag, idx, workdir, asset_locals=None):
     with _measure_render_detail("input_fetch_s"):
         return _render_asset_source_impl(key, tag, idx, workdir, asset_locals)
@@ -8311,7 +8689,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                   program_edges=program_edges)
     info = media.probe(src_path)
     src_dur = info["duration"]
-    render_dict = _repair_legacy_insert_boundaries(edl_dict)
+    asset_locals = dict(asset_locals or {})
+    render_dict = _repair_legacy_insert_boundaries(
+        _sound_only_overlays(edl_dict, workdir, asset_locals))
     # Version skew (INTERFACES.md §4.1): an fx type this lane does not know
     # is dropped and reported (rung omit) — never a failed render.
     render_dict, fx_dropped = strip_unknown_fx(render_dict)
@@ -8444,6 +8824,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     def _fetch(key, tag, idx):
         return _render_asset_source(key, tag, idx, workdir, asset_locals)
 
+    edl, _ = _sound_only_overlays_to_music(
+        edl, lambda k: _fetch(k, "overlay", 0))
+
     music_inputs, insert_inputs, vo_inputs, sfx_inputs = [], [], [], []
     extra_inputs = []
     next_idx = 1
@@ -8461,6 +8844,32 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         extra_inputs += ["-i", local]
         patch_inputs.append((next_idx, item))
         next_idx += 1
+
+    # Chroma key (green / blue screen): its background picture is one more
+    # input, keyed on the source clock right after the patches. A fetch that
+    # fails is tried again; a picture that still cannot be read keys onto the
+    # neutral gradient plate (never black, never a failed render) and the
+    # render log says why. A fringe clean needs no input.
+    key_input = None
+    if (edl.get("effects") or {}).get("key") and not audio_only:
+        args, key_item = chroma_key.input_args(
+            edl, workdir, info.get("width"), info.get("height"),
+            lambda k: _fetch(k, "overlay", next_idx))
+        if key_item.get("fallback"):
+            print(f"[render] key: {key_item['fallback']} — keyed onto the "
+                  "neutral gradient", flush=True)
+        if args and seek_main_source and "-stream_loop" in args:
+            # A looping video background on the seeking path starts on the
+            # main clock at its last whole loop before the seek point: never
+            # decoded from 0 up to the seek point, same frames as unseeked.
+            args, key_item = chroma_key.seek_background(
+                args, key_item, source_seek_s)
+        if args:
+            extra_inputs += args
+            key_input = (next_idx, key_item)
+            next_idx += 1
+        else:
+            key_input = (None, key_item)
 
     # Separated stems (round 97): when the EDL rebalances music vs voice,
     # the two stem files become inputs and build_filtergraph premixes them
@@ -8609,7 +9018,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         prepared = overlay_stream.prepare(
             overlay_items, edl, W, H, fps, workdir,
             lambda key: _fetch(key, 'overlay_stream', next_idx),
-            _overlay_input, cutaway_look_chain, cancelled_cb)
+            _overlay_input, cutaway_look_chain, cancelled_cb,
+            graph_only=lambda it: takes_tone(it) and bool(take_tone_windows(
+                edl, float(it['start']), float(it['duration_s']))))
         if prepared:
             local, item, count, overlay_folder = prepared
             extra_inputs += ['-i', local]
@@ -8646,7 +9057,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # picture-track pad), and never for an audio-only rebuild.
     main_video_inputs = None
     if seek_main_source and not patch_inputs and src_pad <= 0 \
-            and not audio_only:
+            and not audio_only and (key_input is None or
+                                    chroma_key.per_input_ok(key_input[1])):
         clusters = _keep_clusters(
             edl["keep"], config.KEEP_CLUSTER_GAP_S,
             _cluster_input_cap(info.get("width"), info.get("height")))
@@ -9005,6 +9417,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                  plate_idx=plate_idx, plate_box=plate_box,
                                  behind_inputs=behind_inputs,
                                  patch_inputs=patch_inputs,
+                                 key_input=key_input,
                                  cap_burn_offset=cap_burn_offset,
                                  picture_card_inputs=picture_card_inputs,
                                  motion_inputs=motion_inputs,

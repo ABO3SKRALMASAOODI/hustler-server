@@ -37,11 +37,20 @@ def conversation(tmp_path, monkeypatch, quiet_engines):
 
 
 def test_estimate_credits_the_report_once(conversation):
+    """The private estimate is the speaker's own words on screen; its report and its owner are credited once, in the
+    record, never as a research card or a byline over him."""
     script,pack,d = conversation
-    scene,_ = film.build(script,pack,"footage-cut",d)
-    ink = [i["t"] for i in scene["items"] if i["k"]=="word" and i["f"][0] <= 20 < i["f"][1]]
-    assert "20–30%" in " ".join(ink)
-    assert " ".join(ink).count("Ali Ghodsi") == 1
+    scene,beats = film.build(script,pack,"footage-cut",d)
+    ink = " ".join(i["t"] for i in scene["items"] if i["k"]=="word" and i.get("role") != "cap")
+    assert "20–30%" not in ink and "Ali Ghodsi" not in ink
+    estimates = [f for p in beats["research_facts"] for f in p["facts"]
+                 if (f.get("chain") or {}).get("stance") == "discussed_estimate"]
+    assert len(estimates) == 1 and estimates[0]["attribution"] == "Ali Ghodsi"
+    for w in pack["words"]["words"][:9]:
+        mid = round((w["start"]+w["end"])/2*30)+3
+        token = w["w"].strip(".,%").lower()
+        assert any(i.get("role") == "cap" and token in i["t"].lower() and i["f"][0] <= mid < i["f"][1]
+                   for i in scene["items"]), w["w"]
 
 
 def test_deployment_scope_comes_from_the_recorded_conversations(conversation):

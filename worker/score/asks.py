@@ -416,18 +416,22 @@ def _call(ctx, name, schema, system, content, max_tokens=4000, model=None):
 # ------------------------------------------------------------------ the ledger
 
 LEDGER_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["lang", "start", "piece", "asks"],
+    "type": "object", "additionalProperties": False, "required": ["lang", "start", "piece", "frame", "asks"],
     "properties": {
         "lang": {"type": "string", "description": "ISO code of the language the customer typed in."},
         "piece": {"type": "string", "enum": ["made", "plain"],
                   "description": "made when the request wants an edited piece made or remade with craft (a reel, short, promo, montage, highlights, make it better, add effects, make it fire, cinematic or professional, a new style); plain when it is a precise operation or a question."},
         "start": {"type": "string", "enum": ["current", "upload"],
-                  "description": "upload when the current film is an automatic first cut the product made by itself and the customer's words are about their uploaded video, not that cut (they ask to keep the upload's length, format or narration, or to work on a part of it the first cut left out); current otherwise, and always when the customer has built on the current film."},
+                  "description": "upload when the current film is an automatic first cut the product made by itself and the customer's words are about their uploaded video, not that cut (they ask to keep the upload's length, format or narration, or to work on a part of it the first cut left out); current otherwise, and always when the customer has built on the current film. A request that changes how the film on screen looks or sounds (a grade, a look, grain, music, captions, effects, text) and needs nothing of the upload the cut left out is current: it applies to the film they see (p6303: a grade-only ask reset a finished first cut to the bare upload and lost its titles, overlays and music)."},
+        "frame": {"type": "string", "enum": ["first_cut", "upload"],
+                  "description": "The picture shape of the film this request delivers when start is upload. first_cut when they ask for a vertical or short-form social film (a short, a reel, a TikTok, a story) or name the first cut's shape; upload when they name their video's own shape, or want a long film of the upload (a full edit, a condensed talk, lecture or presentation, a film minutes long), where the upload's own frame keeps what is on screen (projected slides, a board, several people) whole. first_cut when start is current."},
         "asks": {"type": "array", "maxItems": 24, "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["id", "said", "want", "kind", "span", "cut", "length", "items", "how", "where", "pass", "otherwise"],
+            "required": ["id", "said", "want", "kind", "span", "cut", "length", "items", "how", "where", "pass", "otherwise", "devices"],
             "properties": {
                 "id": {"type": "string", "description": "a1, a2, ..."},
+                "devices": {"type": "array", "items": {"type": "string", "enum": ["flash", "zoom", "sfx"]},
+                            "description": "Devices this ask wants added or retained. Exclude devices it asks to avoid or remove."},
                 "said": {"type": "string", "description": "The customer's own words for this ask, verbatim and short."},
                 "want": {"type": "string", "description": "One plain sentence: what the delivered film shows or does when this ask is done."},
                 "kind": {"type": "string", "enum": ["film", "change", "edit", "keep", "answer"]},
@@ -465,7 +469,9 @@ cut, for a film ask: new when they want a new cut made from the upload (a short,
 
 piece: made when the customer wants the video made into a piece with craft, whatever words they use: a reel, a short, a promo, a montage, highlights, "make it better", "add effects", "make it fire", cinematic, professional, a new style or vibe. The piece then gets a story, directed moments, display words and a score. plain when they ask for a precise operation (cut the silences, add captions, slow this part, change a title, add this song, remove a sound) or ask a question: that gets exactly that operation, done well.
 
-start: the current film may be an automatic first cut the product made by itself (its origin says made_by automatic_first_cut): a short piece of the upload, often reframed. When the customer has not built on it (customer_requests_since 0) and their words are about their video rather than that cut (a part of the upload the cut left out, the transcript or story as a whole, their full narration or length, the upload's own format), start is upload. start is current when they talk about the cut they saw, or have edited it since.
+start: the current film may be an automatic first cut the product made by itself (its origin says made_by automatic_first_cut): a short piece of the upload, often reframed. When the customer has not built on it (customer_requests_since 0) and their words are about their video rather than that cut (a part of the upload the cut left out, the transcript or story as a whole, their full narration or length, the upload's own format), start is upload. start is current when they talk about the cut they saw, or have edited it since, and when they only change how that film looks or sounds (a grade, a look, music, captions, effects, text) without needing footage, length or format the cut does not have.
+
+frame, when start is upload: the first cut was reframed by the product for a short. first_cut keeps that shape for a short or vertical film they ask for; upload keeps their video's own shape for a long film of the upload (p6307: a 10-minute condense of a 17-minute 16:9 class presentation kept the first cut's 9:16 centre crop, and the projected slides were cut off for all 611 s). A shape they name wins.
 
 how: look when the frames of the rendered film show it (text, pictures, framing, colour, motion). measure when the edit's numbers show it (length, captions on, music present, number of sound effects, loudness, aspect ratio). reply when only the reply can show it. There is no listening: a sound ask is measured.
 
@@ -500,6 +506,13 @@ def build(ctx, request, history=None, edl=None):
     own = patch._own_media(ctx, edl)
     inventory = [{k: v for k, v in r.items() if k != "frame"} for r in own]
     content += "\nAvailable customer uploads (including unused/new assets):\n" + json.dumps(inventory, ensure_ascii=False)
+    track_titles = []
+    if edl.get("music"):
+        import music_library
+        track_titles = [track["title"] for track in music_library.catalog() if track.get("title")]
+        content += ("\nAvailable soundtrack titles for this film. Use the conversation to resolve "
+                    "a selection. These titles describe available audio, not visual directions.\n"
+                    + json.dumps(track_titles, ensure_ascii=False))
     if any(r.get("frame") for r in own):
         import llm
         content = [{"type": "text", "text": content}]
@@ -519,7 +532,10 @@ def build(ctx, request, history=None, edl=None):
         usage = {"usd": round(usage["usd"] + again["usd"], 6), "s": round(usage["s"] + again["s"], 2), "model": again["model"]}
         if not value.get("asks"):
             raise ValueError("the ledger came back empty twice")
-    return settle(value, edl, usage)
+    ledger = settle(value, edl, usage)
+    if track_titles:
+        ledger["soundtrack_options"] = track_titles
+    return ledger
 
 
 def settle(value, edl, usage=None):
@@ -530,7 +546,7 @@ def settle(value, edl, usage=None):
     for n, a in enumerate(value.get("asks") or [], 1):
         if not isinstance(a, dict):
             continue
-        a = {k: a.get(k) for k in ("said", "want", "kind", "span", "cut", "length", "items", "how", "where", "pass", "otherwise")}
+        a = {k: a.get(k) for k in ("said", "want", "kind", "span", "cut", "length", "items", "how", "where", "pass", "otherwise", "devices")}
         a["id"] = f"a{n}"
         a["kind"] = a["kind"] if a["kind"] in ("film", "change", "edit", "keep", "answer") else "edit"
         a["span"] = a["span"] if a["span"] in ("whole", "part") else "part"
@@ -546,7 +562,13 @@ def settle(value, edl, usage=None):
     return {"lang": str(value.get("lang") or "en")[:8], "asks": asks, "route": route(asks),
             "piece": "made" if value.get("piece") == "made" and asks else "plain",
             "start": value.get("start") if value.get("start") in ("current", "upload") else "current",
+            "frame": "upload" if value.get("frame") == "upload" else "first_cut",
             "usage": usage or {}, "checks": [], "repairs": 0}
+
+
+def requested_devices(ctx):
+    ledger = getattr(ctx, "ask_ledger", None) or {}
+    return {device for ask in ledger.get("asks", []) for device in ask.get("devices") or []}
 
 
 def pass_asks(asks):
@@ -582,7 +604,9 @@ def editor_note(ledger, done_by=None):
             + (f" If it can't be done: {a['otherwise']}" if a.get("otherwise") else "")
             for a in ledger["asks"]]
     head = ("\n\nASK LEDGER: each thing the customer asked for and how it will be checked on the "
-            "rendered film before your reply goes out. Do every one; an ask you can't do, say so plainly.\n")
+            "rendered film before your reply goes out. Each want is their message already read in its "
+            "conversation (numbers, typos and references resolved): do it as written, never re-read it "
+            "into something else. Do every one; an ask you can't do, say so plainly.\n")
     tail = ""
     if done_by:
         tail = "\n" + done_by
@@ -607,9 +631,11 @@ CHECK_SCHEMA = {
         }}},
         "asks": {"type": "array", "items": {
         "type": "object", "additionalProperties": False,
-        "required": ["id", "seen", "rests_on", "state", "said_why_not", "made_against", "full_length", "line"],
+        "required": ["id", "seen", "rests_on", "state", "said_why_not", "made_against", "full_length", "line", "fulfilled_by"],
         "properties": {
             "id": {"type": "string"},
+            "fulfilled_by": {"type": "array", "items": {"type": "string"},
+                             "description": "Exact item ids from the film that fulfil this ask, or [] for an answer or a film-wide measurement."},
             "full_length": {"type": "boolean",
                             "description": "This ask wants the film as long as the whole upload, nothing of it cut (keep my full narration, my duration, do not shorten)."},
             "seen": {"type": "string", "description": "First: what the numbers, the frames or the reply show for this ask, with times and figures. At most two short sentences."},
@@ -644,7 +670,7 @@ said_why_not and made_against are facts about this request, for every ask: said_
 
 A keep is about what this request must leave alone or must not make: it is done when this request left it alone or did not make it, even when the film from before already had it. A keep of the upload's length (their full narration, their duration, don't shorten) is about the film itself: done only when the numbers show the whole upload kept (upload_kept_share near 1).
 
-unasked: harm on the film that no ask asked for and a viewer would see. A head or face cut by the frame or by a camera move (moves marked CUTS A FACE are measured; a found picture cropped through a face shows on the frames). A picture of a different person, place or event than the words name, or one the customer ruled out (the items list says what each found picture's source is). A film shorter than the upload while an ask keeps its length. A name or brand spelled in the captions or titles otherwise than the customer writes it or the film's own frames print it. Camera moves, sounds or cards nobody asked for that come again and again or crowd the picture (a punch-in every few seconds on a talking take). One row each, with where and the evidence. items: what to take out to undo it, never an item an ask asked for; [] when the fix is not taking something out. Leave it empty when you see none: a choice you would have made differently is not harm.
+unasked: harm on the film that no ask asked for and a viewer would see. A head or face cut by the frame or by a camera move (moves marked CUTS A FACE are measured; a found picture cropped through a face shows on the frames). A picture of a different person, place or event than the words name, or one the customer ruled out (the items list says what each found picture's source is). A film shorter than the upload while an ask keeps its length. A name or brand spelled in the captions or titles otherwise than the customer writes it or the film's own frames print it. Camera moves, sounds or cards nobody asked for that come again and again or crowd the picture (a punch-in every few seconds on a talking take). One row each, with where and the evidence. items: what to take out to undo it, never an item an ask asked for; [] when the fix is not taking something out. Leave it empty when you see none: a choice you would have made differently is not harm. What an ask asked for is never unasked harm, however the reply or the numbers describe it: flashes, strobes or flicker the customer asked for stay even when the reply says they pass a photosensitivity guideline, a flash budget, or that the export is marked as containing flashing; that mark is information for viewers, not harm to the film.
 
 An ask about the whole film is counted on the numbers under whole_film, measured from the edit: shots with a camera move out of the shots measured, the share of the film moving or under pictures, the transitions, the look, the sound and how much of the upload is kept, in order. Each camera move is listed under whole_film.moves with its window, kind, size, and the subject it was aimed at when one was located on that picture: an ask about moves toward something (eyes, a face, a vehicle, two subjects together) is counted on those rows, and the frames show what they can't. A keep ask is done when those numbers show nothing it protects was changed (no music, sound or speed added to a song asked to stay, all of the upload kept in order when the length must stay).
 
@@ -727,6 +753,27 @@ def output_size(edl, index=None):
                                         delivery=True))
     except Exception:  # noqa: BLE001 - no size is said as unknown, never guessed
         return None
+
+
+def export_size(edl, index=None):
+    """The exported file's size and how it is reached. Previews stay small so
+    they load fast; a 2K/4K export is upscaled at delivery (lanczos plus a
+    contrast-adaptive detail pass), so render_size alone reads as 'no
+    upscale' (p6311)."""
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    res = str(frame.get("resolution") or "").lower()
+    base = output_size(edl, index)
+    if not base:
+        return {"resolution": res or "hd"}
+    if res not in ("2k", "4k"):
+        return {"resolution": "hd", "size": base}
+    try:
+        import renderer
+        W2, H2 = renderer.delivery_resolution_dims(base[0], base[1], res)
+    except Exception:  # noqa: BLE001 - the class is still the truth
+        return {"resolution": res, "master_size": base}
+    return {"resolution": res, "master_size": base, "size": [W2, H2],
+            "upscale": "lanczos + contrast-adaptive detail at the export size"}
 
 
 def _pct(v):
@@ -992,6 +1039,7 @@ def measured(edl, shots=None, source_s=None, preview=None, index=None):
         "render_size": ([preview.get("width"), preview.get("height")] if preview.get("width")
                         else output_size(edl, index)),
         "rendered_seconds": preview.get("duration_s"),
+        "export": export_size(edl, index),
         "shots_measured": len(shots),
         "shots_with_a_camera_move": moved,
         "camera_moves": len(moving),
@@ -1025,7 +1073,8 @@ def facts(edl, preview=None, changes="", shots=None, source_s=None, index=None):
         "frame": edl.get("frame") or {"ratio": "source"},
         "captions": ("off" if not cap else {"mode": cap.get("mode") if isinstance(cap, dict) else "items",
                                             "style": (cap.get("style") if isinstance(cap, dict) else None)}),
-        "titles": [{k: t.get(k) for k in ("id", "text", "start", "end", "template", "font", "color", "size_scale")}
+        "titles": [{k: t.get(k) for k in ("id", "text", "start", "end", "template", "font", "color", "size_scale",
+                                              "x", "y", "font_size", "max_width", "text_align")}
                    for t in (edl.get("texts") or [])[:24] if isinstance(t, dict)],
         "music": [{k: m.get(k) for k in ("start", "end", "gain_db", "mute", "provenance")}
                   for m in edl.get("music") or [] if isinstance(m, dict)],
@@ -1213,7 +1262,7 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes="", fixed=None):
     rows = []
     for a in ledger["asks"]:
         if a["id"] in fixed:
-            rows.append(dict(fixed[a["id"]], id=a["id"]))
+            rows.append({"fulfilled_by": [], **fixed[a["id"]], "id": a["id"]})
             continue
         r = by_id.get(a["id"]) or {}
         state = r.get("state") if r.get("state") in ("done", "partly", "not_done", "cannot_tell") else "cannot_tell"
@@ -1235,13 +1284,25 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes="", fixed=None):
             # and the check saw exactly that: two facts, combined here, never one free answer.
             state, seen = "done", "their alternative was taken: " + seen
         row = {"id": a["id"], "state": state, "seen": seen[:400], "line": str(r.get("line") or "")[:300]}
+        row["fulfilled_by"] = [str(i) for i in r.get("fulfilled_by") or []]
         if r.get("full_length") is True:
             row["full_length"] = True
         rows.append(row)
     out = {"asks": rows, "usage": usage, "edl_version": None}
     if unasked is not None:
-        out["unasked"] = unasked
+        out["unasked"] = _unasked_only(rows, unasked)
     return out
+
+
+def _unasked_only(asks, findings):
+    protected = {item for ask in asks if ask["state"] == "done"
+                 for item in ask["fulfilled_by"]}
+    remaining = []
+    for finding in findings:
+        items = [item for item in finding["items"] if item not in protected]
+        if items or not finding["items"]:
+            remaining.append(dict(finding, items=items))
+    return remaining
 
 
 def harm_rows(raw):
@@ -1298,6 +1359,23 @@ def repair_note(ledger, verdict, extra=""):
                    "nothing of the kind the ask wants removed (0.0 s of dead air, no filler words), the film "
                    "already does what was asked: change nothing for it, never cut footage or music to make a "
                    "change, and say so with the measurement.")
+
+
+def unmoved_note(ledger, verdict):
+    """The follow-up when the editor answered the check without changing the
+    film: the asks still open, and that naming a miss is not doing it."""
+    want = {a["id"]: a for a in ledger["asks"]}
+    rows = [f"- {r['id']}: {want[r['id']]['want']}. On the film: {r['seen']}"
+            for r in open_asks(verdict) if r["id"] in want]
+    if not rows:
+        return None
+    return ("ASK CHECK: your last step changed nothing on the film, and these asks are still open:\n"
+            + "\n".join(rows) +
+            "\nThe customer asked for them as written; the want above is their message already read in "
+            "its conversation, its numbers and misspellings resolved. Change the film for each one now "
+            "with your tools and render. Naming a miss in the reply does not fix it, and a question "
+            "is not an answer to an ask that has one reading. Only an ask that no tool here can do at "
+            "all stays open, with the reason in one clause.")
 
 
 def reply_block(ledger, verdict):

@@ -304,8 +304,8 @@ def test_the_showcase_is_split_then_the_real_studio_then_the_edit_then_the_websi
     # every frame has one base picture; every sound lands on something that moves
     for f in range(l1["dur_f"]):
         assert sum(1 for it in l1["items"] if it["k"] == "shot" and it["f"][0] <= f < it["f"][1]) == 1, f
-    events = {"split": 2, "studio": mk["studio"][0] + 1, "typing": mk["typing"][0] + round(LIB["typing_2"]["peak_s"] * FPS), "send": mk["send"] + 1,
-              "push": mk["push"][0] + D.PUSH_F // 2, "site": mk["site"][0] + 1, "url": mk["site"][0] + 5}
+    events = {"studio": mk["studio"][0] + 1, "typing": mk["typing"][0] + round(LIB["typing_2"]["peak_s"] * FPS), "send": mk["send"] + 1,
+              "push": mk["push"][0] + D.SEAT_F + (D.PUSH_F - D.SEAT_F) // 2, "site": mk["site"][0] + 1, "url": mk["site"][0] + 5}
     assert sorted(s["event_f"] for s in l1["sound"]) == sorted(events.values())
 
 
@@ -427,3 +427,247 @@ def test_checked_keyboard_and_rendered_sound_follow_the_final_picture_clock():
     report = P.W3.rendered_sounds(l1, 30)
     assert [(row["t"], row["kind"]) for row in report["placed"]] == [(30.467, "ct")]
     assert report["placed"][0]["rendered"][0]["file"] == "click_2.flac"
+
+
+# 26 Nov 2026, Marketing film 01 (checklist): the opening never showed the completed checklist, a whoosh played on f2 over
+# a split already whole on f0, the sent prompt passed under the watermark at f178-180 and the result inset covered it at
+# f197. The checklist's three titles below are the real export's landings (records/01.json, export_check.visible) and the
+# bubble's place on the sent photograph is measured from the delivered frames (y 0.29-0.40 after the old 0.30 rise).
+CHECKLIST = [(7.933, 19.0), (8.633, 18.3), (10.766, 16.2)]
+
+
+def test_the_split_opens_on_the_completed_proof_and_pushes_in_until_it_reads(monkeypatch):
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: round(t, 3))
+    # the export check's receipt of the checklist (records/01.json and run fix58c-f1d224-310124: seen whole at 11.64 and
+    # 12.966 s; the edit cut away from the list by 13.17 s, measured on the copy's frames)
+    visible = [dict(seconds=[0.5, 5.533, 11.64, 27.15, 30.566]), dict(seconds=[7.933, 8.5, 10.766, 11.64, 12.966])]
+    span = P.proof_span(CHECKLIST, 27.0, visible)
+    assert span == (11.64, 12.966)
+    hook = P.showcase_hook(dict(file="/x/e.mp4"), 27.0, CHECKLIST, visible=visible)
+    assert hook[1] <= 12.966 - P.PROOF_LEAD_S + 1e-6 and abs(hook[1] - hook[0] - D.SPLIT_S) < 1e-6    # never held past the last sight
+    old = [7.633, 10.433]                                                   # the delivered split: the third question never in it
+    assert old[1] < 10.766 <= hook[1]
+    assert P.showcase_hook(dict(file="/x/e.mp4"), 24.2, [(6.31, 2.2), (13.9, 2.6)]) == [13.6, 16.4]  # no proof: as before
+    at = P.proof_push_at(span, hook)
+    assert span[0] <= at and at + (D.PROOF_PUSH_F + 8) / FPS <= hook[1] + 1e-6
+    l1, beats = D.showcase(upload=UPLOAD, export=EXPORT, edl_b=EDL_B, typed=TYPED, window=[0.0, 18.58], hook=hook, ui=UI, page=UI["site"],
+                           lib=LIB, lead_f=3, later="8 MIN", proof_at=at)
+    split = beats["devices"][0]
+    ex = next(it for it in l1["items"] if it["id"] == "sp.ex")
+    assert split["proof_push"] and ex["s"][-1] * ex["w"] >= D.PROOF_W - 1e-3 and abs(ex["x"][-1] - 0.5) < 1e-3
+    proof_f = int(round((at - hook[0]) * FPS))
+    assert all(v == 1.0 for v in ex["s"][8:proof_f])                      # the comparison holds until the proof is complete
+    assert not [s for s in l1["sound"] if s["event_f"] < 6]             # nothing sounds over a split already whole on f0
+    for lab in (it for it in l1["items"] if it["id"] in ("sp.lab_up", "sp.lab_ex")):
+        assert lab["op"][-1] == 0.0
+
+
+def test_a_checklist_drawn_as_one_title_lands_where_the_export_check_saw_it_whole(monkeypatch):
+    """The second recording of the same sentence drew the checklist as ONE title (items inside it): the edit list shows
+    no stack, the export check's receipt does (its real seconds, run fix58b-f1d224-f51886)."""
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: round(t, 3))
+    visible = [dict(seconds=[0.5, 5.533, 11.64, 27.15]), dict(seconds=[8.2, 9.366, 11.6, 11.64, 12.7])]
+    one_title = [(8.2, 18.0)]
+    assert P.proof_span(one_title, 27.0) is None                          # the edit list alone: no stack
+    assert P.proof_span(one_title, 27.0, visible) == (11.64, 12.7)
+    hook = P.showcase_hook(dict(file="/x/e.mp4"), 27.0, one_title, visible=visible)
+    assert hook[1] == round(12.7 - P.PROOF_LEAD_S, 3)
+
+
+def test_the_sent_prompt_stays_under_the_mark_and_clear_of_the_growing_result():
+    ui = dict(UI, bubble=[0.406, 0.485])
+    l1, beats = D.showcase(upload=UPLOAD, export=EXPORT, edl_b=EDL_B, typed=TYPED, window=[0.0, 18.58], hook=[13.65, 16.45], ui=ui,
+                           page=UI["site"], lib=LIB, lead_f=3, later="8 MIN")
+    mk = beats["marks"]
+    sent = next(it for it in l1["items"] if it["id"] == "st.ui_sent")
+    res = next(it for it in l1["items"] if it["id"] == "st.result")
+    ch = 1080 / 780 * 1688 / 1920
+    for f in range(sent["f"][0], sent["f"][1]):
+        y, s = sent["y"][f - sent["f"][0]], sent["s"][f - sent["f"][0]]
+        top, bot = y + (0.406 - 0.5) * ch * s, y + (0.485 - 0.5) * ch * s
+        assert top > D.MARK[3] + 0.02, (f, top)                         # never under the watermark
+        if res["f"][0] <= f:  # every frame where the prompt and result are both visible
+            i = f - res["f"][0]
+            sb = beats["devices"][1]["result_seat"]
+            h = (sb[3] - sb[1]) * res["s"][i]
+            assert res["y"][i] - h / 2 > bot, (f, res["y"][i] - h / 2, bot)   # the result grows below the sentence
+    pill = next(it for it in l1["items"] if it["id"] == "st.later.pill")
+    assert pill["y"] - pill["h"] / 2 > bot and pill["y"] + pill["h"] / 2 < beats["devices"][1]["result_seat"][1]
+
+
+def test_the_sent_bubble_is_measured_on_the_photograph(tmp_path):
+    from PIL import Image, ImageDraw
+    im = Image.new("RGB", (780, 1688), (10, 10, 12))
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 99, 779, 538], fill=(60, 60, 60))                  # the player
+    d.rounded_rectangle([90, 685, 760, 818], 18, fill=(46, 20, 22))     # the sentence's bubble
+    d.rectangle([0, 1540, 779, 1660], fill=(30, 30, 34))                # the composer
+    im.save(tmp_path / "sent.png")
+    b = P.sent_bubble(str(tmp_path / "sent.png"), [0.0588, 0.3187])
+    assert b and abs(b[0] - 685 / 1688) < 0.01 and abs(b[1] - 819 / 1688) < 0.01
+
+
+# 27 Nov 2026, Marketing film 02 (cassette to office PC): the typed sentence asked for a cassette and an office PC; the
+# Studio export (41.2 s, a Pro export ending on the edit, no card) showed the cassette at 13.866-15.766 s and the PC at
+# 34.2-36.6 s (records/02.json, export_check.visible). The film opened on the cassette and played the export only to
+# 17.57 s, so the PC never appeared and the cassette played twice. Pauses: measured on the source window the export
+# plays 1:1 (0cn3VBjfN8g 1828.15 s + 0-41.2 s); pictures: the receipt's own seconds.
+FILM02_VISIBLE = [dict(asked="Make a vertical short", seconds=[0.5, 5.15, 25.75, 40.7]),
+                  dict(asked="Show a cassette on cue", seconds=[13.866, 14.5, 15.45, 15.766]),
+                  dict(asked="Show an old office PC on cue", seconds=[34.2, 34.533, 36.05, 36.6])]
+FILM02_PAUSES = [(8.38, 8.62), (11.42, 11.7), (13.48, 13.72), (15.24, 15.66), (19.38, 19.76), (21.96, 22.24), (23.96, 24.22),
+                 (28.78, 29.28), (33.08, 33.58), (34.54, 34.96), (37.62, 37.86)]
+FILM02_PICS = [(13.85, 2.0), (34.15, 2.5)]
+
+
+def test_the_showcase_holds_the_turn_the_sentence_asks_for_and_opens_on_it(monkeypatch):
+    monkeypatch.setattr(P, "pauses", lambda path, lo, hi, **k: [p for p in FILM02_PAUSES if lo <= p[0] <= hi])
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: round(t, 3))
+    body = 41.2
+    asked = P.asked_spans(FILM02_VISIBLE, body)
+    assert asked == [(13.866, 15.766), (34.2, 36.6)]                       # the frame itself is not a moment
+    win = P.showcase_window(dict(file="/x/e.mp4"), body, FILM02_PICS, asked=asked)
+    assert win[0] <= 13.866 and 36.6 <= win[1] <= body                      # cassette, then the PC, both in the stretch
+    assert any(a <= win[0] <= b for a, b in FILM02_PAUSES) and any(a <= win[1] <= b for a, b in FILM02_PAUSES)  # between words
+    assert not any(a - 0.2 <= t <= a + d + 0.1 for a, d in FILM02_PICS for t in win)                          # never inside a picture
+    old = P.showcase_window(dict(file="/x/e.mp4"), body, FILM02_PICS)
+    assert old[1] < 34.2                                                     # the delivered behaviour: the PC never reached
+    hook = P.showcase_hook(dict(file="/x/e.mp4"), body, FILM02_PICS, visible=FILM02_VISIBLE)
+    assert hook[0] < 34.2 <= hook[1] <= 36.6 - P.PROOF_LEAD_S + 1e-6       # the split lands on the PC, not the cassette
+    assert not hook[0] <= 13.866 <= hook[1]
+    # the checklist film keeps its stretch: its only moment is inside the old window
+    visible01 = [dict(seconds=[0.5, 5.533, 11.64, 27.15, 30.566]), dict(seconds=[7.933, 8.5, 10.766, 11.64, 12.966])]
+    assert P.asked_spans(visible01, 27.0) == [(7.933, 12.966)]
+
+
+# 27 Nov 2026, Marketing film 03 (show both sides of the same page): the sentence asked for a diagram of the two page
+# views; the Studio export (25.933 s, no card) showed it at 15.5-22.266 s (records/03.json, export_check.visible) while
+# Cuban says "if you were inside of Google ... it would show one page. If you were outside of Google, it would show
+# another." The delivered film played the export 0-14.45 s and gave the picture to the site at 12.43 s, on "look at
+# the" (programme f568), so the diagram never came full frame. Pauses: measured on the source window the export plays
+# 1:1 (0cn3VBjfN8g 4572.69 s + 0-25.9 s, aligned on the delivered clean film, r = 0.89); pictures: the receipt's seconds.
+FILM03_VISIBLE = [dict(asked="Make a vertical short", seconds=[0.233, 16.21, 25.433]),
+                  dict(asked="use a diagram to show the two page views", seconds=[15.5, 22.266])]
+FILM03_PAUSES = [(1.28, 1.76), (1.96, 2.14), (5.44, 5.62), (8.66, 8.98), (10.84, 11.26), (13.3, 13.82), (14.2, 14.86),
+                 (18.46, 18.98), (19.96, 20.34), (23.98, 24.4), (25.72, 25.9)]
+FILM03_PICS = [(15.45, 6.87)]
+FILM03_WORDS = {"look": (11.98, 12.26), "at the": (12.26, 12.52), "another.": (21.98, 22.22), "time": (23.56, 23.94),
+                "for": (23.94, 24.48), "it.": (25.44, 25.76)}
+
+
+def test_the_showcase_completes_the_comparison_the_diagram_illustrates_before_the_site(monkeypatch):
+    monkeypatch.setattr(P, "pauses", lambda path, lo, hi, **k: [p for p in FILM03_PAUSES if lo <= p[0] <= hi])
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: round(t, 3))
+    ex, body = dict(file="/x/e.mp4"), 25.933
+    old = P.showcase_window(ex, body - P.endcard_s(), FILM03_PICS)          # the delivered code: a card trimmed that was not there
+    assert old[1] - D.SITE_OVER_S < FILM03_PICS[0][0]                        # the site took the picture before the diagram
+    assert FILM03_WORDS["look"][0] <= old[1] - D.SITE_OVER_S <= FILM03_WORDS["at the"][1]    # ... on "look at the"
+    asked = P.asked_spans(FILM03_VISIBLE, body)
+    assert asked == [(15.5, 22.266)]
+    win = P.showcase_window(ex, body, FILM03_PICS, asked=asked)
+    assert win[0] <= 15.5 and FILM03_WORDS["it."][1] <= win[1] <= body      # the diagram whole, the last sentence finished
+    assert 10.84 <= win[0] <= 11.26                                          # opens on "And we would both look at the same page"
+    assert win[1] - win[0] <= P.SHOWCASE_S[1]
+    over = P.site_handover(ex, win, D.SITE_OVER_S)
+    site = win[1] - over
+    assert site > 22.266 and site > FILM03_WORDS["another."][1]              # the comparison is said and seen before the site
+    assert 23.98 <= site <= 24.4                                             # and the site arrives between "time" and "for"
+    mk = D.showcase_marks([22.533, 25.333], win, 13, over_s=over)
+    assert (mk["export"][1] - mk["export"][0]) / D.FPS >= site - win[0] - 0.05
+    # film 02's stretch is unchanged by the export's own close (its export runs on 4.6 s past the PC)
+    monkeypatch.setattr(P, "pauses", lambda path, lo, hi, **k: [p for p in FILM02_PAUSES if lo <= p[0] <= hi])
+    assert P.showcase_window(ex, 41.2, FILM02_PICS, asked=P.asked_spans(FILM02_VISIBLE, 41.2)) == [11.56, 37.74]
+    # the opening split ends on the diagram whole, not on the vertical frame's row (main put it at 22.5-25.3 s)
+    hook = P.showcase_hook(ex, body, FILM03_PICS, visible=FILM03_VISIBLE)
+    assert 15.5 <= hook[0] and hook[1] <= 22.266 - P.PROOF_LEAD_S + 1e-6
+
+
+def test_showcase_supply_plays_the_checked_caption_on_both_recorded_clocks(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    # Film 04, recorded export-check frames and source ASR on the upload clock.
+    words = [(7.05, 7.68, "And"), (8.08, 8.33, "the"), (8.33, 9.05, "NVIDIA"),
+             (9.05, 10.08, "processors..."), (10.49, 10.64, "Or"), (10.64, 11.2, "GPUs"),
+             (11.2, 11.85, "rather,"), (12.16, 12.41, "you")]
+    visible = [dict(seconds=[4.92, 11.633, 25.766, 37.9], how="The 1080×1920 export frames Cuban."),
+               dict(seconds=[11.633, 25.766, 28.8], how='The on-screen captions show “processors or GPUs rather,” “ASICs right,” and “CPUs that were”.')]
+    edl = dict(keep=[[0, 39.4]], captions=dict(mode="from_transcript", emphasis_words=["GPUs", "ASICs", "CPUs", "AI"]))
+    rec = dict(upload=dict(file="u"), words=[dict(t0=a, t1=b, w=w) for a, b, w in words],
+               exports=[dict(file="e", dur=39.4, tag="final", edl_version=3)])
+    P.jsave(str(tmp_path / "record.json"), rec)
+    (tmp_path / "edl").mkdir()
+    P.jsave(str(tmp_path / "edl/v003.json"), edl)
+    script = dict(record=str(tmp_path / "record.json"), receipts=dict(visible=visible, typed=TYPED))
+    monkeypatch.setattr(P, "cut", lambda *args: None)
+    monkeypatch.setattr(P, "pauses", lambda *args, **kwargs: [])
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, **kwargs: t)
+    monkeypatch.setattr(P.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(P.PX, "sound_facts", lambda *args: {})
+    out = P.showcase_supply(SimpleNamespace(sid="caption"), script, str(tmp_path), str(tmp_path / "pack.json"))
+    prod = out["product"]
+    assert 8.90 <= prod["hook"][0] <= 9.05 and 11.85 <= prod["hook"][1] <= 12.16
+    assert prod["upload_at"] == prod["hook"][0]
+    assert 7.68 <= prod["window"][0] <= 8.08 and prod["window"][1] >= 28.8
+    assert prod["caption_proof"]["seen_s"] == 11.633
+    l1 = reel()
+    split = D.split(l1, f0=0, f1=120, upload=UPLOAD, export=EXPORT, edl_b=edl,
+                    export_at=prod["hook"][0], lib=LIB, caption_proof=prod["caption_proof"])
+    assert split["export_box"][2] - split["export_box"][0] >= .95
+    assert split["upload_box"][3] < split["export_box"][1]
+    assert split["export_at"] == split["upload_at"]
+    assert all(it["k"] != "word" or it["t"] in split["labels"] for it in l1["items"] if it["id"].startswith("sp."))
+
+
+def test_region_grade_opens_at_equal_scale_and_returns_on_a_registered_wipe():
+    # Film 05, Studio v6. The fitted picture has bars, and the second keep starts after a cut.
+    edl = dict(keep=[[0, 29.27], [34.07, 61.4]],
+               frame=dict(mode="crop", ratio="9:16", focus_x=.67, picture=[0, .035, 1, .965]),
+               fx=[dict(type="region", device="region_tone", effect="exposure", start=0, end=56.6,
+                        region=dict(shape="ellipse", box=[.31, .07, .92, .54]))])
+    l1, beats = D.showcase(upload=dict(UPLOAD, dur=61.4), export=dict(EXPORT, dur=56.6),
+                           edl_b=edl, typed=TYPED, window=[1, 11], hook=[28, 30.8], ui=UI, page=UI["site"], lib=LIB)
+    opening = beats["devices"][0]
+    a, b = opening["upload_box"], opening["export_box"]
+    assert a[2]-a[0] == b[2]-b[0] >= .9
+    assert a[3] <= b[1] and abs((a[3]-a[1]) - (b[3]-b[1])) < .0001
+    raw = [i for i in l1["items"] if i["id"].startswith("sp.up.")]
+    assert [i["f"] for i in raw] == [[0, 38], [38, 84]]
+    assert abs(raw[1]["src"][0] - 34.07) < .02
+    # The same physical feature must land at the same pane coordinate on both sides.
+    crop = raw[0]["crop"]
+    ex = next(i for i in l1["items"] if i["id"] == "sp.ex")["crop"]
+    import renderer
+    src, dst = renderer.picture_mapping(1920, 1080, 1080, 1920, "crop", (.67, None), edl["frame"]["picture"])
+    for axis in (0, 1):
+        for corner in (axis, axis+2):
+            actual = (crop[corner]-src[axis]) / (src[axis+2]-src[axis])
+            expected = (ex[corner]-dst[axis]) / (dst[axis+2]-dst[axis])
+            assert abs(actual-expected) < .001
+    wipe = next(i for i in l1["items"] if i["k"] == "join" and i.get("mode") == "seam")
+    assert beats["reveal"][1] < wipe["f"][0] < wipe["f"][1] < beats["cta"][0]
+    assert wipe["x"][0] <= 0 and wipe["x"][-1] >= 1
+    assert abs(wipe["src"][0] - (1 + (wipe["f"][0]-beats["reveal"][0])/30)) < .001
+
+
+def test_grade_showcase_continues_the_same_thought_after_send(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    edl = dict(keep=[[0, 29.27], [34.07, 61.4]],
+               fx=[dict(type="region", device="region_tone", start=0, end=56.6,
+                        region=dict(box=[.31, .07, .92, .54]))])
+    rec = dict(upload=dict(file="u"), exports=[dict(file="e", dur=56.6, tag="final", edl_version=6)])
+    P.jsave(str(tmp_path / "record.json"), rec)
+    (tmp_path / "edl").mkdir()
+    P.jsave(str(tmp_path / "edl/v006.json"), edl)
+    script = dict(record=str(tmp_path / "record.json"), receipts=dict(typed=TYPED),
+                  export_check=dict(spoken_thought=[1., 11.1]))
+    monkeypatch.setattr(P, "cut", lambda *args: None)
+    monkeypatch.setattr(P, "pauses", lambda path, a, b, **kw: [(3.98, 4.54)] if a < 3.98 < b else [])
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, **kw: t)
+    monkeypatch.setattr(P.subprocess, "run", lambda *args, **kw: None)
+    monkeypatch.setattr(P.PX, "sound_facts", lambda *args: {})
+    result = P.showcase_supply(SimpleNamespace(sid="grade"), script, str(tmp_path), str(tmp_path / "pack.json"))
+    product = result["product"]
+    assert product["hook"] == [1., 128/30]
+    assert product["window"] == [128/30, 11.1]
+    assert product["marks"]["site"][0] == product["marks"]["export_voice"][1]

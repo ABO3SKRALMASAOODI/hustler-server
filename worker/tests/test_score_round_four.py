@@ -121,12 +121,17 @@ def test_a_film_gets_its_look_as_one_plain_window_and_the_shadow_hue_and_the_key
     assert "protect" not in wins[0] and wins[1]["protect"] == ["skin"]
     gc = edl["effects"]["grade_custom"]
     assert set(gc) <= {"temperature", "tint"} and gc["temperature"] < 0       # the hue, and nothing graded twice
-    # the same film with a moment of its own take cut in: a cutaway takes plain windows only, so no keyed tone
+    # the same film with a moment of its own take cut in full-frame: the render grades that picture of the take with the
+    # take's keyed windows (renderer.takes_tone), so the film keeps its keyed tone (final review of 27 Nov: the collage
+    # spine's photo fills, #1830, turned it off for every collage film whose window moved)
+    import renderer
     c2 = S.compile_score(film(beats_over(idx, 3, lambda k, a, z: {"cut": [30, 999], "pic": ["main@2.0-3.0", "main"]} if k == 1 else {"pic": "main"}),
                               dna={"look": "cream_teal"}), index=idx, work_dir=work, bin_items={}, perception={})
     edl2, _, rep2 = lower.lower(c2.l1, work)
-    assert any(o.get("asset_key") == "main" for o in edl2["overlays"])
-    assert [f["id"] for f in edl2["fx"] if f["type"] == "grade_window"] == ["look.base"] and not rep2["look"]["keyed"]
+    takes = [o for o in edl2["overlays"] if o.get("asset_key") == "main"]
+    assert takes and all(renderer.takes_tone(o) for o in takes)
+    assert [f["id"] for f in edl2["fx"] if f["type"] == "grade_window"] == ["look.base", "look.key"] and rep2["look"]["keyed"]
+    assert [w["id"] for w in renderer.take_tone_windows(edl2, takes[0]["start"], takes[0]["duration_s"])] == ["look.key"]
 
 
 def test_a_compile_with_no_frames_keeps_the_plain_numbers():

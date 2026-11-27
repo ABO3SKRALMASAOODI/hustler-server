@@ -235,7 +235,9 @@ def test_add_finish_and_remove(tmp_path):
                                                   palette="sepia")
     ft.add_finish(ctx, "thermal", 4, 4.1, matte_weighted=True)
     ids = [i["id"] for i in ctx._edl["fx"]]
-    assert ft.remove_finish(ctx, ids="nope").startswith("REJECTED")
+    before = list(ctx._edl["fx"])
+    assert "already absent" in ft.remove_finish(ctx, ids="nope")
+    assert ctx._edl["fx"] == before
     out = ft.remove_finish(ctx, ids=ids)
     assert out.startswith("EDL") and ctx._edl["fx"] == []
     assert schemas.edl_signature(ctx._edl) == schemas.edl_signature(_base())

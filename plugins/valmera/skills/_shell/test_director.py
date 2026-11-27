@@ -322,12 +322,24 @@ def test_a_device_that_sets_his_words_and_got_none_sets_the_words_said():
 
 def test_a_counters_figure_word_lands_on_its_frame():
     """A counter's lands is a word: read as a frame it drew the count in the first second (five Cuban films, 20 Nov)."""
-    d = dict(asks=[dict(dev="counter", at=dict(w=20, seg=1, word="1,200"), args=dict(at=20, lands=21, to=1200, fmt="{n} MILES")),
+    d = dict(asks=[dict(dev="counter", at=dict(w=20, seg=1, word="1,200"), args=dict(at=20, lands=21, to=1200, fmt="{n} MILES", **{"from":0})),
                    dict(dev="staircase", at=dict(w=20, seg=1, word="x"), args=dict(lines=[dict(t="1,200", at=21), dict(t="MILES", at=22)]))])
     asks, _ = DR.palette_asks(d, lambda w: 10 * w, lambda i: (i * 100, i * 100 + 90), None, 400)
-    assert "at" not in asks[0] and (asks[0]["f"][0] if isinstance(asks[0]["f"], list) else asks[0]["f"]) == 200
-    assert asks[0]["lands"] == 210 and asks[0]["to"] == 1200
+    # A flat figure first shows on its spoken word: never ahead of it, never fictional values on the way.
+    assert "at" not in asks[0] and (asks[0]["f"][0] if isinstance(asks[0]["f"], list) else asks[0]["f"]) == 210
+    assert asks[0]["lands"] == 210 and asks[0]["from"] == asks[0]["to"] == 1200 and asks[0]["run"] == 0
     assert [x["at"] for x in asks[1]["lines"]] == [210, 220]
+
+
+def test_a_counter_over_a_sourced_progression_keeps_its_counted_start():
+    """'Count between two sourced endpoints': a progression bound from the sources (wf1_display.bind) keeps its from."""
+    facts = [dict(source=dict(url="https://example.com"), relation="Members", value="1,200",
+                  progression={"from": 300, "to": 1200})]
+    d = dict(asks=[dict(dev="counter", at=dict(w=20, seg=1, word="300"),
+                        args=dict(lands=24, to=1200, fmt="{n}", facts=facts, **{"from": 300}))])
+    asks, _ = DR.palette_asks(d, lambda w: 10 * w, lambda i: (i * 100, i * 100 + 90), None, 400)
+    assert asks[0]["from"] == 300 and asks[0]["to"] == 1200 and "run" not in asks[0]
+    assert (asks[0]["f"][0] if isinstance(asks[0]["f"], list) else asks[0]["f"]) == 200
 
 
 def test_the_strobe_floor_leaves_one_and_two_frame_shots_to_punctuation():

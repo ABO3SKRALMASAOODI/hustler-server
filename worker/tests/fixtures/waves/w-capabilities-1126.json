@@ -1,0 +1,5 @@
+{
+  "wave": "capabilities-1126",
+  "doc": "26 Nov 2026 (p6311, #935): chroma_key (tools_ext/key_tools.py, compositing) keys a green/blue screen onto a new background; stabilize_video and find_meme (tools_ext/steady_tools.py, picture) remove measured camera shake and find meme clips. No core catalog growth.",
+  "verbs": ["chroma_key", "stabilize_video", "find_meme"]
+}

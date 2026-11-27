@@ -18,7 +18,7 @@ from .faults import SceneFault
 from .plan import ANIM, ANIM_RECT, KINDS, PLAN_VERSION, Plan, canon, eligible, fingerprint, keep_frames, scene_of, sized
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE_VERSION = "scene-3"      # in every plan and so in every segment's hash: a segment kept by another engine is never taken for this one's
+ENGINE_VERSION = "scene-4"      # in every plan and so in every segment's hash: a segment kept by another engine is never taken for this one's
 # what strict mode refuses to draw around: these change the picture a customer was promised
 STRICT = ("missing", "not installed", "lacks a glyph", "no font here", "without exactly one")
 

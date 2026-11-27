@@ -419,6 +419,9 @@ class FxPlan:
         # substitute, params, est_ms}; devices.resolve_detail): a compiler
         # draws a substitute rung from ``ctx.device(item)``.
         self.devices = {}
+        # Windows collected while the renderer draws many junctions through
+        # shared chains (batch_junctions / flush_junctions).
+        self.junction_batch = None
         # CPU-ms the render's devices may still add (devices.render_budget_ms,
         # spent in program order); None: no cap (cost model unreadable).
         self.budget_ms = None
@@ -967,6 +970,7 @@ def apply_junction(parts, a_label, b_label, junction, plan):
             plan.note(it, "omit", "another junction effect already owns "
                       "this cut")
     mark = len(parts)
+    batched = _batch_mark(plan)
     ctx = StageCtx(plan, "junction", parts, None, a_label=a_label,
                    b_label=b_label, junction=junction,
                    h=int(junction["h"]))
@@ -977,9 +981,59 @@ def apply_junction(parts, a_label, b_label, junction, plan):
         _rollback(parts, mark, plan, group, e)
         out = None
     if out is None:
+        # the window's rows leave the batch with it: its sides are drained
+        # here, so a batched mix must not read them a second time
+        _batch_restore(plan, batched)
         parts.append(f"[{a_label}]nullsink")
         parts.append(f"[{b_label}]nullsink")
     return out
+
+
+def _batch_mark(plan):
+    """How many rows each list of the open junction batch holds."""
+    batch = getattr(plan, "junction_batch", None)
+    if not isinstance(batch, dict):
+        return None
+    return {k: len(v) for k, v in batch.items() if isinstance(v, list)}
+
+
+def _batch_restore(plan, mark):
+    """Drop the rows added to the junction batch since ``_batch_mark``."""
+    batch = getattr(plan, "junction_batch", None)
+    if mark is None or not isinstance(batch, dict):
+        return
+    for k, v in list(batch.items()):
+        if isinstance(v, list):
+            del v[mark.get(k, 0):]
+
+
+def batch_junctions(parts, plan):
+    """From here until ``flush_junctions(parts, plan)``, compilers that can
+    draw many windows through one chain (junctions_v2's dissolve) collect
+    them instead of drawing each alone; the labels they return are defined
+    by the flush. Each graph build has its own batch (keyed by ``parts``)."""
+    if plan is not None:
+        plan.junction_batch = {"parts": parts}
+
+
+def flush_junctions(parts, plan):
+    """Draw every window collected since ``batch_junctions``. A compiler's
+    flush defines every label its windows returned whatever happens: a
+    batch it cannot draw together it draws window by window
+    (junctions_v2._Junction.flush_junctions)."""
+    batch = getattr(plan, "junction_batch", None) if plan is not None \
+        else None
+    if plan is not None:
+        plan.junction_batch = None
+    if not isinstance(batch, dict) or batch.get("parts") is not parts:
+        return
+    seen = set()
+    for comp in list(plan._compilers.values()):
+        fn = getattr(comp, "flush_junctions", None)
+        if fn is None or id(comp) in seen:
+            continue
+        seen.add(id(comp))
+        fn(parts, plan, batch)
 
 
 def junction_overlay(parts, vlabel, windows, plan):

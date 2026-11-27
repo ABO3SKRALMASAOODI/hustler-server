@@ -170,13 +170,9 @@ def test_plan_to_music_writes_one_batch_with_its_intent(monkeypatch):
     assert len(ctx.lines) == 1 and "no sound" not in out.lower()
 
 
-def test_strobe_needs_the_users_ask(monkeypatch):
+def test_editor_chosen_strobe_survives_without_reinterpreting_the_request(monkeypatch):
     modes = {"verse": "strobe"}
     ctx = ctx_with(monkeypatch, pool())
-    out = MT.plan_to_music(ctx, 0, 18, modes=modes)
-    assert "flash safety" in out
-    assert not [f for f in ctx.edl["fx"] if f["type"] == "strobe"]
-    ctx = ctx_with(monkeypatch, pool(), msg="strobe the verse please")
     out = MT.plan_to_music(ctx, 0, 18, modes=modes)
     st = [f for f in ctx.edl["fx"] if f["type"] == "strobe"]
     assert len(st) == 1 and all(fr["hold_f"] == 2 for fr in st[0]["frames"])
@@ -233,7 +229,7 @@ def test_a_recorded_montage_replans_deterministically(monkeypatch):
 def test_a_song_swap_recuts_the_montage_on_the_new_track(monkeypatch,
                                                          tmp_path):
     ctx = ctx_with(monkeypatch, pool())
-    MT.plan_to_music(ctx, 0, 18, seed=4)
+    MT.plan_to_music(ctx, 0, 18, seed=4, modes={"verse": "strobe"})
     e = json.loads(json.dumps(ctx.edl))
     e["music"][0]["storage_key"] = "music/new.mp3"
     e["music"][0]["offset_s"] = None
@@ -242,6 +238,7 @@ def test_a_song_swap_recuts_the_montage_on_the_new_track(monkeypatch,
     e2, notes = hooks.on_music_swap(e, "m1", "m1")
     assert any("re-cut on the new track" in n for n in notes), notes
     e2 = schemas.validate_edl(e2, S.DUR).model_dump()
+    assert any(it["type"] == "strobe" for it in e2["fx"])
     new = rmap(bpm=150.0, n=50, intro=0)
     kick_f = {montage.frame(o["t"], 25.0) for o in new["onsets"]}
     starts = [montage.frame(o["start"] + 0.005, 25.0)
@@ -485,3 +482,32 @@ def test_library_clusters_alike_shots_across_clips():
     ents = [{"desc": d1}, {"desc": d2}, {"desc": d3}]
     library.cluster(ents)
     assert ents[0]["cluster"] == ents[1]["cluster"] != ents[2]["cluster"]
+
+
+def test_ramp_window_off_kept_footage_is_fitted_not_refused():
+    # p6238 (24 Nov): "window is not on kept footage" ended the turn partial.
+    ctx = S.Ctx(S.edl(keep=((0.0, 10.0), (12.0, 20.0))))
+    out = MT.set_speed_ramp(ctx, 15.0, 30.0, low=0.6, hold=0.3,
+                            allow_duplicates=True, allow_speech=True)
+    assert not out.startswith("REJECTED"), out
+    assert "fitted to the kept shot" in out, out
+
+
+def test_ramp_window_across_a_cut_stays_in_the_shot_it_covers_most():
+    from timeline import Timeline
+    tl = Timeline([[0.0, 10.0], [12.0, 20.0]])
+    kind, a, b = MT._ramp_window(tl, 8.0, 15.0)
+    assert kind == "shot" and a == pytest.approx(10.0) and b < 15.0 + 1e-6
+    kind, a, b = MT._ramp_window(tl, 30.0, 33.0)
+    assert kind == "shot" and b <= 18.0 + 1e-6 and a >= 15.0 - 1e-6
+
+
+def test_keep_duration_ramp_slows_then_catches_up_to_the_same_length():
+    # #1656 (p5968): slow motion that keeps the film's duration.
+    import ramps
+    spans, rep = MT._duration_kept_ramp(ramps, 2.0, 8.0, 0.5, "ease_in_out",
+                                        60.0, 30.0, "rp_", False)
+    played = sum((s["end"] - s["start"]) / s["factor"] for s in spans)
+    covered = sum(s["end"] - s["start"] for s in spans)
+    assert abs(played + (6.0 - covered) - 6.0) < 0.05
+    assert min(s["factor"] for s in spans) < 0.75 < 1.2 < max(s["factor"] for s in spans)

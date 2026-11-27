@@ -141,18 +141,27 @@ def raster_sprite(o):
         bx0, by0, bx1, by1 = 0.0, -px, adv / ss, 0.0
     x0, y0 = int(math.floor(bx0)) - pad, int(math.floor(by0)) - pad
     x1, y1 = int(math.ceil(bx1)) + pad, int(math.ceil(by1)) + pad
-    w, h = (x1 - x0) * ss, (y1 - y0) * ss
+    # Keep layout in output pixels. Fit the padded raster by dropping whole
+    # mip levels, including below 1:1 for a line wider than a native texture.
+    density = ss
+    while max(x1 - x0, y1 - y0) * density > BIG_PAGE:
+        density /= 2
+    w, h = math.ceil((x1 - x0) * density), math.ceil((y1 - y0) * density)
     if len(lines):
         ln = lines.copy()
         ln[:, [0, 2]] -= x0 * ss
         ln[:, [1, 3]] -= y0 * ss
+        if density != ss:
+            ln *= density / ss
         cov = coverage(ln, w, h)
     else:
         cov = np.zeros((h, w), np.float32)
     arr = np.empty((h, w, 4), np.uint8)
-    for i, ch in enumerate((cov, soft(cov, o["sig_s"] * ss), soft(cov, o["sig_g"] * ss), sdf(cov, SPREAD * ss))):
+    for i, ch in enumerate((cov, soft(cov, o["sig_s"] * density), soft(cov, o["sig_g"] * density), sdf(cov, SPREAD * density))):
         arr[..., i] = (ch * 255 + 0.5).astype(np.uint8)
-    meta = {"w": x1 - x0, "h": y1 - y0, "x0": x0, "y0": y0, "ss": ss,
+    # A partial last texel extends the quad into transparent padding. Each
+    # axis still samples at exactly the same density about the original pen.
+    meta = {"w": w / density, "h": h / density, "x0": x0, "y0": y0, "ss": density,
             "cx": (bx0 + bx1) / 2, "cy": (by0 + by1) / 2, "adv": adv / ss,
             "dx": (o["dx_slot"] - adv / ss) / 2, "px": px}
     return arr, meta
@@ -233,6 +242,7 @@ def pack(sprites):
         while not placed:
             if cur is None:
                 cur = new_page()
+                cur_index = len(pages)
                 pages.append(cur)
             for sh in cur["shelves"]:
                 if sh["h"] >= h and sh["x"] + w <= PAGE:
@@ -250,7 +260,7 @@ def pack(sprites):
                 else:
                     cur = None
         cur["items"].append((k, x, y))
-        out[k] = dict(meta, page=len(pages) - 1, ax=x, ay=y, aw=w, ah=h)
+        out[k] = dict(meta, page=cur_index, ax=x, ay=y, aw=w, ah=h)
     arrays = []
     for pg in pages:
         wmax = max((x + sprites[k][0].shape[1] for k, x, y in pg["items"]), default=GRID)

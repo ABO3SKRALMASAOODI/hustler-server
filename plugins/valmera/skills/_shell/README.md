@@ -41,9 +41,11 @@ earlier one-film podcast workflow and is not part of it.
 **Model calls** (`llm.py`): the OpenAI rung by default since 14 Nov 2026 (`gpt-6.1-sol`, the key read from the
 backend's `.env` into the process, never printed); `SHELL_LLM=anthropic` under `claude_trial_env.sh` for Claude.
 
-**The worker** (`brand.worker_dir()`): the checkout beside the plugin when it holds this week's engines
-(`scene/run.py`, `footage/run.py`, `music_film.py`), else `worktrees/skill-main/worker`, which
-`.valmera/sync_skill.sh` keeps at main. The installed copy under `hustler-server/` and Codex's cache both reach it.
+**The worker** (`brand.worker_dir()`): `VALMERA_WORKER` when set (the factory sets its own); else the checkout beside
+the plugin when it is on the workflow worker line (its `scene/text_layout.py` has `shared_source_credits`); else
+`worktrees/skill-worker/worker`, which `.valmera/sync_skill.sh` keeps at `claude/cr-worker-1120`, so a film started by
+hand from the installed copy or Codex's cache builds on the factory's engines; else the checkout beside the plugin
+(CI); else `worktrees/skill-main/worker`.
 
 A workflow module (`wf1.py` is the first) has `ideas(ctx)` and `script(ctx, ideas)`. It may
 replace `supply`, `score`, `render` or `check` when its films need it (narration for WF3/WF4,

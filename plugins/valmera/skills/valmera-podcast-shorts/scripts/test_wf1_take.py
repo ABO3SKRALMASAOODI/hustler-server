@@ -168,11 +168,12 @@ def test_a_rebuild_with_no_open_holds_adds_no_stress_moves(tmp_path, quiet_engin
     assert sup["coverage"]["unresolved_holds"] == [] and second["coverage"]["stress_moves"] == []
 
 
-@pytest.mark.parametrize("story_word,flashed", [(7, True), (3, False)])
-def test_the_story_turn_flash_snaps_to_a_real_cut_or_stays_off(tmp_path, quiet_engines, monkeypatch, story_word, flashed):
-    """Integration of the craft and take lanes (20 Nov): the story turn's flash lands on the film's real cut nearest it
-    (here the speaker change inside the two-shot), never on a join of its own inside a continuous shot; with no real
-    cut within a second there is no story flash, and the take is never split at the story turn."""
+@pytest.mark.parametrize("story_word,punched", [(7, False), (3, True)])
+def test_the_story_turn_flash_lands_on_a_real_cut(tmp_path, quiet_engines, monkeypatch, story_word, punched):
+    """Integration of the craft and take lanes (20 Nov): the story turn's flash lands on a real cut, never on a join of
+    its own inside a continuous shot. Since 08c8d142 (23 Nov) a story turn that no footage covers and that comes more
+    than three seconds before the payoff is the speaker's punch-in (a real cut to the close-up framing), so its flash
+    lands on that cut; a story turn near the payoff never splits the take and its flash snaps to the show's own cut."""
     words = _sup(tmp_path, cuts_two_shot())
     for i, w in enumerate(words["words"]["words"]):
         w["seg"] = 0 if i < story_word else 1 if i < 15 else 2
@@ -183,14 +184,15 @@ def test_the_story_turn_flash_snaps_to_a_real_cut_or_stays_off(tmp_path, quiet_e
     l1, beats = film.build(script, words, "footage-cut", dict(turn_seg=2, story_turn_seg=1, coverage_final=True))
     starts = {it["f"][0] for it in l1["items"] if it["k"] == "shot"}
     story_f = beats["story_turn_f"]
-    assert story_f is not None and story_f not in starts
     flashes = _flash_frames(l1)
-    assert set(flashes) <= starts
-    real = sorted(f for f in starts if 0 < f and abs(f - story_f) <= 30)
-    if flashed:
-        assert real and min(real, key=lambda f: (abs(f - story_f), f)) in flashes
+    assert story_f is not None and set(flashes) <= starts
+    framing = next((p for p in beats["coverage"]["take_pieces"] if p["f"][0] == story_f), None)
+    if punched:
+        assert framing and framing["punch"] and story_f in flashes
     else:
-        assert not real and len(flashes) == 1                              # the payoff's flash alone
+        assert framing is None and story_f not in starts
+        real = sorted(f for f in starts if 0 < f and abs(f - story_f) <= 30)
+        assert real and min(real, key=lambda f: (abs(f - story_f), f)) in flashes
 
 
 def test_scarce_footage_keeps_live_argument_and_attributes_listener_cut(tmp_path,quiet_engines,monkeypatch):
@@ -415,7 +417,10 @@ def test_adjacent_survey_rows_reuse_clean_panel_then_show_live_speaker(tmp_path,
         assert row["source_evidence"]["time_s"]==102
         assert any(it.get("src") and it["f"]==row["f"] for it in scene["items"])
     assert any(it.get("presenter_insert") and it["crop"]==tile for it in scene["items"])
-    assert [p["facts"][0]["value"] for p in beats["display_facts"]] == ["Possibly lower"]
+    # Research claims and their estimate labels stay in the record; the survey panel and live speaker keep the frame.
+    assert beats["display_facts"] == []
+    assert "Possibly lower" in [p["facts"][0]["value"] for p in beats["research_facts"]]
+    assert not any(it.get("t") == "Possibly lower" for it in scene["items"])
     assert source.shared_presenter_region(pack["coverage"]["source_reading"]) == tile
     repaired, report = film.build(script, pack, "window", dict(coverage_final=True,
         reframe=[dict(window=rows[1]["source_slot"], path=path)]))
@@ -482,11 +487,9 @@ def test_source_strip_has_a_reading_seat_and_close_follows_the_reaction(tmp_path
     fragment, = [i for i in scene["items"] if i.get("document_excerpt")]
     assert fragment["crop"] == rec["document"]["detail"]
     assert fragment["w"] * 360 >= 290 and fragment["h"] * 640 > 97
-    assert fragment["source_ink"][0][3] <= .50
-    assert beats["display_facts"][0]["facts"] == [fact]
-    rows = [i for i in scene["items"] if i.get("fact_type")]
-    assert " ".join(i["t"] for i in rows if i["v"] == "quote_body") == fact["statement"]
-    assert "May 7, 2010" in " ".join(i["t"] for i in rows if i["v"] == "quote_credit")
+    # The cited statement is research: it stays in the record and the document itself carries the evidence.
+    assert beats["display_facts"] == [] and beats["research_facts"][0]["facts"] == [fact]
+    assert not any(i.get("v") == "quote_body" for i in scene["items"])
     assert any(i.get("role") == "cap" and i["f"][0] < 87 and i["f"][1] > 18 for i in scene["items"])
     wide = [i for i in scene["items"] if i.get("source_frame")]
     reaction = round(words[15]["start"] * 30) + film.LEAD_F
@@ -498,7 +501,8 @@ def test_source_strip_has_a_reading_seat_and_close_follows_the_reaction(tmp_path
     end_page = dict(first=17, last=17, facts=[fact])
     scene, _ = film.build(script, pack, "prints", dict(turn_seg=1, display_facts=[end_page]))
     closing_word = round(words[17]["start"] * 30) + film.LEAD_F
-    assert any(i.get("speaker_panel") and i["crop"] != [0,0,1,1] and i["f"][0] <= closing_word < i["f"][1]
+    # A research page on the closing word stays in the record: the live speaker holds the close.
+    assert any(i["k"] == "shot" and str(i.get("pic","")).startswith("own:") and i["f"][0] <= closing_word < i["f"][1]
                for i in scene["items"])
 
 
@@ -618,3 +622,48 @@ def test_live_interview_uses_both_camera_tiles_and_captions_its_own_account(tmp_
     assert int(pixel[0]) > int(pixel[2])+55, pixel
     assert any(it.get("role")=="cap" and it["f"][0] <= 155 < it["f"][1] for it in plan.items)
     assert beats["display_facts"] == [] and beats["interview_accounts"] == [page]
+
+
+def _action_build(tmp_path, monkeypatch, next_row=None):
+    import placement_check
+    import wf1_coverage
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *a: ([], []))
+    pack = _sup(tmp_path, [dict(t0=0.0, t1=7.0, faces=[])])
+    pack["coverage"]["windows"] = [dict(t0=.9, t1=4.0, single_action=True, first=2, last=10),
+                                   dict(t0=4.0, t1=6.5, first=11, last=17)]
+    clip = dict(window=0, path="/clip.mp4", w=1280, h=720, fps=30, src=[0, 1.0], verified_motion=True, fit=9,
+                action_box=[.1, .2, .6, .5], attribution="WeatherService +29", action_caption="WeatherService shows +29",
+                source=dict(url="https://example.com/v", channel="Weather Channel"))
+    rows = [[30, 60, "clip", "weather", clip]] + ([next_row] if next_row else [])
+    pack["archived_placement_plan"] = dict(rows=rows, report=dict(contract=placement_check.CONTRACT, placements=[]),
+                                           run_id="action")
+    words = pack["words"]["words"]
+    script = dict(title="Coach", segments=[dict(say=" ".join(w["w"] for w in words if w["seg"] == i), pictures=[])
+                                           for i in (0, 1)])
+    l1, beats = film.build(script, pack, "window", dict(coverage_final=True))
+    return l1, beats
+
+
+def _bases(l1, f):
+    return [it for it in l1["items"] if it["k"] in ("shot", "card") and it["f"][0] <= f < it["f"][1]]
+
+
+def test_a_verified_action_hands_back_to_the_take_with_its_credit(tmp_path, quiet_engines, monkeypatch):
+    """26 Nov: the clip cut back to the live speaker where the action ended, but its result credit ran on for three
+    seconds over the speaker. The row, its picture and its credit end together."""
+    l1, beats = _action_build(tmp_path, monkeypatch)
+    clip = [p for p in beats["pictures"] if p["name"] == "weather"]
+    assert [p["f"] for p in clip] == [[30, 60]] and clip[0]["action_end"] == 60
+    credit = [it for it in l1["items"] if it["k"] == "word" and "Weather Channel" in it.get("t", "")]
+    assert credit and all(it["f"][1] <= 60 for it in credit)
+    for f in range(60, 90):
+        assert [it.get("pic") for it in _bases(l1, f) if it["k"] == "shot"] in (["main"], ["own:cut1"])
+        assert not any("Weather" in (it.get("t") or "") for it in l1["items"] if it["f"][0] <= f < it["f"][1])
+
+
+def test_a_verified_action_one_frame_short_of_the_next_picture_never_leaves_an_empty_frame(tmp_path, quiet_engines, monkeypatch):
+    photo = [61, 91, "photo", "other", dict(window=1, path="/p.jpg", w=1000, h=1000)]
+    l1, beats = _action_build(tmp_path, monkeypatch, photo)
+    for f in range(30, 91):
+        assert _bases(l1, f), f                                    # a picture on every frame
+    assert any(it["k"] == "card" and it["f"] == [30, 61] for it in l1["items"])

@@ -17,10 +17,10 @@ whose ``devices`` report lists a creative device at any rung other than
 ``full`` (a substitute, a reduced rung or an omit) records one blocking
 ``device_degraded`` finding per device, so the export stays blocked until
 the degradation is acknowledged (justify_verification_findings) or fixed —
-never shipped silently. Flash safety: more than
-``config.FLASH_SAFE_MAX_PER_S`` full-frame flashes in any second is a
-blocking ``flash_rate_exceeded`` finding unless the user opted in, and an
-opted-in program is flagged ``contains_flashing`` on the record.
+never shipped silently. Flash safety informs: more than
+``config.FLASH_SAFE_MAX_PER_S`` full-frame flashes in any second is an
+advisory ``flash_rate_exceeded`` finding and the program is flagged
+``contains_flashing`` on the record.
 """
 
 from __future__ import annotations
@@ -1200,26 +1200,21 @@ def flash_assessment(edl, index=None, request_text=None):
 
 
 def _flash_findings(edl, index=None, request_text=None):
+    """The program passing the flash-safe limit, as an advisory: the export
+    is marked contains_flashing, nothing is held. It was a blocking finding
+    whenever a word rule found no "strobe" or "flash" in this one request,
+    and it taught the editor to thin flashes the customer asked for (p5968,
+    19 Nov 2026). The editor reads the whole conversation and decides."""
     a = flash_assessment(edl, index, request_text)
-    if not a or not a["over_limit"] or a["opted_in"]:
+    if not a or not a["over_limit"]:
         return []
-    # Opt-in is read from THIS request only; the editor sees the whole
-    # conversation. Flashing the user asked for in an earlier message, or
-    # flashing that is the user's own existing edit, is acknowledged with
-    # justify_verification_findings (naming that request), never thinned away.
     return [_finding(
         FLASH_FINDING, "motion_color",
         (f"Up to {a['peak_per_s']} full-frame flashes fall inside one second "
-         f"(the flash-safe limit is {a['max_per_s']}) and this request does "
-         "not ask for flashing: thin them if you added them unasked; if the "
-         "user asked for it earlier or it is their own edit, keep it and "
-         "justify this finding naming that request."),
-        a, ("if you added them unasked, thin the flashes to at most "
-            f"{a['max_per_s']} per second (flash_safety.plan); if the user "
-            "asked for this flashing (in this or an earlier message) or it is "
-            "their own edit, keep it and justify_verification_findings "
-            "quoting that request — the export is then flagged "
-            "contains_flashing"))]
+         f"(the photosensitivity guideline is {a['max_per_s']}); the export "
+         "is marked contains_flashing. Flashes or strobes the customer asked "
+         "for stay; thin only flashes nobody asked for."),
+        a, None, severity="advisory")]
 
 
 def deterministic_findings(edl, index=None, request_text=None,
@@ -1434,10 +1429,8 @@ def build_verification_record(project_id, version, manifest, edl, index,
             "picture_qc", "audio_model_review", "verify_frames", "sheet_key",
             "caption_sheet_key", "caption_pages", "devices")
             if preview.get(key) is not None},
-        # The program flashes past the flash-safe limit. It reaches export
-        # only through the user's opt-in (this request) or an acknowledged
-        # flash_rate_exceeded finding, so it is flagged — the same reading
-        # the backend export gate stamps on the final job.
+        # The program flashes past the flash-safe limit: it is flagged — the
+        # same reading the backend export gate stamps on the final job.
         "contains_flashing": bool((flash_assessment(
             edl, index or {}, request_text) or {}).get("over_limit")),
         "findings": findings,

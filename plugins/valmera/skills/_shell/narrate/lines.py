@@ -405,6 +405,25 @@ def join_lines(kept, segments, sr):
 GATE_ROUNDS = int(os.environ.get("NARRATE_GATE_ROUNDS", "3"))
 
 
+def next_batch(job, eng, takes_dir, i, start, count, log, heard=None):
+    """Review saved candidates in their original batches. Only synthesize missing slots."""
+    row = job["lines"][i]
+    if eng == "phonon" and getattr(generate_phonon, "bounded", False):
+        from read_cache import APPROACHES, APPROACH_TAKES, TAKE_BUDGET, fallback_start
+        if start >= TAKE_BUDGET:
+            limit = fallback_start(takes_dir, row["id"])
+            start = max(start, limit)
+            if start >= limit + APPROACHES * APPROACH_TAKES:
+                return []
+            row = dict(row, plain_end=limit, start_take=start, heard=heard)
+    end = start + count
+    files = [takes_dir / f"{row['id']}_t{k}.wav" for k in range(start, end)]
+    complete = getattr(generate_phonon, "whole_take", Path.is_file) if eng == "phonon" else Path.is_file
+    if not all(complete(f) for f in files):
+        generate(dict(job, lines=[dict(row, takes=end)]), eng, takes_dir, log)
+    return [f for f in files if f.is_file()]
+
+
 def gate_repair(N, eng, job, takes_dir, script, band, names, sr0, kept, kept_v, chosen, pool, report):
     """The gate's own listener and spoken form on the joined lines; a line it does not hear whole gets the next take
     that listener hears whole on its own (the take listener's clean takes first, by signal), else new takes."""
@@ -425,6 +444,7 @@ def gate_repair(N, eng, job, takes_dir, script, band, names, sr0, kept, kept_v, 
         N.log(f"gate listener, round {rnd}: {se['total']} word errors in {se['words']} on lines {sorted(se['by_line'])}")
         if se["total"] == 0 or rnd == GATE_ROUNDS or not set(se["by_line"]) - spent:
             return hist
+        changed = False
         for i in sorted(set(se["by_line"]) - spent):
             failed = set(chosen[i].get("gate_failed") or []) | {chosen[i]["file"]}
             chosen[i]["gate_failed"] = sorted(failed)
@@ -444,25 +464,29 @@ def gate_repair(N, eng, job, takes_dir, script, band, names, sr0, kept, kept_v, 
                         nearest = (e, t)
                     failed.add(t["file"])
                 if hit:
+                    changed = True
                     kept[i], kept_v[i], chosen[i] = take_audio(takes_dir, hit)[0], hit["voice"], dict(hit, gate_failed=sorted(failed))
                     report[i].update(kept=hit["file"], errs=hit["errs"], score=hit["score"], gate_round=rnd + 1)
                     N.log(f"line {i}: the gate listener hears {hit['file']} whole")
                     break
                 if attempt < (INPROC_ROUNDS if ENGINES[eng].get("inproc") else 2) - 1:
                     # no take left that both listeners hear whole: new takes, new seeds
-                    n = len(list(takes_dir.glob(f"s{i:02d}_t*.wav")))
                     more = INPROC_MORE if ENGINES[eng].get("inproc") else MORE_TAKES
-                    generate(dict(job, lines=[dict(job["lines"][i], takes=n + more)]), eng, takes_dir, N.log)
-                    new = [f for f in sorted(takes_dir.glob(f"s{i:02d}_t*.wav"), key=lambda p: int(p.stem.split("_t")[1]))
-                           if f.name not in {t["file"] for t in pool[i]}]
+                    start = 1 + max(int(t["file"].split("_t")[1].split(".")[0]) for t in pool[i])
+                    new = next_batch(job, eng, takes_dir, i, start, more, N.log, chosen[i].get("heard"))
+                    if not new:
+                        break
                     pool[i] += drop_audio(_judge_files(N, new, segs[i], script, band, names, sr0))
-            else:
+            if hit is None:
                 spent.add(i)          # every take this line will get has been heard: the gate reports what is left
                 if nearest and nearest[0] < cur_e:
+                    changed = True
                     t = nearest[1]
                     kept[i], kept_v[i], chosen[i] = take_audio(takes_dir, t)[0], t["voice"], dict(t, gate_failed=sorted(failed))
                     report[i].update(kept=t["file"], errs=t["errs"], score=t["score"], gate_round=rnd + 1, gate_errs=nearest[0])
                     N.log(f"line {i}: no take heard whole; {t['file']} is heard best ({nearest[0]} against {cur_e})")
+        if not changed:
+            return hist
     return hist
 
 
@@ -492,17 +516,30 @@ def render_lines(args, script, vid, out, N):
     kept, kept_v, chosen, pool, report, sr0 = [], [], [], [], [], None
     for i, s in enumerate(script["segments"]):
         takes = []
+        count = int(job["lines"][i].get("takes") or job["takes"])
+        start = 0
+        previous_errors = set()
+        heard = None
         for rnd in range(n_rounds + 1):
-            files = sorted(takes_dir.glob(f"s{i:02d}_t*.wav"), key=lambda p: int(p.stem.split("_t")[1]))
-            done = {t["file"] for t in takes}
-            takes += _judge_files(N, [f for f in files if f.name not in done], s, script, band, names, sr0)
-            sr0 = sr0 or (takes[0]["_sr"] if takes else None)
-            if any(t["errs"] == 0 for t in takes) or rnd == n_rounds:
+            files = next_batch(job, eng, takes_dir, i, start, count, N.log, heard)
+            if not files:
                 break
-            # no take read the line whole: more takes of this line, new seeds (Phonon: each batch a little slower)
-            more = dict(job, lines=[dict(job["lines"][i], takes=len(files) + n_more)])
-            N.log(f"line {i}: no take read it whole; {n_more} more")
-            generate(more, eng, takes_dir, N.log)
+            batch = _judge_files(N, files, s, script, band, names, sr0)
+            takes += batch
+            sr0 = sr0 or (takes[0]["_sr"] if takes else None)
+            if any(t["errs"] == 0 for t in takes):
+                break
+            start = 1 + int(files[-1].stem.split("_t")[1])
+            if inproc and getattr(generate_phonon, "bounded", False):
+                from read_cache import TAKE_BUDGET
+                errors = {t["heard"].casefold().strip() for t in batch}
+                if errors and errors <= previous_errors and start < TAKE_BUDGET:
+                    N.log(f"line {i}: same failed readings; changing the delivery")
+                    start = TAKE_BUDGET
+                previous_errors.update(errors)
+                if batch:
+                    heard = min(batch, key=lambda t: t["errs"])["heard"]
+            count = n_more
         best = P.choose(takes, kept_v)
         x = best["_x"]
         f = 1.0

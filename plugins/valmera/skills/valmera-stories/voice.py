@@ -220,6 +220,21 @@ def cadence_bonus(cad, stops_kept):
     return round(b, 2)
 
 
+def whole_take(f):
+    """A checkpointed take a resumed read may reuse: a RIFF/WAVE file whose declared
+    size is its byte length. A partial one is removed, so the read makes it again."""
+    try:
+        size = f.stat().st_size
+        with open(f, "rb") as stream:
+            head = stream.read(12)
+    except FileNotFoundError:
+        return False
+    if len(head) == 12 and head[:4] == b"RIFF" and head[8:12] == b"WAVE" and int.from_bytes(head[4:8], "little") == size - 8:
+        return True
+    f.unlink()
+    return False
+
+
 class Read:
     def __init__(self, N, LN, PF, prosody):
         self.N, self.LN, self.PF, self.prosody = N, LN, PF, prosody
@@ -247,9 +262,9 @@ class Read:
         base = int(job.get("takes") or LN.TAKES)
         for ln in job["lines"]:
             i = int(ln["id"][1:])
-            for k in range(int(ln.get("takes") or base)):
+            for k in range(ln.get("start_take", 0), int(ln.get("takes") or base)):
                 f = out / f"{ln['id']}_t{k}.wav"
-                if f.exists():
+                if whole_take(f):
                     continue
                 dd = LN.retake_dd(k, base)
                 tts.set_conditions({"duration_delta": dd} if dd else {})
@@ -258,8 +273,13 @@ class Read:
                 if temp:
                     kw["temperature"] = temp
                 x = tts.synth(ln["text"], **kw)
-                sf.write(f, np.asarray(x, np.float32), tts.sample_rate, subtype="FLOAT")
+                partial = f.with_suffix(".part")
+                sf.write(partial, np.asarray(x, np.float32), tts.sample_rate, format="WAV", subtype="FLOAT")
+                partial.replace(f)
                 cond[f.name] = {"duration_delta": dd, "temperature": temp or 0.3}
+                # Checkpointed with the take, so a resumed read keeps every take's conditions.
+                cp.with_suffix(".part").write_text(json.dumps(cond))
+                cp.with_suffix(".part").replace(cp)
                 n += 1
                 self.generated_takes += 1
         tts.set_conditions({})
@@ -838,6 +858,16 @@ def main():
         return
     os.chdir(NARR)
     if a.cmd == "render":
+        from read_cache import bounded_generation, cache_gate_listening, cache_take_analysis
+        if N.pick_engine(a, json.loads(Path(a.script).read_text())) == "phonon":
+            listener = N.CHECK_ASR
+            if os.environ.get("CODEX_PROXY_LOCAL") == "1":
+                from take_hearing import pool_or_local
+                N.listen_fast = pool_or_local(N)
+                listener = "factory-whisper-medium-or-unprompted-large-v3"
+            cache_take_analysis(a.out, listener)
+            cache_gate_listening(a.out, listener)
+            Read.generate_phonon = bounded_generation(Read.generate_phonon)
         render(a)  # callers of render() use its take count; a successful CLI run exits zero
         return
     if a.cmd == "finish":

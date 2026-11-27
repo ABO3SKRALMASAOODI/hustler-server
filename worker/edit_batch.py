@@ -11,12 +11,13 @@ import re
 import sys
 
 try:
-    from schemas import (FX_AUTHORABLE_TYPES, FX_TYPES, CaptionStyle,
-                         Effects, export_input, keep_boundaries,
+    from schemas import (FX_AUTHORABLE_TYPES, FX_TYPES, TEXT_MIN_SPAN_S,
+                         CaptionStyle, Effects, export_input, keep_boundaries,
                          program_duration, sped_len, validate_edl)
 except ImportError:
-    from worker_schemas import (FX_AUTHORABLE_TYPES, FX_TYPES, CaptionStyle,
-                                Effects, export_input, keep_boundaries,
+    from worker_schemas import (FX_AUTHORABLE_TYPES, FX_TYPES,
+                                TEXT_MIN_SPAN_S, CaptionStyle, Effects,
+                                export_input, keep_boundaries,
                                 program_duration, sped_len, validate_edl)
 
 # "fx" (Wave 0 seam, worker/devices/INTERFACES.md §4): registered effect
@@ -30,6 +31,39 @@ LAYERS = frozenset(("keep", "speed", "inserts", "frame", "captions",
     "export"))
 ITEM_LAYERS = frozenset(("inserts", "texts", "vectors", "music", "sfx", "voiceover", "overlays",
     "motion", "fx"))
+# Layers whose rows carry ids an item operation can name. speed spans have ids
+# (sp1, sp2) but stay a whole-list layer everywhere else: p6304 (26 Nov) had
+# "Unsupported operation upsert on speed" when the editor retimed sp1-sp3 to
+# reach the 55 s the customer asked for.
+ID_LAYERS = ITEM_LAYERS | {"speed"}
+
+
+def _item_op_id(edl, layer, op):
+    """The id an item upsert/remove acts on. An op written without its top-level
+    id carries it in its value; an upsert of a NEW row with no id at all gets
+    a fresh one (p6238, 24 Nov: "An item operation requires a stable id" was
+    refused twice and the turn ended partial). None only for a remove that
+    names nothing. The op is updated in place so later steps see the id."""
+    item_id = op.get("id")
+    value = op.get("value")
+    if (not isinstance(item_id, str) or not item_id) and isinstance(value, dict):
+        item_id = value.get("id")
+    if isinstance(item_id, (int, float)) and not isinstance(item_id, bool):
+        item_id = str(item_id)
+    if isinstance(item_id, str) and item_id.strip():
+        op["id"] = item_id.strip()
+        return op["id"]
+    if op.get("action") != "upsert":
+        return None
+    taken = {str(i.get("id")) for i in (edl.get(layer) or []) if isinstance(i, dict)}
+    stem = {"texts": "tx", "vectors": "vec", "music": "mu", "sfx": "sfx",
+            "voiceover": "vo", "overlays": "ov", "inserts": "ins",
+            "motion": "mg", "fx": "fx", "speed": "sp"}.get(layer, layer[:3])
+    n = len(taken) + 1
+    while f"{stem}{n}" in taken:
+        n += 1
+    op["id"] = f"{stem}{n}"
+    return op["id"]
 
 
 # Device cards (worker/devices/cards/<id>.json), read as plain JSON so this
@@ -490,6 +524,76 @@ def _near_misses(edl, layers):
                              f"animation (0.12-1.2 s), so {dur:g} is stored as 0.12; "
                              "the card's window is start-end")
     notes += _item_near_misses(edl, layers)
+    notes += _give_missing_ids(edl, layers)
+    if "texts" in layers:
+        notes += _texts_long_enough(edl)
+    return notes
+
+
+# The id a batch item is given when it came without one, per layer.
+_ID_PREFIX = {"texts": "tx", "inserts": "ins", "overlays": "ov",
+              "music": "mu", "sfx": "sfx", "voiceover": "vo",
+              "vectors": "vec", "motion": "mo", "fx": "fx"}
+
+
+def _give_missing_ids(edl, layers):
+    """An item written without an id gets the next free one of its layer.
+
+    p5993 (19 Nov 2026): a paying user's promo line, five texts set in one
+    batch without ids, came back "EDL shape invalid: texts.0.id Field
+    required" and cost the editor a turn. The id is ours to give."""
+    notes = []
+    for layer in sorted(set(layers) & ITEM_LAYERS):
+        items = edl.get(layer)
+        if not isinstance(items, list):
+            continue
+        prefix = _ID_PREFIX.get(layer, layer[:3])
+        taken = {str(i.get("id")) for i in items
+                 if isinstance(i, dict) and i.get("id")}
+        given, n = [], 0
+        for item in items:
+            if not isinstance(item, dict) or item.get("id"):
+                continue
+            n += 1
+            while f"{prefix}{n}" in taken:
+                n += 1
+            item["id"] = f"{prefix}{n}"
+            taken.add(item["id"])
+            given.append(item["id"])
+        if given:
+            notes.append(f"{layer}: {len(given)} item(s) came without an id, "
+                         f"given {', '.join(given[:12])}"
+                         + (", ..." if len(given) > 12 else ""))
+    return notes
+
+
+def _texts_long_enough(edl):
+    """Use available time at the authored position, preserving every onset."""
+    from bisect import bisect_right
+    from collections import defaultdict
+
+    tracks = defaultdict(list)
+    for item in edl.get("texts") or []:
+        if isinstance(item, dict) and isinstance(item.get("start"), (int, float)):
+            tracks[(item.get("x"), item.get("y"))].append(item)
+    program_end = _programme_end(edl)
+    notes = []
+    for items in tracks.values():
+        starts = sorted({item["start"] for item in items})
+        for item in items:
+            start, end = item["start"], item.get("end")
+            if not isinstance(end, (int, float)) or not 0 <= end - start < TEXT_MIN_SPAN_S - 1e-6:
+                continue
+            pos = bisect_right(starts, start)
+            limits = [start + TEXT_MIN_SPAN_S]
+            if pos < len(starts):
+                limits.append(starts[pos])
+            if program_end is not None:
+                limits.append(program_end)
+            repaired = round(min(limits), 2)
+            if repaired > start and abs(repaired - end) > 1e-6:
+                item["end"] = repaired
+                notes.append(f"text {item.get('id')} at {start:g}s: end {end:g}s to {repaired:g}s")
     return notes
 
 
@@ -753,6 +857,17 @@ def _fit_operation(op, before, notes):
     return op
 
 
+def _split_list_upsert(op):
+    if (isinstance(op, dict) and op.get("action") == "upsert"
+            and op.get("layer") in ITEM_LAYERS and not op.get("id")
+            and isinstance(op.get("value"), list)
+            and all(isinstance(row, dict) for row in op["value"])):
+        return [{"action": "upsert", "layer": op["layer"], "value": row,
+                 **({"id": row["id"]} if row.get("id") else {})}
+                for row in op["value"]]
+    return [op]
+
+
 def _remove_elsewhere(edl, layer, item_id):
     """A remove that named the wrong layer: the id is what it means. Named
     nowhere, the state it asked for already holds."""
@@ -877,6 +992,10 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
     near_ops = []
     operations = [_fit_operation(op, before, near_ops)
                   for op in copy.deepcopy(operations)]
+    # An item upsert written with a list of rows is one upsert per row (each
+    # by its own id, a new row given one), as the editor meant it.
+    operations = [row_op for op in operations
+                  for row_op in _split_list_upsert(op)]
     # Keys already in the EDL were placed by Valmera's own tools (erase
     # patches, subject mattes, fetched stock, library sounds) and validated
     # when written; many never appear in the project's assets table. Only
@@ -896,7 +1015,7 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
         # An explicitly named object is an item patch, never a replacement
         # for its entire list. Preserve its siblings and still validate the
         # resulting EDL atomically below.
-        if action == "set" and layer in ITEM_LAYERS and op.get("id") \
+        if action == "set" and layer in ID_LAYERS and op.get("id") \
                 and isinstance(op.get("value"), dict):
             action = op["action"] = "upsert"
         if layer == "patches" and action == "remove":
@@ -944,7 +1063,7 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
             # upsert on a layer that is one object patches its fields, the
             # same word doing the same thing on every layer.
             edl[layer] = {**(edl.get(layer) or {}), **op["value"]}
-        elif action == "remove" and layer not in ITEM_LAYERS:
+        elif action == "remove" and layer not in ID_LAYERS:
             # A field of an object layer by id; with no id, the whole layer.
             current = edl.get(layer)
             if op.get("id") and isinstance(current, dict):
@@ -952,10 +1071,13 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
                               if k != op["id"]}
             elif not op.get("id"):
                 edl[layer] = None if layer != "keep" else edl.get(layer)
-        elif action in ("upsert", "remove") and layer in ITEM_LAYERS:
-            item_id = op.get("id")
-            if not isinstance(item_id, str) or not item_id:
-                raise ValueError("An item operation requires a stable id.")
+        elif action in ("upsert", "remove") and layer in ID_LAYERS:
+            item_id = _item_op_id(edl, layer, op)
+            if item_id is None:
+                # A remove that names nothing removes nothing: the asked-for
+                # absence already holds (#1767's twin), never a refusal.
+                near_ops.append(f"{layer}: a remove named no id, nothing removed")
+                continue
             items = edl.get(layer) or []
             if not isinstance(items, list) or any(not isinstance(i, dict) for i in items):
                 raise ValueError(f"{layer} must be a list of objects.")
@@ -1059,12 +1181,34 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
         normalized = validate_edl(edl, duration).model_dump()
     check_fx_devices(before, normalized)
     if isinstance(allowed_keys, dict):
+        # A clip window past its source's end is moved back inside it (p5993
+        # gate, 26 Nov: "Clip m20 extends beyond its source video" refused a
+        # whole montage batch twice). The clip keeps its length when the
+        # source is long enough, else it plays the whole source.
+        refit = False
         for item in normalized.get("inserts") or []:
             asset_duration = (allowed_keys.get(item["asset_key"]) or {}).get("duration_s")
             if item["kind"] == "video" and asset_duration:
-                end = (item.get("source_start_s") or 0) + item["duration_s"] * (item.get("rate") or 1)
-                if end > float(asset_duration) + .05:
-                    raise ValueError(f"Clip {item['id']} extends beyond its source video.")
+                rate = float(item.get("rate") or 1)
+                src = float(asset_duration)
+                need = float(item["duration_s"]) * rate
+                end = float(item.get("source_start_s") or 0) + need
+                if end > src + .05:
+                    if need <= src:
+                        item["source_start_s"] = round(max(0.0, src - need - .02), 3)
+                        msg = (f"clip {item['id']}: its window ran past the {src:.2f} s source; "
+                               f"it now starts at {item['source_start_s']:.2f} s, same length")
+                    else:
+                        item["source_start_s"] = 0.0
+                        item["duration_s"] = round(max(.1, (src - .02) / rate), 3)
+                        refit = True
+                        msg = (f"clip {item['id']}: the {src:.2f} s source is shorter than the "
+                               f"window; it plays the whole source ({item['duration_s']:.2f} s)")
+                    near_ops.append(msg)
+                    if notes is not None:
+                        notes.append(msg)
+        if refit:
+            normalized = validate_edl(normalized, duration).model_dump()
     # Pydantic's historical EDL schema tolerates extras. A field it would
     # have dropped silently is said in the result: the near spelling of a real
     # field is kept, anything else is named as left out.

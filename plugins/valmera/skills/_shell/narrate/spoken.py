@@ -112,6 +112,8 @@ def _call(system, user, model, max_tokens=24000, timeout=600):
     body = openai_cache.responses(body, "narrate:spoken")
     req = urllib.request.Request("https://api.openai.com/v1/responses", data=json.dumps(body).encode(),
                                  headers={"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"], "Content-Type": "application/json"})
+    if os.environ.get("CODEX_PROXY_LOCAL") == "1" and os.environ.get("CODEX_PROXY_PROOF"):
+        req.add_header("X-Codex-Proxy-Run", os.environ["CODEX_PROXY_PROOF"])
     for attempt in range(3):
         try:
             import openai_budget

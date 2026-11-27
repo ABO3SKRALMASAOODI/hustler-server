@@ -16,50 +16,20 @@ import subprocess
 import sys
 import math
 import hashlib
-import pickle
 
 HERE=Path(__file__).resolve().parent
 sys.path[:0]=[str(HERE.parent/'valmera-stories'),str(HERE.parent/'_shell'/'narrate')]
 import voice as shared
-from measure_voice import measure
+from measure_voice import measure,line_of
 
 
-def cache_take_analysis(out):
-    """Keep expensive listening/pitch evidence per immutable take. Selecting a
-    film can then resume after a later listener error without rejudging an hour
-    of candidates. Compute the ending pitch while that take's track is hot.
-    """
+from read_cache import bounded_generation, cache_gate_listening, cache_take_analysis
+
+
+def read_max_tempo():
+    """The tempo ceiling the read runs under (the shared lines module's), for a stage written before it was kept."""
     import lines as LN
-    import prosody
-    import perform
-    import measure as signal
-    import numpy as np
-    root=Path(out)/'take-analysis';root.mkdir(parents=True,exist_ok=True)
-    version=hashlib.sha256(b''.join(Path(m.__file__).read_bytes() for m in (LN,prosody,perform,shared))).digest()
-    original=LN._judge_files
-    def judged(N,files,seg,script,band,names,sr0):
-        evidence=[]
-        context=json.dumps(dict(seg=seg,script=script,band=band,names=names),sort_keys=True).encode()
-        for f in files:
-            key=hashlib.sha256(version+context+f.read_bytes()).hexdigest()
-            cache=root/(key+'.pickle')
-            if cache.exists():
-                with open(cache,'rb') as stream:t=pickle.load(stream)
-                x,sr=signal.load_mono(f)
-                if sr0 and sr!=sr0:continue
-                t['_x']=LN.trim_take(x.astype(np.float32),sr)
-            else:
-                rows=original(N,[f],seg,script,band,names,sr0)
-                if not rows:continue
-                t=rows[0]
-                track=prosody.pitch_track(t['_x'],t['_sr']);v=track[np.isfinite(track)]
-                t['_ends']=(float(np.median(v[:25])),float(np.median(v[-25:]))) if len(v)>=30 else (None,None)
-                temp=cache.with_suffix('.tmp')
-                with open(temp,'wb') as stream:pickle.dump({k:v for k,v in t.items() if k!='_x'},stream,pickle.HIGHEST_PROTOCOL)
-                os.replace(temp,cache)
-            evidence.append(t)
-        return evidence
-    LN._judge_files=judged
+    return LN.MAX_TEMPO
 
 
 def tempo_factor(rate, median):
@@ -138,6 +108,15 @@ def shorten_joins(audio, wj, heard, script, out, ffmpeg, aim=14.0):
     return wj,edits
 
 
+def unheard(audio,expected,cache,segments):
+    """The words still counted against the read, line by line: scripted against heard."""
+    import measure as M
+    spoken=json.loads((Path(cache)/'wer-spoken.json').read_text())
+    heard=json.loads((Path(cache)/'heard.json').read_text())['text']
+    rows=M.wer_detail(expected,spoken['text'] if spoken.get('ok') else heard)
+    return [dict(line='s%02d'%line_of(r['at'],segments),scripted=r['script'],heard=r['heard']) for r in rows]
+
+
 def finish(out, script):
     import numpy as np
     import soundfile as sf
@@ -155,8 +134,8 @@ def finish(out, script):
     if not origin.exists():
         shutil.copy2(audio,origin); shutil.copy2(words,origin_words)
     if not origin_render.exists() and (out/'render.json').exists():shutil.copy2(out/'render.json',origin_render)
-    before=measure(origin,expected,out/'performance-metrics')
-    if before['wer']>=.01: raise ValueError('Easton performance must pass word error before contour processing')
+    before=measure(origin,expected,out/'performance-metrics',script['segments'])
+    if before['wer']>=.01: raise ValueError('Easton performance must pass word error before contour processing; the words heard against the script: '+json.dumps(unheard(origin,expected,out/'performance-metrics',script['segments']),ensure_ascii=False))
     factor=1.0
     # No pitch resynthesis (16 Nov). Expanding the whole contour toward the short reels' 14.5 st (gain 1.24 on the 16 Nov
     # Skylab read) made every sentence end fall deeper (78% of line ends over 2 st, 4% rising; metromedia 53-55% and
@@ -218,7 +197,7 @@ def finish(out, script):
             ff=os.environ.get('NARRATE_FFMPEG') or '/Users/masaoodi/Documents/Valmera/audit/subscriber-reliability-20260908/bin-arm/ffmpeg'
             wj,joins=shorten_joins(audio,wj,heard,script,out,ff,aim=join_aim)
             words.write_text(json.dumps(wj,indent=1))
-        after=measure(audio,expected,out/'longform-metrics')
+        after=measure(audio,expected,out/'longform-metrics',script['segments'])
         result=dict(before=before,after=after,tempo=factor,contour_gain=gain,join_edits=joins,method='Easton performance as read (no pitch resynthesis); short joins paced with WSOLA, phonemes retained')
         last=attempt==2
         nxt=factor
@@ -248,8 +227,14 @@ def finish(out, script):
     raise ValueError('Easton read has word errors after its corrections: '+json.dumps(after))
 
 
-def raw_checkpoint(out,script,groups,picks=None):
-    """Commit the read before the shared mastering FFT allocates its buffers."""
+def raw_checkpoint(out,script,groups,picks=None,tone_fn=None,max_tempo=1.0):
+    """Commit the read before the shared mastering FFT allocates its buffers.
+
+    It stands in for voice.finish inside the read, so it takes exactly what voice.finish takes
+    (test_longform_voice.py compares the two signatures). The mastering that follows is the shared finish
+    in its own process, which gets the read's tempo ceiling back from read-stage.json; tone_fn belongs to
+    that later call, which passes room_tone itself.
+    """
     import narrate as N
     N.free_gate_listener();N.free_take_listener()
     out=Path(out)
@@ -257,7 +242,7 @@ def raw_checkpoint(out,script,groups,picks=None):
         shutil.copy2(out/name,out/(Path(name).stem+'_raw'+Path(name).suffix))
     for name in ('narration_performance.wav','words_performance.json','render_performance.json','longform_voice.json','check.json'):
         (out/name).unlink(missing_ok=True)
-    (out/'read-stage.json').write_text(json.dumps(dict(script=script,groups=groups,picks=picks or [])))
+    (out/'read-stage.json').write_text(json.dumps(dict(script=script,groups=groups,picks=picks or [],max_tempo=max_tempo)))
 
 
 def room_tone(n,sr,db):
@@ -322,7 +307,7 @@ def main():
             (out/name).unlink(missing_ok=True)
         import narrate as N
         N.malloc_returns_memory()
-        shared.finish(out,stage['script'],stage['groups'],stage['picks'],tone_fn=room_tone)
+        shared.finish(out,stage['script'],stage['groups'],stage['picks'],tone_fn=room_tone,max_tempo=stage.get('max_tempo',read_max_tempo()))
         (out/'shared-finish.sha256').write_text(master_version())
         return
     if a.cmd=='_render':
@@ -339,18 +324,8 @@ def main():
         os.environ['NARRATE_KEEP_TAKES']='1'
         cache_take_analysis(a.out)
         os.environ.pop('NARRATE_ALLOW_FALLBACK',None)
-        original_generate=shared.Read.generate_phonon
-        def bounded_generate(self,job,dest,log,seed0=7):
-            # A resume keeps its spent budget: six initial + four six-take rounds.
-            # The word gate remains unchanged, including after exhaustion.
-            import copy
-            bounded=copy.deepcopy(job)
-            for row in bounded['lines']:
-                requested=int(row.get('takes') or bounded.get('takes') or 6)
-                row['takes']=min(requested,30)
-                if requested>30:log(row['id']+': thirty-take retry budget spent; retaining strict gate')
-            return original_generate(self,bounded,dest,log,seed0)
-        shared.Read.generate_phonon=bounded_generate
+        shared.Read.generate_phonon=bounded_generation(shared.Read.generate_phonon)
+        cache_gate_listening(a.out)
         shared.finish=raw_checkpoint
         shared.render(a)
         rendered=json.loads((Path(a.out)/'render.json').read_text())

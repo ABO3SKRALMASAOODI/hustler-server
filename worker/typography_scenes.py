@@ -153,9 +153,14 @@ def fit_box(box, default, fit, problems, notes, safe=True, min_width=MIN_BOX_SPA
 
 
 def _color(value):
-    if not re.fullmatch(r'#[0-9a-fA-F]{6}', str(value)):
+    try:
+        from schemas import coerce_hex
+    except ImportError:   # the backend loads worker/schemas.py by path as worker_schemas
+        from worker_schemas import coerce_hex
+    got = coerce_hex(value)
+    if got is None:
         raise ValueError('Colors must be #RRGGBB')
-    return value.upper()
+    return got
 
 
 def _parse_lines(lines, start, end, motion, reveal, fit, problems, notes):

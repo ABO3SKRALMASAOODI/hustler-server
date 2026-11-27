@@ -45,9 +45,11 @@ def test_reaction_credit_and_live_closing_record(tmp_path, quiet_engines, monkey
     scene, beats = film.build(script, pack, "prints", dict(display_facts=pages))
     reaction = 29*30
     visible = [i for i in scene["items"] if i["f"][0] <= reaction < i["f"][1]]
-    assert not any(i.get("t") == "Guest · Concern" for i in visible)
-    assert any(i.get("t") == "Voice · Guest" for i in visible)
-    final = beats["display_facts"][-1]["f"][0]+15
+    # The reaction stays live with its timed words; who is speaking and the claims stay in the record.
+    assert not any(i.get("t") in ("Guest · Concern", "Voice · Guest") for i in visible)
+    assert any(i.get("role") == "cap" for i in visible)
+    assert sorted(p["first"] for p in beats["research_facts"]) == [first, last]
+    final = round(words[last]["start"]*30)+3+15
     cameras = {key for key, asset in scene["assets"].items() if asset.get("path") == pack["take"]["path"]}
     assert any(i.get("pic") in cameras and i["f"][0] <= final < i["f"][1] for i in scene["items"])
 
