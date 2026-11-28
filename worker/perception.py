@@ -469,6 +469,7 @@ def analyze_transient(path, max_s=60.0):
         "tail_s": round(max(0.0, (last_i - peak_i) / FPS), 3),
         "crest_db": round(10.0 * math.log10(peak / max(mean_power, 1e-18)),
                            2),
+        "spectral_variation": round(float(np.std(centroid[mask]) / max(1, np.mean(centroid[mask]))), 3),
         "spectral_centroid_hz": round(float(np.median(centroid[mask]))),
         "bass_ratio": round(float(np.median(bass[mask])), 3),
         "midband_ratio": round(float(np.median(mid[mask])), 3),

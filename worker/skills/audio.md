@@ -167,10 +167,10 @@ LEVELS:
   'smooth')` when the bed pumps or swallows the first word after a pause.
 
 OTHER SOURCES:
-- Sound effects come only from the approved library: there is no web
-  sound. When the user asks for a specific sound it lacks (a crowd cheer, a
-  door, rain), `list_sound_library(role='<the sound>')` files it for the
-  owner to audition; place none and tell the user in one clause.
+- Find a missing sound as a real recording with `search_sfx` or `add_web_sfx`.
+  For waves, wind, birds, rain or a continuous crowd, choose `role="bed"`.
+  Place a fetched bed with `add_music(loop=true)`. For a door or another
+  single event choose `role="one_shot"` and place it with `add_sfx`.
 - A sound the user uploads, or the sound off a clip they sent, places
   directly with `add_sfx` / `add_music`.
 - Keep real environmental sound when it already tells the truth; it is the

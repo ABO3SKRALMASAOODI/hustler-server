@@ -2373,6 +2373,10 @@ def run_agent_job(worker_db, job):
         import request_contract as semantic_request
         prior_chat = worker_db.run(dbx.recent_chat, ctx.session_id, 24, user_message["id"])
         ctx.request_contract_history = semantic_request.history(prior_chat, user_message["id"])
+        ctx.previous_ask_ledger = next(
+            (row["meta"]["ask_ledger"] for row in reversed(prior_chat)
+             if row["id"] < user_message["id"] and row["role"] == "assistant"
+             and (row.get("meta") or {}).get("ask_ledger") is not None), None)
         later_cut = None
         try:
             later_cut = worker_db.run(dbx.first_cut_after, ctx.session_id,
@@ -3209,6 +3213,8 @@ def _asks_check(ctx, draft, allow_repair=True):
         except dbx.JobLeaseLost:
             raise
         except Exception as exc:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
             print(f"[asks] check skipped: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
             return None
         verdict["edl_version"] = row.get("version")
@@ -3985,9 +3991,6 @@ def _edit_without_write_pushback(ctx, messages, already_pushed):
     editor's own words."""
     if already_pushed or not _edit_changed_nothing(ctx) or ctx.over_budget():
         return False
-    # This is the "do it before you ask" repair. ask_user's own first hold
-    # would make the same point a second time.
-    ctx._question_held = True
     messages.append({"role": "system", "content": _edit_without_write_note(ctx)})
     return True
 
@@ -5153,24 +5156,16 @@ def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
         ("" if kind == "script" else " (words)")
     print(f"[language] job {ctx.job['id']}: reply drafted in {r_side} "
           f"({kind}) for a {u_side} user — forcing one rewrite", flush=True)
-    if kind == "script":
-        why = (f"Your reply above is written in {r_side} script, "
-               f"but the user's own messages are {u_side}-script. ")
-    else:
-        why = (f"Your reply above is written in {r_side}, but the user's "
-               f"own messages are in {u_side}. ")
-    msgs = messages + [
-        {"role": "assistant", "content": final},
-        {"role": "system",
-         "content": (why +
-                     "Rewrite the reply in the USER'S language — a faithful "
-                     "translation with every fact, number and timing kept "
-                     "identical, nothing added. Output only the rewritten "
-                     "reply.")},
+    msgs = [
+        {"role": "system", "content": (
+            "Translate the editor's reply into the customer's language (" + u_side + "). "
+            "Preserve all claims, numbers, timings and quotations. Return only the translated reply. "
+            "Customer language samples: " + json.dumps(texts[-6:], ensure_ascii=False))},
+        {"role": "user", "content": final},
     ]
     try:
         resp = llm.create_with_dialect(
-            client, model, msgs, tools=tools, tool_choice="none",
+            client, model, msgs,
             temperature=config.AGENT_TEMPERATURE,
             max_tokens=config.AGENT_REPLY_MAX_TOKENS)
         llm.record("language_regen",
@@ -5183,13 +5178,8 @@ def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
         print(f"[language] rewrite failed ({e}) — posting the draft as-is",
               flush=True)
         return final
-    if kind == "script":
-        ok = redraft and _dominant_script(redraft, min_letters=10) == u_side
-    else:
-        recheck = reply_language.judge(client, model, texts, redraft) \
-            if redraft else None
-        ok = redraft and (recheck or {}).get("same_language") is not False
-    if ok:
+    checked = reply_language.judge(client, model, texts, redraft, original=final) if redraft else None
+    if checked and checked.get("same_language") and checked.get("faithful"):
         honesty["language_fixed"] = True
         return redraft
     return final
@@ -7642,7 +7632,13 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                          else AWAITING_USER)
                     # Ending on a question cannot leave an unverified attempt
                     # behind or bypass disclosure of what actually changed.
-                    _asks_check(ctx, q.question, allow_repair=False)
+                    repair = _asks_check(ctx, q.question, allow_repair=turn_deadline - time.monotonic() > 150)
+                    if repair:
+                        messages.append({"role": "tool", "tool_call_id": tc.id,
+                                         "content": repair + "\n" + (_next_ask_write(ctx) or "")})
+                        _activity(worker_db, session_id, name, args, "ask check requested repair", edl_version=_cur_v)
+                        total_steps += 1
+                        continue
                     q.question, _question_outcome = _asks_settle(
                         ctx, q.question, _question_outcome)
                     _cur_v = ctx.latest_edl().get("version", _cur_v)

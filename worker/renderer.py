@@ -63,7 +63,7 @@ import true_peak
 from schemas import (clean_fingerprint, patch_fingerprint, patch_clip_key,
                      EDLValidationError,
                      is_canvas_program, keep_boundaries, master_loudness,
-                     quad_bbox, speed_pieces, strip_unknown_fx,
+                     quad_bbox, sounding_volume, speed_pieces, strip_unknown_fx,
                      subject_matte_geom, validate_edl)
 from timeline import Timeline, merge_spans, transition_junctions
 
@@ -4525,7 +4525,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # windows are in source seconds — exactly what the agent wrote.
         vol_filters = "" if dialogue_probe else "".join(
             f",volume={v['gain_db']}dB:enable='between(t,{v['start']:.2f},{v['end']:.2f})'"
-            for v in edl.get("volume", []))
+            for v in sounding_volume(edl))
         pitch = float(edl.get("source_pitch_semitones") or 0)
         pitch_filter = ""
         if pitch and has_audio:
@@ -5039,6 +5039,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       f"gt(floor((t-start_t)*{fps:.8f}/{f:g}),"
                       f"floor((prev_selected_t-start_t)*{fps:.8f}/{f:g}))'"
                       if f > 4 else "")
+            span = next((sp for sp in speed if sp["start"] <= (ps + pe) * .5 < sp["end"]), {})
+            interpolation = ""
+            if span.get("interpolate") and f < 1:
+                # Give the motion estimator its two lookahead frames at EOF.
+                interpolation = (f",tpad=stop_mode=clone:stop_duration={3/max(1, fps*f):.6f},"
+                                 f"minterpolate=fps={fps:.6f}:mi_mode=mci:me=epzs:scd=fdiff,"
+                                 f"trim=duration={(pe-ps)/f:.6f}")
             if regions:
                 # Region windows arrive in PROGRAM time; inside a sped piece
                 # the local pre-speed clock runs `f` times program speed.
@@ -5065,10 +5072,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                              f"setpts=PTS-STARTPTS[pvr{i}_{j}]")
                 _region_parts(parts, f"pvr{i}_{j}", f"pvt{i}_{j}", local_rgs,
                               sw, sh, 0.0, pe - ps, f"sp{i}_{j}")
-                parts.append(f"[pvt{i}_{j}]setpts=PTS{spts}[pvz{i}_{j}]")
+                parts.append(f"[pvt{i}_{j}]setpts=PTS{spts}{interpolation}[pvz{i}_{j}]")
             else:
                 parts.append(f"[pv{i}_{j}]trim=start={ps:.3f}:end={pe:.3f}{sample},"
-                             f"setpts=(PTS-STARTPTS){spts}[pvz{i}_{j}]")
+                             f"setpts=(PTS-STARTPTS){spts}{interpolation}[pvz{i}_{j}]")
             tempo = "" if abs(f - 1.0) < 1e-9 else f",{_atempo_chain(f)}"
             # Joins INSIDE a sped segment meet two independently retimed
             # pieces: the waveform steps (a click measured at 2.25x the
@@ -5082,7 +5089,20 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                     jf += ",afade=t=in:st=0:d=0.004"
                 if j < k - 1:
                     jf += f",afade=t=out:st={max(0.0, plen - 0.004):.6f}:d=0.004"
-            parts.append(f"[pa{i}_{j}]atrim=start={ps:.3f}:end={pe:.3f},"
+            audio_s, audio_e = ps, pe
+            if span.get("audio_mode") == "original":
+                origin = span["audio_start"] if span.get("audio_start") is not None else span["start"]
+                end = span["audio_end"] if span.get("audio_end") is not None else span["end"]
+                audio_s = min(end, origin + (ps - span["start"]) / f)
+                audio_e = min(end, audio_s + plen)
+                if audio_e <= audio_s + .001:
+                    # Past the end of the source sound, leave room for the bed.
+                    audio_s, audio_e = ps, pe
+                    tempo = ",volume=0"
+                else:
+                    tempo = ""
+                tempo += f",apad=whole_dur={plen:.6f},atrim=duration={plen:.6f}"
+            parts.append(f"[pa{i}_{j}]atrim=start={audio_s:.3f}:end={audio_e:.3f},"
                          f"asetpts=PTS-STARTPTS{tempo},{AUDIO_NORM}{jf}"
                          f"[paz{i}_{j}]")
             p_acc += (pe - ps) / f
@@ -7295,16 +7315,17 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # against a copy of the program audio, so the bed dips WITH the voice
     # and swells back in the gaps instead of the legacy -12dB step. Split
     # the program feed once, before the mix consumes it.
+    speech = _speech_spans_out(index, tl) if music_inputs else []
     smooth_js = [j for j, (_i, item, _d) in enumerate(music_inputs or [])
-                 if item.get("duck", True)
+                 if speech and item.get("duck", True)
                  and item.get("duck_mode") == "smooth"]
     if smooth_js:
         taps = "".join(f"[dref{j}]" for j in smooth_js)
-        parts.append(f"[{alabel}]asplit={len(smooth_js) + 1}"
-                     f"[aduckm]{taps}")
+        parts.append(f"[{alabel}]asplit=2[aduckm][dialoguekey]")
+        parts.append(f"[dialoguekey]highpass=f=250,lowpass=f=3500,"
+                     f"volume=0:enable='not({_enable_expr(speech)})',asplit={len(smooth_js)}{taps}")
         alabel = "aduckm"
     if music_inputs:
-        speech = _speech_spans_out(index, tl)
         for j, (input_idx, item, track_dur) in enumerate(music_inputs):
             m_start, m_end = _music_render_span(
                 item, total_dur,
@@ -8562,36 +8583,112 @@ def _repair_legacy_insert_boundaries(edl_dict):
 
 
 def _fx_run(cmd, fx_box, rebuild, cancelled_cb, **run_kw):
-    """Run a render command; when it fails with fx items in the graph, run
-    it once more WITHOUT them (every item reported ``omit`` with the cause):
-    a creative device can degrade, it can never fail a render (ROADMAP A3).
-    Cancellation, a lost lease and a timeout are not retried — the budget is
-    spent. ``fx_box`` holds the plan the graph builder reads; ``rebuild()``
-    returns the command for the graph rebuilt from it."""
-    try:
-        return _render_media_run(cmd, cancelled_cb=cancelled_cb, **run_kw)
-    except media.MediaError as e:
-        plan = fx_box[0]
-        # a program matte (Wave 1, 1A) is fx plumbing too: an EDL whose only
-        # device is a word behind the subject retries without it as well —
-        # but only when the graph carried one (every render with an indexed
-        # source holds a ProgramMatte; one nothing asked for emits nothing,
-        # and its failure is the legacy graph's, raised as before)
-        pm = getattr(plan, "pm", None)
-        pm_on = pm is not None and bool(pm.active and pm.wants)
-        comp_on = bool(getattr(plan, "has_composites", False)
-                       and not getattr(plan, "no_composites", False))
-        if plan is None or (plan.empty and not pm_on and not comp_on) \
-                or (cancelled_cb and cancelled_cb()) \
-                or "timed out" in str(e) or "cancelled" in str(e):
-            raise
-        print(f"[render] fx graph failed ({str(e).splitlines()[-1][:200] if str(e) else e!r})"
-              " — re-rendering without fx", flush=True)
-        fx_box[0] = fxgraph.without_fx(plan, e)
-        if getattr(fx_box[0], "pm", None) is not None:
-            fx_box[0].pm = None        # the behind items are drawn in front
-        return _render_media_run(rebuild(), cancelled_cb=cancelled_cb,
-                                 **run_kw)
+    """Render picture FX in bounded time windows. Keep the whole-program audio clock."""
+    import tempfile
+    plan = fx_box[0]
+    picture = [item for rows in (plan.by_stage.values() if plan else ()) for item in rows]
+    video = "[vout]" in cmd
+    bounded = video and plan and not plan.preview and len(picture) > 6
+    def run(args):
+        return _render_media_run(args, cancelled_cb=cancelled_cb, **run_kw)
+    def eligible(exc):
+        return not ((cancelled_cb and cancelled_cb()) or "timed out" in str(exc)
+                    or "cancelled" in str(exc))
+    if not bounded:
+        try:
+            return run(cmd)
+        except media.MediaError as exc:
+            if not eligible(exc) or not video or not picture:
+                raise
+            print(f"[render] retrying {len(picture)} picture devices in bounded windows: {str(exc)[:120]}", flush=True)
+
+    duration = float(run_kw["expected_out_s"])
+    fps = plan.fps3
+    end_frame = max(1, round(duration * fps))
+    spans = [(int(round(it["start"] * fps)), int(round(it["end"] * fps)), it)
+             for it in picture]
+    ids = {it["id"] for it in picture}
+    target = cmd[-1]
+    def low_memory(args):
+        args = list(args)
+        for flag in ("-filter_complex_threads", "-filter_threads", "-threads:v"):
+            for i in range(len(args) - 1):
+                if args[i] == flag:
+                    args[i + 1] = "1"
+        for i in reversed([i for i, value in enumerate(args) if value == "-i"]):
+            args[i:i] = ["-threads:v", "1"]
+        return args
+
+    with tempfile.TemporaryDirectory(prefix="fx_windows_", dir=plan.workdir) as folder:
+        pieces = []
+        def encode(a, b, active):
+            if cancelled_cb and cancelled_cb():
+                raise dbx.JobLeaseLost("FX window render cancelled")
+            path = os.path.join(folder, f"part_{len(pieces)}.mp4")
+            fx_box[0] = fxgraph.without_fx(plan, ids - {it["id"] for it in active})
+            args = low_memory(rebuild())
+            # Consume both graph outputs. The audio is rebuilt once below; the
+            # pieces contribute video only. Output seeking retains global clocks
+            # for tracked crops, captions, watermarks and the final dissolve.
+            start, length = a / fps, (b - a) / fps
+            args[-1:] = ["-ss", f"{start:.9f}", "-t", f"{length:.9f}",
+                         "-threads:v", "1", path]
+            run(args)
+            pieces.append((path, length))
+
+        def window(a, b):
+            active = [it for left, right, it in spans if left < b and right > a]
+            try:
+                encode(a, b, active)
+                return
+            except media.MediaError as exc:
+                if not eligible(exc) or not active:
+                    raise
+                error = str(exc).splitlines()[0][:160]
+            edges = sorted({x for left, right, it in spans for x in (left, right) if a < x < b})
+            if edges:
+                mid = min(edges, key=lambda x: abs((a+b)/2 - x))
+                window(a, mid)
+                window(mid, b)
+                return
+            # All these devices overlap throughout this small window. Only
+            # omit a device if removing that individual device restores it.
+            for item in active:
+                try:
+                    encode(a, b, [it for it in active if it is not item])
+                except media.MediaError as exc:
+                    if not eligible(exc):
+                        raise
+                    continue
+                plan.note(item, "omit", f"{a/fps:.2f}-{b/fps:.2f}s: {error}")
+                return
+            raise media.MediaError(f"could not encode FX window {a/fps:g}-{b/fps:g}s: {error}")
+
+        try:
+            starts = sorted({max(0, min(end_frame, left)) for left, _, _ in spans})
+            bounds = sorted({0, end_frame, *starts[3::3]})
+            for a, b in zip(bounds, bounds[1:]):
+                window(a, b)
+            fx_box[0] = fxgraph.without_fx(plan, ids)
+            args = rebuild()
+            graph_flag = next(f for f in ("-filter_complex", "-/filter_complex", "-filter_complex_script") if f in args)
+            pos = args.index(graph_flag)
+            graph = args[pos + 1]
+            if graph_flag != "-filter_complex":
+                with open(graph, encoding="utf-8") as fh:
+                    graph = fh.read()
+            audio_path = os.path.join(folder, "audio.m4a")
+            run([*low_memory(args[:pos]), *_graph_args(_prune_graph_to_audio(graph), folder, max_threads=1),
+                 "-map", "[aout]", "-c:a", "aac", "-b:a", "128k" if plan.preview else "192k",
+                 "-t", str(duration), audio_path])
+            listing = os.path.join(folder, "pictures.txt")
+            with open(listing, "w", encoding="utf-8") as fh:
+                for path, length in pieces:
+                    fh.write(f"file '{os.path.basename(path)}'\nduration {length:.9f}\n")
+            run(["ffmpeg", "-y", "-f", "concat", "-safe", "1", "-i", listing, "-i", audio_path,
+                 "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-movflags", "+faststart", target])
+        finally:
+            fx_box[0] = plan
 
 
 def _fx_source(edl, index):

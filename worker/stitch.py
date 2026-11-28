@@ -295,7 +295,7 @@ def expand(windows, all_item_spans, event_spans, junction_zones, fade_zones,
     """Grow windows so nothing is cut mid-element; merge; None on a zone that
     cannot be satisfied (fades) or runaway growth."""
     ws = [list(w) for w in windows]
-    for _ in range(24):                       # fixpoint with a hard ceiling
+    while True:  # bounds advance only to a finite set of span endpoints
         grew = False
         merged = []
         for w in sorted(ws):
@@ -307,14 +307,13 @@ def expand(windows, all_item_spans, event_spans, junction_zones, fade_zones,
         for w in ws:
             for a, b in all_item_spans + event_spans + junction_zones:
                 if a < w[1] and b > w[0]:      # overlaps
-                    na, nb = min(w[0], a - 0.05), max(w[1], b + 0.05)
+                    na = max(0.0, min(w[0], a - 0.05))
+                    nb = min(out_duration, max(w[1], b + 0.05))
                     if (na, nb) != (w[0], w[1]):
-                        w[0], w[1] = max(0.0, na), min(out_duration, nb)
+                        w[0], w[1] = na, nb
                         grew = True
         if not grew:
             break
-    else:
-        return None
     for w in ws:
         for a, b in fade_zones:
             if a < w[1] and b > w[0]:
@@ -802,7 +801,12 @@ def window_edl(edl, tl, w0, w1, keep_audio=False, fps=None,
                     continue
                 keep.append([src_a, src_b])
                 if abs(f - 1.0) > 1e-9:
-                    speed.append({"id": f"sw{len(speed) + 1}",
+                    item = next((sp for sp in edl.get("speed") or []
+                                 if sp["start"] <= (src_a + src_b) / 2 < sp["end"]), {})
+                    attrs = {k: item[k] for k in ("interpolate", "audio_mode", "audio_end") if item.get(k) is not None}
+                    if item.get("audio_start") is not None:
+                        attrs["audio_start"] = item["audio_start"] + (src_a - item["start"]) / f
+                    speed.append({**attrs, "id": f"sw{len(speed) + 1}",
                                   "start": src_a,
                                   "end": src_b, "factor": f})
             acc += plen
@@ -1237,13 +1241,17 @@ def timeline_atoms(edl, tl):
     [(out_a, out_b, key)] where key identifies WHAT plays there —
     ("src", src_a, src_b, rate) for main footage, ("ins", id) for a spliced
     insert. Sorted by output position."""
+    import follow
+    frame = edl.get("frame") or {}
+    tracked = (frame.get("focus_track") or frame.get("follow") or
+               any(follow.card_follows(c) for c in (edl.get("effects") or {}).get("picture_cards") or []))
     atoms = []
     for (_s, _e), pcs, off in zip(tl.segs, tl.pieces, tl.offsets):
         acc = off
         for ps, pe, f in pcs:
             plen = (pe - ps) / f
             if plen > 1e-4:
-                atoms.append((acc, acc + plen, ("src", ps, pe, f)))
+                atoms.append((acc, acc + plen, ("src", ps, pe, f) + (((_s, _e),) if tracked else ())))
             acc += plen
     from timeline import insert_windows as _iw
     items = {item["id"]: item for item in edl.get("inserts") or []}
@@ -1271,11 +1279,13 @@ def match_runs(prev_atoms, new_atoms):
     cands = []
     for na, nb, key in new_atoms:
         if key[0] == "src":
-            _t, ps, pe, f = key
+            _t, ps, pe, f = key[:4]
             for pa, _pb, pkey in prev_atoms:
                 if pkey[0] != "src":
                     continue
-                _t2, qs, qe, g = pkey
+                _t2, qs, qe, g = pkey[:4]
+                if pkey[4:] != key[4:]:
+                    continue
                 if abs(g - f) > 1e-9:
                     continue
                 lo, hi = max(ps, qs), min(pe, qe)
@@ -1361,18 +1371,6 @@ def plan_timeline(prev_edl, new_edl, tl_prev, tl_new, out_duration,
     cap_events_*: [(start, end, payload)] caption events of each program's
     full ASS (renderer builds both — captions burn on the output clock, so
     equality has to be CHECKED, never assumed)."""
-    if ((prev_edl.get("frame") or {}).get("focus_track")
-            and prev_edl.get("keep") != new_edl.get("keep")):
-        return None, None, "changed segment midpoint can select a different tracked crop"
-    import follow
-    if prev_edl.get("keep") != new_edl.get("keep") and any(
-            ((e.get("frame") or {}).get("follow")
-             or any(follow.card_follows(c)
-                    for c in ((e.get("effects") or {}).get("picture_cards") or [])))
-            for e in (prev_edl, new_edl)):
-        # a follow block snaps its holds on its own union frame: the same
-        # source moment can land a pixel apart in a re-cut block
-        return None, None, "a face-following crop is drawn per block"
     if ((prev_edl.get("captions") != new_edl.get("captions")
          or prev_edl.get("caption_mutes") != new_edl.get("caption_mutes"))
             and (cap_events_prev is None or cap_events_new is None)):
