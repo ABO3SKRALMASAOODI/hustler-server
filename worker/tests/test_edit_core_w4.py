@@ -35,6 +35,27 @@ def test_rotated_source_and_index_share_coordinates(tmp_path):
     assert idx["video"]["width"] == 96
 
 
+def test_broll_keeps_late_pages_when_the_moment_planner_is_unavailable(monkeypatch):
+    from tools_ext import broll_tools
+    from types import SimpleNamespace
+    import llm
+    import device_planner
+    words = [{"w": f"word{i}", "t0": float(i)} for i in range(365)]
+    monkeypatch.setattr(device_planner, "program_words", lambda *args: words)
+    monkeypatch.setattr(llm, "ask_text", lambda *args, **kw: None)
+    batches = []
+    def record(ctx, moments, limit, providers, place):
+        batches.append(moments)
+        return "placed"
+    monkeypatch.setattr(broll_tools, "_source_broll", record)
+    ctx = SimpleNamespace(index={}, user_message="Place cutaways on the mentions",
+                          latest_edl=lambda: {"version": 1, "json": {"keep": [[0, 365]]}})
+    broll_tools.source_broll(ctx)
+    assert len(batches) == 2
+    assert batches[-1][-1]["at"] == 350
+    assert batches[-1][-1]["query"].startswith("word350 ")
+
+
 def test_source_gains_follow_the_mix_and_the_kept_spans():
     from schemas import source_gain_stretches
     edl = {"keep": [[0, 2], [4, 6]], "stem_mix": {"voice_gain_db": -4},

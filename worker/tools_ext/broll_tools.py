@@ -537,20 +537,30 @@ def source_broll(ctx, moments=None, max=None, providers=None, place=True):
         edl, _ = _edl(ctx)
         words = device_planner.program_words(edl, getattr(ctx, "index", {}) or {})
         moments = []
-        for pos in range(0, len(words), 350):
-            page = words[pos:pos+350]
+        request = request_text_for(ctx) or ""
+        for page in ([words[pos:pos+350] for pos in range(0, len(words), 350)] or [[]]):
             answer = llm.ask_text(
-                "Plan licensed cutaways for these timed words and the editor's current request. "
-                "Cover mentions throughout this passage at a density that suits the brief. "
-                "Return a JSON array of objects with query (concrete stock search), at (the matching "
-                "output timestamp), purpose, duration_s and kind (video, photo or any).",
-                json.dumps({"request": request_text_for(ctx),
+                "Plan licensed cutaways for the editor's current request. Ground each query in the "
+                "timed words, or the brief when the film has no speech. Cover mentions throughout "
+                "this passage at a density that suits the brief. Return a JSON array of objects "
+                "with query (concrete stock search), at (output timestamp), purpose, duration_s "
+                "and kind (video, photo or any).",
+                json.dumps({"request": request, "duration_s": _program_s(edl),
                             "words": [[w["t0"], w["w"]] for w in page]}, ensure_ascii=False),
                 max_tokens=2400, purpose="source_broll_moments")
-            if answer:
-                moments.extend(llm.extract_json_array(answer["text"]) or [])
-        if not moments:
-            return "No timed moments were available. Supply moments with a query and output time."
+            planned = llm.extract_json_array(answer["text"]) if answer else []
+            usable = [m for m in planned or [] if isinstance(m, dict) and m.get("query")]
+            if usable:
+                moments.extend(usable)
+                continue
+            # The provider can miss one page on a long film. Search using the
+            # actual words in spaced passages, keeping each on its spoken beat.
+            for pos in range(0, len(page), 40):
+                quote = " ".join(str(w["w"]) for w in page[pos:pos+6] if w.get("w")).strip()
+                if quote:
+                    moments.append({"at": page[pos]["t0"], "query": quote, "purpose": quote})
+        if not moments and request.strip():
+            moments.append({"at": 0, "query": request.strip()[:120], "purpose": request.strip()[:160]})
     try:
         moments = _obj(moments, "moments")
         limit = int(max) if max is not None else None
