@@ -104,8 +104,10 @@ def child_depth(spec, ch):
     net = _net(engine["path"], engine.get("threads") or None)
     maps, ts, t_model = [], [], 0.0
     i = 0
+    # A 40 ms photo disappears entirely in an 8 fps sampling filter.
+    # For a single keyframe, decode the first source frame in the window.
     for frame in aj._decode(spec["src"], ch["t0"], max(span, 0.04), w, h,
-                            fps, n):
+                            None if n == 1 else fps, n):
         t = time.perf_counter()
         maps.append(infer(net, np.ascontiguousarray(frame),
                           int(params.get("input_size") or 518)))
@@ -251,7 +253,7 @@ def local_clip(path, t0, t1, *, fps=8.0, max_side=518, input_size=518,
     span = max(0.04, float(t1) - float(t0))
     n = max(1, int(round(span * fps)))
     maps, ts = [], []
-    for i, frame in enumerate(aj._decode(path, t0, span, w, h, fps, n)):
+    for i, frame in enumerate(aj._decode(path, t0, span, w, h, None if n == 1 else fps, n)):
         maps.append(infer(net, np.ascontiguousarray(frame), input_size))
         ts.append(float(t0) + i / fps)
     if not maps:

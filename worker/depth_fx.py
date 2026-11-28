@@ -336,7 +336,8 @@ def still_depth(plan, item, img, origin, wait_s):
     if origin[0] == "asset":
         clip = _local_still_depth(origin[1])
         if clip is None:
-            ref = _asset_ref(origin[1])
+            ref = _asset_ref(origin[1], (item.get("source") or {}).get("asset_key"),
+                             getattr(plan.source, "project_id", None))
             if ref is not None:
                 clip, _st = depth_track.fetch(ref, [(0.0, 0.04)], dest,
                                               wait_s=wait_s)
@@ -376,7 +377,7 @@ def _crop_map(m, rect, w, h):
                       interpolation=cv2.INTER_LINEAR)
 
 
-def _asset_ref(path):
+def _asset_ref(path, storage_key=None, project_id=None):
     """A SourceRef for a local still (its own sha), or None."""
     try:
         import media
@@ -384,9 +385,9 @@ def _asset_ref(path):
         import sidecars
         info = qa_metrics.probe(path)
         sha = media.sha256_file(path)
-        return sidecars.source_from(sha, path, {
+        return sidecars.source_from(sha, storage_key or path, {
             "duration": 0.04, "fps": 25.0, "width": info.get("width"),
-            "height": info.get("height")}, None, [])
+            "height": info.get("height")}, project_id, [])
     except Exception:  # noqa: BLE001
         return None
 

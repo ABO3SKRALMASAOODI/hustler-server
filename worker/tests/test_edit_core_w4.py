@@ -225,3 +225,28 @@ def test_encoded_window_identity_follows_media_and_device_bytes(tmp_path, monkey
     assert original and key(1) == original and key(2) != original
     grade.write_text("different grade")
     assert key(1) != original
+
+
+def test_depth_samples_the_first_frame_of_a_photo_at_the_batch_rate(tmp_path, monkeypatch):
+    import cv2
+    import analysis_jobs
+    import depth_fx
+    import depth_track
+
+    photo = tmp_path / "local.png"
+    image = np.zeros((48, 64, 3), np.uint8)
+    image[:, 32:] = 255
+    assert cv2.imwrite(str(photo), image)
+    ref = depth_fx._asset_ref(str(photo), "fetched/31/photo.png", 31)
+    assert (ref.storage_key, ref.project_id) == ("fetched/31/photo.png", 31)
+    assert analysis_jobs.sidecars.chunks_for([], ref.duration_s, [(0, .04)]) == [(0, .04)]
+    monkeypatch.setattr(depth_track, "_net", lambda *args: object())
+    monkeypatch.setattr(depth_track, "infer", lambda net, bgr, size: bgr[:, :, 0])
+    path, info = depth_track.child_depth(
+        {"params": {"fps": 8, "max_side": 64}, "source": {"width": 64, "height": 48},
+         "engine": {"path": "test"}, "src": str(photo), "outdir": str(tmp_path)},
+        {"t0": 0, "t1": .04, "out_key": "photo"})
+    assert info["frames"] == 1
+    with np.load(path) as data:
+        assert data["depth"].shape == (1, 48, 64)
+        assert data["depth"].max() > data["depth"].min()

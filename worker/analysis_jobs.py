@@ -475,9 +475,11 @@ def _decode(src, start, dur, w, h, fps, n_max):
     if str(src).startswith(("http://", "https://")):
         cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
                 "-reconnect_delay_max", "5"]
+    scale = f"scale={w}:{h}:flags=area"
+    sample = f"fps={fps:.6f},{scale}" if fps is not None else scale
     cmd += ["-ss", f"{max(0.0, start):.3f}", "-t", f"{dur:.3f}", "-i",
             str(src), "-an", "-sn", "-dn",
-            "-vf", f"fps={fps:.6f},scale={w}:{h}:flags=area",
+            "-vf", sample,
             "-frames:v", str(int(n_max)), "-pix_fmt", "bgr24",
             "-f", "rawvideo", "pipe:1"]
     # stderr to a file, never a pipe nobody drains: a damaged stream can log
