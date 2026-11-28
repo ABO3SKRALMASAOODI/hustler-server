@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import caption_pixels
@@ -25,7 +26,19 @@ def test_finish_repairs_missing_encoded_ink_and_caches_the_repaired_master(tmp_p
     assert not reused
     assert result["finish"]["caption_pixels"] == dict(sampled=1,repaired=1,items=["word0"],unreadable=0)
     assert caption_pixels.repair(final,scene,ff)["repaired"] == 0
-    assert chain.cached_finish(ctx,path,final,caption_scene=str(composed),accent=False) == (result,True)
+    # A fresh check process has the saved receipt, but never imported the render worker.
+    resume = """
+import chain, sys
+from types import SimpleNamespace
+programme, final, scene = sys.argv[1:]
+assert chain.brand.worker_dir() not in sys.path
+saved, reused = chain.cached_finish(SimpleNamespace(), programme, final, caption_scene=scene, accent=False)
+assert reused and saved["finish"]["caption_pixels"]["repaired"] == 1
+"""
+    paths = [os.path.dirname(module.__file__) for module in (chain, caption_pixels)]
+    subprocess.run([sys.executable, "-c", resume, path, final, str(composed)], cwd=tmp_path,
+                   env=dict(os.environ, PYTHONPATH=os.pathsep.join(paths), VALMERA_WORKER=chain.brand.worker_dir()),
+                   check=True)
 
 
 def test_missing_caption_is_drawn_and_the_encoded_glyphs_are_measured(tmp_path):

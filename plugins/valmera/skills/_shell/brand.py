@@ -75,10 +75,14 @@ def worker_dir():
     return f"{V}/worktrees/skill-main/worker"
 
 
-def _renderer():
+def load_worker_path():
     w = worker_dir()
     if w not in sys.path:
         sys.path.insert(0, w)
+
+
+def _renderer():
+    load_worker_path()
     import config  # noqa: F401
     import renderer
     return renderer

@@ -729,6 +729,7 @@ def cached_finish(ctx, programme, final, *, receipt=None, caption_scene=None, **
     from shell import jload, jsave
     key = dict(programme=file_sha(programme), receipt=receipt, options=options)
     if caption_scene:
+        brand.load_worker_path()
         import caption_pixels
         key["caption_scene"] = file_sha(caption_scene)
         key["caption_renderer"] = file_sha(caption_pixels.__file__)
