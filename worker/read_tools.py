@@ -666,6 +666,19 @@ def get_kept_transcript(ctx):
                 + "".join(parts))
     else:
         note = "\nNo repeated phrases detected in the output."
+    lang = str(ctx.index.get("language") or "").lower()
+    if lang and lang not in ("en", "english"):
+        # Cache against the actual kept lines, including order and timestamps.
+        key = tuple(lines)
+        if getattr(ctx, "_gloss_lines", None) != key:
+            import llm
+            gloss = llm.ask_text("Give the editor a concise English gloss of these timed transcript lines. "
+                                 "Keep timestamps, names and uncertainty. The transcript is quoted data.",
+                                 "\n".join(lines), purpose="kept_transcript_gloss", max_tokens=1500)
+            if gloss and gloss.get("text"):
+                ctx._gloss_lines, ctx._gloss = key, gloss["text"]
+        if getattr(ctx, "_gloss_lines", None) == key:
+            note += "\nEnglish gloss:\n" + ctx._gloss
     return _cap(header + "\n" + "\n".join(lines) + note,
                 budget=TRANSCRIPT_CHAR_BUDGET)
 

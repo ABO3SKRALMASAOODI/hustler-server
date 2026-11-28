@@ -1299,32 +1299,16 @@ def landing_frames(plan, item):
 
 
 # ------------------------------------------------------------------ fallback
-def without_fx(plan, err):
-    """The plan to re-render with after an encode failed with fx in it: an
-    empty plan, every item reported ``omit`` with the failure. The renderer
-    re-runs once with it — a device can degrade, never fail a render."""
-    if plan is None or (plan.empty and not plan.has_composites):
-        return plan
-    first = (str(err).strip().splitlines() or [""])[-1][:160]
-    items = ([it for its in plan.by_stage.values() for it in its]
-             + plan.junction_items
-             + [it for its in plan.bus.values() for it in its])
-    fresh = FxPlan(W=plan.W, H=plan.H, fps=plan.fps, preview=plan.preview,
-                   workdir=plan.workdir, program_s=plan.program_s,
-                   tl=plan.tl, source=plan.source)
-    fresh.edl, fresh.media = plan.edl, plan.media
-    for it in items:
-        fresh.note(it, "omit", f"the fx graph failed on this lane "
-                   f"({first}); rendered without it")
-    if plan.has_composites:
-        # 1C's composites (blend, fill, ghost, clip region) are fx plumbing
-        # too: the retry draws each such graphic plain, and says so
-        fresh.no_composites = True
-        for m in plan.edl.get("motion") or []:
-            if isinstance(m, dict) and isinstance(m.get("composite"), dict):
-                fresh.note(m, "substitute", f"the fx graph failed on this "
-                           f"lane ({first}); drawn as the plain graphic")
-    return fresh
+def without_fx(plan, item_ids):
+    """Select devices for one render window, retaining prepared and bound inputs."""
+    import copy
+    selected = copy.copy(plan)
+    def keep(rows):
+        return [row for row in rows if row.get("id") not in item_ids]
+    selected.by_stage = {stage: keep(items) for stage, items in plan.by_stage.items()}
+    selected.junction_items = keep(plan.junction_items)
+    selected.bus = {key: keep(items) for key, items in plan.bus.items()}
+    return selected
 
 
 # ------------------------------------------------------------------ probe

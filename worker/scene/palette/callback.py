@@ -39,7 +39,9 @@ def callback(l1, work, ask, sense_=None, pool=None):
     a0, z0 = int(fr[0]), int(fr[1])
     if z0 > a:
         z0 = a
-    op = opening(l1, work, a0, z0) or opening(l1, work, a0, z0, take=True)
+    planned = l1.get("opening_shots")
+    original = dict(l1, items=planned) if planned else l1
+    op = opening(original, work, a0, z0) or opening(original, work, a0, z0, take=True)
     if not op:
         return {"skip": "the opening holds no picture to return"}
     if str(args.get("mode", "burst")) == "grid" and len(op) >= 2:

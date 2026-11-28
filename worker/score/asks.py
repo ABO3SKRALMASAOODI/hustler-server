@@ -103,7 +103,9 @@ def admitted(cfg, user_id):
 
 # ------------------------------------------------------------------ the film digest
 
-LANES = ("texts", "overlays", "inserts", "music", "sfx", "voiceover", "motion", "vectors", "fx")
+from schemas import sounding_volume, source_voice_gain
+
+LANES = ("volume", "texts", "overlays", "inserts", "music", "sfx", "voiceover", "motion", "vectors", "fx")
 
 
 def _t(v):
@@ -125,6 +127,8 @@ def _end(it):
 def _label(lane, it, names=None):
     name = (names or {}).get(str(it.get("asset_key") or it.get("storage_key") or ""))
     named = f" [{name}]" if name else ""
+    if lane == "volume":
+        return f"source gain {_t(it.get('start'))}-{_t(it.get('end'))} s: {it.get('gain_db')} dB"
     if lane == "texts":
         return f"text \"{str(it.get('text') or '')[:60]}\" {it.get('template') or ''} {_t(it.get('start'))}-{_t(it.get('end'))} s"
     if lane == "inserts":
@@ -164,8 +168,10 @@ def sound_layers(edl, index=None):
              else f"noise cleaning on (strength {nc.get('strength')}"
                   + (f", measured noise floor {nc.get('floor_db')} dBFS" if nc.get("floor_db") is not None else "")
                   + ")")
-    vol = [v for v in edl.get("volume") or [] if isinstance(v, dict)]
-    gain = (f"; its level changed on {len(vol)} stretch(es)" if vol else "")
+    vol = sounding_volume(edl)
+    gain = "".join(f"; source gain {v['start']:g}-{v['end']:g}s {v['gain_db']:g} dB" for v in vol)
+    if edl.get("stem_mix"):
+        gain += f"; voice stem {edl['stem_mix'].get('voice_gain_db', 0)} dB"
     lines = [f"the upload's own sound (the recording itself): {spoken}, and around it the "
              f"recording's room tone and background noise; {clean}{gain}"]
     for m in edl.get("music") or []:
@@ -286,6 +292,8 @@ def spoken(ctx, edl, limit=9000):
     lines, group = [], []
     for w in words:
         try:
+            if source_voice_gain(edl, (w["src_t0"] + w["src_t1"]) / 2) <= -40:
+                continue
             t0, t1, text = float(w["t0"]), float(w["t1"]), str(w["w"])
         except (KeyError, TypeError, ValueError):
             continue
@@ -323,6 +331,8 @@ def pauses(ctx, edl, limit=12):
         tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed") or [])
         rows, dead_s, live_s, unread_s = [], 0.0, 0.0, 0.0
         for g in gaps:
+            if source_voice_gain(edl, (g["start"] + g["end"]) / 2) <= -40:
+                continue
             for a, b in tl.span_to_out(float(g["start"]), float(g["end"])):
                 if b - a < 0.3:
                     continue
@@ -416,8 +426,14 @@ def _call(ctx, name, schema, system, content, max_tokens=4000, model=None):
 # ------------------------------------------------------------------ the ledger
 
 LEDGER_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["lang", "partial_status", "start", "source_need", "frame", "asks"],
+    "type": "object", "additionalProperties": False, "required": ["lang", "partial_status", "start", "source_need", "frame", "asks", "previous"],
     "properties": {
+        "previous": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["id", "status", "ask_id"], "properties": {
+                "id": {"type": "string", "description": "ID in the previous ledger."},
+                "status": {"type": "string", "enum": ["carried", "reopened", "dropped"]},
+                "ask_id": {"type": "string", "description": "Corresponding ID in this ledger, empty if dropped."}}}},
         "lang": {"type": "string", "description": "ISO code of the language the customer typed in."},
         "start": {"type": "string", "enum": ["current", "upload"],
                   "description": "upload when the current film is an automatic first cut the product made by itself and the customer's words are about their uploaded video, not that cut (they ask to keep the upload's length, format or narration, or to work on a part of it the first cut left out); current otherwise, and always when the customer has built on the current film. A request that changes how the film on screen looks or sounds (a grade, a look, grain, music, captions, effects, text) and needs nothing of the upload the cut left out is current: it applies to the film they see (p6303: a grade-only ask reset a finished first cut to the bare upload and lost its titles, overlays and music)."},
@@ -456,6 +472,8 @@ LEDGER_SCHEMA = {
 
 LEDGER_SYSTEM = """You read what a customer typed to a video editor and list each thing they asked for: the ask ledger. You don't edit anything.
 
+Read the contract alongside the customer's words. Resolve a short answer against the last question the editor asked. Account for each earlier ask in previous. Carry unfinished work through complaints, clarifications and track selections. Reopen a completed ask if the customer disputes the result. Drop an unfinished ask when the customer withdraws or supersedes it. Include every carried or reopened ask in asks. Distinguish the requested outcome from whatever happens to be on the timeline now.
+
 One ask per thing they really asked for, none invented, none merged away. A list of five wishes is five asks. Small talk, thanks and descriptions of the upload are not asks. What they asked to keep or avoid is an ask of kind keep. A question is an ask of kind answer. An ask with a condition and its alternative ("make X; if you can't, explain why and stop") is one ask: the alternative goes in its otherwise, never in an ask of its own, and when the alternative covers several asks each of them carries it. A qualifier of an ask (what is not enough, what it must look like, how long) is part of that ask's pass, not a keep of its own.
 
 kind:
@@ -487,11 +505,15 @@ def build(ctx, request, history=None, edl=None):
     index = getattr(ctx, "index", None) or {}
     video = index.get("video") or {}
     lines = []
-    for row in (history or [])[-6:]:
+    for row in (history or [])[-12:]:
         if row.get("role") in ("user", "assistant") and str(row.get("content") or "").strip():
-            lines.append(f"{row['role']}: {str(row['content'])[:600]}")
+            lines.append(f"{row['role']}: {str(row['content'])[:3000]}")
     origin = getattr(ctx, "request_edit_origin", None)
+    previous = (getattr(ctx, "previous_ask_ledger", None) or {}).get("asks") or []
+    requirements = (getattr(ctx, "semantic_contract", None) or {}).get("requirements") or []
     content = "\n".join([
+        "Asks and last verdict from the previous request (carry open work): " + json.dumps(previous, ensure_ascii=False),
+        "The contract's reading of the current request: " + json.dumps(requirements, ensure_ascii=False),
         "The customer's request now: " + json.dumps(str(request)[:6000], ensure_ascii=False),
         "Earlier in this project (oldest first):\n" + ("\n".join(lines) if lines else "nothing"),
         f"The upload: {float(video.get('duration') or getattr(ctx, 'duration', 0) or 0):.1f} s, "
@@ -521,18 +543,17 @@ def build(ctx, request, history=None, edl=None):
                 content.extend([{"type": "text", "text": f"Upload #{r['n']}: {r['name']} ({r['kind']}), key {r['key']}"},
                                 llm.image_part(r["frame"])])
     value, usage = _call(ctx, "record_ask_ledger", LEDGER_SCHEMA, LEDGER_SYSTEM, content, max_tokens=8000)
-    if not value.get("asks") and str(request or "").strip():
-        # The model answered with no ledger for a typed request (p5520's second request on a replay:
-        # {"lang": "en"} and nothing else). Asked once more; an empty ledger is no ledger, never a
-        # request that asked for nothing.
-        value, again = _call(ctx, "record_ask_ledger", LEDGER_SCHEMA, LEDGER_SYSTEM,
-                             (content + [{"type": "text", "text": "List every ask in the request; the previous ledger was empty."}]
-                              if isinstance(content, list) else content + "\nList every ask in the request; the previous ledger was empty."),
-                             max_tokens=8000)
-        usage = {"usd": round(usage["usd"] + again["usd"], 6), "s": round(usage["s"] + again["s"], 2), "model": again["model"]}
-        if not value.get("asks"):
-            raise ValueError("the ledger came back empty twice")
-    ledger = settle(value, edl, usage)
+    current = value.get("asks") or []
+    decisions = {d["id"]: d for d in value.get("previous") or [] if isinstance(d, dict) and d.get("id")}
+    current_ids = {a.get("id") for a in current}
+    for old in previous:
+        decision = decisions.get(old["id"], {})
+        if decision.get("status") == "dropped" or decision.get("ask_id") in current_ids:
+            continue
+        if old.get("state") in (*OPEN_STATES, "unchecked", "open") or decision.get("status") == "reopened":
+            current.append(dict(old, want=old.get("want") or old.get("said"), **{"pass": old.get("pass") or old.get("said")}))
+    ledger = settle(dict(value, asks=current), edl, usage)
+    ledger["previous"] = list(decisions.values())
     if track_titles:
         ledger["soundtrack_options"] = track_titles
     return ledger
@@ -601,14 +622,12 @@ def editor_note(ledger, done_by=None):
     """The ledger for the editor: its checklist, read once at the top of the turn."""
     whole_length = ", keeps the upload's whole length"
     rows = [f"{a['id']} [{a['kind']}{', whole film' if a.get('span') == 'whole' else ''}"
-            f"{whole_length if a.get('length') == 'upload' else ''}] {a['want']} (check: {a['pass']})"
+            f"{whole_length if a.get('length') == 'upload' else ''}] Customer: {a.get('said', '')} — {a['want']} (check: {a['pass']})"
             + (f" Build with {a['write_tool']}." if a.get("write_tool") else "")
             + (f" If it can't be done: {a['otherwise']}" if a.get("otherwise") else "")
             for a in ledger["asks"]]
     head = ("\n\nASK LEDGER: each thing the customer asked for and how it will be checked on the "
-            "rendered film before your reply goes out. Each want is their message already read in its "
-            "conversation (numbers, typos and references resolved): do it as written, never re-read it "
-            "into something else. Do every one; an ask you can't do, say so plainly.\n")
+            "rendered film before your reply goes out. Read each want alongside the customer's words and the current film. Do every one; an ask you can't do, say so plainly.\n")
     tail = ""
     if done_by:
         tail = "\n" + done_by
@@ -1078,6 +1097,8 @@ def facts(edl, preview=None, changes="", shots=None, source_s=None, index=None):
         "titles": [{k: t.get(k) for k in ("id", "text", "start", "end", "template", "font", "color", "size_scale",
                                               "x", "y", "font_size", "max_width", "text_align")}
                    for t in (edl.get("texts") or [])[:24] if isinstance(t, dict)],
+        "source_gain_db": sounding_volume(edl),
+        "source_stems": edl.get("stem_mix"),
         "music": [{k: m.get(k) for k in ("start", "end", "gain_db", "mute", "provenance")}
                   for m in edl.get("music") or [] if isinstance(m, dict)],
         "sound_effects": len(edl.get("sfx") or []),
@@ -1089,7 +1110,7 @@ def facts(edl, preview=None, changes="", shots=None, source_s=None, index=None):
         "speed_changes": len(edl.get("speed") or []),
         "effects": json.dumps({k: v for k, v in (edl.get("effects") or {}).items() if k != "zooms"},
                               ensure_ascii=False, default=str)[:1200],
-        "loudness": (preview.get("audio_qc") or {}).get("integrated_lufs") if isinstance(preview.get("audio_qc"), dict) else None,
+        "loudness": (preview.get("audio_qc") or {}).get("i") if isinstance(preview.get("audio_qc"), dict) else None,
         "whole_film": measured(edl, shots, source_s, preview, index),
         "changed_in_this_request": str(changes or "nothing")[:1500],
     }
@@ -1103,11 +1124,11 @@ def frame_pages(ctx, preview, limit=3):
     pages = []
     for p in (preview or {}).get("screening_pages") or []:
         if isinstance(p, dict) and p.get("key"):
-            pages.append((p["key"], "; ".join(f"tile {i + 1}={float(r.get('time_s', 0)):.1f}s"
+            pages.append((p["key"], "; ".join(f"tile {i + 1}={_t(r.get('time_s'))}s"
                                              for i, r in enumerate(p.get("frames") or []))))
     for p in ((preview or {}).get("caption_pages") or [])[:1]:
         if isinstance(p, dict) and p.get("key"):
-            pages.append((p["key"], "caption frames at " + ", ".join(f"{float(t):.1f}s" for t in p.get("times") or [])))
+            pages.append((p["key"], "caption frames at " + ", ".join(f"{_t(t)}s" for t in p.get("times") or [])))
     if not pages and (preview or {}).get("sheet_key"):
         pages.append((preview["sheet_key"], "a contact sheet across the whole film, left to right, top to bottom"))
     out = []
@@ -1556,7 +1577,7 @@ def summary(ledger, verdict=None):
             "routed": ledger.get("routed"), "usd": round(sum(float((c or {}).get("usd") or 0) for c in
                                                              [ledger.get("usage"), (ledger.get("routed") or {}).get("usage")]
                                                              + [x.get("usage") for x in ledger.get("checks") or []]), 6),
-            "asks": [{"id": a["id"], "kind": a["kind"], "span": a.get("span"), "said": a["said"][:160],
+            "asks": [{**a,
                       "state": states.get(a["id"], "unchecked"), "seen": seen.get(a["id"], "")}
                      for a in ledger["asks"]],
             "unasked": [{k: r.get(k) for k in ("what", "at_s", "fix")} for r in harm(verdict)][:8],

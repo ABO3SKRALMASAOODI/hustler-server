@@ -101,7 +101,7 @@ class SfxSearchError(Exception):
     pass
 
 
-def _outage_hits(query, cap, count):
+def _outage_hits(query, cap, count, role="one_shot"):
     words = set(re.findall(r"[a-z0-9]+", str(query or "").casefold()))
     rows = []
     for raw in _OUTAGE_CATALOG:
@@ -114,7 +114,7 @@ def _outage_hits(query, cap, count):
             "duration_s": raw["duration_s"], "license": "cc0-1.0",
             "page_url": raw["page"], "_url": raw["url"],
         }
-        rows.append((_rank_score(item, query, cap), item))
+        rows.append((_rank_score(item, query, cap, role), item))
     rows.sort(key=lambda row: (-row[0], row[1]["id"]))
     return [item for _score, item in rows[:count]]
 
@@ -137,7 +137,7 @@ _ONE_SHOT_WORDS = {
 }
 
 
-def _rank_score(item, query, cap):
+def _rank_score(item, query, cap, role="one_shot"):
     """Editorial relevance score for a one-shot picker.
 
     Openverse's text rank is broad-audio rank: a search for "camera shutter"
@@ -156,6 +156,8 @@ def _rank_score(item, query, cap):
         score += 12.0
     score += 3.0 * sum(1 for w in qwords if w in title)
     score += 1.0 * sum(1 for w in qwords if w in hay and w not in title)
+    if role == "bed":
+        return score
     score += 2.5 * sum(1 for w in _ONE_SHOT_WORDS if w in hay)
     score -= 7.0 * sum(1 for w in _NOISY_WORDS if w in hay)
 
@@ -173,12 +175,12 @@ def _rank_score(item, query, cap):
     return score
 
 
-def search(query, max_s=None, count=MAX_RESULTS):
+def search(query, max_s=None, count=MAX_RESULTS, role="one_shot"):
     query = (query or "").strip()
     if not query:
         raise SfxSearchError("a search query is required")
     count = max(1, min(int(count or MAX_RESULTS), MAX_RESULTS))
-    cap = min(float(max_s or DEFAULT_MAX_S), HARD_MAX_S)
+    cap = math.inf if role == "bed" else min(float(max_s or DEFAULT_MAX_S), HARD_MAX_S)
     # The category field is unpopulated on Freesound entries, so the one-shot
     # shape is enforced by the duration cap, not a category filter.
     params = {"q": query, "license_type": "commercial,modification",
@@ -186,7 +188,7 @@ def search(query, max_s=None, count=MAX_RESULTS):
     try:
         data = music_search._openverse_get_json(OPENVERSE_API, params=params)
     except Exception as exc:
-        fallback = _outage_hits(query, cap, count)
+        fallback = _outage_hits(query, cap, count, role)
         if fallback:
             return fallback
         raise SfxSearchError(str(exc))
@@ -219,7 +221,7 @@ def search(query, max_s=None, count=MAX_RESULTS):
         # exposed to the EDL or storage metadata.
         rank_item = dict(item, description=t.get("description"),
                          tags=t.get("tags"))
-        ranked.append((_rank_score(rank_item, query, cap), -provider_i, item))
+        ranked.append((_rank_score(rank_item, query, cap, role), -provider_i, item))
     ranked.sort(key=lambda row: (-row[0], -row[1],
                                  (row[2].get("title") or "").lower(),
                                  row[2].get("id") or ""))
@@ -227,7 +229,7 @@ def search(query, max_s=None, count=MAX_RESULTS):
     # An empty upstream page gets the verified physical fallback. A non-empty
     # page whose every result was rejected (for example all ND licenses) must
     # stay empty; the safety filter is not a provider outage.
-    return hits or (_outage_hits(query, cap, count) if not raw_results else [])
+    return hits or (_outage_hits(query, cap, count, role) if not raw_results else [])
 
 
 def resolve(result_id):

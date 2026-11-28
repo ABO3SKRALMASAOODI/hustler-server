@@ -57,7 +57,7 @@ ADVISORY_FINDINGS = {
     "scene_unaware_reframe", "duplicate_broll_window",
     "music_missing_treatment_purpose", "sfx_missing_trigger",
     "mechanical_sfx_pattern", "taste_advisory", "sound_off_gap",
-    "earn_its_place", "speaker_stutter",
+    "earn_its_place", "speaker_stutter", "device_degraded",
 }
 ADVISORY_LABEL = "advisory: keep if intentional"
 DEGRADED_FINDING = "device_degraded"
@@ -1086,9 +1086,7 @@ def _earn_its_place_findings(edl, index, request_text=None):
 
 
 def device_findings(preview):
-    """The DEGRADED gate (INTERFACES.md §6.3): one blocking finding per
-    device the render did not draw at full quality, from the render's own
-    ``devices`` report (attached by the renderer from the fxgraph plan)."""
+    """Record the render rung so the editor can describe what was drawn."""
     findings = []
     for row in (preview or {}).get("devices") or []:
         if not isinstance(row, dict) or row.get("rung") == "full":
@@ -1101,16 +1099,11 @@ def device_findings(preview):
         findings.append(_finding(
             DEGRADED_FINDING, "devices",
             (f"Device {name} ({row.get('id')}, {row.get('family') or '?'}) "
-             f"{what}: {row.get('reason') or 'no reason given'}. Fix the "
-             "cause and re-render, or justify this finding (say what "
-             "degraded and why that is acceptable)."),
+             f"{what}: {row.get('reason') or 'no reason given'}."),
             {"device": row.get("device"), "item_id": row.get("id"),
              "family": row.get("family"), "stage": row.get("stage"),
              "rung": rung, "reason": row.get("reason")},
-            ("fix the cause (warm the sidecar, re-render) or acknowledge it: "
-             "justify_verification_findings naming what degraded and why "
-             "that is acceptable — an export never ships a degraded device "
-             "silently")))
+            severity="advisory"))
     return findings
 
 

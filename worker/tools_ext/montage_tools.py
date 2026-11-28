@@ -903,7 +903,7 @@ def _ramp_window(tl, s, e):
 def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
                    curve="ease_in_out", allow_duplicates=False, id=None,
                    insert=None, allow_speech=False, ease_out=True,
-                   keep_duration=False):
+                   keep_duration=False, audio_mode=None):
     """An eased speed swing over a program window as contiguous spans (or
     over a whole b-roll insert as constant-rate pieces)."""
     import ramps
@@ -927,18 +927,6 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
         return "REJECTED: start, end and low are numbers."
     if curve not in ramps.CURVES:
         return f"REJECTED: curve is one of {ramps.CURVES}."
-    if not allow_speech:
-        # A speed span retimes the sound with the picture: under speech the
-        # voice drags and the pitch-kept pieces join audibly (W2 review).
-        # The same rule as Wave 4's time ramp (add_time_effect).
-        talk = [w for w in _program_words(ctx, edl)
-                if w["t1"] > s + 0.02 and w["t0"] < e - 0.02]
-        if len(talk) >= 2:
-            return (f"REJECTED: the ramp covers {len(talk)} spoken words; a "
-                    "speed ramp slows the voice with the picture and its "
-                    "joins are audible. Ramp B-roll (insert=id), a gesture, "
-                    "a walk or a pause — or pass allow_speech true if the "
-                    "user wants it there.")
     # The window lands on the footage it means (p6238, 24 Nov: "window is not
     # on kept footage" refused the ramp and the turn ended partial): over a
     # spliced insert it ramps that insert; across a cut or past the end it is
@@ -987,6 +975,14 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
         return f"REJECTED: {err}"
     if not spans:
         return "NO CHANGE — that curve stays at 1.0x."
+    speech = any(w["t1"] > s and w["t0"] < e for w in _program_words(ctx, edl))
+    keep_sound = audio_mode == "original" or (audio_mode is None and speech and not allow_speech)
+    if keep_sound:
+        for sp in spans:
+            offset = ramps.time_map(spans, sp["start"], a)
+            sp["audio_mode"] = "original"
+            sp["audio_start"] = min(b, a + offset)
+            sp["audio_end"] = min(b, a + offset + (sp["end"] - sp["start"]) / sp["factor"])
     old = [sp for sp in edl.get("speed") or []
            if not str(sp.get("id", "")).startswith(prefix + "_")]
     clash = ramps.fits(old, spans)
@@ -1008,7 +1004,7 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
     desc = (f"speed ramp {prefix}: 1.0 -> {min(rep['factors']):g} -> 1.0 "
             f"over source {a:.2f}-{b:.2f}s in {rep['steps']} steps")
     res = agent_tools._write_speed(ctx, prev, new, desc,
-                                   warn_slow=rep["dup_frames"] > 0)
+                                   warn_slow=allow_duplicates and rep["dup_frames"] > 0)
     if not res.startswith("EDL v"):
         return res
     tail = (f"\nfactors {rep['factors']}; the {fps_src:g} fps source shows a "
@@ -1018,7 +1014,10 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
                  "repeats (allow_duplicates=true goes lower, visibly "
                  "stepping)")
     elif rep["dup_frames"]:
-        tail += f"; {rep['dup_frames']} output frames repeat"
+        tail += (f"; {rep['dup_frames']} repeated frames permitted" if allow_duplicates else
+                 "; motion interpolation supplies the missing frames in the slow steps")
+    if keep_sound:
+        tail += "; the original sound plays at 1x under the ramp"
     if snapped_note:
         tail += "\n" + snapped_note
     return res + tail
@@ -1168,10 +1167,8 @@ TOOL_SPECS = {
         "WRITE: an eased slow-motion swing over a program window inside one "
         "shot: 1.0 -> low -> 1.0 (hold = share spent at the low) as <= 12 "
         "contiguous speed spans; or over a whole video insert (insert=id) "
-        "as constant-rate pieces. The low is held where the source still "
-        "shows a fresh frame each output frame (a 60p clip in a 30p program "
-        "reaches 0.5x) unless allow_duplicates. Refused over speech "
-        "unless allow_speech. keep_duration: slow motion then a catch-up, "
+        "as constant-rate pieces. Main footage interpolates missing frames in slow steps. "
+        "Speech plays at 1x unless you choose audio_mode=retimed. keep_duration: slow motion then a catch-up, "
         "the window keeps its length.",
         {"start": {"type": "number"}, "end": {"type": "number"},
          "low": {"type": "number", "minimum": 0.25, "maximum": 0.95},
@@ -1181,6 +1178,7 @@ TOOL_SPECS = {
          "allow_duplicates": {"type": "boolean"},
          "allow_speech": {"type": "boolean"},
          "keep_duration": {"type": "boolean"},
+         "audio_mode": {"type": "string", "enum": ["original", "retimed"]},
          "id": {"type": "string"}, "insert": {"type": "string"}}),
     "animate_still": (
         animate_still,

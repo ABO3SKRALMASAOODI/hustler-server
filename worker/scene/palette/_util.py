@@ -55,7 +55,7 @@ def colour(ask, k, default=None):
     return default
 
 
-def frames(l1, ask, default_len=12, min_len=1):
+def frames(l1, ask, default_len=12, min_len=1, max_len=None, at_end=False):
     """(a, b): the programme frames an ask covers, clamped to the film. ``f``, ``at``/``until``/``len`` in frames,
     or ``t``/``t_end``/``dur`` in seconds; a span too short is lengthened to ``min_len`` (the moment, repaired)."""
     dur = int(l1["dur_f"])
@@ -87,6 +87,11 @@ def frames(l1, ask, default_len=12, min_len=1):
     b = min(max(b, a + max(min_len, 1)), dur)
     if b - a < min_len:
         a = max(b - min_len, 0)
+    if max_len is not None and b - a > max_len:
+        if at_end:
+            a = b - max_len
+        else:
+            b = a + max_len
     return a, b
 
 

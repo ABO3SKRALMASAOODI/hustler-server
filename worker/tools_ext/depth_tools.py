@@ -245,7 +245,7 @@ def add_depth_effect(ctx, kind, start=None, end=None, word=None,
                      focus=None, focus_from=None, rack_at=None, text=None,
                      colour=None, blur=None, strength=None, backdrop=None,
                      density=None, stage=None, user_asked=False, id=None,
-                     allow_speech=False):
+                     allow_speech=False, target=None):
     edl, _v = _edl(ctx)
     kind = str(kind or "").strip().lower()
     if kind not in DEPTH_KINDS:
@@ -262,6 +262,11 @@ def add_depth_effect(ctx, kind, start=None, end=None, word=None,
     prog = _program_s(edl)
     index = getattr(ctx, "index", None) or {}
     bind = None
+    stills = [it for it in edl.get("fx") or [] if it.get("type") == "broll" and it.get("media") == "still"]
+    cutaway = next((it for it in stills if it["id"] == (target or id)), None)
+    if cutaway:
+        start, end = cutaway["start"], cutaway["end"]
+        asset_key = cutaway["source"]["asset_key"]
     # parallax / ken_burns on the main video's own picture: a freeze
     held = kind in ("parallax", "ken_burns") and not asset_key
     try:
@@ -317,34 +322,35 @@ def add_depth_effect(ctx, kind, start=None, end=None, word=None,
             e = float(end) if end is not None else s + span
         s, e = round(max(0.0, s), 2), round(min(prog, e), 2)
         if held and not allow_speech:
-            talk = spoken_in(edl, index, s, e)
-            nxt = talk[0] if talk else None
-            if talk and end is None:
-                # the default span runs into the next words: stop before
-                e = round(min(e, talk[0]["t0"] - 0.04), 2)
-                talk = spoken_in(edl, index, s, e)
-            if talk or e - s < HOLD_MIN_S:
-                said = " ".join(str(w["w"]) for w in talk[:4]) if talk \
-                    else ""
-                return _rejected(
-                    (f"a held frame at {s:g}-{e:g}s would freeze his lips "
-                     f"while he says '{said}' (the sound keeps playing). "
-                     if talk else
-                     f"only {max(0.0, e - s):.2f}s of pause before "
-                     + (f"he goes on ('{nxt['w']}' at {nxt['t0']:.2f}s)"
-                        if nxt else "the end") +
-                     ": a held frame would freeze his lips or needs >= "
-                     "0.5 s. ") +
-                    "Hold after the LAST word of the thought (a real "
-                    "pause), give the payoff room (extend the final keep "
-                    "into the pause), use a cutaway still (asset_key), or "
-                    "pass allow_speech true if the user wants the freeze "
-                    "over the words.")
+            cutaway = next((it for it in stills if it["start"] <= s < it["end"]), None)
+            if cutaway:
+                asset_key = cutaway["source"]["asset_key"]
+                s, e = cutaway["start"], cutaway["end"]
+                held = False
+            else:
+                import device_planner
+                words = sorted(device_planner.program_words(edl, index), key=lambda w: w["t0"])
+                if any(w["t0"] < e and w["t1"] > s for w in words):
+                    cursor, duration = s, e - s
+                    for w in words + [{"t0": prog, "t1": prog}]:
+                        if w["t0"] - cursor >= HOLD_MIN_S:
+                            s, e = round(cursor, 2), round(min(cursor + duration, w["t0"]), 2)
+                            break
+                        cursor = max(cursor, w["t1"])
         if e - s < 0.2:
             return _rejected(f"the window {s:g}-{e:g}s is too short for a "
                              "depth effect (>= 0.2 s)")
     except (TypeError, ValueError) as x:
         return _rejected(str(x))
+    if cutaway and kind in ("parallax", "ken_burns"):
+        updated = dict(cutaway, depth=kind == "parallax")
+        updated["move"] = dict(move or cutaway.get("move") or {"path": "push_in", "amount": .3})
+        if amount is not None:
+            updated["move"]["amount"] = float(amount)
+        result = _commit(ctx, [_upsert(updated)], f"{kind} on {cutaway['id']} at {s:g}-{e:g}s")
+        if kind == "parallax" and result.startswith("EDL "):
+            result += "\n" + _ensure_depth(ctx, edl, [], asset=_asset_row(ctx, asset_key))
+        return result
     source = None
     asset = None
     if asset_key:
@@ -610,6 +616,7 @@ TOOL_SPECS = {
          "density": {"type": "number"},
          "stage": {"type": "string", "enum": ["world", "screen"]},
          "user_asked": {"type": "boolean"},
+         "target": {"type": "string", "description": "Existing cutaway still ID."},
          "allow_speech": {"type": "boolean"}, "id": {"type": "string"}}),
     "add_time_effect": (
         add_time_effect,

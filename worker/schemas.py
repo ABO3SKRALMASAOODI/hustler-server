@@ -924,9 +924,23 @@ class SfxItem(BaseModel):
 
 
 class VolumeItem(BaseModel):
+    music_id: Optional[str] = None
     start: float   # source-timeline seconds
     end: float
     gain_db: float
+
+
+def sounding_volume(edl):
+    """Source-time gain automation whose associated layer is playing."""
+    live = {m.get("id") for m in edl.get("music") or [] if not m.get("mute")}
+    return [v for v in edl.get("volume") or []
+            if not v.get("music_id") or v["music_id"] in live]
+
+
+def source_voice_gain(edl, t):
+    gain = float((edl.get("stem_mix") or {}).get("voice_gain_db") or 0)
+    return gain + sum(float(v["gain_db"]) for v in sounding_volume(edl)
+                      if v["start"] <= t <= v["end"])
 
 
 FRAME_RATIOS = ("source", "16:9", "9:16", "1:1", "4:5")
@@ -2695,6 +2709,11 @@ def speed_factor(value):
 
 
 class SpeedSpan(BaseModel):
+    interpolate: Optional[bool] = None
+    audio_mode: Optional[Literal["original", "retimed"]] = None
+    # Source interval of the continuous 1x soundtrack under this picture step.
+    audio_start: Optional[float] = None
+    audio_end: Optional[float] = None
     id: str
     start: float                    # SOURCE seconds
     end: float

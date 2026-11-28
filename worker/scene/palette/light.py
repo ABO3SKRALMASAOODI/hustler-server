@@ -8,7 +8,7 @@ LAYER = "surface"
 
 
 def leak(l1, work, ask, sense):
-    a, b = frames(l1, ask, default_len=36, min_len=10)
+    a, b = frames(l1, ask, default_len=36, min_len=10, max_len=36)
     n = b - a
     amt = num(ask, "amount", 0.85)
     it = {"id": uid(l1, "pd_lk"), "k": "flash", "f": [a, b], "mode": "leak", "speed": num(ask, "speed", 1.0),
@@ -20,7 +20,7 @@ def leak(l1, work, ask, sense):
 
 def filmburn(l1, work, ask, sense):
     """The frame burns through from a corner over the moment, ending white-hot: an exit, a close, a memory lost."""
-    a, b = frames(l1, ask, default_len=14, min_len=6)
+    a, b = frames(l1, ask, default_len=14, min_len=6, max_len=20, at_end=True)
     n = b - a
     o = arg(ask, "origin") or [0.12, 0.88]
     prog = [round(0.05 + 1.05 * (i / max(n - 1, 1)) ** 1.6, 4) for i in range(n)]
@@ -30,7 +30,7 @@ def filmburn(l1, work, ask, sense):
 
 def prism(l1, work, ask, sense):
     """An anamorphic streak and a rainbow ghost off the picture's brightest light, swelling and gone."""
-    a, b = frames(l1, ask, default_len=24, min_len=8)
+    a, b = frames(l1, ask, default_len=24, min_len=8, max_len=24)
     n = b - a
     at = arg(ask, "origin")
     if not (isinstance(at, (list, tuple)) and len(at) == 2 and all(isinstance(v, (int, float)) and 0 <= v <= 1 for v in at)):

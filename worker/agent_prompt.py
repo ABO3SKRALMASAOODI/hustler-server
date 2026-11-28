@@ -332,8 +332,8 @@ def project_state_block(video, index_summary, edl_line, history_lines,
         sfx_line += (
             " search_sfx finds a REAL recording online only when the user "
             "asks for a specific sound the library lacks (by its physical "
-            "name: 'crowd cheer', 'door slam'); fetch_sfx downloads the pick "
-            "for add_sfx. License terms ride each hit — relay them.")
+            "name). add_web_sfx(role='bed') places continuous recordings such as waves; "
+            "fetch_sfx returns a key for add_music(loop=true) or add_sfx for a one-shot. Relay license terms.")
     else:
         sfx_line += (
             " A specific sound it lacks: list_sound_library(role='<the "

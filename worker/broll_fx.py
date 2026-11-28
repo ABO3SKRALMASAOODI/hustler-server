@@ -283,7 +283,7 @@ class _Broll:
         fit = it.get("fit") or "cover"
 
         def build(parts, src, uid):
-            parts.append(f"[{src}]nullsink")
+
             chain = self._chain(it, st, W, H, ctx.fps)
             head = f"[{clip}]setpts=PTS-STARTPTS"
             if st.get("video") and fit == "frame":
@@ -309,7 +309,16 @@ class _Broll:
                                               f"end_frame={n},{clock}"])
             parts.append(f"{body}[{o}]")
             return o
-        return finish.window_composite(ctx, label, [(f0, f1)], build, uid=u)
+        # A cutaway supplies every pixel. Splitting and buffering the entire
+        # programme to obtain an unused background made each additional
+        # cutaway retain another full-resolution decode.
+        out = build(ctx.parts, None, u)
+        positioned = ctx.uid("brw")
+        ctx.parts.append(f"[{out}]settb=AVTB,setpts='round((N+{f0})/{ctx.fps3:.3f}/TB)-2'[{positioned}]")
+        result = ctx.uid("brout")
+        overlay = fxprims.composite_overlay(ctx.parts, label)
+        ctx.parts.append(f"[{label}][{positioned}]{overlay}:enable='{fxprims.enable_expr([(f0, f1)])}'[{result}]")
+        return result
 
 
 def _contained(img, W, H):

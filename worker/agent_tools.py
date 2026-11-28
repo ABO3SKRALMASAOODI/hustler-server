@@ -8031,7 +8031,7 @@ def _web_sfx_refusal(ctx, query, at=None):
             + sound_requests.decline_clause(q, rid))
 
 
-def search_sfx(ctx, query, max_seconds=None):
+def search_sfx(ctx, query, max_seconds=None, role="one_shot"):
     """READ: find a real recorded sound effect on the open web — the
     editor's whoosh/shutter/click, not a synthesized guess."""
     if not sfx_search.available():
@@ -8056,7 +8056,7 @@ def search_sfx(ctx, query, max_seconds=None):
                         "Changing the query will not fix it. Use uploaded audio "
                         "or continue the edit; do not claim sound was added.\n" + kit_text)
         else:
-            hits = sfx_search.search(query, max_s=mx)
+            hits = sfx_search.search(query, max_s=mx, role=role)
     except sfx_search.SfxSearchError as e:
         if re.search(r"\b(?:401|403)\b", str(e)):
             memory["sfx_auth_retry_at"] = time.time() + 900
@@ -8371,14 +8371,14 @@ def fetch_sfx(ctx, id):
             "sound lands ON a nameable visible moment.")
 
 
-def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None,
-                allow_none=True):
+def add_web_sfx(ctx, query, at, gain_db=None, max_seconds=None,
+                allow_none=True, role="one_shot", end=None):
     """Search, acoustically compare, store and place a real one-shot."""
     if not sfx_search.available():
         return _web_sfx_refusal(ctx, query, at=at)
     try:
         at_n = float(at)
-        gain_n = float(gain_db)
+        gain_n = float(gain_db) if gain_db is not None else -6.0
         mx = float(max_seconds) if max_seconds is not None else None
     except (TypeError, ValueError):
         return "REJECTED: at, gain_db and max_seconds must be numbers."
@@ -8393,12 +8393,12 @@ def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None,
         return (f"REJECTED: at={at_n:g}s is outside the program "
                 f"(0 to {round(prog, 2)}s).")
     try:
-        hits = sfx_search.search(query, max_s=mx, count=6)
+        hits = sfx_search.search(query, max_s=mx, count=6, role=role)
     except Exception as e:
         return (f"Sound search failed ({str(e)[:180]}). Use a physical sound "
                 "name such as 'cinematic whoosh' or 'camera shutter'.")
     if not hits:
-        return (f"No usable one-shot matched '{query}'. Try a more physical "
+        return (f"No usable recording matched '{query}'. Try a more physical "
                 "sound name; nothing was fetched or placed.")
     _remember_search_hits(ctx, "sfx", hits)
     measured, local_by_id, errors = [], {}, []
@@ -8415,7 +8415,15 @@ def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None,
     if not measured:
         return ("Could not download and measure any ranked sound. "
                 + "; ".join(errors)[:400])
-    ranked = sfx_judge.rank(measured, query)
+    if role == "bed":
+        def steadiness(candidate):
+            _hit, signal = candidate
+            return signal.get("crest_db", 0) + 10 * signal.get("spectral_variation", 0)
+        ranked = [{"id": hit["id"], "title": hit["title"],
+                   "reasons": [f"crest {signal['crest_db']} dB, spectral variation {signal.get('spectral_variation')}"]}
+                  for hit, signal in sorted(measured, key=steadiness)]
+    else:
+        ranked = sfx_judge.rank(measured, query)
     sound_context = _sound_design_context(ctx, at_n)
     _metric(ctx, "sfx_candidates_measured", len(measured))
     chosen_id = ranked[0]["id"]
@@ -8426,7 +8434,7 @@ def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None,
     # measured candidates, and fall back to deterministic transient ranking
     # whenever the reviewer is absent, ambiguous or unavailable.
     heard = [row for row in ranked if row["id"] in local_by_id][:3]
-    if len(heard) >= 2 and llm.audio_review_available():
+    if role != "bed" and len(heard) >= 2 and llm.audio_review_available():
         none_contract = (
             "Choice may be `none` when keeping the moment dry is stronger "
             "than every recording."
@@ -8482,8 +8490,11 @@ def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None,
         asset, error = _download_sfx_hit(ctx, chosen)
         if error:
             return error
-        placed = add_sfx(ctx, asset["storage_key"], at_n, gain_n,
-                         purpose=query)
+        if role == "bed":
+            placed = add_music(ctx, asset["storage_key"], start=at_n, end=end, loop=True,
+                               gain_db=gain_db, purpose=query, role="bed")
+        else:
+            placed = add_sfx(ctx, asset["storage_key"], at_n, gain_n, purpose=query)
         _decision_trace(
             ctx, "sfx_cast",
             candidate_ids=[row["id"] for row in ranked],
@@ -8531,7 +8542,7 @@ def _speech_overlap_s(ctx, edl, start_out, end_out):
 
 def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
               duck=None, offset_s=None, fade_in_s=None, fade_out_s=None,
-              loop=True, purpose=None):
+              loop=True, purpose=None, role=None):
     track, err = _resolve_music(ctx, storage_key)
     if err:
         return err
@@ -8572,9 +8583,32 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
     # it further on every ambient sound. Only the DEFAULTS are contextual;
     # explicit arguments always win (they just earn an advisory note).
     speech_s = _speech_overlap_s(ctx, edl, s, e)
-    lead = speech_s < 1.0
+    levels = getattr(ctx, "_music_levels", {})
+    programme = (getattr(ctx, "last_preview", None) or {}).get("audio_qc") or {}
+    programme_lufs = programme.get("i") if not edl.get("music") else None
+    track_lufs = None
+    if gain_db is None:
+        import audio_qc
+        for key in ("source", storage_key):
+            if key in levels or (key == "source" and programme_lufs is not None):
+                continue
+            try:
+                path = (ctx.proxy_path() if key == "source" else
+                        _asset_local_path(ctx, ctx.db.run(dbx.asset_by_key, ctx.project_id, storage_key)))
+                reading = audio_qc.measure(path) or {}
+                levels[key] = reading.get("i")
+            except (OSError, KeyError, TypeError, AttributeError):
+                pass
+        ctx._music_levels = levels
+        if programme_lufs is None:
+            programme_lufs = levels.get("source")
+        track_lufs = levels.get(storage_key)
+    lead = (role == "lead" if role else speech_s < 1.0 and
+            (programme_lufs is None or programme_lufs < -45))
     if gain_db is None:
         g = -4.0 if lead else -18.0
+        if track_lufs is not None and programme_lufs is not None and programme_lufs > -60:
+            g = round(min(12, max(-60, programme_lufs - track_lufs + (3 if lead else -10))), 1)
     else:
         try:
             g = float(gain_db)
@@ -8635,23 +8669,9 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
         res += ("\nNote: music ducks smoothly under speech (a sidechain dip "
                 "that follows the voice, not a hard step) — "
                 "set_music_fit(duck_mode='step') switches to the legacy duck.")
-    if res.startswith("EDL v"):
-        if lead and gain_db is None:
-            res += ("\nNote: no speech survives under this window, so the "
-                    "music was added as the LEAD audio — gain -4dB, no "
-                    "ducking. If it competes with the original sound, lower "
-                    "the original with set_volume rather than burying the "
-                    "music.")
-        elif lead and g <= -10.0:
-            res += (f"\nNote: no speech survives under this window, and at "
-                    f"{g:g}dB the music will sit far below the original "
-                    "audio — lead music usually plays at -6..0dB. Raise it "
-                    "with set_audio_gain if the user cannot hear it.")
-        elif lead and duck:
-            res += ("\nNote: there is no speech to duck under in this "
-                    "window — the sidechain will dip the music on every "
-                    "loud ORIGINAL sound instead (waves, crowd, noise). "
-                    "set_music_fit(duck=false) if that is not wanted.")
+    if res.startswith("EDL v") and track_lufs is not None and programme_lufs is not None:
+        res += (f"\nProgramme {programme_lufs:g} LUFS, recording {track_lufs:g} LUFS. "
+                f"{'Lead' if lead else 'Bed'} gain {g:g} dB before fades and ducking.")
 
     # Tell the agent what the track can actually cover, so it reports the
     # truth rather than assuming the span got filled.
@@ -21152,10 +21172,12 @@ def add_freeze_frame(ctx, at_output_s, duration_s=None, text=None,
                 "'hold' (hold the composed frame with room tone: the payoff "
                 "button before the end card).")
     try:
-        dur = round(min(max(float(
+        dur = round(max(float(
             duration_s if duration_s is not None
             else (HOLD_DEFAULT_S if audio_mode == "hold" else 2.5)),
-            0.3), 10.0), 2)
+            0.3), 2)
+        if audio_mode != "continue":
+            dur = min(dur, 10.0)
     except (TypeError, ValueError):
         return "REJECTED: duration_s must be a number of seconds."
     try:
@@ -21193,6 +21215,7 @@ def add_freeze_frame(ctx, at_output_s, duration_s=None, text=None,
         return err
 
     if audio_mode == "continue":
+        dur = min(dur, prog - at) if duration_s is not None else prog - at
         # A full-frame still overlay replaces only the viewer's picture. The
         # program clock and every audio lane continue underneath it, which is
         # the precise visual/audio decoupling needed for a held sunset or
@@ -32785,11 +32808,8 @@ TOOLS = {
                   "for a user-supplied file or link; a trending platform "
                   "sound can only be provided by the user.",
                   {"query": {"type": "string"}}),
-    "add_music": (add_music, "Mix music into the edit. The defaults are "
-                  "CONTEXT-AWARE: under speech the track sits low as a bed "
-                  "(-18dB, ducked); when NO speech survives under the window "
-                  "the music is the LEAD audio (-4dB, no ducking) so the "
-                  "user actually hears it. Pass gain_db/duck only to "
+    "add_music": (add_music,  "Mix music into the edit. Choose role=bed for background or role=lead for a featured song. "
+                  "Default gain is relative to measured programme loudness. Pass gain_db/duck to "
                   "override that. storage_key is an exact key from "
                   "list_assets(kind='music') — the user's own uploads or a "
                   "track fetch_url just downloaded — never invent one. "
@@ -32805,6 +32825,7 @@ TOOLS = {
                   "that follows the voice; set_music_fit(duck_mode='step') "
                   "restores the legacy hard -12dB duck).",
                   {"storage_key": {"type": "string"},
+                   "role": {"type": "string", "enum": ["lead", "bed"]},
                    "start": {"type": "number"},
                    "end": {"type": "number"},
                    "gain_db": {"type": "number"},
@@ -32858,6 +32879,7 @@ TOOLS = {
                    "relay the terms. max_seconds caps length (default "
                    "15s; one-shots are seconds long).",
                    {"query": {"type": "string"},
+                    "role": {"type": "string", "enum": ["one_shot", "bed"]},
                     "max_seconds": {"type": "number"}}),
     "audition_sfx_candidates": (
         audition_sfx_candidates,
@@ -32888,9 +32910,11 @@ TOOLS = {
                     "whoosh at 3.2s', 'put a shutter on this cut', or any "
                     "specific requested sound. The result reports the real "
                     "source and license. gain_db defaults -6; max_seconds "
-                    "defaults 15.",
+                    "defaults 15 for a one_shot. Use role=bed for continuous recordings (waves, wind, birds); the bed loops.",
                     {"query": {"type": "string"},
+                    "role": {"type": "string", "enum": ["one_shot", "bed"]},
                      "at": {"type": "number"},
+                     "end": {"type": "number", "description": "End of a bed, default programme end."},
                      "gain_db": {"type": "number"},
                      "max_seconds": {"type": "number"},
                      "allow_none": {"type": "boolean"}}),
@@ -32912,7 +32936,7 @@ TOOLS = {
                 "storage_key is 'sound:<id>' for an approved library "
                 "recording (list_sound_library), or an exact key from "
                 "list_assets(kind='music') for a sound the user supplied — "
-                "never invent one, never a web sound. "
+                "or the exact key returned by fetch_sfx. "
                 "`at` is an OUTPUT-timeline second (the edited program, not "
                 "source time). For a library recording `at` is the moment it "
                 "HITS — the visual frame its peak belongs on: the tool starts "
@@ -33310,7 +33334,8 @@ TOOLS = {
                                    "enum": ["16:9", "9:16", "1:1",
                                             "4:3", "3:4"]}}),
     "generate_video": (generate_video, "Generate a VIDEO clip with AI — real "
-                       "moving footage — from a text prompt, or animate an "
+                        "moving footage. To show a reference character or look in the moving film, animate the reference, "
+                       "then add_overlay over the original window, keeping its sound and duration. Animate an "
                        "existing image by passing from_image_asset_key (a "
                        "generated or uploaded image's storage_key). The clip "
                        "is saved as a project asset; it reaches the program "
@@ -34118,7 +34143,7 @@ TOOLS = {
                      "get_edl) — that footage returns to normal speed and "
                      "program-time items re-anchor automatically.",
                      {"id": {"type": "string"}}),
-    "add_overlay": (add_overlay, "Draw an image or video clip OVER the "
+    "add_overlay": (add_overlay,  "Show a character or reference look over a moving shot with a generated clip. Draw an image or video clip OVER the "
                     "program picture for a window of PROGRAM time — "
                     "picture-in-picture, a corner logo, or fit='cover' for "
                     "a FULL-FRAME B-ROLL CUTAWAY. fit='picture' fills only "
@@ -35691,8 +35716,7 @@ _COMPACT_CONTRACTS = {
     "add_sfx": (
         "One-shot sound at an OUTPUT second. storage_key 'sound:<id>' places "
         "an approved library recording (list_sound_library); otherwise an "
-        "exact key from list_assets for a sound the user supplied; never "
-        "invented, never a web sound. Leave "
+        "exact key from list_assets or fetch_sfx. Leave "
         "gain_db unset: a library recording is levelled against the voice at "
         "its hit (MIX/CHECK lines). Its `at` is the frame it HITS: the tool "
         "starts it early by its measured peak (a riser ends on `at`, typing "

@@ -98,9 +98,6 @@ def plan(src0, src1, curve, *, fps_src=30.0, fps_out=30.0, max_steps=None,
     def fac(u):
         nonlocal clamped
         v = min(max_factor, max(min_factor, float(curve(u))))
-        if not allow_duplicates and v < lo_ok - 1e-9:
-            clamped = True
-            v = lo_ok
         return v
     # dense samples of the output density 1/f
     us = [k / N_SAMPLES for k in range(N_SAMPLES + 1)]
@@ -159,7 +156,8 @@ def plan(src0, src1, curve, *, fps_src=30.0, fps_out=30.0, max_steps=None,
         if abs(f - 1.0) < 0.01:
             continue                # plain footage: no span
         spans.append({"id": f"{prefix}{len(spans) + 1}", "start": a,
-                      "end": b, "factor": f})
+                      "end": b, "factor": f,
+                      **({"interpolate": True} if f * fps_src < fps_out - 1e-6 and not allow_duplicates else {})})
     rep = {"out_s": round(out_s, 3), "steps": len(spans),
            "dup_frames": int(round(dup)), "floor": round(lo_ok, 3),
            "clamped": clamped,

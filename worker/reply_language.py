@@ -31,7 +31,7 @@ _SYSTEM = (
     "same_language is true when draft_language is a language this customer "
     "used in any of their messages, or a language they asked to be answered "
     "in. A customer who mixes languages, or writes one language in another's "
-    "alphabet, may be answered in either way of writing. Short messages such "
+    "alphabet (including romanized Hindi or Hinglish alongside English), may be answered in either way of writing. Short messages such "
     "as 'ok' carry little: judge from all the messages together. When you "
     "cannot tell, answer true.")
 _SCHEMA = {
@@ -56,20 +56,25 @@ _SCHEMA = {
 }
 
 
-def judge(client, model, customer_texts, draft):
+def judge(client, model, customer_texts, draft, original=None):
     """{'same_language', 'customer_language', 'draft_language'}, or None."""
     texts = [str(t).strip()[:MAX_TEXT_CHARS]
              for t in (customer_texts or []) if str(t or "").strip()]
     draft = str(draft or "").strip()
     if not texts or not draft or client is None:
         return None
-    payload = json.dumps({"customer_messages": texts[-MAX_TEXTS:],
-                          "draft": draft[:MAX_DRAFT_CHARS]},
-                         ensure_ascii=False)
+    data = {"customer_messages": texts[-MAX_TEXTS:], "draft": draft if original else draft[:MAX_DRAFT_CHARS]}
+    schema, system = _SCHEMA, _SYSTEM
+    if original:
+        data["original_reply"] = original
+        schema = dict(_SCHEMA, required=[*_SCHEMA["required"], "faithful"],
+                      properties=dict(_SCHEMA["properties"], faithful={"type": "boolean"}))
+        system += " Set faithful only if the draft translates the entire original reply without changes, instructions or commentary."
+    payload = json.dumps(data, ensure_ascii=False)
     tool = {"type": "function", "function": {
         "name": _TOOL, "description": "Report the language comparison.",
-        "parameters": _SCHEMA}}
-    messages = [{"role": "system", "content": _SYSTEM},
+        "parameters": schema}}
+    messages = [{"role": "system", "content": system},
                 {"role": "user", "content": payload}]
     try:
         response = llm.create_with_dialect(
@@ -84,6 +89,7 @@ def judge(client, model, customer_texts, draft):
         return None
     if not isinstance(value.get("same_language"), bool):
         return None
-    return {"same_language": value["same_language"],
+    return {**({"faithful": value.get("faithful") is True} if original else {}),
+            "same_language": value["same_language"],
             "customer_language": str(value.get("customer_language") or "")[:40],
             "draft_language": str(value.get("draft_language") or "")[:40]}
