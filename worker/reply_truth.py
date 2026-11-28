@@ -258,12 +258,10 @@ def enforce(ctx, client, model, request_text, draft, honesty=None, strict=False)
     return text
 
 
-def first_cut_summary(preview, source_seconds=None):
+def first_cut_summary(preview, source_seconds=None, source_video=None):
     """Use the delivered player's runtime. Plan cuts, fetched assets and EDL
     cues cannot establish the images or sounds in that encoded file."""
     seconds = round(float(preview.get("duration_s") or 0))
-    if not seconds:
-        return "your edited video"
     picture = preview.get("picture_qc") or {}
     moments = sorted(picture.get("visible_title_moments") or [], key=lambda row: row["start"])
     lines = []
@@ -281,9 +279,13 @@ def first_cut_summary(preview, source_seconds=None):
     facts = []
     if lines:
         facts.append("The title reads “" + " / ".join(lines) + "”")
-    if source_seconds and round(source_seconds) > seconds + 1:
+    source = source_video or {}
+    if ((source.get("width") or 0) > (source.get("height") or 0) > 0
+            and 0 < (preview.get("width") or 0) < (preview.get("height") or 0)):
+        facts.append("I reframed the landscape footage for a portrait screen")
+    if seconds and source_seconds and round(source_seconds) > seconds + 1:
         facts.append(f"I cut the {round(source_seconds)} seconds of footage to {seconds} seconds")
-    else:
+    elif seconds:
         facts.append(f"The cut runs {seconds} seconds")
     sound = preview.get("craft_report") or {}
     if sound.get("music_present"):
@@ -292,4 +294,4 @@ def first_cut_summary(preview, source_seconds=None):
     if accents:
         cue = accents[0]
         facts.append(f"You can hear the {cue['role']} at {cue['at']:.2f} seconds")
-    return ". ".join(facts)
+    return ". ".join(facts) or "Your edit is ready"

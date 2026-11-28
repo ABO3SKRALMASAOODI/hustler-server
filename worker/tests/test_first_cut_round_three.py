@@ -153,3 +153,37 @@ def test_reading_push_keeps_both_ends_of_the_line_on_every_frame():
     assert path[0][2]-path[0][0] > path[-1][2]-path[-1][0]
     assert all(c[0] <= .36+1e-6 and c[2] >= .78-1e-6 for c in path)
     assert np.allclose(path[-1],target) and path[16] == path[-1]
+
+
+def test_reading_crop_keeps_a_subject_absent_from_the_storyboard_still():
+    l1 = {"frame": [1080, 1920], "fps": 30, "items": [
+        {"id": "demo", "k": "shot", "pic": "main", "src": [0, 2], "f": [0, 60]}]}
+    index = {"_first_film_source_guard": True, "video": {"width": 1920, "height": 1080, "duration": 2},
+             "spatial": {"samples": [{"t": 1.2, "faces": [[.02, .24, .25, .55]]}]},
+             "visual_storyboard": {"evidence": [{"representative_t": .5, "visible_text": "Building",
+                                                 "text_geometry": [[.45, .77, .85, .83]]}]}}
+    source_guard.apply(l1, index, {})
+    left, top, right, bottom = l1["items"][0]["crop"]
+    assert left <= .02 and top <= .24 and right >= .85 and bottom >= .83
+
+
+def test_counter_stays_visible_across_a_nearby_picture_cut(monkeypatch):
+    from score import lower
+    def item(l1, word, start, end, report):
+        return {"id": "tx." + word["id"], "start": start / 30, "end": end / 30}
+    monkeypatch.setattr(lower, "text_item", item)
+    monkeypatch.setattr(lower, "no_double_type", lambda out, report: out)
+    words = [{"k": "word", "role": "big", "id": f"b01.counter.{i}.0", "t": t,
+              "x": .4, "y": .4, "f": span}
+             for i, (t, span) in enumerate([("12", [0, 24]), ("16", [24, 70])])]
+    panels = lower.lower_texts({"fps": 30, "items": words, "dur_f": 70}, {},
+                              [({"f": [a, b]}, a, b, 1) for a, b in ((0, 22), (22, 69), (69, 70))])
+    assert panels[0]["end"] == panels[1]["start"] == 24/30
+    assert panels[1]["end"] == 70/30
+
+
+def test_reply_knows_the_reframe_from_the_actual_player_size():
+    from reply_truth import first_cut_summary
+    player = {"width": 720, "height": 1280, "duration_s": 7}
+    assert "landscape footage" in first_cut_summary(player, 13, {"width": 1920, "height": 1080})
+    assert "landscape footage" not in first_cut_summary(player, 13, {"width": 1080, "height": 1920})

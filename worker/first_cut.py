@@ -4082,7 +4082,9 @@ def run(worker_db, job, project, index_row):
             summary = "Here's your first cut: " + _summary(applied, duration, url)
         else:
             import reply_truth
-            summary = reply_truth.first_cut_summary(preview, getattr(ctx, "upload_duration", None) or ctx.duration)
+            summary = reply_truth.first_cut_summary(
+                preview, getattr(ctx, "upload_duration", None) or ctx.duration,
+                (getattr(ctx, "index", None) or {}).get("video"))
             if (picked and picked.get("how") == "director" and "captions" in (applied or [])):
                 summary += ". I added captions"
         admission = project_admission_safe(worker_db, project["id"])

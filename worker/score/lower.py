@@ -1116,6 +1116,7 @@ def lower_texts(l1, rep, runs=None):
         group = tx["id"].split(".")
         if len(group) >= 5 and group[2].startswith("counter"):
             counters[tuple(group[1:3])].append(tx)
+    counter_ids = {tx["id"] for ticks in counters.values() for tx in ticks}
     for ticks in counters.values():
         ticks.sort(key=lambda tx: tx["start"])
         for prev, nxt in zip(ticks, ticks[1:]):
@@ -1126,6 +1127,10 @@ def lower_texts(l1, rep, runs=None):
         # frames. End the lockup on the actual compiled picture boundary.
         cuts = sorted({b/fps for _, _, b, _ in runs})
         for tx in visible:
+            if tx["id"] in counter_ids:
+                # A count is one continuous display, including its held
+                # destination. Its value changes may straddle a picture cut.
+                continue
             cut = next((c for c in reversed(cuts) if c <= tx["end"]), None)
             if cut is not None and 0 < tx["end"]-cut <= .12 and cut-tx["start"] >= TX_MIN_S:
                 tx["end"] = cut

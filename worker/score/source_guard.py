@@ -315,6 +315,10 @@ def apply(l1, index, perception, *, views=None):
             view = (views or {}).get(str(item.get("view"))) or {}
             region = view.get("box") if view.get("t0", end+1) <= mid <= view.get("t1", -1) else None
             subjects = _boxes(scene)
+            # The storyboard supplies the reading column. Its representative
+            # frame can miss a speaker who enters during the kept interval.
+            subjects.extend(box for sample in samples if start <= sample["t"] < end
+                            for box in _boxes(sample))
             crop = reading_window(scene, ratio, subjects, region)
             if crop:
                 frames = item.get("f") or []
