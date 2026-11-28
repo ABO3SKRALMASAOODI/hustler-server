@@ -127,6 +127,8 @@ def _end(it):
 def _label(lane, it, names=None):
     name = (names or {}).get(str(it.get("asset_key") or it.get("storage_key") or ""))
     named = f" [{name}]" if name else ""
+    if lane == "fx" and it.get("type") == "broll":
+        return f"cutaway {_t(it.get('start'))}-{_t(it.get('end'))} s, intended subject {str(it.get('moment') or '')[:100]}"
     if lane == "volume":
         return f"source gain {_t(it.get('start'))}-{_t(it.get('end'))} s: {it.get('gain_db')} dB"
     if lane == "texts":
@@ -950,6 +952,10 @@ def _inside(box, vp, slack=0.015):
 
 def _hidden(edl, t):
     """A full-frame picture over the film hides the upload's frame at film second t."""
+    for item in edl.get("fx") or []:
+        if item.get("type") == "broll" and item.get("fit") == "cover" and item.get("start") is not None and item.get("end") is not None:
+            if float(item["start"]) <= t < float(item["end"]):
+                return True
     for o in edl.get("overlays") or []:
         try:
             if isinstance(o, dict) and str(o.get("fit") or "") == "cover":
@@ -1077,6 +1083,14 @@ def measured(edl, shots=None, source_s=None, preview=None, index=None):
             pic_spans.append((a, a + float(o.get("duration_s") or o.get("dur") or 0)))
         except (TypeError, ValueError):
             continue
+    cutaway_moves = []
+    for item in edl.get("fx") or []:
+        if item.get("type") != "broll" or item.get("start") is None or item.get("end") is None:
+            continue
+        span = (item["start"], item["end"])
+        pic_spans.append(span)
+        if item.get("media") == "still" and item.get("move"):
+            cutaway_moves.append(span)
     shots = list(shots or [])
     moved = 0
     for a, b in shots:
@@ -1098,7 +1112,8 @@ def measured(edl, shots=None, source_s=None, preview=None, index=None):
         "shots_with_a_camera_move": moved,
         "camera_moves": len(moving),
         "moves": move_rows(edl, index=index),
-        "share_of_film_moving": round(_union(moving) / prog, 3) if prog else None,
+        "share_under_camera_moves": round(_union(moving) / prog, 3) if prog else None,
+        "share_of_film_moving": round(_union(moving + cutaway_moves) / prog, 3) if prog else None,
         "pictures_over_the_film_count": len(pic_spans) + len(edl.get("inserts") or []),
         "share_of_film_under_pictures": round(_union(pic_spans) / prog, 3) if prog else None,
         "transitions": ({"style": tr.get("style"), "scope": tr.get("scope"), "seconds": tr.get("duration_s"),
@@ -1140,7 +1155,12 @@ def facts(edl, preview=None, changes="", shots=None, source_s=None, index=None):
         "pictures_over_the_film": [{k: i.get(k) for k in ("id", "kind", "at_output_s", "duration_s", "motion")}
                                    for i in (edl.get("inserts") or [])[:30] if isinstance(i, dict)],
         "overlays": len(edl.get("overlays") or []),
-        "motion_graphics": len(edl.get("motion") or []) + len(edl.get("vectors") or []) + len(edl.get("fx") or []),
+        "cutaways": [{k: it.get(k) for k in ("id", "start", "end", "media", "moment")}
+                     for it in edl.get("fx") or [] if it.get("type") == "broll"],
+        "rendered_devices": [{k: r.get(k) for k in ("id", "rung", "reason")}
+                             for r in preview.get("devices") or [] if isinstance(r, dict)],
+        "motion_graphics": len(edl.get("motion") or []) + len(edl.get("vectors") or []) +
+                           sum(it.get("type") != "broll" for it in edl.get("fx") or []),
         "speed_changes": len(edl.get("speed") or []),
         "effects": json.dumps({k: v for k, v in (edl.get("effects") or {}).items() if k != "zooms"},
                               ensure_ascii=False, default=str)[:1200],
@@ -1158,20 +1178,29 @@ def frame_pages(ctx, preview, limit=3):
     pages = []
     for p in (preview or {}).get("screening_pages") or []:
         if isinstance(p, dict) and p.get("key"):
-            pages.append((p["key"], "; ".join(f"tile {i + 1}={_t(r.get('time_s'))}s"
+            pages.append((p["key"], "; ".join(f"tile {i + 1}={_t(r.get('time_s'))}s ({r.get('reason') or 'programme'})"
                                              for i, r in enumerate(p.get("frames") or []))))
     for p in ((preview or {}).get("caption_pages") or [])[:1]:
         if isinstance(p, dict) and p.get("key"):
             pages.append((p["key"], "caption frames at " + ", ".join(f"{_t(t)}s" for t in p.get("times") or [])))
     if not pages and (preview or {}).get("sheet_key"):
         pages.append((preview["sheet_key"], "a contact sheet across the whole film, left to right, top to bottom"))
+    if (preview or {}).get("verify_sheet_key"):
+        pages.insert(0, (preview["verify_sheet_key"], "rendered frames at the changed moments, in order"))
     out = []
     folder = os.path.join(getattr(ctx, "workdir", None) or "/tmp", "asks_check")
     os.makedirs(folder, exist_ok=True)
     for n, (key, label) in enumerate(pages[:limit], 1):
-        local = os.path.join(folder, f"page_{n}.jpg")
+        local = os.path.join(folder, hashlib.sha256(key.encode()).hexdigest() + ".jpg")
         try:
-            storage.download_to(key, local)
+            if not os.path.isfile(local):
+                import tempfile
+                with tempfile.NamedTemporaryFile(dir=folder) as tmp:
+                    storage.download_to(key, tmp.name)
+                    try:
+                        os.link(tmp.name, local)
+                    except FileExistsError:
+                        pass
         except Exception as exc:  # noqa: BLE001 - a missing sheet narrows the check, it never fails the turn
             print(f"[asks] sheet {key} not read: {str(exc)[:120]}", flush=True)
             continue

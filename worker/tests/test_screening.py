@@ -241,3 +241,13 @@ def test_audio_listener_windows_cover_late_mix_not_first_three_events():
 
 def test_audio_listener_zero_budget_is_honest():
     assert audio_qc.listen_windows([1, 5], 10, max_windows=0) == []
+
+
+def test_sourced_cutaways_appear_inside_the_rendered_review_tiles():
+    edl = {"keep": [[0, 465]], "fx": [
+        {"type": "broll", "id": "br1", "start": 78., "end": 80., "moment": "Thoracic spine"},
+        {"type": "broll", "id": "br2", "start": 362., "end": 364., "moment": "Lungs"}]}
+    frames = screening.plan(edl, 465., max_frames=16, base_frames=8)
+    samples = {r["reason"]: r["time_s"] for r in frames}
+    assert 78. < samples["B-roll br1 body"] < 80.
+    assert 362. < samples["B-roll br2 body"] < 364.

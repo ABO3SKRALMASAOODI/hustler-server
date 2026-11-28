@@ -119,6 +119,15 @@ def _event_frames(edl, duration):
             if length >= 1.2:
                 add(_inside(start, start + length, 0.96), f"{kind} {i} exit")
 
+    # source_broll places screen FX. Sample the actual delivered picture
+    # inside their spans just as we do for legacy cover overlays.
+    for item in edl.get("fx") or []:
+        if item.get("type") != "broll":
+            continue
+        start, end = _number(item.get("start")), _number(item.get("end"))
+        if start is not None and end is not None and end > start:
+            add(_inside(start, end), f"B-roll {item.get('id')} body")
+
     for i, text in enumerate(edl.get("texts") or [], 1):
         start, end = _number(text.get("start")), _number(text.get("end"))
         if start is not None and end is not None and end > start:

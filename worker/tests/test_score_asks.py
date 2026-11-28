@@ -756,3 +756,15 @@ def test_the_check_sees_which_pauses_are_the_film_playing(monkeypatch):
     assert "[8.8-24.5] 15.7 s, footage, not dead air" in text
     assert asks.pauses(NS(index={"words": [], "silences": [], "video": {"duration": 9.0}}, duration=9.0),
                        {"keep": [[0.0, 9.0]]}) == ""
+
+
+def test_checked_cutaways_count_in_whole_film_coverage_and_authored_motion():
+    edl = {"keep": [[0., 60.]], "fx": [
+        {"id":"br1","type":"broll","start":5.,"end":11.,"media":"still","move":{"amount":.3}},
+        {"id":"br2","type":"broll","start":30.,"end":36.,"media":"video"}]}
+    data = asks.facts(edl)
+    assert data["whole_film"]["pictures_over_the_film_count"] == 2
+    assert data["whole_film"]["share_of_film_under_pictures"] == .2
+    assert data["whole_film"]["share_of_film_moving"] == .1
+    assert data["whole_film"]["share_under_camera_moves"] == 0.
+    assert data["motion_graphics"] == 0
