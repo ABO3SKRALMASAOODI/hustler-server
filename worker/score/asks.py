@@ -1249,7 +1249,7 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes="", fixed=None):
     import llm
     fixed = {k: v for k, v in (fixed or {}).items() if isinstance(v, dict) and v.get("state")}
     import required_broll
-    fixed.update(required_broll.check(ctx, ledger, edl, preview))
+    fixed.update(required_broll.check(ctx, ledger, edl, preview, fixed=fixed))
     todo = [a for a in ledger["asks"] if a["id"] not in fixed]
     usage = {"usd": 0.0, "s": 0.0, "model": None}
     by_id = {}

@@ -289,7 +289,7 @@ def anchors(picture, edl):
     return sorted(set(out))
 
 
-def check(ctx, ledger, edl, preview):
+def check(ctx, ledger, edl, preview, fixed=None):
     """Independent gpt-6-sol reading at exact spoken anchors, never search metadata."""
     pictures = ledger.get('required_pictures') or []
     if not pictures:
@@ -323,7 +323,12 @@ def check(ctx, ledger, edl, preview):
     schema = {'type': 'object', 'additionalProperties': False,
               'required': ['shown', 'seen', 'line'], 'properties': {
                   'shown': {'type': 'boolean'}, 'seen': {'type': 'string'}, 'line': {'type': 'string'}}}
+    cache = ledger.setdefault('picture_frame_observations', {})
     for p in pictures:
+        prior = (fixed or {}).get(p['id']) or {}
+        if prior.get('state') in ('done', 'partly', 'not_done'):
+            out[p['id']] = prior
+            continue
         times = anchors(p, edl)
         spoken = bool(p.get('source_words'))
         if not spoken:
@@ -353,14 +358,12 @@ def check(ctx, ledger, edl, preview):
                 frame = os.path.join(folder, f"{p['id']}-{n}.jpg")
                 media.frame_at(path, t, frame, width=960)
                 content += [{'type': 'text', 'text': f"Rendered {'named-word frame' if spoken else 'illustration sample'}, {t:.3f}s"}, llm.image_part(frame)]
-            cache = getattr(ctx, '_checked_picture_frames', None)
-            if cache is None:
-                cache = ctx._checked_picture_frames = {}
             # The image parts include the actual JPEG bytes. A new export with
             # identical pictures at these mentions can reuse the same observation.
-            fingerprint = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).digest()
-            if fingerprint in cache:
-                out[p['id']] = dict(cache[fingerprint], id=p['id'])
+            fingerprint = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+            previous = cache.get(p['id']) or {}
+            if previous.get('fingerprint') == fingerprint:
+                out[p['id']] = previous['row'].copy()
                 continue
             value, _ = asks._call(ctx, 'check_required_picture', schema,
                 'Check whether the requested subject is visibly illustrated in these rendered '
@@ -381,7 +384,7 @@ def check(ctx, ledger, edl, preview):
             row.update(state='done' if value.get('shown') is True else 'not_done',
                        seen=str(value.get('seen') or '')[:400], line=str(value.get('line') or row['line'])[:300])
             if isinstance(value.get('shown'), bool):
-                cache[fingerprint] = row.copy()
+                cache[p['id']] = {'fingerprint': fingerprint, 'row': row.copy()}
         except Exception as exc:
             row['seen'] += f' ({type(exc).__name__})'
         out[p['id']] = row

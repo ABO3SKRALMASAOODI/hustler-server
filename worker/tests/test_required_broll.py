@@ -111,6 +111,17 @@ def test_wrong_brand_in_render_overrides_general_ask_checker(monkeypatch, tmp_pa
     assert result['picture1']['state'] == 'not_done'
     assert 'Nike' in result['picture1']['line']
 
+    # A different draft on this exact preview needs no frame extraction.
+    again = required_broll.check(ctx, ledger, {'keep': [[1, 5]]}, {'edl_version': 3}, fixed=result)
+    assert again == result and len(sampled) == 1
+
+    # New repair slice, changed EDL, identical sampled picture bytes and target.
+    reopened = NS(workdir=str(tmp_path), db=ctx.db, project_id=1)
+    monkeypatch.setattr(asks, '_call', lambda *a, **k: pytest.fail('rechecked unchanged image'))
+    persisted = json.loads(json.dumps(ledger))
+    assert required_broll.check(reopened, persisted, {'keep': [[1, 5]]}, {'edl_version': 4}) == result
+    assert len(sampled) == 2
+
 
 def test_missing_render_cannot_claim_picture_done(tmp_path):
     p = {'id': 'picture1', 'subject': 'crypto mining', 'source_words': [{'t0': 1, 't1': 2}]}
