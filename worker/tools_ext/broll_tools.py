@@ -530,6 +530,36 @@ def _board(ctx, rows, W, H):
 def source_broll(ctx, moments=None, max=None, providers=None, place=True):
     # ``max`` is the tool's argument name; the work happens where the
     # builtin is not shadowed
+    import llm
+    if moments is None:
+        import device_planner
+        from quality_verifier import request_text_for
+        edl, _ = _edl(ctx)
+        words = device_planner.program_words(edl, getattr(ctx, "index", {}) or {})
+        moments = []
+        for pos in range(0, len(words), 350):
+            page = words[pos:pos+350]
+            answer = llm.ask_text(
+                "Plan licensed cutaways for these timed words and the editor's current request. "
+                "Cover mentions throughout this passage at a density that suits the brief. "
+                "Return a JSON array of objects with query (concrete stock search), at (the matching "
+                "output timestamp), purpose, duration_s and kind (video, photo or any).",
+                json.dumps({"request": request_text_for(ctx),
+                            "words": [[w["t0"], w["w"]] for w in page]}, ensure_ascii=False),
+                max_tokens=2400, purpose="source_broll_moments")
+            if answer:
+                moments.extend(llm.extract_json_array(answer["text"]) or [])
+        if not moments:
+            return "No timed moments were available. Supply moments with a query and output time."
+    try:
+        moments = _obj(moments, "moments")
+        limit = int(max) if max is not None else None
+    except (TypeError, ValueError) as exc:
+        return _rejected(str(exc))
+    if isinstance(moments, list) and len(moments) > MAX_MOMENTS:
+        selected = moments if limit is None else moments[:limit]
+        return "\n".join(_source_broll(ctx, selected[pos:pos+MAX_MOMENTS], None, providers, place)
+                         for pos in range(0, len(selected), MAX_MOMENTS))
     return _source_broll(ctx, moments, max, providers, place)
 
 
@@ -543,12 +573,7 @@ def _source_broll(ctx, moments, limit, providers, place):
     except ValueError as e:
         return _rejected(str(e))
     if not isinstance(moments, list) or not moments:
-        return _rejected("name the story moments: moments=[{query, word or "
-                         "at, purpose?, duration_s?, kind?, archival?}] — "
-                         "one concrete visual per moment (what the words "
-                         "PROVE, not their topic)")
-    if len(moments) > MAX_MOMENTS:
-        return _rejected(f"at most {MAX_MOMENTS} moments per call")
+        return _rejected("provide a timed moment with a concrete query or omit moments to plan from speech")
     cap = len(moments)
     if limit is not None:
         try:
@@ -889,19 +914,10 @@ _MOMENT = {"type": "object", "properties": {
 TOOL_SPECS = {
     "source_broll": (
         source_broll,
-        "WRITE: the B-roll director. moments=[{query (what the shot SHOWS), "
-        "depicts (a named real subject: 'Elon Musk'), "
-        "word or at, purpose, duration_s, kind video|photo|any, archival}] "
-        "-> searches Pexels, Pixabay, Openverse, Wikimedia Commons, NASA "
-        "(and the Internet Archive when archival) in parallel, keeps only "
-        "licences that allow commercial use and edits, judges a short list "
-        "on the real files (vertical-crop survival, resolution, motion, "
-        "depth of field, range, colour distance to your hero frame, "
-        "watermarks, starved encodes, posed stock) and cuts the winner in "
-        "as a broll fx item: graded to match the camera, grain matched, "
-        "photos moving in 2.5D, its licence line on the item. Speech and "
-        "captions continue over it. place=false researches only. No "
-        "library live: says so and returns a shoot list.",
+        "Source licensed cutaways matched to the speech. Omit moments to plan throughout the kept transcript, "
+        "or give moments=[{query, depicts, word or at, purpose, duration_s, kind, archival}]. Searches real "
+        "recordings and photos, measures crop and image quality, matches the grade, moves stills in 2.5D "
+        "and records each licence. Keeps speech and captions. place=false researches only.",
         {"moments": {"type": "array", "items": _MOMENT},
          "max": {"type": "integer"},
          "providers": {"type": "array", "items": {"type": "string"}},
@@ -912,10 +928,10 @@ TOOL_SPECS = {
         "picture returns.",
         {"ids": {"type": "array", "items": {"type": "string"}}}),
 }
-REQUIRED_ARGS = {"source_broll": ["moments"], "remove_broll": ["ids"]}
+REQUIRED_ARGS = {"source_broll": [], "remove_broll": ["ids"]}
 WRITE_TOOLS = {"source_broll", "remove_broll"}
 COMPACT = {
-    "source_broll": "WRITE: B-roll director: moments [{query, word|at, "
+    "source_broll": "WRITE: B-roll throughout the transcript in one call; optional moments [{query, word|at, "
                     "purpose}] -> licensed, judged, colour-matched "
                     "cutaways (photos move); place=false researches.",
     "remove_broll": "WRITE: remove cutaways by id.",

@@ -29,7 +29,7 @@ NUDGE = ("[system: EXECUTION CHECKPOINT — 8 read-only tool calls have "
 def _verdict(same, customer="Spanish", draft="Spanish"):
     call = types.SimpleNamespace(function=types.SimpleNamespace(
         name="language_verdict", arguments=json.dumps({
-            "same_language": same, "customer_language": customer,
+            "same_language": same, "faithful": True, "customer_language": customer,
             "draft_language": draft})))
     return types.SimpleNamespace(
         usage=None, choices=[types.SimpleNamespace(

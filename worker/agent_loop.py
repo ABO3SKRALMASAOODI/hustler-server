@@ -3226,6 +3226,7 @@ def _asks_check(ctx, draft, allow_repair=True):
                                                 "open": [r["id"] for r in asks.open_asks(verdict)],
                                                 "harm": len(asks.harm(verdict))})
         ctx.ask_verdict = verdict
+        print(f"[asks] ask check v{row.get('version')}: open={ledger['checks'][-1]['open']}", flush=True)
     if not allow_repair or not (asks.open_asks(verdict) or asks.harm(verdict)):
         return None
     # No count of repair passes (owner, 16 Nov 2026: a cap that makes the agent give up is a bug; p5873

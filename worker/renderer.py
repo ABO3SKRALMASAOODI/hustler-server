@@ -7923,9 +7923,13 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                                      "asset_locals": asset_locals,
                                      "index": None,
                                      "audio_only": bool(audio_only)})]
-    next_idx = fx_box[0].bind_inputs(extra_inputs, next_idx)
+    base_input_length = len(extra_inputs)
+    base_next_idx = next_idx
+    fx_box[0].bind_inputs(extra_inputs, base_next_idx)
 
     def _graph(**extra):
+        del extra_inputs[base_input_length:]
+        fx_box[0].bind_inputs(extra_inputs, base_next_idx)
         return build_filtergraph(edl, tl.out_duration, False, tl, ass_path,
                                  music_inputs, {}, preview,
                                  W=W, H=H, fps=fps, frame_mode=None,
@@ -8598,7 +8602,35 @@ def _fx_run(cmd, fx_box, rebuild, cancelled_cb, **run_kw):
         try:
             return run(cmd)
         except media.MediaError as exc:
-            if not eligible(exc) or not video or not picture:
+            if not eligible(exc) or plan is None:
+                raise
+            if not video or not picture:
+                items = [*plan.junction_items, *(row for rows in plan.bus.values() for row in rows)]
+                for item in items:
+                    try:
+                        fx_box[0] = fxgraph.without_fx(plan, {item["id"]})
+                        result = run(rebuild())
+                    except media.MediaError as retry_error:
+                        if not eligible(retry_error):
+                            raise
+                    else:
+                        plan.note(item, "omit", "this device failed to encode individually")
+                        return result
+                    finally:
+                        fx_box[0] = plan
+                if plan.has_composites:
+                    from copy import copy
+                    stripped = copy(plan)
+                    stripped.no_composites = True
+                    fx_box[0] = stripped
+                    try:
+                        result = run(rebuild())
+                        for item in plan.edl.get("motion") or []:
+                            if item.get("composite"):
+                                plan.note(item, "substitute", "drawn as its plain graphic")
+                        return result
+                    finally:
+                        fx_box[0] = plan
                 raise
             print(f"[render] retrying {len(picture)} picture devices in bounded windows: {str(exc)[:120]}", flush=True)
 
@@ -8627,16 +8659,24 @@ def _fx_run(cmd, fx_box, rebuild, cancelled_cb, **run_kw):
             path = os.path.join(folder, f"part_{len(pieces)}.mp4")
             fx_box[0] = fxgraph.without_fx(plan, ids - {it["id"] for it in active})
             args = low_memory(rebuild())
-            # Consume both graph outputs. The audio is rebuilt once below; the
-            # pieces contribute video only. Output seeking retains global clocks
-            # for tracked crops, captions, watermarks and the final dissolve.
+            # A picture fragment must have no AAC priming delay: concat uses
+            # the earliest stream clock even when the final map drops its audio.
+            flag = next(k for k in ("-filter_complex", "-/filter_complex", "-filter_complex_script") if k in args)
+            gi = args.index(flag) + 1
+            if flag == "-filter_complex":
+                args[gi] += ";[aout]anullsink"
+            else:
+                with open(args[gi], "a", encoding="utf-8") as script:
+                    script.write(";[aout]anullsink")
+            ai = args.index("[aout]")
+            del args[ai-1:ai+1]
             start, length = a / fps, (b - a) / fps
-            args[-1:] = ["-ss", f"{start:.9f}", "-t", f"{length:.9f}",
+            args[-1:] = ["-an", "-ss", f"{start:.9f}", "-t", f"{length:.9f}",
                          "-threads:v", "1", path]
             run(args)
             pieces.append((path, length))
 
-        def window(a, b):
+        def window(a, b, split_once=True):
             active = [it for left, right, it in spans if left < b and right > a]
             try:
                 encode(a, b, active)
@@ -8646,6 +8686,11 @@ def _fx_run(cmd, fx_box, rebuild, cancelled_cb, **run_kw):
                     raise
                 error = str(exc).splitlines()[0][:160]
             edges = sorted({x for left, right, it in spans for x in (left, right) if a < x < b})
+            if not edges and split_once and b-a > 2:
+                mid = (a+b)//2
+                window(a, mid, False)
+                window(mid, b, False)
+                return
             if edges:
                 mid = min(edges, key=lambda x: abs((a+b)/2 - x))
                 window(a, mid)
@@ -8791,6 +8836,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                   render_fragment=render_fragment,
                                   discard_audio=discard_audio,
                                   program_edges=program_edges)
+    turn = edl_dict.get("source_rotation")
+    if turn:
+        src_path = media.oriented_source(src_path, turn, workdir)
+        index = media.oriented_index(index, turn)
     info = media.probe(src_path)
     src_dur = info["duration"]
     asset_locals = dict(asset_locals or {})
@@ -8858,6 +8907,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         frame = None
     W, H = frame_dims(info["width"], info["height"],
                       (frame or {}).get("ratio"), delivery=not preview)
+    delivery_dims = (W, H)
+    if not preview and sum(it.get("type") == "broll" for it in edl.get("fx") or []) > 6:
+        W, H = frame_dims(info["width"], info["height"], (frame or {}).get("ratio"))
+
     frame_mode = (frame or {}).get("mode", "crop") if frame else None
     if not preview and (W, H) != (info["width"], info["height"]) and not frame_mode:
         frame_mode = "pad"
@@ -9496,9 +9549,13 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                   flush=True)
         for note in pm.notes:
             print(f"[render] program matte: {note}", flush=True)
-    next_idx = fx_box[0].bind_inputs(extra_inputs, next_idx)
+    base_input_length = len(extra_inputs)
+    base_next_idx = next_idx
+    fx_box[0].bind_inputs(extra_inputs, base_next_idx)
 
     def _graph(**extra):
+        del extra_inputs[base_input_length:]
+        fx_box[0].bind_inputs(extra_inputs, base_next_idx)
         return build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
                                  music_inputs, index, preview,
                                  W=W, H=H, fps=fps, frame_mode=frame_mode,
@@ -9597,6 +9654,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                        _many_video_threads(info["width"], info["height"], video_reads))
 
     def _video_cmd(g):
+        if (W, H) != delivery_dims and not preview:
+            g = g.replace("[vout]", "[working_picture]") + (
+                f";[working_picture]{upscale_filter(*delivery_dims)}[vout]")
         return ["ffmpeg", "-y", *_filter_thread_args(g),
                 *_stable_video_inputs(main_input_args + extra_inputs,
                                       decoder_threads=bounded_threads),
@@ -10134,6 +10194,8 @@ def _composition_geometry(edl, src_local, preview):
         W, H = info["width"], info["height"]
     else:
         info = media.probe(src_local)
+        if (edl.get("source_rotation") or 0) % 180:
+            info = dict(info, width=info["height"], height=info["width"])
         W, H = frame_dims(info["width"], info["height"],
                           (edl.get("frame") or {}).get("ratio"), delivery=not preview)
     fps = max(1., min(float(info.get("fps") or 30.), 60.))
@@ -10776,6 +10838,8 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
 
     if src_local:
         info = media.probe(src_local)
+        if (edl.get("source_rotation") or 0) % 180:
+            info = dict(info, width=info["height"], height=info["width"])
         W, H = frame_dims(info["width"], info["height"],
                           (edl.get("frame") or {}).get("ratio"))
         W, H, _fps = preview_geometry(W, H, info.get("fps") or 30.0)
@@ -12053,7 +12117,7 @@ def _run_render_job(worker_db, job):
                 # bounded audio reviewer without downloading/decoding the whole MP4.
                 # These clips are evidence, never a render gate, and failures here do
                 # not fail the valid preview.
-                if variant == "preview" and not proof_only:
+                if variant in ("preview", "final") and not proof_only:
                     try:
                         _explicit = ((edl_row["json"].get("master") or {})
                                      .get("loudness"))
@@ -12068,10 +12132,17 @@ def _run_render_job(worker_db, job):
                     except Exception:
                         audio_qc_res = None
                     authored = edl_row["json"]
+                    if audio_qc_res is not None:
+                        try:
+                            audio_qc_res["layers"] = audio_qc.layer_levels(
+                                out_local, authored, out_dur, lambda key: _render_asset_source(
+                                    key, "audio_check", key.encode().hex()[-24:], workdir, asset_locals))
+                        except Exception as exc:
+                            print(f"[audio check] stem measurement unavailable: {type(exc).__name__}", flush=True)
                     has_designed_audio = bool(
                         authored.get("music") or authored.get("sfx") or
                         authored.get("voiceover"))
-                    if has_designed_audio and audio_model_review:
+                    if variant == "preview" and has_designed_audio and audio_model_review:
                         review_times = list(vtimes or [])
                         # Ensure the bounded actual-audio listener hears the beginning,
                         # middle and end of the final mix even when all authored SFX

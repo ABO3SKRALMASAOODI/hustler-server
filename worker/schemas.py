@@ -3115,6 +3115,7 @@ class EDL(BaseModel):
     # keep is empty ONLY for a canvas program (image/clip-only, no main video);
     # otherwise it is the non-empty cut list of the one main video.
     keep: List[List[float]]
+    source_rotation: Optional[Literal[-90, 90, 180]] = None
     split_keep_boundaries: Optional[List[float]] = None
     canvas: Optional[Canvas] = None
     captions: Optional[Union[CaptionsFromTranscript, List[CaptionItem]]] = None
@@ -3177,6 +3178,10 @@ class EDL(BaseModel):
         # Every EDL written before the export target existed dumps (and so
         # stores and compares) byte-identically: an unset export is absent.
         data = handler(self)
+        if isinstance(data, dict):
+            for key in ("source_rotation", "source_pitch_semitones"):
+                if data.get(key) is None:
+                    data.pop(key, None)
         ex = data.get("export") if isinstance(data, dict) else None
         if isinstance(data, dict) and (ex is None or (
                 isinstance(ex, dict) and not any(ex.values()))):

@@ -290,7 +290,7 @@ _bot_walled = ytaccess.bot_walled
 
 def _extract(url, workdir, prefer=None, client_override=None,
              use_cookies=True, format_mode="adaptive", proxy=None,
-             impersonate=False):
+             impersonate=False, force_ipv4=False):
     """Pull media out of a page with yt-dlp. Returns (path, info dict).
 
     Runs as a subprocess rather than through the python API so a hung or
@@ -347,6 +347,8 @@ def _extract(url, workdir, prefer=None, client_override=None,
            "--match-filter", "!is_live",
            "--write-info-json",
            "-o", os.path.join(workdir, "dl.%(ext)s")]
+    if force_ipv4:
+        cmd.append("--force-ipv4")
     if client_override:
         cmd += ["--extractor-args", f"youtube:player_client={client_override}"]
     if impersonate:
@@ -425,6 +427,10 @@ def _extract(url, workdir, prefer=None, client_override=None,
     files = [p for p in glob.glob(os.path.join(workdir, "dl.*"))
              if not p.endswith(".info.json")]
     if not files:
+        if not force_ipv4 and ytaccess.network_unreachable(err):
+            _clear_partials(workdir)
+            return _extract(url, workdir, prefer, client_override, use_cookies,
+                            format_mode, proxy, impersonate, force_ipv4=True)
         # yt-dlp's stderr is the only place the real reason lives (private
         # video, region block, sign-in wall, extractor broken by a site
         # change). Surfacing its last line beats "download failed" — the user

@@ -455,6 +455,53 @@ def rotation_of(stream):
         return 0
 
 
+def oriented_source(path, clockwise, workdir):
+    """Compose a project quarter-turn with the input display matrix, without encoding."""
+    if not clockwise:
+        return path
+    from tempfile import NamedTemporaryFile
+    identity = hashlib.sha256(os.fsencode(path)).hexdigest()[:20]
+    target = os.path.join(workdir, f"oriented-{identity}-{clockwise}.mov")
+    if os.path.isfile(target):
+        return target
+    angle = probe(path).get("display_rotation", 0) - clockwise
+    with NamedTemporaryFile(dir=workdir, suffix=".mov", delete=False) as temp:
+        intermediate = temp.name
+    try:
+        run(["ffmpeg", "-y", "-display_rotation:v:0", str(angle), "-i", path,
+             "-map", "0:v:0", "-map", "0:a?", "-c", "copy", intermediate])
+        os.replace(intermediate, target)
+    finally:
+        if os.path.exists(intermediate):
+            os.unlink(intermediate)
+    return target
+
+
+def oriented_index(index, clockwise):
+    """Project a shared source index into the same display coordinates as the renderer."""
+    if not clockwise or not index:
+        return index
+    video = dict(index.get("video") or {})
+    if clockwise % 180:
+        video["width"], video["height"] = video.get("height"), video.get("width")
+    result = dict(index, video=video)
+    def rotate_box(box):
+        x, y, right, bottom = box
+        for _ in range((clockwise % 360) // 90):
+            x, y, right, bottom = 1-bottom, x, 1-y, right
+        return [round(v, 6) for v in (x, y, right, bottom)]
+    spatial = index.get("spatial") or {}
+    if spatial.get("samples"):
+        samples = []
+        for sample in spatial["samples"]:
+            sample = dict(sample)
+            for lane in ("text", "faces"):
+                sample[lane] = [rotate_box(box) for box in sample.get(lane) or []]
+            samples.append(sample)
+        result["spatial"] = dict(spatial, samples=samples)
+    return result
+
+
 _FIRST_BOXES = {b"ftyp", b"styp", b"wide", b"free", b"skip", b"mdat", b"moov",
                 b"pnot", b"uuid", b"junk", b"pict"}
 
@@ -594,6 +641,7 @@ def probe(path):
         else None,
         "color_range": rng if rng in ("tv", "pc") else None,
         "sar": round(sar, 6),
+        "display_rotation": rotation_of(v),
         "duration": round(duration, 3),
         "video_duration": video_duration,
         "fps": round(fps, 3),

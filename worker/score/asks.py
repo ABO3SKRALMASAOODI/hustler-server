@@ -543,15 +543,27 @@ def build(ctx, request, history=None, edl=None):
                 content.extend([{"type": "text", "text": f"Upload #{r['n']}: {r['name']} ({r['kind']}), key {r['key']}"},
                                 llm.image_part(r["frame"])])
     value, usage = _call(ctx, "record_ask_ledger", LEDGER_SCHEMA, LEDGER_SYSTEM, content, max_tokens=8000)
+    if "asks" not in value and not previous:
+        value, again = _call(ctx, "record_ask_ledger", LEDGER_SCHEMA, LEDGER_SYSTEM, content, max_tokens=8000)
+        usage = {"usd": round(usage["usd"] + again["usd"], 6), "s": round(usage["s"] + again["s"], 2),
+                 "model": again["model"]}
     current = value.get("asks") or []
     decisions = {d["id"]: d for d in value.get("previous") or [] if isinstance(d, dict) and d.get("id")}
     current_ids = {a.get("id") for a in current}
     for old in previous:
         decision = decisions.get(old["id"], {})
-        if decision.get("status") == "dropped" or decision.get("ask_id") in current_ids:
+        if (decision.get("status") == "dropped" or decision.get("ask_id") in current_ids or
+                any(a.get("said") == old.get("said") and a.get("want") == old.get("want") for a in current)):
             continue
         if old.get("state") in (*OPEN_STATES, "unchecked", "open") or decision.get("status") == "reopened":
             current.append(dict(old, want=old.get("want") or old.get("said"), **{"pass": old.get("pass") or old.get("said")}))
+    if not current:
+        for req in requirements:
+            if not req.get("quote") or str(req.get("id", "")).startswith("system:"):
+                continue
+            want = req.get("description") or req["quote"]
+            current.append({"said": req["quote"], "want": want, "pass": want,
+                            "kind": {"preserve": "keep", "inspect": "answer"}.get(req.get("action"), "edit")})
     ledger = settle(dict(value, asks=current), edl, usage)
     ledger["previous"] = list(decisions.values())
     if track_titles:
@@ -1097,6 +1109,7 @@ def facts(edl, preview=None, changes="", shots=None, source_s=None, index=None):
         "titles": [{k: t.get(k) for k in ("id", "text", "start", "end", "template", "font", "color", "size_scale",
                                               "x", "y", "font_size", "max_width", "text_align")}
                    for t in (edl.get("texts") or [])[:24] if isinstance(t, dict)],
+        "measured_audio_layers": (preview.get("audio_qc") or {}).get("layers"),
         "source_gain_db": sounding_volume(edl),
         "source_stems": edl.get("stem_mix"),
         "music": [{k: m.get(k) for k in ("start", "end", "gain_db", "mute", "provenance")}

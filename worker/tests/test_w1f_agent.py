@@ -323,67 +323,22 @@ class _WDB:
         raise AssertionError(name)
 
 
-def test_the_worker_export_path_holds_an_unacknowledged_degraded_final():
-    db = _WDB()
-    job = {"id": 1, "type": "final", "project_id": 5,
-           "payload": {"edl_version": 9}}
-    result = {"render_asset_id": 77, "devices": [ROW, dict(ROW, id="ok",
-                                                           rung="full")]}
-    held = job_completion.hold_degraded_final(db, job, result)
-    assert [r["id"] for r in held] == ["sx1"]
-    assert db.meta["degraded_hold"] == held
-    assert result["export_held"].startswith("This export is held")
-    assert db.record["status"] == "repair_required"
-    # acknowledged: the next final is not held
-    db2 = _WDB(quality_verifier.justify_findings(
-        db.record, ["device_degraded"],
-        "the substitute flash is what the user approved on the preview"))
-    result2 = {"render_asset_id": 78, "devices": [ROW]}
-    assert job_completion.hold_degraded_final(db2, job, result2) == []
-    assert "export_held" not in result2
-    # ...and is stamped judged-and-released: the backend holds an UNSTAMPED
-    # final with degraded rows (routes/video.final_degraded_hold)
-    assert db2.meta == {"degraded_hold": []}
-    # previews and clean finals are untouched
-    assert job_completion.hold_degraded_final(
-        _WDB(), dict(job, type="preview"), {"devices": [ROW]}) == []
-    assert job_completion.hold_degraded_final(
-        _WDB(), job, {"devices": [dict(ROW, rung="full")]}) == []
-
-
-def test_acknowledging_releases_exactly_the_held_final():
-    rec = quality_verifier.hold_final(None, [ROW], project_id=5, version=9)
-
-    class DB:
-        meta = {"devices": [ROW], "degraded_hold": [ROW]}
-
-        def run(self, fn, *a):
-            if fn.__name__ == "find_render_asset":
-                assert a[1:] == ("final", 9)
-                return {"id": 77, "meta": dict(self.meta)}
-            if fn.__name__ == "update_asset_meta":
-                self.meta.update(a[1])
-                return None
-            raise AssertionError(fn.__name__)
-    db = DB()
-    assert job_completion.refresh_final_hold(db, 5, 9, rec) == [ROW]
-    acked = quality_verifier.justify_findings(
-        rec, ["device_degraded"], "confirmed with the user: the flash "
-        "substitute reads fine for this short")
-    assert job_completion.refresh_final_hold(db, 5, 9, acked) == []
-    assert db.meta["degraded_hold"] == []
-    # a final whose commit never stamped it (the stamp failed) is judged on
-    # the next acknowledgement from its own device rows
-    db.meta = {"devices": [ROW, dict(ROW, id="ok", rung="full")]}
-    assert job_completion.refresh_final_hold(db, 5, 9, rec) == [ROW]
-    assert db.meta["degraded_hold"] == [ROW]
-    db.meta = {"devices": [ROW]}
-    assert job_completion.refresh_final_hold(db, 5, 9, acked) == []
-    assert db.meta["degraded_hold"] == []
-    # a final with nothing degraded is left alone
-    db.meta = {"devices": [dict(ROW, rung="full")]}
-    assert job_completion.refresh_final_hold(db, 5, 9, rec) == []
-    assert "degraded_hold" not in db.meta
+def test_a_final_reports_the_exact_device_once_on_its_reply():
+    import db
+    class Cursor:
+        row = {"id": 19, "content": "Edited.", "meta": {"preview": {}}}
+        def execute(self, sql, params):
+            if sql.startswith("UPDATE"):
+                self.row["content"] = params[0]
+                self.row["meta"].update(params[1].adapted)
+        def fetchone(self):
+            return self.row
+    cur = Cursor()
+    for _ in range(2):
+        db._update_final_device_note(cur, 2, {"devices": [ROW]})
+    assert cur.row["content"].count("sx1 (substitute)") == 1
+    db._update_final_device_note(cur, 2, {"devices": [dict(ROW, rung="full")]})
+    assert cur.row["content"] == "Edited."
 
 
 # ── close-out guidance ───────────────────────────────────────────────────

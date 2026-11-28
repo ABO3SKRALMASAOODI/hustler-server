@@ -245,7 +245,9 @@ class ToolContext:
         # tool that reads the source footage; duration is the master clock for
         # main-video edits (0 when there is none — placement tools bound
         # themselves against program_duration instead).
-        self.index = index or {}
+        self._original_index = index or {}
+        self._source_rotation = 0
+        self.index = self._original_index
         self.has_main_video = bool(index and index.get("video"))
         self.duration = (float(index["video"]["duration"])
                          if self.has_main_video else 0.0)
@@ -613,7 +615,7 @@ class ToolContext:
     def clamp(self, t):
         return read_tools.clamp_seconds(self.duration, t)
 
-    def proxy_path(self):
+    def native_proxy_path(self):
         if self._proxy_local is None:
             proxy = self.db.run(dbx.latest_asset, self.project_id, "proxy")
             if not proxy:
@@ -630,6 +632,9 @@ class ToolContext:
                 storage.download_to(proxy["storage_key"], local)
             self._proxy_local = local
         return self._proxy_local
+
+    def proxy_path(self):
+        return media.oriented_source(self.native_proxy_path(), self._source_rotation, self.workdir)
 
     def cut_sound_source(self):
         """Where cut_audio reads the main video's sound around a cut: a
@@ -685,6 +690,11 @@ class ToolContext:
             row = self.db.run(dbx.get_edl_version, self.project_id, v)
             gen = dbx.edl_write_generation(self.project_id) \
                 if cache is not None else None
+        turn = ((row or {}).get("json") or {}).get("source_rotation") or 0
+        if turn != self._source_rotation:
+            self.index = media.oriented_index(self._original_index, turn)
+            self._spatial = None
+            self._source_rotation = turn
         if cache is not None and row:
             cache.update(gen=gen, row=copy.deepcopy(dict(row)))
         return row
@@ -4809,8 +4819,9 @@ def _get_spatial(ctx):
     index_row = ctx.db.run(dbx.get_index_by_sha, original["sha256"])
     if not index_row:
         raise spatial.SpatialError("no index row for this video")
-    ctx._spatial = spatial.get_or_compute_for_index(
-        ctx.db, dbx, index_row, ctx.proxy_path(), ctx.workdir)
+    native = getattr(ctx, "native_proxy_path", ctx.proxy_path)()
+    raw = spatial.get_or_compute_for_index(ctx.db, dbx, index_row, native, ctx.workdir)
+    ctx._spatial = media.oriented_index({"spatial": raw}, getattr(ctx, "_source_rotation", 0))["spatial"]
     return ctx._spatial
 
 
@@ -4837,7 +4848,7 @@ def _get_source_layout(ctx, compute=False):
                    ctx.db.run(dbx.get_index_by_sha, original["sha256"]))
             if row:
                 layout = source_layout.get_or_compute_for_index(
-                    ctx.db, dbx, row, ctx.proxy_path(), ctx.workdir)
+                    ctx.db, dbx, row, getattr(ctx, "native_proxy_path", ctx.proxy_path)(), ctx.workdir)
                 if isinstance(index, dict):
                     index["source_layout"] = layout
         except Exception as exc:
@@ -8049,14 +8060,14 @@ def search_sfx(ctx, query, max_seconds=None, role="one_shot"):
     unavailable_until = memory.get("sfx_auth_retry_at", 0)
     try:
         if time.time() < unavailable_until:
-            hits = sfx_search._outage_hits(query, min(mx or sfx_search.DEFAULT_MAX_S,
-                                                    sfx_search.HARD_MAX_S), 12)
+            cap = float("inf") if role == "bed" else min(mx or sfx_search.DEFAULT_MAX_S, sfx_search.HARD_MAX_S)
+            hits = sfx_search._outage_hits(query, cap, 12, role)
             if not hits:
                 return ("UNAVAILABLE: online sound search authentication is failing. "
                         "Changing the query will not fix it. Use uploaded audio "
                         "or continue the edit; do not claim sound was added.\n" + kit_text)
         else:
-            hits = sfx_search.search(query, max_s=mx, role=role)
+            hits = sfx_search.search(query, max_s=mx, **({"role": role} if role == "bed" else {}))
     except sfx_search.SfxSearchError as e:
         if re.search(r"\b(?:401|403)\b", str(e)):
             memory["sfx_auth_retry_at"] = time.time() + 900
@@ -8076,6 +8087,13 @@ def search_sfx(ctx, query, max_seconds=None, role="one_shot"):
         return (f"No sounds matched '{query}'. Use the PHYSICAL name of "
                 "the sound ('whoosh', 'camera shutter', 'keyboard click', "
                 "'pop', 'riser') rather than a mood word, or list_sound_library.")
+    if role == "bed":
+        with ThreadPoolExecutor(max_workers=min(3, len(hits))) as pool:
+            samples = list(pool.map(lambda hit: _measure_sfx_candidate(ctx, hit), hits[:6]))
+        measured = sorted(((hit, signal) for hit, signal, _, _ in samples if signal),
+                          key=_bed_steadiness)
+        ordered = [hit for hit, _ in measured]
+        hits = ordered + [hit for hit in hits if hit not in ordered]
     ctx._sfx_hits = {h["id"]: h for h in hits}
     _remember_search_hits(ctx, "sfx", hits)
     return (kit_text + "Sounds found (each line carries its license terms — relay "
@@ -8136,6 +8154,11 @@ def _sound_design_context(ctx, at=None):
         sequence.replace("\n", " | "),
     ]
     return " | ".join(dict.fromkeys(part for part in parts if part))[:2200]
+
+
+def _bed_steadiness(candidate):
+    _, signal = candidate
+    return signal.get("crest_db", 0) + 10 * signal.get("spectral_variation", 0)
 
 
 def _measure_sfx_candidate(ctx, hit, need_file=False):
@@ -8393,7 +8416,7 @@ def add_web_sfx(ctx, query, at, gain_db=None, max_seconds=None,
         return (f"REJECTED: at={at_n:g}s is outside the program "
                 f"(0 to {round(prog, 2)}s).")
     try:
-        hits = sfx_search.search(query, max_s=mx, count=6, role=role)
+        hits = sfx_search.search(query, max_s=mx, count=6, **({"role": role} if role == "bed" else {}))
     except Exception as e:
         return (f"Sound search failed ({str(e)[:180]}). Use a physical sound "
                 "name such as 'cinematic whoosh' or 'camera shutter'.")
@@ -8416,12 +8439,9 @@ def add_web_sfx(ctx, query, at, gain_db=None, max_seconds=None,
         return ("Could not download and measure any ranked sound. "
                 + "; ".join(errors)[:400])
     if role == "bed":
-        def steadiness(candidate):
-            _hit, signal = candidate
-            return signal.get("crest_db", 0) + 10 * signal.get("spectral_variation", 0)
         ranked = [{"id": hit["id"], "title": hit["title"],
-                   "reasons": [f"crest {signal['crest_db']} dB, spectral variation {signal.get('spectral_variation')}"]}
-                  for hit, signal in sorted(measured, key=steadiness)]
+                   "reasons": [f"crest {signal.get('crest_db', 0)} dB, spectral variation {signal.get('spectral_variation')}"]}
+                  for hit, signal in sorted(measured, key=_bed_steadiness)]
     else:
         ranked = sfx_judge.rank(measured, query)
     sound_context = _sound_design_context(ctx, at_n)
@@ -8597,8 +8617,10 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
                         _asset_local_path(ctx, ctx.db.run(dbx.asset_by_key, ctx.project_id, storage_key)))
                 reading = audio_qc.measure(path) or {}
                 levels[key] = reading.get("i")
-            except (OSError, KeyError, TypeError, AttributeError):
-                pass
+            except dbx.JobLeaseLost:
+                raise
+            except Exception as exc:
+                print(f"[music] loudness unavailable: {type(exc).__name__}", flush=True)
         ctx._music_levels = levels
         if programme_lufs is None:
             programme_lufs = levels.get("source")
@@ -9567,10 +9589,10 @@ def _cap_zoom_strength(ctx, strength, room, base, stacked=0.0):
 
 
 def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
-              _measured=False, focus_track=None, picture=None, _follow=False):
+              _measured=False, focus_track=None, picture=None, _follow=False, rotation=None):
     res = _behind_framing_note(ctx, _set_frame(
         ctx, ratio, mode, focus_x, focus_y, _measured, focus_track, picture,
-        _follow))
+        _follow, rotation))
     if not _measured and isinstance(res, str) and res.startswith("EDL v"):
         # An authored crop keeps the editor's aim; what it shows is said.
         try:
@@ -9603,7 +9625,7 @@ def _focus_rounding_note(ctx, payload, frame):
 
 def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
                _measured=False, focus_track=None, picture=None,
-               _follow=False):
+               _follow=False, rotation=None):
     payload = {"ratio": str(ratio), "mode": str(mode or "crop")}
     if picture is not None:
         payload["picture"] = picture
@@ -9637,6 +9659,8 @@ def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
             except Exception:
                 track_notes = []
     edl = dict(ctx.latest_edl()["json"])
+    if rotation is not None:
+        edl["source_rotation"] = int(rotation) or None
     if frame.ratio == "source" and frame.picture is None:
         edl["frame"] = None
         return ctx.write_edl(edl, "output frame back to the source ratio")
@@ -11010,7 +11034,13 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
             wins.append([fragments[0][0], fragments[-1][1]])
     if len(wins) < 2:
         return None
-    measured = []
+    from score.source_guard import printed_lines
+    measured, protected_text = [], {}
+    video = (ctx.index or {}).get("video") or {}
+    sw, sh = video.get("width"), video.get("height")
+    rw, rh = map(float, str(ratio).split(":"))
+    aspect = (rw/rh) * (sh/sw) if sw and sh else 1
+    cw, ch = min(1, aspect), min(1, 1/aspect)
     for w in wins:
         fp = os.path.join(ctx.workdir, f"track_{len(measured)}.jpg")
         pt = None
@@ -11039,6 +11069,18 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
                     pt = pts[0]
         except Exception:
             pass
+        lines = [line for sample in spatial_samples for line in printed_lines(sample)]
+        if lines:
+            boxes = lines + _spatial_face_boxes(sidecar, [w])
+            xmin, ymin = min(b[0] for b in boxes), min(b[1] for b in boxes)
+            xmax, ymax = max(b[2] for b in boxes), max(b[3] for b in boxes)
+            fits = xmax - xmin <= cw and ymax - ymin <= ch
+            mode = "crop" if fits else "pad_blur"
+            pt = pt or global_pt or (.5, .5)
+            if fits:
+                pt = (min(xmin + cw/2, max(xmax - cw/2, pt[0])),
+                      min(ymin + ch/2, max(ymax - ch/2, pt[1])))
+            protected_text[w[0]] = mode
         measured.append([w[0], w[1], pt])
     have = [m for m in measured if m[2]]
     if not have:
@@ -11060,7 +11102,7 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
             m[2] = prev or nxt or global_pt
             m.append("pad_blur" if preserve_unmeasured else "crop")
         else:
-            m.append("crop")
+            m.append(protected_text.get(m[0], "crop"))
     spans = []
     for s, e, pt, span_mode in measured:
         if spans and abs(spans[-1]["x"] - pt[0]) < 0.06 \
@@ -11072,12 +11114,12 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
         spans.append({"t0": round(s, 3), "t1": round(e, 3),
                       "x": round(pt[0], 3), "y": round(pt[1], 3),
                       "mode": span_mode})
-    if len(spans) < 2:
+    if len(spans) < 2 and not protected_text:
         return None                      # one aim — the single point serves
     # Each camera position's crop edges are checked on its own frames: an
     # inset or a door frame belongs to one position, not to the whole video.
     edge_notes = []
-    cropped = [sp for sp in spans if sp.get("mode") == "crop"]
+    cropped = [sp for sp in spans if sp.get("mode") == "crop" and sp["t0"] not in protected_text]
     if proxy and cropped and _crops_anything(ctx, ratio):
         rows = [(sp["t0"], sp["t1"], (sp["x"], sp["y"])) for sp in cropped]
         for n, (members, windows) in enumerate(_edge_check_positions(rows)):
@@ -11217,7 +11259,11 @@ def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
             fit = False
         if fit:
             return set_frame(ctx, ratio, "pad_blur")
-        mode = "crop"  # local face/saliency tracking below, never a first-film strip
+        if mode in ("auto", "crop") and any(row.get("text") for row in
+                (index.get("spatial") or {}).get("samples") or []):
+            tracked = _reframe_with_track(ctx, ratio, (.5, .5), preserve_unmeasured=True)
+            if tracked:
+                return tracked
     # A call composited over a broadcast frame (source_layout.py) is framed
     # from its measured layout, not from a face and the detail around it:
     # that read the Diamandis call as a wide shot and fitted it (Oct 2026).
@@ -15022,6 +15068,9 @@ def set_speed(ctx, start, end, factor, motion_motif=None):
     spans = [sp for sp in spans if sp not in replaced]
     item = {"id": _next_item_id(spans, "sp"), "start": s, "end": e,
             "factor": f}
+    source_fps = float((ctx.index.get("video") or {}).get("fps") or 30)
+    if f < 1 and f * source_fps < min(source_fps, 60):
+        item["interpolate"] = True
     if motif:
         item["motion_motif"] = motif
     spans.append(item)
@@ -15033,7 +15082,7 @@ def set_speed(ctx, start, end, factor, motion_motif=None):
                  + ", ".join(f"{sp.get('id')} ({float(sp['factor']):g}x "
                              f"{sp['start']}-{sp['end']}s)"
                              for sp in replaced))
-    return _write_speed(ctx, prev, edl, desc, warn_slow=(f < 0.6))
+    return _write_speed(ctx, prev, edl, desc, warn_slow=(f < 0.6 and not item.get("interpolate")))
 
 
 def remove_speed(ctx, id):
@@ -26165,13 +26214,6 @@ def justify_verification_findings(ctx, finding_ids, justification,
         return ("TRANSIENT FAILURE: the justification was not persisted: "
                 f"{str(exc)[:240]}. Retry this idempotent verification call.")
     ctx.verification_records[version] = updated
-    # Wave 1 (1F): an acknowledged device_degraded finding releases a final
-    # the export gate held for exactly that device instance
-    if any(str(f) == quality_verifier.DEGRADED_FINDING or str(f).startswith(
-            "vf_") for f in finding_ids or []):
-        import job_completion
-        job_completion.refresh_final_hold(ctx.db, ctx.project_id, version,
-                                          updated)
     resolved = {row.get("finding_id") for row in updated.get("justifications")
                 or []}
     resolved_messages = {
@@ -33074,7 +33116,7 @@ TOOLS = {
                    "those.",
                    {"start": {"type": "number"}, "end": {"type": "number"},
                     "gain_db": {"type": "number"}}),
-    "set_frame": (set_frame, "Set the output aspect ratio for every render. "
+    "set_frame": (set_frame, "Set the output ratio. rotation turns the main video clockwise from its displayed orientation. "
                   "ratio: source, 16:9, 9:16, 1:1 or 4:5; mode: crop "
                   "(default), pad (black bars) or pad_blur (blurred "
                   "backdrop). focus_x/focus_y aim the CROP at the subject "
@@ -33097,7 +33139,8 @@ TOOLS = {
                   "Captions, headlines and branding stay at the full delivery resolution. "
                   "set_frame writes STILL aims: it drops a face-following path auto_reframe "
                   "measured (call auto_reframe again to re-measure one).",
-                  {"ratio": {"type": "string",
+                  {"rotation": {"type": "integer", "enum": [-90, 0, 90, 180]},
+                   "ratio": {"type": "string",
                              "enum": ["source", "16:9", "9:16", "1:1",
                                       "4:5"]},
                    "mode": {"type": "string",
@@ -35714,20 +35757,10 @@ _COMPACT_CONTRACTS = {
         "screen: zero by default in a podcast short, at most 1-2 (one per 4-5 s "
         "at most elsewhere); never on captions or as a pun on the spoken word."),
     "add_sfx": (
-        "One-shot sound at an OUTPUT second. storage_key 'sound:<id>' places "
-        "an approved library recording (list_sound_library); otherwise an "
-        "exact key from list_assets or fetch_sfx. Leave "
-        "gain_db unset: a library recording is levelled against the voice at "
-        "its hit (MIX/CHECK lines). Its `at` is the frame it HITS: the tool "
-        "starts it early by its measured peak (a riser ends on `at`, typing "
-        "starts there) and caps long tails, so never pre-roll by hand. dur_s "
-        "stops typing when the typing stops. purpose names the on-screen "
-        "event. Optional, never a rule: zero is fine; a sound with no "
-        "on-screen reason looks childish. Never on captions or ordinary cuts. "
-        "Podcast short: zero by default, at most 1-2, each on a visual partner "
-        "(~50 ms), never on a payoff word's onset, no puns, no reflexive "
-        "opening whoosh; elsewhere about one sound every 4-5 s at most, none "
-        "repeated within ~3 s."),
+        "One-shot at an output second. Give sound:<id> from list_sound_library or a project key from "
+        "fetch_sfx or list_assets. at aligns a library recording's measured peak to the visible event. "
+        "Default gain is relative to the local voice. dur_s trims the tail; purpose identifies the event."),
+
     "add_captions": (
         "Burned captions: mode='from_transcript', 'off', or dictated items. "
         "Short-form speech: style.motion_look editorial|clean (premium default), "

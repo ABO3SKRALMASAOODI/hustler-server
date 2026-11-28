@@ -379,15 +379,16 @@ def test_a_named_model_is_used_only_on_a_claude_lane(monkeypatch):
     assert used == ["claude-sonnet-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
 
 
-def test_an_empty_ledger_for_a_typed_request_is_asked_again_then_dropped(monkeypatch):
+def test_incomplete_ledger_retries_and_empty_followup_carries_unfinished_work(monkeypatch):
     answers = [{"lang": "en"}, {"lang": "en", "asks": [_ask("edit")]}]
     monkeypatch.setattr(asks, "_call", lambda *a, **k: (answers.pop(0), {"usd": 0.001, "s": 1.0, "model": "m"}))
     ctx = NS(latest_edl=lambda: {"version": 3, "json": EDL}, index={}, duration=20.0)
     ledger = asks.build(ctx, "remove the grade and add dissolves")
     assert len(ledger["asks"]) == 1 and ledger["usage"]["usd"] == 0.002
     answers[:] = [{"lang": "en"}, {"lang": "en", "asks": []}]
-    with pytest.raises(ValueError):
-        asks.build(ctx, "remove the grade and add dissolves")
+    ctx.previous_ask_ledger = {"asks": [dict(ledger["asks"][0], state="partly")]}
+    carried = asks.build(ctx, "that still looks the same")
+    assert carried["asks"][0]["said"] == ledger["asks"][0]["said"]
 
 
 def test_the_customers_alternative_rides_with_its_ask_to_the_editor_and_the_check(monkeypatch, tmp_path):

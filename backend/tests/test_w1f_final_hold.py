@@ -1,11 +1,4 @@
-"""Wave 1 (1F): the final-export DEGRADED gate in the backend.
-
-The worker stamps a final's unacknowledged degraded device rows on the asset
-(``degraded_hold``: quality_verifier.unacknowledged_degradations at commit,
-re-judged on every acknowledgement). The backend reads the stamp: the final
-is not downloadable, a new export request is refused with the devices named
-(re-encoding the same immutable EDL cannot fix it), and MCP's download says
-how to release it."""
+"""A final carries its measured device rungs and remains downloadable."""
 
 import os
 import sys
@@ -23,23 +16,6 @@ from routes import video           # noqa: E402
 
 ROW = {"id": "sx1", "device": "subject_fill_flash", "rung": "substitute",
        "reason": "matte.person pending -> full_frame_flash"}
-
-
-def test_hold_reads_the_stamp_and_holds_an_unjudged_final():
-    assert video.final_degraded_hold({}) == []
-    assert video.final_degraded_hold({"degraded_hold": []}) == []
-    assert video.final_degraded_hold({"degraded_hold": [ROW, "x"]}) == [ROW]
-    # the stamp is the worker's judgement: [] releases even degraded rows
-    assert video.final_degraded_hold({"degraded_hold": [],
-                                      "devices": [ROW]}) == []
-    # before the job commits (or when its stamp failed) the render's own
-    # degraded rows hold it: never downloadable unjudged
-    assert video.final_degraded_hold({"devices": [ROW]}) == [ROW]
-    full = dict(ROW, rung="full")
-    assert video.final_degraded_hold({"devices": [full]}) == []
-    msg = video.final_hold_message([ROW])
-    assert msg.startswith("This export is held: subject_fill_flash "
-                          "(substitute)")
 
 
 class _GateCur:
@@ -62,14 +38,14 @@ class _GateCur:
         return self._one
 
 
-def test_a_held_final_is_not_downloadable():
+def test_legacy_hold_is_downloadable():
     video._pipeline_probe.clear()
     gate = video._final_gate(_GateCur(), project_id=1, user_id=7)
     ok_meta = {"outro_v": video.OUTRO_VERSION,
                "trans_v": video.TRANSITION_VERSION, "wm_v": 0,
                "delivery_v": 1}
     assert gate(10, ok_meta, 3)
-    assert not gate(11, dict(ok_meta, degraded_hold=[ROW]), 3)
+    assert gate(11, dict(ok_meta, degraded_hold=[ROW]), 3)
     assert gate(12, dict(ok_meta, degraded_hold=[]), 3)
 
 
@@ -111,12 +87,10 @@ def _request(cur):
         return resp.get_json(), status
 
 
-def test_a_held_version_is_not_re_encoded(quiet):
-    data, status = _request(_ReqCur({"id": 9, "meta": {
-        "degraded_hold": [ROW]}}))
-    assert status == 409 and data["code"] == "device_degraded"
-    assert data["devices"][0]["device"] == "subject_fill_flash"
-    assert quiet[-1][0][2] == "export_blocked"
+def test_an_export_with_legacy_hold_can_render(quiet):
+    data, status = _request(_ReqCur({"id": 9, "meta": {"degraded_hold": [ROW]}}))
+    assert status == 200 and data["job_id"] == 777
+    assert all(args[2] != "export_blocked" for args, _ in quiet)
 
 
 def test_an_acknowledged_or_clean_version_exports(quiet):

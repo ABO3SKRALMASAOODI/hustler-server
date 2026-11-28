@@ -60,7 +60,7 @@ class Tok:
         self.spec = shaping.FontSpec(rs["family"], rs.get("weight", 400),
                                      rs.get("style", "normal"),
                                      rs.get("stretch", 100.0),
-                                     rs.get("axes"))
+                                     rs.get("axes")).covering(self.text)
         self.track = float(rs.get("tracking", 0.0))
         self.ratio = V.ladder_ratio(voice, role)
         self.onset, self.dur = onset, dur

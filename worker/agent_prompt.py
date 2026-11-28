@@ -351,9 +351,10 @@ def project_state_block(video, index_summary, edl_line, history_lines,
     if song_find.footage_available():
         _broll.append("find_footage finds real VIDEO of a named topic, "
                       "fetch_url downloads the pick as a clip")
+    lines.append("For b-roll on mentions or throughout the film use source_broll; omit moments to plan from timed words.")
     if _broll:
         lines.append(
-            "B-roll on mentions: when the speaker names a concrete "
+            "For a specific named clip: when the speaker names a concrete "
             "person/thing/event, you can SHOW it — "
             + "; ".join(_broll) +
             ". Place as a 2-6s cutaway ON the words that mention it "
