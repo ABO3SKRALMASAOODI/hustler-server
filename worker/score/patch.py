@@ -827,51 +827,55 @@ def named_sources(ctx, ledger, rows):
 # cut through the face (chin to chest). The faces on the picture are measured and the crop moves to
 # hold every head whole.
 
+def still_framing(local, out_size):
+    """Cover crop around visible heads or salient detail, or fit a whole
+    picture when its heads do not fit together inside a cover window."""
+    import cv2
+    import spatial
+    import subject
+    img = cv2.imread(local)
+    if img is None or not out_size:
+        return None, True
+    h, w = img.shape[:2]
+    aspect = (w / h) / (out_size[0] / out_size[1])
+    if abs(aspect - 1) < .002:
+        return None, False
+    heads = [asks.head_box(face) for face in (spatial.analyze_frame(local) or {}).get("faces", [])]
+    vertical = aspect < 1
+    size = aspect if vertical else 1 / aspect
+    axis = 1 if vertical else 0
+    if heads:
+        lo, hi = min(h[axis] for h in heads), max(h[axis+2] for h in heads)
+        if hi - lo > size:
+            return None, True
+        middle = (1 - size) / 2
+        if middle <= lo and hi <= middle + size:
+            return None, False
+        start = lo - (size - (hi - lo)) * (.3 if vertical else .5)
+    else:
+        small = cv2.resize(img, (max(3, round(w*320/max(w,h))), max(3, round(h*320/max(w,h)))))
+        import numpy as np
+        point = subject._energy_point(np, cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
+        start = point[axis] - size / 2
+    start = min(max(start, 0.), 1-size)
+    ends = round(start, 5), round(start+size, 5)
+    return ([0., ends[0], 1., ends[1]] if vertical else [ends[0], 0., ends[1], 1.]), False
+
+
 def face_crop(ctx, key, out_size, kind="image"):
-    """[left, top, right, bottom] of the picture that fills the film's frame with every measured head
-    whole, or None when the centre crop already keeps them (or nothing can be measured)."""
+    """Subject crop for score-authored images. add_overlay handles a whole-picture fit."""
+    if not out_size or kind != "image":
+        return None
+    import storage
+    folder = os.path.join(ctx.workdir, "face_crop")
+    os.makedirs(folder, exist_ok=True)
+    local = os.path.join(folder, os.path.basename(str(key)))
     try:
-        if not out_size or kind != "image":
-            return None
-        import cv2
-        import spatial
-        import storage
-        folder = os.path.join(getattr(ctx, "workdir", None) or "/tmp", "face_crop")
-        os.makedirs(folder, exist_ok=True)
-        local = os.path.join(folder, os.path.basename(str(key)) or "picture")
         if not os.path.exists(local):
             storage.download_to(key, local)
-        img = cv2.imread(local)
-        if img is None:
-            return None
-        h_px, w_px = img.shape[:2]
-        faces = (spatial.analyze_frame(local) or {}).get("faces") or []
-        if not faces:
-            return None
-        heads = [asks.head_box(f) for f in faces]
-        a_img, a_out = w_px / float(h_px), float(out_size[0]) / float(out_size[1])
-        if abs(a_img - a_out) / a_out < 0.02:
-            return None
-        u = (min(h[0] for h in heads), min(h[1] for h in heads), max(h[2] for h in heads), max(h[3] for h in heads))
-        if a_img < a_out:       # taller than the frame: the crop slides up or down
-            hf = a_img / a_out
-            top = (1.0 - hf) / 2.0
-            if u[1] >= top - 0.005 and u[3] <= top + hf + 0.005:
-                return None
-            if u[3] - u[1] > hf:
-                top = u[1]
-            else:
-                top = u[1] - (hf - (u[3] - u[1])) * 0.3
-            top = min(max(top, 0.0), 1.0 - hf)
-            return [0.0, round(top, 4), 1.0, round(top + hf, 4)]
-        wf = a_out / a_img      # wider than the frame: the crop slides sideways
-        left = (1.0 - wf) / 2.0
-        if u[0] >= left - 0.005 and u[2] <= left + wf + 0.005:
-            return None
-        left = min(max((u[0] + u[2]) / 2.0 - wf / 2.0, 0.0), 1.0 - wf)
-        return [round(left, 4), 0.0, round(left + wf, 4), 1.0]
-    except Exception as exc:  # noqa: BLE001 - the renderer's centre crop, as before
-        print(f"[pass] faces on {str(key)[:60]} not measured: {type(exc).__name__}: {str(exc)[:120]}", flush=True)
+        return still_framing(local, out_size)[0]
+    except Exception as exc:
+        print(f"[pass] still framing unavailable: {type(exc).__name__}", flush=True)
         return None
 
 

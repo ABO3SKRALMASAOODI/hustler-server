@@ -15305,15 +15305,6 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
     if prog <= 0.4:
         return ("REJECTED: there is no program yet to overlay onto — place "
                 "footage first (insert_media / keep), then add the overlay.")
-    if (kind == "image" and source_crop is None and str(fit or "") == "cover"
-            and getattr(ctx, "ask_ledger", None)):
-        # A typed request (app_kv.typed_asks): a full-frame photo keeps every measured head whole
-        # instead of the centre crop (p5472, round 3: a portrait cut through the face).
-        try:
-            from score import asks as _asks, patch as _patch
-            source_crop = _patch.face_crop(ctx, asset_key, _asks.output_size(edl, ctx.index or {}))
-        except Exception:  # noqa: BLE001 - the centre crop, as before
-            source_crop = None
     try:
         s = round(min(max(float(start), 0.0), max(0.0, prog - 0.2)), 2)
     except (TypeError, ValueError):
@@ -15398,6 +15389,17 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
             "scale": sc, "fit": fitv, "opacity": op,
             "entrance": entrance, "exit": exit,
             "source_start_s": off if kind == "video" else None}
+    if kind == "image" and source_crop is None and fitv in ("cover", "picture"):
+        from score import asks, patch
+        try:
+            size = asks.output_size(edl, ctx.index or {})
+            if size and fitv == "picture":
+                size = renderer.picture_pixels(*size, (edl.get("frame") or {}).get("picture"))[2:]
+            source_crop, contain = patch.still_framing(_asset_local_path(ctx, asset), size)
+        except Exception:
+            contain = True
+        if contain:
+            item["contain_subject"] = True
     if source_crop is not None:
         item["source_crop"] = source_crop
     if z_index is not None:

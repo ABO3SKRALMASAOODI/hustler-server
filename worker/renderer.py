@@ -6886,9 +6886,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # and keep the original dialogue playing underneath.
             rect = picture_pixels(W or 1280, H or 720,
                 (edl.get("frame") or {}).get("picture") if picture_cover else None)
-            chain.append(f"scale={rect[2]}:{rect[3]}:"
-                         f"force_original_aspect_ratio=increase,"
-                         f"crop={rect[2]}:{rect[3]}")
+            import overlay_stream
+            chain.append(overlay_stream.fit_filter(rect[2], rect[3], item.get("contain_subject")))
         else:
             if scale_animated:
                 scale_expr = _anim_expr(scale_value, "t")

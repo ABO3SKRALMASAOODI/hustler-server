@@ -45,6 +45,13 @@ def plan(items, fps, graph_only=None):
     return prefix, pieces
 
 
+def fit_filter(width, height, contain=False):
+    if contain:
+        return (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2")
+    return f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"
+
+
 def prepare(items, edl, width, height, fps, workdir, fetch, input_args,
             look_chain, cancelled_cb=None, graph_only=None):
     """graph_only(item): the cutaway needs the full filter graph (the take
@@ -86,8 +93,7 @@ def prepare(items, edl, width, height, fps, workdir, fetch, input_args,
                     l, t, r, d = item['source_crop']
                     chain += [f"crop=w='trunc(iw*{r-l:.6f}/2)*2':h='trunc(ih*{d-t:.6f}/2)*2':"
                               f"x='trunc(iw*{l:.6f}/2)*2':y='trunc(ih*{t:.6f}/2)*2'"]
-                chain += [f'scale={width}:{height}:force_original_aspect_ratio=increase',
-                          f'crop={width}:{height}', 'format=yuv420p']
+                chain += [fit_filter(width, height, item.get('contain_subject')), 'format=yuv420p']
                 chain += look_chain(edl, float(item['start']), dur)
                 # Grade/texture clocks above remain relative to the authored
                 # shot, including a shot partially hidden by a later layer.

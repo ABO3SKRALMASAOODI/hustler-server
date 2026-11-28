@@ -258,3 +258,18 @@ def test_what_an_ask_asked_for_is_never_unasked_harm_whatever_the_reply_says():
     assert "What an ask asked for is never unasked harm" in s
     assert "photosensitivity guideline" in s and "marked as containing flashing" in s
     assert "information for viewers, not harm" in s
+
+
+def test_still_subject_fit_keeps_group_and_tracks_detail(monkeypatch, tmp_path):
+    import cv2
+    import numpy as np
+    import spatial
+    path = str(tmp_path / "still.png")
+    pixels = np.zeros((400, 200, 3), np.uint8)
+    pixels[20:70:3, 60:140] = 255
+    cv2.imwrite(path, pixels)
+    monkeypatch.setattr(spatial, "analyze_frame", lambda _: {"faces": []})
+    crop, contain = patch.still_framing(path, (780, 360))
+    assert crop[1] < .16 and not contain
+    monkeypatch.setattr(spatial, "analyze_frame", lambda _: {"faces": [[.1,.1,.4,.4],[.6,.7,.9,.9]]})
+    assert patch.still_framing(path, (780, 360)) == (None, True)

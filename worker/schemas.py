@@ -2205,6 +2205,7 @@ class OverlayItem(BaseModel):
     rate: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     # Preserve a region of uploaded footage above a cutaway (for example
     # burned-in subtitles or a logo), without transcribing/recreating pixels.
+    contain_subject: Optional[bool] = None
     source_crop: Optional[List[float]] = None
     z_index: Optional[int] = Field(default=None, ge=-1000, le=1000)
     entrance: Optional[Literal["fade", "slide_left", "slide_right",
