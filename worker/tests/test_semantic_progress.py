@@ -166,3 +166,17 @@ def test_failed_plan_criteria_are_not_completed_work():
     before = agent_loop._semantic_progress_marker(_ctx(edit_plan=_plan()))
     after = agent_loop._semantic_progress_marker(_ctx(edit_plan=_plan('blocked', 'failed')))
     assert not agent_loop._semantic_progressed(before, after)
+
+
+def test_checked_customer_asks_advance_only_once_across_slices():
+    base = agent_loop._semantic_progress_marker(_ctx())
+    progress = agent_loop._semantic_progress_marker(_ctx(ask_verdict={
+        "asks": [{"id": "a1", "state": "done"}, {"id": "a2", "state": "partly"}]}))
+    finished = agent_loop._semantic_progress_marker(_ctx(ask_verdict={
+        "asks": [{"id": "a1", "state": "done"}, {"id": "a2", "state": "done"}]}))
+    assert agent_loop._semantic_progressed(base, progress)
+    frontier = agent_loop._merge_progress_frontier(base, progress)
+    assert agent_loop._semantic_progressed(frontier, finished)
+    frontier = agent_loop._merge_progress_frontier(frontier, finished)
+    assert not agent_loop._semantic_progressed(frontier, progress)
+    assert not agent_loop._semantic_progressed(frontier, finished)

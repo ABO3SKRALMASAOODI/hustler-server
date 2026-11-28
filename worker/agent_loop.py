@@ -3273,7 +3273,7 @@ def _length_reading(ctx, ledger, verdict):
             f"{kept:.1f} s of the {source_s:.1f} s upload. restore_range brings back what it should keep.")
 
 
-def _asks_settle(ctx, final, outcome):
+def _asks_settle(ctx, final, outcome, *, delivery_summary=False):
     """The reply says what is done and what is not; the outcome is never fulfilled with an ask open."""
     ledger = getattr(ctx, "ask_ledger", None)
     if not ledger or not ledger.get("asks"):
@@ -3299,7 +3299,8 @@ def _asks_settle(ctx, final, outcome):
         verdict = None
     edit_scope.disclose(ctx, final)
     if verdict:
-        final = asks.true_reply(ctx, ledger, verdict, final or "")
+        final = asks.true_reply(ctx, ledger, verdict, final or "",
+                                **({"delivery_summary": True} if delivery_summary else {}))
     return final, asks.outcome(ledger, verdict, outcome)
 
 
@@ -5369,6 +5370,12 @@ def _semantic_progress_marker(ctx):
         "has_plan": bool(plan),
         "resolved_steps": steps,
         "resolved_checks": checks,
+        # A repair can fulfil a customer ask without changing any blueprint
+        # or verifier finding. Record each attained level once per logical turn.
+        "checked_asks": frozenset((row["id"], level)
+            for row in (getattr(ctx, "ask_verdict", None) or {}).get("asks") or []
+            if row.get("id") and row.get("state") in ("partly", "done")
+            for level in (("partly", "done") if row["state"] == "done" else ("partly",))),
         "decisions": decisions,
         "assets": assets,
         "inspected_assets": frozenset(_inspection_checkpoint(ctx)),
@@ -5404,8 +5411,8 @@ def _semantic_progressed(before, after):
     # criteria or improving measured evidence. Trying another setter, making
     # another decision or collecting another asset isn't completion progress.
     repairing = int(before.get("verification_rank") or 0) > 0
-    keys = (("resolved_steps", "resolved_checks") if repairing else
-            ("write_tools", "resolved_steps", "resolved_checks", "decisions", "inspected_assets"))
+    keys = (("resolved_steps", "resolved_checks", "checked_asks") if repairing else
+            ("write_tools", "resolved_steps", "resolved_checks", "checked_asks", "decisions", "inspected_assets"))
     for key in keys:
         old, new = _hashable_rows(before.get(key)), \
             _hashable_rows(after.get(key))
@@ -5452,7 +5459,7 @@ def _serializable_progress_marker(marker):
     for key, value in marker.items():
         if isinstance(value, (set, frozenset)):
             value = sorted(value)
-        if key == "decisions":
+        if key in {"decisions", "checked_asks"}:
             value = [list(row) if isinstance(row, tuple) else row
                      for row in (value or [])]
             value = sorted(value, key=lambda row: json.dumps(
@@ -5551,7 +5558,7 @@ def _merge_progress_frontier(before, after):
     out = dict(before or {})
     for key, value in (after or {}).items():
         old = out.get(key)
-        if key in {"write_tools", "resolved_steps", "resolved_checks", "decisions", "inspected_assets"}:
+        if key in {"write_tools", "resolved_steps", "resolved_checks", "checked_asks", "decisions", "inspected_assets"}:
             rows = list(old or []) + list(value or [])
             out[key] = list({json.dumps(row, sort_keys=True): row for row in rows}.values())
         elif key in {"assets", "review_verdicts", "review_findings"}:
@@ -6161,7 +6168,8 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
     outcome, billable = _turn_completion(ctx, status, fail_note=fail_note)
     if getattr(ctx, "ask_ledger", None) or getattr(ctx, "ask_check_required", False):
         _asks_check(ctx, final_text, allow_repair=False)
-        final_text, outcome = _asks_settle(ctx, final_text, outcome)
+        final_text, outcome = _asks_settle(ctx, final_text, outcome,
+            **({"delivery_summary": True} if status == "blocked" and ctx.versions_written else {}))
         latest = ctx.latest_edl()
         quality = _quality_handoff(ctx)
         if isinstance(honesty, dict) and getattr(ctx, "ask_ledger", None):

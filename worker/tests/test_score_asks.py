@@ -768,3 +768,14 @@ def test_checked_cutaways_count_in_whole_film_coverage_and_authored_motion():
     assert data["whole_film"]["share_of_film_moving"] == .1
     assert data["whole_film"]["share_under_camera_moves"] == 0.
     assert data["motion_graphics"] == 0
+
+
+def test_saved_film_gets_a_delivery_reply_from_rendered_facts(monkeypatch):
+    def compose(ctx, name, schema, system, content, **kw):
+        assert "Customer language: pt" in content and "24 cutaways" in content
+        return {"wrong": [], "missing": [], "reply": "Coloquei 24 imagens no vídeo."}, {}
+    monkeypatch.setattr(asks, "_call", compose)
+    outcome = {"asks": [{"id":"a1","state":"done","seen":"24 cutaways in the verified film"}]}
+    reply = asks.true_reply(NS(), {"lang":"pt","asks":[{"id":"a1","said":"B-roll"}]}, outcome,
+                            "I stopped because the edit was no longer making progress.", delivery_summary=True)
+    assert reply == "Coloquei 24 imagens no vídeo."
