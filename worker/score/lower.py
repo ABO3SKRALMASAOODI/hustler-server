@@ -509,17 +509,10 @@ def lower_pictures(l1, work, bake, rep):
             elif moves:
                 rep["moves_held_on_pictures"] = rep.get("moves_held_on_pictures", 0) + 1
         if pic == "main" and it.get("source_full_frame") and asset:
-            # An off-spine source shot is a video overlay. `cover` would
-            # silently crop it again after the compiler held it whole.
-            # Fit it inside the canvas with an opaque backing so the old
-            # underlying source shot cannot show through the letterbox.
-            # Equal layers are sorted by ID when the EDL is normalized.
-            overlays.append({"id": f"safe.{pid}", "asset_key": bake.plate({"c0": it.get("source_fit_background") or "#000000"}, W, H),
-                             "kind": "image", "start": start, "duration_s": dur,
-                             "fit": "cover", "z_index": -1})
-            ov.pop("fit", None)
+            # This source picture shares the take's background and reading
+            # camera. Ordinary overlays are screen-locked above that camera.
+            ov["fit"] = "source_blur"
             ov.pop("source_crop", None)
-            ov.update(x=0.5, y=0.5, scale=min(1., (H / W) * (asset["w"] / asset["h"])))
         overlays.append(ov)
         gain = float((it.get("grade") or {}).get("gain", 1.0))
         if gain < 0.85 and pic != "plate":        # an overlay has no grade today. dna.match lands as black laid over it at the right strength
@@ -538,6 +531,20 @@ def lower_pictures(l1, work, bake, rep):
                 fx.append({"id": f"tr.{pid}", "type": "accent", "kind": kind, "stage": "pre_captions", "start": start, "end": r2(b / fps)})
             else:
                 rep.setdefault("treats_dropped", []).append(pid)
+    if rep["frame"]["mode"] == "pad_blur":
+        # A sub-overlay-length sliver of the base between the portrait
+        # camera and a title page briefly exposes the letterboxed take.
+        # Keep the established crop right through the page cut.
+        pages = {it["f"][0] for it in shots if it.get("pic") == "plate"}
+        for j, (it, a, b, _) in enumerate(runs[:-1]):
+            if it.get("pic") != "main" or it.get("source_full_frame") or b not in pages:
+                continue
+            if (b - a) / fps <= OV_MIN_S and j and runs[j - 1][2] == a:
+                prior = next((z for z in reversed(zooms) if z["end"] == r2(a / fps)), None)
+                if prior and not any(z["start"] == r2(a / fps) for z in zooms):
+                    point = prior["path"][-1]
+                    zooms.append(dict(prior, id=f"z.{it['id']}.hold", start=r2(a / fps),
+                                      end=r2(b / fps), path=[dict(point, f=0.), dict(point, f=1.)]))
     if clips:
         import concurrent.futures as cf
         t_reel = time.monotonic()
@@ -1089,7 +1096,20 @@ def lower_texts(l1, rep, runs=None):
                 a = min(a, b - n_min)
             top = shown_piece(g, runs, (a + b) // 2) if runs else g[-1]
             out.append(text_item(l1, dict(g[-1], f=[a, b], op=None, s=None, ink=top.get("ink"), edge=top.get("edge")), a, b, rep))
-    return no_double_type(out, rep)
+    visible = no_double_type(out, rep)
+    # Dropping a too-short tick during layout must not blink the entire
+    # counter off before the next tick. Hold the preceding visible value.
+    counters = collections.defaultdict(list)
+    for tx in visible:
+        group = tx["id"].split(".")
+        if len(group) >= 5 and group[2].startswith("counter"):
+            counters[tuple(group[1:3])].append(tx)
+    for ticks in counters.values():
+        ticks.sort(key=lambda tx: tx["start"])
+        for prev, nxt in zip(ticks, ticks[1:]):
+            if 0 < nxt["start"] - prev["end"] <= TX_MIN_S + 1 / fps:
+                prev["end"] = nxt["start"]
+    return visible
 
 
 def _x_overlap(a, b):

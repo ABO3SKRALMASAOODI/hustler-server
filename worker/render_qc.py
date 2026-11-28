@@ -3262,8 +3262,10 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
         if plan_.get("ordinary_text"):
             try:
                 import rendered_ass_type
+                visible = []
                 rows, skipped = rendered_ass_type.measure(
-                    path, plan_["ordinary_text"], W, H, prog, deadline)
+                    path, plan_["ordinary_text"], W, H, prog, deadline, visible=visible)
+                res["visible_titles"] = visible
                 res["ordinary_text_contrast"] = rows
                 res["skipped"].extend(skipped)
             except Exception as exc:

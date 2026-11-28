@@ -1024,6 +1024,27 @@ def read_beats(ctx, lines):
             continue
         ctx.beat_by[bid] = b
         beats.append(b)
+    if beats and ctx.index.get("first_film") and not ctx.words:
+        # A visual beat can name a broad source interval to select from and
+        # give each of its pictures an explicit screen duration. A highlight
+        # runs for those pictures, not the unused remainder of that interval.
+        for b in beats:
+            frames = plan_cut(b, ctx)["frames"]
+            if not b.src or not frames:
+                continue
+            # Fill markers can take their length from a named, bounded
+            # source view. A deliberate open hold still uses its source span.
+            if any(f >= FILL_F for f in frames):
+                refs = parse_pics(ctx, b.raw.get("pic"), b.id)
+                if refs:
+                    frames = list(frames)
+                    for j, f in enumerate(frames):
+                        ref = refs[j % len(refs)]
+                        if f >= FILL_F and ref.get("t1") is not None and ref.get("t0") is not None:
+                            span = (ref["t1"] - ref["t0"]) / (ref.get("rate") or 1)
+                            frames[j] = max(1, round(span * ctx.fps))
+            if max(frames) < FILL_F:
+                b.src = (b.src[0], min(b.src[1], b.src[0] + sum(frames) / ctx.fps))
     ctx.beats = fill_coverage(ctx, beats)
     played = {}
     for b in ctx.beats:
@@ -4102,6 +4123,8 @@ def display(ctx, iid, text, a, z, opt, b=None):
             continue
         extra = entrance(kind, n, y)
         yy = extra.pop("y", y)
+        if opt.get("_chapter"):
+            extra["chapter"] = opt["_chapter"]
         if opt.get("blend"):
             extra["blend"] = opt["blend"]
         if opt.get("behind") and ctx.matte and not hidden_line(ctx, [x, y - 0.74 * px / H, x + w, y], a, z):
@@ -4706,6 +4729,25 @@ def counter_text(fmt, v, whole, sep=False):
     return out if fmt else num  # A literal format is complete; only fields insert digits.
 
 
+def number_chapters(items):
+    """Count surviving chapter gestures in film order, including split runs."""
+    ordinals = {}
+    for item in sorted(items, key=lambda row: row["f"][0]):
+        marker = item.pop("chapter", None)
+        if not marker:
+            continue
+        group, fmt, old = marker
+        number = ordinals.setdefault(group, len(ordinals) + 1)
+        # A wrapped label may occupy several words/lines. Only replace the
+        # numeric field; other numbers in a label remain factual.
+        field = _FMT_FIELD.search(fmt)
+        if field:
+            prefix = fmt[:field.start()]
+            old_prefix = prefix + counter_text(field.group(), old, True)
+            if item["t"].startswith(old_prefix):
+                item["t"] = prefix + counter_text(field.group(), number, True) + item["t"][len(old_prefix):]
+
+
 @gesture("counter", 'from to at step fmt("DIA {n}", "{n:02d}") size seat font. Digits step hard, slowing at the end', lower="text")
 def g_counter(ctx, b, g, i):
     a, z = span_of(ctx, b, g.get("at"))
@@ -4719,7 +4761,7 @@ def g_counter(ctx, b, g, i):
         g = dict(g, size=max(float(g.get("size") or 0.055), 0.055))
         g.setdefault("font", "grotesk-bold")
     step = max(1, int(g.get("step", 3)))
-    n = max(1, (z - a) // step)
+    n = 1 if v0 == v1 else max(1, (z - a) // step)
     fmt = str(g.get("fmt", "{n}"))
     whole = v0 == int(v0) and v1 == int(v1)
     held = None                     # one counter, one seat: solved on its first tick and kept across cuts
@@ -4733,6 +4775,8 @@ def g_counter(ctx, b, g, i):
         if g.get("hold") and j == n - 1:
             q = min(ctx.dur_f, z + int(g["hold"]))
         opt = {k: v2 for k, v2 in g.items() if k in ("size", "seat", "font", "ink", "fit", "blend", "case", "_room", "_want", "_fit0", "_noseat")}
+        if g.get("chapter") is True and v0 == v1:
+            opt["_chapter"] = (g["_gid"], fmt, int(v0))
         if held:
             opt["seat"] = held
         r = display(ctx, f"{g['_gid']}.{j}", s, f, q, opt, b)
@@ -6986,6 +7030,7 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
     if ctx.mends:
         m["mended_type"] = mend_type(ctx, l1)
     m["final_type_contrast"] = final_type_contrast(ctx, l1)
+    number_chapters(l1["items"])
     from . import picture_cuts
     m["selected_source_blanks"] = picture_cuts.selected_blanks(l1, ctx.index)
     for blank in m["selected_source_blanks"]:
@@ -7042,7 +7087,7 @@ def steps_finding(ctx, l1):
         return
     ctx.find(f"type: between its title and its last line this film shows {pictures} pictures in {dur:.0f} s and says nothing. If it goes step by step "
              "(a routine, a recipe, a how-to, a build), count the steps in chapters: one `counter` on each step's first shot, "
-             '{"g":"counter","from":2,"to":2,"fmt":"{n:02d} rinse","size":.065,"seat":[.5,.66],"font":"grotesk-bold","for":"b03.s0","at":"b03.in"}, '
+             '{"g":"counter","chapter":true,"from":2,"to":2,"fmt":"{n:02d} rinse","size":.065,"seat":[.5,.66],"font":"grotesk-bold","for":"b03.s0","at":"b03.in"}, '
              "one or two words a step, three to five steps, all at one seat. If it does not, leave it and say why in `rest`")
 
 

@@ -276,7 +276,7 @@ def test_missing_face_reading_or_a_live_subject_does_not_trigger_slide_fit(chang
     assert not film["items"][0].get("source_full_frame")
 
 
-def test_off_spine_static_slide_keeps_full_source_and_measured_palette(tmp_path):
+def test_off_spine_static_slide_uses_its_own_blurred_picture(tmp_path):
     from score import lower
     from types import SimpleNamespace
     film, index = _scene()
@@ -291,8 +291,8 @@ def test_off_spine_static_slide_keeps_full_source_and_measured_palette(tmp_path)
     overlays, *_ = lower.lower_pictures(film, str(tmp_path),
                                       SimpleNamespace(locals={}, plate=plate), {})
     main = next(o for o in overlays if o["asset_key"] == "main")
-    assert not main.get("source_crop") and not main.get("fit")
-    assert main["scale"] == 1. and plates == [{"c0": "#E8E2C9"}]
+    assert not main.get("source_crop") and main["fit"] == "source_blur"
+    assert len(overlays) == 1 and not plates
 
 
 def test_fractional_eof_spine_rounding_matches_the_publication_gate():

@@ -266,8 +266,6 @@ def apply(l1, index, perception, *, views=None):
             item["crop"] = [.5 - fit_w / 2, .5 - fit_h / 2,
                             .5 + fit_w / 2, .5 + fit_h / 2]
             item["source_full_frame"] = True
-            palette = (perception or {}).get("palette") or []
-            item["source_fit_background"] = palette[0].get("hex", "#202020") if palette else "#202020"
             report.append({"id": item["id"], "source": [start, end],
                            "reason": "static_source_text_fit", "crop": item["crop"]})
             continue

@@ -67,7 +67,8 @@
       "patches": [],
       "motion": [],
       "fx": [],
-      "noise_clean": null
+      "noise_clean": null,
+      "direction": []
     }
   },
   {
@@ -178,7 +179,8 @@
       "patches": [],
       "motion": [],
       "fx": [],
-      "noise_clean": null
+      "noise_clean": null,
+      "direction": []
     }
   },
   {
@@ -295,7 +297,8 @@
       "patches": [],
       "motion": [],
       "fx": [],
-      "noise_clean": null
+      "noise_clean": null,
+      "direction": []
     }
   },
   {
@@ -364,7 +367,8 @@
       "patches": [],
       "motion": [],
       "fx": [],
-      "noise_clean": null
+      "noise_clean": null,
+      "direction": []
     }
   },
   {
@@ -439,7 +443,8 @@
       "patches": [],
       "motion": [],
       "fx": [],
-      "noise_clean": null
+      "noise_clean": null,
+      "direction": []
     }
   },
   {
@@ -522,7 +527,8 @@
       "patches": [],
       "motion": [],
       "fx": [],
-      "noise_clean": null
+      "noise_clean": null,
+      "direction": []
     }
   }
 ]

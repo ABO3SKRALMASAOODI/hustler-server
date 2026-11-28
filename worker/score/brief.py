@@ -205,6 +205,13 @@ def footage_part(per, idx):
     samples = per["samples"]
     step = per["step"]
     blanks = (idx.get("director_cut_measure") or {}).get("blank_intervals") or []
+    soft = (idx.get("director_cut_measure") or {}).get("soft_transitions") or []
+    if soft and idx.get("first_film"):
+        out.append("Source seconds where edge detail fades and returns: " +
+                   ", ".join(f"{a:.2f}-{b:.2f}" for a, b in soft) +
+                   ". Look on either side for a clean picture. Keep whole spoken phrases, "
+                   "and cover a baked dissolve or double image with the actual detail the "
+                   "speaker is explaining. Land the return on the clear face.")
     if blanks:
         out.append("Measured near-uniform black source intervals (seconds): " +
                    "; ".join(f"{a:.3f}-{b:.3f}" for a, b in blanks) +
@@ -679,6 +686,13 @@ def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None, spe
             out.append("Customer, verbatim: " + json.dumps(p["text"], ensure_ascii=False))
     else:
         out.append("The customer uploaded and typed nothing.")
+    if idx.get("first_film") and not idx.get("words"):
+        out.append("Build this highlight from the visible moments alone. Write each beat's exact "
+                   "source in and out, and its finite picture lengths in frames. End when the "
+                   "payoff lands: use the in-game clock or other legible evidence for the hook, "
+                   "and cut away from idle screens between actions. The finishing reaction may "
+                   "be short or long as its action requires. There is no target runtime. Mark "
+                   "chapter counters with chapter:true; keep factual counters as numbers.")
     typography = idx.get("source_typography") or {}
     if typography.get("caption_track") == "complete":
         out.append("The upload already carries its spoken narrative in changing printed type. Preserve that reading track, without adding a second caption track or repeating its words as display titles. "

@@ -4072,7 +4072,7 @@ def run(worker_db, job, project, index_row):
             summary = _summary(applied, duration, url)
         else:
             import reply_truth
-            summary = reply_truth.first_cut_summary(preview)
+            summary = reply_truth.first_cut_summary(preview, getattr(ctx, 'duration', None))
         admission = project_admission_safe(worker_db, project["id"])
         trial = bool(admission and admission.get("kind") == "trial")
         facts = getattr(ctx, "first_cut_brief", None) if url else None
@@ -4438,7 +4438,7 @@ def _director_upgrade(ctx, worker_db, job, session_id, started, steps,
         latest = ctx.latest_edl()
         preview = getattr(ctx, "last_preview", None) or {}
         import reply_truth
-        text = f"The updated cut is playing now. It's {reply_truth.first_cut_summary(preview)}."
+        text = f"The updated cut is playing now. It's {reply_truth.first_cut_summary(preview, getattr(ctx, 'duration', None))}."
         more = dict(meta, edl_version=latest["version"], preview=preview)
         more["first_cut"] = dict(meta.get("first_cut") or {}, footage={
             "clips": got.get("clips"), "sources": got.get("sources")})

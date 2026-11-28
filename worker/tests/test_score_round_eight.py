@@ -203,12 +203,12 @@ def test_constant_chapter_counter_survives_lowering_at_phone_readable_size(tmp_p
     from tests.test_score_taste import comp, film
     from tests.test_score_compiler import wordless_index
     from score import lower
-    c=comp(film([dict(k='b',id='b01',at='@0..@3',job='action',pic='main',do=[dict(g='counter',**{'from':2,'to':2},fmt='{n:02d} RINSE',size=.04,seat=[.5,.68],**{'for':'b01.s0'})])]),wordless_index(3))
+    c=comp(film([dict(k='b',id='b01',at='@0..@3',job='action',pic='main',do=[dict(g='counter',**{'from':2,'to':2},chapter=True,fmt='{n:02d} RINSE',size=.04,seat=[.5,.68],**{'for':'b01.s0'})])]),wordless_index(3))
     words=[w for w in c.l1['items'] if w.get('k')=='word' and 'counter' in w.get('id','')]
     assert words
     assert min(c.l1['voices'][w['v']]['px']/c.l1['frame'][1] for w in words)>=.054
     edl,_,_=lower.lower(c.l1,str(tmp_path))
-    assert any('RINSE' in str(t.get('text',t.get('t',''))) for t in edl['texts'])
+    assert any(t['text'] == '01 RINSE' for t in edl['texts'])
 
 
 def test_first_film_on_a_cold_worker_reads_its_existing_footage_permission(monkeypatch):

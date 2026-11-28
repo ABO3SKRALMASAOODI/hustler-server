@@ -2215,7 +2215,7 @@ class OverlayItem(BaseModel):
     # picture switches to the overlay while the program's audio keeps
     # playing. None = the legacy width-fraction PIP and is dropped from
     # signatures, so stored EDLs render byte-identically.
-    fit: Optional[Literal["cover", "picture"]] = None
+    fit: Optional[Literal["cover", "picture", "source_blur"]] = None
     opacity: Optional[AnimFloat] = None  # 0-1; None = fully opaque
     rotation: Optional[AnimFloat] = None # degrees; curves may cross 0/360
     source_start_s: Optional[float] = None   # video overlays: seek into clip

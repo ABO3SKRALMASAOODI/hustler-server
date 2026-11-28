@@ -53,7 +53,7 @@ def _filter_path(path):
     return os.fspath(path).replace('\\', '\\\\').replace("'", "'\\''").replace(':', '\\:')
 
 
-def measure(path, texts, W, H, duration, deadline):
+def measure(path, texts, W, H, duration, deadline, visible=None):
     """Bounded offline samples; return failures and explicitly skipped reads."""
     failures, skipped = [], []
     w = min(720, int(W))
@@ -83,6 +83,10 @@ def measure(path, texts, W, H, duration, deadline):
                         timeout=max(.1, deadline-time.monotonic()))
                     images.append(Image.open(BytesIO(r.stdout)).copy())
                 result = contrast(images[1], images[0])
+                if visible is not None and result and result.get('pass'):
+                    text = texts[n].get('text')
+                    if text and text not in visible:
+                        visible.append(text)
                 if result and result.get('pass') is False:
                     item = texts[n]
                     failures.append(dict(id=item.get('id') or f'text.{n}', t=round(t, 3),

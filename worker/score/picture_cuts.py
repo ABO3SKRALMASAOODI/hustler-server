@@ -89,6 +89,44 @@ def boundaries(frames, fps):
     return cuts, flashes
 
 
+def soft_transitions(frames, fps):
+    """Find a loss and recovery of edge detail between two clear pictures.
+    A baked dissolve and a defocus can both make poor places to cut to a face.
+    A sustained soft take, hard cut or fade to black is a different signal.
+    """
+    if len(frames) < 7 or fps < 4:
+        return []
+    edge, light = [], []
+    for frame in frames:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        edge.append(cv2.Laplacian(gray, cv2.CV_32F).var())
+        light.append(gray.mean())
+    radius = max(3, round(fps * 1.3))
+    energy = np.convolve(np.pad(edge, 1, mode="edge"), [0.25, 0.5, 0.25], "valid")
+    spans = []
+    for i in range(2, len(energy) - 2):
+        if not energy[i - 1] > energy[i] <= energy[i + 1]:
+            continue
+        left = max(0, i - radius)
+        a = left + int(np.argmax(energy[left:i]))
+        b = i + 1 + int(np.argmax(energy[i + 1:i + radius + 1]))
+        shoulder = min(energy[a], energy[b])
+        if shoulder < 30 or energy[i] > .76 * shoulder or min(light[a:b + 1]) < 18:
+            continue
+        while a < i and energy[a] > .9 * shoulder:
+            a += 1
+        while b > i and energy[b] > .9 * shoulder:
+            b -= 1
+        if b - a < max(2, fps * .2):
+            continue
+        lo, hi = round(a / fps, 3), round((b + 1) / fps, 3)
+        if spans and lo <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], hi)
+        else:
+            spans.append([lo, hi])
+    return spans
+
+
 def measure(path, video, timeout=12.0):
     dur = float(video['duration']); W, H = int(video['width']), int(video['height'])
     fps = min(FPS, MAX_FRAMES / max(dur, 1.0))
@@ -104,6 +142,7 @@ def measure(path, video, timeout=12.0):
     frames = np.frombuffer(raw[:n*w*h*3], np.uint8).reshape(n, h, w, 3)
     cuts, flashes = boundaries(frames, fps)
     return dict(method='judge3_pixel_cuts', fps=fps, frames=n, cuts=cuts, flashes=flashes,
+                soft_transitions=soft_transitions(frames, fps),
                 blank_intervals=[[a, min(b, dur)] for a, b in blank_intervals(frames, fps)
                                  if a < dur])
 

@@ -258,7 +258,7 @@ def enforce(ctx, client, model, request_text, draft, honesty=None, strict=False)
     return text
 
 
-def first_cut_summary(preview):
+def first_cut_summary(preview, source_seconds=None):
     """Use the delivered player's runtime. Plan cuts, fetched assets and EDL
     cues cannot establish the images or sounds in that encoded file."""
     seconds = round(float(preview.get("duration_s") or 0))
@@ -271,4 +271,11 @@ def first_cut_summary(preview):
         shape = "vertical " if height > width else "landscape " if width > height else "square "
     audio = preview.get("craft_report") or {}
     sound = " with sound" if audio.get("silent") is False else ""
-    return f"{article} {seconds}-second {shape}edit{sound}"
+    summary = f"{article} {seconds}-second {shape}edit{sound}"
+    if source_seconds and round(source_seconds) > seconds + 1:
+        summary += f", cut down from {round(source_seconds)} seconds"
+    titles = (preview.get("picture_qc") or {}).get("visible_titles") or []
+    if titles:
+        quoted = [f'“{t}”' for t in titles[:2]]
+        summary += " featuring " + " and ".join(quoted)
+    return summary

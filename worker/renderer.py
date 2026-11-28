@@ -6464,6 +6464,28 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                                         f"c{ci}", fps)
         vlabel = out_lab
 
+    # Full-source cutaways replace the take before its reading camera. Fit
+    # both branches from the same timed video, so a change of source instant
+    # cannot expose the preceding shot or a solid colour in the margins.
+    for j, (idx, item) in enumerate(overlay_inputs):
+        if item.get("fit") != "source_blur":
+            continue
+        start, duration = float(item["start"]), float(item["duration_s"])
+        off, rate = float(item.get("source_start_s") or 0), float(item.get("rate") or 1)
+        tag = f"sourcefit{j}"
+        parts.append(f"[{idx}:v]setpts=(PTS-{off:.6f}/TB)/{rate:.12f},"
+                     f"fps={fps}:round=up:start_time=0,trim=duration={duration:.6f},"
+                     f"tpad=stop_mode=clone:stop_duration=0.15[{tag}raw]")
+        look = cutaway_look_chain(edl, start, duration)
+        _normalize_video(parts, tag + "raw", tag + "fit", W, H, fps,
+                         "pad_blur", tag, grade=",".join(look) if look else None)
+        # The Score is frame-authored while old EDLs store centiseconds.
+        a, b = round(start * fps), round((start + duration) * fps)
+        parts.append(f"[{tag}fit]setpts=PTS+{a}/{fps:.9f}/TB[{tag}timed]")
+        parts.append(f"[{vlabel}][{tag}timed]overlay=0:0:eof_action=pass:"
+                     f"enable='gte(n,{a})*lt(n,{b})'[{tag}]")
+        vlabel = tag
+
     # ---- the program matte in WORLD space: the picture's geometry before
     # the camera (Wave 1, track 1A). Its consumers each take a fresh copy.
     if pm is not None:
@@ -6819,6 +6841,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                                fps)
     # ---- overlays (round 35): PIP / b-roll / logo layer -----------------
     for j, (idx, item) in enumerate(overlay_inputs):
+        if item.get("fit") == "source_blur":
+            continue
         if item.get('_cover_windows') is not None:
             # This internal input already contains the authored per-shot
             # crop and look. Gaps expose the original picture, never black.
