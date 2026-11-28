@@ -18,6 +18,28 @@ def test_light_devices_keep_their_own_length_in_a_142_frame_beat():
         assert patch["items"][0]["f"] == expected
 
 
+def test_picture_change_reuses_verified_audio_without_reencoding(tmp_path, monkeypatch):
+    import subprocess
+    import mastering
+    import media_cache
+    monkeypatch.setattr(media_cache, "cache_dir", lambda: str(tmp_path/"cache"))
+    paths = [str(tmp_path/(color+".mp4")) for color in ("red","blue")]
+    for color, path in zip(("red","blue"), paths):
+        subprocess.run(["ffmpeg","-v","error","-f","lavfi","-i",f"color={color}:s=64x48:r=24:d=3",
+                        "-f","lavfi","-i","sine=frequency=480:sample_rate=48000:duration=3",
+                        "-c:v","libx264","-c:a","aac","-b:a","128k",path],check=True)
+    def packets(path, stream):
+        return subprocess.check_output(["ffmpeg","-v","error","-i",path,"-map",stream,"-c","copy",
+                                        "-f","framehash","-"])
+    blue = packets(paths[1], "0:v:0")
+    first = mastering.cached_guard(paths[0], str(tmp_path), "128k")
+    assert first["held"] and first["passes"] > 0
+    second = mastering.cached_guard(paths[1], str(tmp_path), "128k")
+    assert second.get("reused") and second["i"] == first["i"]
+    assert packets(paths[1], "0:v:0") == blue
+    assert packets(paths[1], "0:a:0") == packets(paths[0], "0:a:0")
+
+
 def test_stock_gif_with_jpeg_filename_plays_for_its_full_window(tmp_path):
     from PIL import Image
     import renderer

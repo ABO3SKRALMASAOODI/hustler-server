@@ -11895,7 +11895,7 @@ def _run_render_job(worker_db, job):
             # (a program whose sound is only room tone stays at its recorded
             # level: render_edl measured its bed and left it unmastered)
             import mastering
-            master_guard = mastering.guard(out_local, workdir,
+            master_guard = mastering.cached_guard(out_local, workdir,
                 bitrate="128k" if variant == "preview" else "192k")
             if master_guard and master_guard.get("passes"):
                 qc_pass = None

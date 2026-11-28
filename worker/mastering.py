@@ -17,6 +17,65 @@ def measure(path):
     return {k: float(data[v]) for k, v in (('i', 'input_i'), ('tp', 'input_tp'))}
 
 
+def _audio_fingerprint(path):
+    """Hash the actual packets, codec parameters, durations and timestamps, without decoding."""
+    import hashlib
+    proc = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-copyts", "-i", path,
+                           "-map", "0:a:0", "-c", "copy", "-f", "framehash", "-"],
+                          capture_output=True, check=True, timeout=90)
+    return hashlib.sha256(proc.stdout).hexdigest()
+
+
+def cached_guard(path, workdir, bitrate):
+    """Reuse a measured AAC master across picture edits. Keep the normal path on a cache miss."""
+    import json
+    import tempfile
+    import media_cache
+    try:
+        key = f"social-master/v1/{TARGET}/{TOLERANCE}/{bitrate}/{_audio_fingerprint(path)}"
+    except (OSError, subprocess.SubprocessError):
+        return guard(path, workdir, bitrate)
+    with tempfile.TemporaryDirectory(dir=workdir, prefix="verified_audio_") as folder:
+        audio = os.path.join(folder, "master.m4a")
+        note = os.path.join(folder, "measurements.json")
+        try:
+            if media_cache.resident(key+".json", folder, "measurements.json"):
+                with open(note) as record:
+                    saved = json.load(record)
+                report = saved["report"]
+                if not report["passes"]:
+                    return dict(report, reused=True)
+                if media_cache.resident(key+".m4a", folder, "master.m4a"):
+                    mux = os.path.join(folder, "picture.mp4")
+                    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-copyts", "-i", path,
+                                    "-i", audio, "-map", "0:v?", "-map", "1:a:0", "-c", "copy",
+                                    "-movflags", "+faststart", mux], check=True, capture_output=True, timeout=180)
+                    if _audio_fingerprint(mux) == saved["audio"]:
+                        os.replace(mux, path)
+                        return dict(report, reused=True)
+        except (OSError, KeyError, ValueError, subprocess.SubprocessError):
+            pass
+        report = guard(path, workdir, bitrate)
+        if report and report.get("held"):
+            # Use fresh paths: a failed read can leave a hardlinked cache lease above.
+            try:
+                saved = {"report": report}
+                if report["passes"]:
+                    audio = os.path.join(folder, "new.m4a")
+                    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-copyts", "-i", path,
+                                    "-map", "0:a:0", "-c", "copy", audio],
+                                   check=True, capture_output=True, timeout=180)
+                    saved["audio"] = _audio_fingerprint(path)
+                    media_cache.remember_file(key+".m4a", audio)
+                note = os.path.join(folder, "new.json")
+                with open(note, "w") as record:
+                    json.dump(saved, record)
+                media_cache.remember_file(key+".json", note)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        return report
+
+
 def guard(path, workdir, bitrate='192k'):
     first = current = measure(path)
     if current is None:
