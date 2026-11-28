@@ -510,7 +510,16 @@ def lower_pictures(l1, work, bake, rep):
                 ov.pop("source_crop", None)
             elif moves:
                 rep["moves_held_on_pictures"] = rep.get("moves_held_on_pictures", 0) + 1
-        if pic == "main" and it.get("source_full_frame") and asset:
+        if pic == "main" and it.get("reading_move") and asset:
+            # This cutaway shares the world camera, just like a spine shot.
+            # Start it on the whole source so its path stays in source space.
+            aspect = (W/H) * (asset["h"]/asset["w"])
+            w, h = max(1., aspect), max(1., 1/aspect)
+            fitted = [.5-w/2, .5-h/2, .5+w/2, .5+h/2]
+            ov["fit"] = "source_blur"
+            ov.pop("source_crop", None)
+            zooms.append(zoom_of(it, a, b, fps, f"z.{pid}", fitted))
+        elif pic == "main" and it.get("source_full_frame") and asset:
             # This source picture shares the take's background and reading
             # camera. Ordinary overlays are screen-locked above that camera.
             ov["fit"] = "source_blur"

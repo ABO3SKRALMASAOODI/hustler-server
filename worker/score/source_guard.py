@@ -230,6 +230,22 @@ def enclosing_window(boxes, ratio, minimum):
     return [x, y, x+width, y+height]
 
 
+def reading_move(target, ratio, count, fps):
+    """Ease in from a little context. Every intermediate window contains the line."""
+    width = target[2] - target[0]
+    cx, cy = (target[0]+target[2])/2, (target[1]+target[3])/2
+    opening = min(1., width*1.20)
+    move = max(1, min(count-1, round(fps*.45)))
+    path = []
+    for f in range(count):
+        w = width + (opening-width)*(1-min(1., f/move))**3
+        h = w/ratio
+        x = max(0., min(1-w, cx-w/2))
+        y = max(0., min(1-h, cy-h/2)) if h <= 1 else (1-h)/2
+        path.append([x,y,x+w,y+h])
+    return path
+
+
 def apply(l1, index, perception, *, views=None):
     if not index.get("_first_film_source_guard"):
         return []
@@ -301,7 +317,12 @@ def apply(l1, index, perception, *, views=None):
             subjects = _boxes(scene)
             crop = reading_window(scene, ratio, subjects, region)
             if crop:
-                item["crop"] = crop
+                frames = item.get("f") or []
+                if scene.get("dense_ui") and len(frames) == 2 and frames[1]-frames[0] >= 8:
+                    item["crop"] = reading_move(crop, ratio, frames[1]-frames[0], l1.get("fps") or 30)
+                    item["reading_move"] = True
+                else:
+                    item["crop"] = crop
                 item["source_full_frame"] = crop[1] < 0
                 report.append({"id": item["id"], "source": [start, end],
                                "reason": "measured_reading_window", "crop": crop})
@@ -344,6 +365,11 @@ def apply(l1, index, perception, *, views=None):
                     point = [(box[0]+box[2])/2, (box[1]+box[3])/2]
                     reason = "local_subject_crop"
                 elif nearby and nearby[0].get("focus"):
+                    regions = nearby[0].get("salient_regions") or []
+                    if ratio < 1 and len((scene or {}).get("subjects") or []) >= 2 and regions:
+                        points.append(enclosing_window(regions, ratio, minimum=ratio))
+                        reason = "local_salient_regions"
+                        continue
                     point = nearby[0]["focus"]
                     reason = "local_saliency_crop"
                 else:

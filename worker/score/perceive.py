@@ -330,6 +330,34 @@ class Subjects:
         return [x / sw, y / sh, (x + bw) / sw, (y + bh) / sh]
 
 
+def salient_framing(gray):
+    """Find the best portrait crop and the bounds of distinct salient regions.
+
+    A centroid of two characters can land entirely on the wall between them.
+    Keep their separate extents so the planner can frame both in a two-shot.
+    """
+    from broll_score import best_window, saliency
+    small = cv2.resize(gray, (96, max(8, round(96*gray.shape[0]/gray.shape[1]))),
+                       interpolation=cv2.INTER_AREA)
+    mass = saliency(small)
+    gx = cv2.Sobel(small, cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(small, cv2.CV_32F, 0, 1)
+    edges = cv2.GaussianBlur(cv2.magnitude(gx, gy), (0, 0), 2)
+    mass = .3*mass + .7*edges / max(float(edges.sum()), 1e-8)
+    _, x, y = best_window(mass, 9/16)
+    hot = (mass > np.quantile(mass,.88)).astype(np.uint8)
+    count, labels, stats_, _ = cv2.connectedComponentsWithStats(hot)
+    h, w = hot.shape
+    ranked = []
+    for n in range(1,count):
+        left, top, width, height, area = stats_[n]
+        if area >= .009*w*h:
+            ranked.append((float(mass[labels == n].sum()), [left/w, top/h, (left+width)/w, (top+height)/h]))
+    ranked.sort(reverse=True)
+    return dict(focus=[x,y], focus_method="local_saliency",
+                salient_regions=[box for weight,box in ranked[:3] if weight >= .45*ranked[0][0]])
+
+
 def head_of_person(b):
     """The head inside a standing person's box: the top fifth, the middle half."""
     w, h = b[2] - b[0], b[3] - b[1]
@@ -366,9 +394,12 @@ def _run(index, src, work, audio):
         if person:
             samples[-1]["person"] = [round(float(v), 4) for v in person]
         if not face and not person:
-            import subject
-            samples[-1]["focus"] = list(subject._energy_point(np, gray))
-            samples[-1]["focus_method"] = "local_saliency"
+            if index.get("_first_film_source_guard") and W > H:
+                samples[-1].update(salient_framing(gray))
+            else:
+                import subject
+                samples[-1]["focus"] = list(subject._energy_point(np, gray))
+                samples[-1]["focus_method"] = "local_saliency"
         keep.append((t, f))
     # A fixed sampling grid can miss an entire short shot. Give every
     # refined shot a local observation rather than borrowing across its cut.
@@ -389,6 +420,8 @@ def _run(index, src, work, audio):
                             persons=int(bool(face or person)),
                             focus=list(subject._energy_point(np, gray)),
                             focus_method="local_saliency", **stats(gray)))
+        if not face and not person and index.get("_first_film_source_guard") and W > H:
+            samples[-1].update(salient_framing(gray))
         keep.append((t,f))
     samples.sort(key=lambda row: row["t"])
     keep.sort(key=lambda row: row[0])

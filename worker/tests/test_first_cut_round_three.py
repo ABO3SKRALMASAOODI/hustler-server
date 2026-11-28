@@ -122,3 +122,34 @@ def test_bed_claim_matches_music_in_two_separate_passages(tmp_path):
         paths.append(path)
     assert rendered_bed(paths[0], track, paths[0], 2)
     assert not rendered_bed(paths[0], track, paths[1], 2)
+
+
+def test_two_salient_subjects_leave_the_empty_centre_out_of_a_single_subject_crop():
+    from score.perceive import salient_framing
+    gray = np.zeros((90,160), np.uint8)
+    gray[26:61,10:36] = 200
+    gray[23:58,124:151] = 200
+    framing = salient_framing(gray)
+    assert abs(framing["focus"][0] - .5) > .15
+    boxes = framing["salient_regions"]
+    assert min(b[0] for b in boxes) < .25 and max(b[2] for b in boxes) > .75
+
+
+def test_chapter_reading_time_scales_with_copy_and_keeps_one_centre(monkeypatch):
+    out = []
+    monkeypatch.setattr(compiler, "span_of", lambda *_: (0, 14))
+    monkeypatch.setattr(compiler, "display", lambda ctx,i,t,a,z,opt,b: out.append((z,opt["seat"])))
+    monkeypatch.setattr(compiler, "g_snd", lambda *_: None)
+    ctx = SimpleNamespace(index={"first_film":True}, fps=30, dur_f=90, governed=True)
+    for label in ("{n} SCOUT", "{n} REBUILD THE WEST WALL"):
+        compiler.g_counter(ctx, SimpleNamespace(id="game"), {"_gid":"game.counter",
+            "chapter":True,"fmt":label,"from":1,"to":1,"seat":[.32,.5]}, 0)
+    assert out[1][0] > out[0][0] > 30 and out[1][1][0] == out[0][1][0] == .5
+
+
+def test_reading_push_keeps_both_ends_of_the_line_on_every_frame():
+    target = [.36,-.16,.78,1.16]
+    path = source_guard.reading_move(target,.42/1.32,36,30)
+    assert path[0][2]-path[0][0] > path[-1][2]-path[-1][0]
+    assert all(c[0] <= .36+1e-6 and c[2] >= .78-1e-6 for c in path)
+    assert np.allclose(path[-1],target) and path[16] == path[-1]
