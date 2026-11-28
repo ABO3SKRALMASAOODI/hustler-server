@@ -1170,6 +1170,7 @@ class InsertItem(BaseModel):
                              "pan_left", "pan_right"]] = None
     motion_motif: Optional[MotionMotif] = None
     rate: Optional[float] = None
+    interpolate: Optional[bool] = None
     crop: Optional[List[float]] = None
     # mute (round 78): the spliced scene plays SILENT — its own audio is
     # dropped and the block renders over the shared anullsrc, exactly like a
@@ -3182,6 +3183,9 @@ class EDL(BaseModel):
             for key in ("source_rotation", "source_pitch_semitones"):
                 if data.get(key) is None:
                     data.pop(key, None)
+            for insert in data.get("inserts") or []:
+                if insert.get("interpolate") is None:
+                    insert.pop("interpolate", None)
         ex = data.get("export") if isinstance(data, dict) else None
         if isinstance(data, dict) and (ex is None or (
                 isinstance(ex, dict) and not any(ex.values()))):

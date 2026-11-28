@@ -86,10 +86,11 @@ def test_final_with_seven_cutaways_decodes_each_one(tmp_path, monkeypatch):
     edl = {"keep": [[0., 3.]], "fx": items}
     out = str(tmp_path / "final.mp4")
     run = renderer._render_media_run
-    decoder_counts = []
+    decoder_counts, kills = [], []
     def constrained(cmd, **kw):
-        count = sum(v == str(still) for v in cmd)
+        count = sum(Path(v).name.startswith("w4b_") and v.endswith(".mkv") for v in cmd)
         if count > 2:
+            kills.append(count)
             raise media.MediaOOMError("fixture decoder memory exhausted")
         if "[vout]" in cmd:
             decoder_counts.append(count)
@@ -106,13 +107,14 @@ def test_final_with_seven_cutaways_decodes_each_one(tmp_path, monkeypatch):
     for it in items:
         r, g, b = frames[round(25*(it["start"]+.12))]
         assert b > max(r, g) + 100
-    assert decoder_counts and max(decoder_counts) <= 2
+    assert kills and max(kills) > 2
+    assert 0 < max(decoder_counts) <= 2
     assert media.probe(out)["has_audio"]
 
 
 def test_callback_draws_the_planned_take_when_stock_covers_the_opening(tmp_path, monkeypatch):
     from scene.palette import callback, picks
-    take = {"id": "op", "pic": "take", "k": "shot", "f": [0, 120], "src": [7., 11.]}
+    take = {"id": "op", "pic": "main", "k": "shot", "f": [0, 120], "src": [7., 11.]}
     stock = dict(take, id="cutaway", pic="stock", src=[0., 4.])
     scene = {"fps": 30, "dur_f": 250, "frame": [160, 96], "items": [stock],
              "opening_shots": [take], "assets": {}}
@@ -121,4 +123,19 @@ def test_callback_draws_the_planned_take_when_stock_covers_the_opening(tmp_path,
     monkeypatch.setattr(picks, "luminance", lambda *_: .4)
     result = callback.callback(scene, str(tmp_path), {"at": [180, 210]})
     returned = [it for it in result["items"] if it["id"].startswith("cb.")]
-    assert returned and all(it["pic"] == "take" and it["src"][0] == 7 for it in returned)
+    assert returned and all(it["pic"] == "main" and it["src"][0] == 7 for it in returned)
+
+
+def test_encoded_window_identity_follows_media_and_device_bytes(tmp_path, monkeypatch):
+    import renderer
+    monkeypatch.setattr(renderer.shutil, "which", lambda _: str(Path(__file__)))
+    source, grade = tmp_path/"source", tmp_path/"grade.cube"
+    source.write_bytes(b"picture")
+    grade.write_text("grade 1")
+    def key(start):
+        graph = f"[0:v]trim=start={start},lut3d=file='{grade}'[vout]"
+        return renderer._encoded_block_key(["ffmpeg","-i",str(source),"-filter_complex",graph,"out.mp4"],str(tmp_path))
+    original = key(1)
+    assert original and key(1) == original and key(2) != original
+    grade.write_text("different grade")
+    assert key(1) != original

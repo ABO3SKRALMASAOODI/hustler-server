@@ -1023,6 +1023,12 @@ def _anim_expr(v, tvar):
     return f"if(lt({tvar},{kfs[0][0]:.3f}),{kfs[0][1]:.4f},{expr})"
 
 
+def _slow_frames(fps, rate, duration):
+    return (f",tpad=stop_mode=clone:stop_duration={3/max(1, fps*rate):.6f},"
+            f"minterpolate=fps={fps:.6f}:mi_mode=mci:me=epzs:scd=fdiff,"
+            f"trim=duration={duration:.6f}")
+
+
 def _atempo_chain(factor):
     """atempo accepts 0.5-2.0 per instance; chain instances for the rest.
     Returns e.g. 'atempo=2.0,atempo=1.5' for 3.0x."""
@@ -5043,9 +5049,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             interpolation = ""
             if span.get("interpolate") and f < 1:
                 # Give the motion estimator its two lookahead frames at EOF.
-                interpolation = (f",tpad=stop_mode=clone:stop_duration={3/max(1, fps*f):.6f},"
-                                 f"minterpolate=fps={fps:.6f}:mi_mode=mci:me=epzs:scd=fdiff,"
-                                 f"trim=duration={(pe-ps)/f:.6f}")
+                interpolation = _slow_frames(fps, f, (pe-ps)/f)
             if regions:
                 # Region windows arrive in PROGRAM time; inside a sped piece
                 # the local pre-speed clock runs `f` times program speed.
@@ -5547,9 +5551,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         rate = float(item.get("rate") or 1.0) if item["kind"] != "image" \
             else 1.0
         if abs(rate - 1.0) > 1e-6:
+            smooth = _slow_frames(fps, rate, dur) if item.get("interpolate") and rate < 1 else ""
             parts.append(
                 f"[{idx}:v]trim=start={off:.3f}:end={off + dur * rate:.3f},"
-                f"setpts=(PTS-STARTPTS)/{rate:.4f}[insv{j}]")
+                f"setpts=(PTS-STARTPTS)/{rate:.4f}{smooth}[insv{j}]")
         else:
             parts.append(f"[{idx}:v]trim=start={off:.3f}:end={off + dur:.3f},"
                          f"setpts=PTS-STARTPTS[insv{j}]")
@@ -8016,7 +8021,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                 "-progress", "pipe:1", "-nostats", out_path]
     _fx_run(_video_cmd(graph), fx_box,
             lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed)),
-            cancelled_cb,
+            cancelled_cb, cache_fragment=discard_audio,
             timeout=_render_ffmpeg_timeout(preview, expected_out_s),
             progress_cb=progress_cb, expected_out_s=expected_out_s)
     if mark_img and not preview and not _base_stage and _batch_window is None:
@@ -8586,7 +8591,38 @@ def _repair_legacy_insert_boundaries(edl_dict):
     return repaired or edl_dict
 
 
-def _fx_run(cmd, fx_box, rebuild, cancelled_cb, **run_kw):
+def _encoded_block_key(cmd, workdir):
+    """Identity of the compiled source span, inputs, device assets and encoder settings."""
+    import render_memo
+    args = list(cmd[:-1])
+    for i, arg in enumerate(args[:-1]):
+        if arg == "-i":
+            source = args[i+1]
+            if args[max(i-2, 0):i] == ["-f", "lavfi"]:
+                continue
+            if not os.path.isfile(source):
+                return None
+            args[i+1] = render_memo.file_digest(source)
+        elif arg in ("-filter_complex", "-/filter_complex", "-filter_complex_script"):
+            graph = args[i+1]
+            if arg != "-filter_complex":
+                with open(graph, encoding="utf-8") as script:
+                    graph = script.read()
+            # Filters such as subtitles, movie and lut3d read outside their
+            # input pads. Resolve those files too, including generated ASS.
+            for match in reversed(list(re.finditer(r"'([^']+)'", graph))):
+                path = match[1].replace("\\:", ":")
+                if os.path.isabs(path) and os.path.isfile(path):
+                    graph = graph[:match.start(1)] + render_memo.file_digest(path) + graph[match.end(1):]
+            args[i] = "-filter_complex"
+            args[i+1] = graph
+    binary = shutil.which("ffmpeg")
+    if not binary:
+        return None
+    return "encoded-window/" + render_memo.key("video", render_memo.file_digest(binary), args) + ".mp4"
+
+
+def _fx_run(cmd, fx_box, rebuild, cancelled_cb, cache_fragment=False, **run_kw):
     """Render picture FX in bounded time windows. Keep the whole-program audio clock."""
     import tempfile
     plan = fx_box[0]
@@ -8600,7 +8636,20 @@ def _fx_run(cmd, fx_box, rebuild, cancelled_cb, **run_kw):
                     or "cancelled" in str(exc))
     if not bounded:
         try:
-            return run(cmd)
+            key = None
+            if cache_fragment and plan is not None and video and not (cancelled_cb and cancelled_cb()):
+                import media_cache
+                try:
+                    key = _encoded_block_key(cmd, plan.workdir)
+                    if key and not os.path.exists(cmd[-1]) and media_cache.resident(
+                            key, os.path.dirname(cmd[-1]), os.path.basename(cmd[-1])):
+                        return
+                except (OSError, ValueError):
+                    key = None
+            result = run(cmd)
+            if key:
+                media_cache.remember_file(key, cmd[-1])
+            return result
         except media.MediaError as exc:
             if not eligible(exc) or plan is None:
                 raise
@@ -8954,6 +9003,13 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # instead of libass (worker/motion_captions.py). Stitched pieces never
     # reach here with a motion look — the stitchers refuse those programs.
     caption_motion_items = []
+    stitched_caption_track = [item for item in edl.get("motion") or []
+                              if item["id"].startswith("__captions_") and item.get("template") == motion_captions.TEMPLATE]
+    original_ass = ass_path
+    if stitched_caption_track:
+        ass_path = None
+        caption_motion_items = stitched_caption_track
+        edl["motion"] = [item for item in edl["motion"] if item not in stitched_caption_track]
     if not audio_only and cap_ass_override is None and \
             motion_captions.look_of(edl):
         try:
@@ -9467,7 +9523,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             motion_layer.warn(
                 "motion caption track did not render — burned ordinary "
                 "captions instead")
-            ass_path = caplib.build_ass(edl, index, tl,
+            ass_path = original_ass or caplib.build_ass(edl, index, tl,
                                         os.path.join(workdir, "captions.ass"),
                                         play_res=(W, H))
         # ---- behind-subject motion graphics: one mask input per item -------
@@ -9670,7 +9726,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     try:
         _fx_run(_video_cmd(graph), fx_box,
                 lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed)),
-                cancelled_cb,
+                cancelled_cb, cache_fragment=discard_audio,
                 timeout=_render_ffmpeg_timeout(preview, expected_out_s),
                 progress_cb=progress_cb, expected_out_s=expected_out_s)
     finally:
@@ -10237,8 +10293,6 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
     dur_out = tl_new.out_duration
     if preview and outro_seconds(True) > 0:
         return None                    # previews with an end card: rare, out
-    if motion_captions.look_of(new_edl) or motion_captions.look_of(prev_edl):
-        return None                    # browser captions regroup per window
     if is_canvas_program(new_edl) != is_canvas_program(prev_edl):
         return None
     if music_tail_ext(new_edl, dur_out) or music_tail_ext(prev_edl, tl_prev.out_duration):
@@ -10424,16 +10478,19 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
                 (float(e) for _s, e in
                  (prev_row["json"].get("keep") or [])), default=0.0))
         ).model_dump()
-        if motion_captions.look_of(new_edl) or motion_captions.look_of(prev_edl):
-            # Browser-drawn captions are a single program-wide track; a piece
-            # would otherwise burn libass captions in their place.
-            print(f"[render {job_id}] stitch: full render (motion captions)",
-                  flush=True)
-            return None
         tl_new = Timeline(new_edl["keep"], new_edl.get("inserts") or [],
                           new_edl.get("speed") or [])
         tl_prev = Timeline(prev_edl["keep"], prev_edl.get("inserts") or [],
                            prev_edl.get("speed") or [])
+        # Group the browser captions once on each full programme, exactly as
+        # a full render does. The motion lane already clips a composition
+        # with its original phase and carries that phase into a window.
+        for film, tl in ((new_edl, tl_new), (prev_edl, tl_prev)):
+            if motion_captions.look_of(film) and motion_layer.motion_engine.available():
+                width, height, rate = _composition_geometry(film, src_local, preview)
+                motion_layer.fill_footprints(film, width, height, rate, index=index, tl=tl)
+                captions = motion_captions.items(film, index, tl, canvas=(width, height))
+                film["motion"] = captions + (film.get("motion") or [])
         duration = float((index.get("video") or {}).get("duration") or 0.0)
         windows, why = stitch.plan(prev_edl, new_edl, tl_prev, tl_new,
                                    duration, tl_new.out_duration)

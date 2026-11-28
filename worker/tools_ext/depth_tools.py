@@ -337,6 +337,10 @@ def add_depth_effect(ctx, kind, start=None, end=None, word=None,
                             s, e = round(cursor, 2), round(min(cursor + duration, w["t0"]), 2)
                             break
                         cursor = max(cursor, w["t1"])
+                    else:
+                        # A continuously speaking take has no still frame to
+                        # hold naturally. Depth of field follows its live subject.
+                        kind, held, src_t, move = "dof", False, None, None
         if e - s < 0.2:
             return _rejected(f"the window {s:g}-{e:g}s is too short for a "
                              "depth effect (>= 0.2 s)")
