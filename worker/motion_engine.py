@@ -422,6 +422,30 @@ body{width:var(--W);height:var(--H);position:relative;font-family:'Inter Display
 """
 
 
+# A custom composition may lay its artwork out on a fixed-size stage.
+# Measure that layout in the browser, including its padding. The capture and
+# footprint probes both use this document and therefore the same transform.
+FIT_AUTHORED_STAGE = """
+<script>
+(() => {
+  const body = document.body;
+  const stages = Array.from(body.children).filter(el => {
+    const css = getComputedStyle(el);
+    return el.childElementCount && ['relative', 'absolute', 'fixed'].includes(css.position)
+      && el.offsetLeft === 0 && el.offsetTop === 0;
+  });
+  const w = Math.max(MG.W, ...stages.map(el => el.offsetWidth));
+  const h = Math.max(MG.H, ...stages.map(el => el.offsetHeight));
+  const scale = Math.min(MG.W / w, MG.H / h);
+  if (scale < 1) {
+    Object.assign(body.style, {width: w + 'px', height: h + 'px', transformOrigin: '0 0',
+      transform: `translate(${(MG.W - w * scale) / 2}px, ${(MG.H - h * scale) / 2}px) scale(${scale})`});
+  }
+})();
+</script>
+"""
+
+
 def _json_for_script(obj):
     # JSON inside <script>: neutralise "</script" and HTML comment openers.
     return (json.dumps(obj, ensure_ascii=False)

@@ -450,6 +450,8 @@ def build_job(item, out_w, out_h, fps, asset_locals=None, plate=None,
         else:
             params[key] = None
     body = item.get("html") if name == "html" else motion_engine.template_body(name)
+    if name == "html":
+        body += motion_engine.FIT_AUTHORED_STAGE
     html = motion_engine.build_document(body, params=params, duration=full, fps=fps,
                                         design_w=dw, design_h=dh, plate=plate,
                                         yields=yields)
