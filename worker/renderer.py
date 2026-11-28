@@ -9703,12 +9703,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # with 20 windows of one 4K upload otherwise gives each read and each
     # RGB scaler a full CPU-sized pool, multiplying buffered full-size
     # frames even though only a few windows are visible at once (p5716).
-    video_reads = 1 + sum(item.get("kind") == "video" for _, item in overlay_inputs)
-    video_reads += sum(item.get("kind") != "image" for _, item, _ in insert_inputs)
-    bounded_threads = (2 if overlay_folder else
-                       _many_video_threads(info["width"], info["height"], video_reads))
-
     def _video_cmd(g):
+        readers = len(set(re.findall(r"\[(\d+):v(?::\d+)?\]", g)))
+        bounded_threads = (2 if overlay_folder else
+                           _many_video_threads(info["width"], info["height"], readers))
         if (W, H) != delivery_dims and not preview:
             g = g.replace("[vout]", "[working_picture]") + (
                 f";[working_picture]{upscale_filter(*delivery_dims)}[vout]")
@@ -9716,7 +9714,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                 *_stable_video_inputs(main_input_args + extra_inputs,
                                       decoder_threads=bounded_threads),
                 *_graph_args(g, workdir, max_threads=bounded_threads), "-map", "[vout]", "-map", "[aout]",
-                *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
+                *encode, *(["-threads:v", "2"] if readers >= 12 else []),
+                *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
                 "-movflags", "+faststart",
                 "-progress", "pipe:1", "-nostats", out_path]
     # Progress is percent-of-expected, so it must be the RENDERED length. Left
@@ -9754,6 +9753,8 @@ def _many_video_threads(width, height, readers):
     per reader/filter keep parallel decoding without changing the picture,
     timestamps, requested resolution or authored effects.
     """
+    if readers >= 12:
+        return min(2, max(1, 64 // readers))  # Share the decoder budget across sprites and stills.
     return 2 if readers >= 4 and width * height * readers >= 16_000_000 else None
 
 

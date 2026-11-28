@@ -278,6 +278,7 @@ def project_state_block(video, index_summary, edl_line, history_lines,
     # claim. The generic open-catalog chain is retired after production showed
     # it consuming search turns without producing an asset. Keep only paths
     # that work: a user link/upload, or explicit named-song discovery.
+    import sfx_search
     if follow_up:
         # The same rules, once, in the words the model already has: it read
         # them in full on the project's first request.
@@ -285,10 +286,12 @@ def project_state_block(video, index_summary, edl_line, history_lines,
                      "or named track, else choose a library track that fits "
                      "the film yourself (Valmera may choose the music; the "
                      "customer decides whether to keep it) and name it in the "
-                     "reply. Sound library: list_sound_library. B-roll: "
-                     "search_stock, find_footage.")
+                     "reply. Sound library: list_sound_library. For cutaways across the speech, "
+                     "load_tools(names=['source_broll']), then source_broll() sources and places them "
+                     "on the timed words across the film. Use find_footage for a specific named clip.")
+        if sfx_search.available():
+            lines.append("For real ambience use search_sfx or add_web_sfx with role='bed'.")
         return "\n".join(lines)
-    import sfx_search
     import song_find
     import music_library
     named = ("A SPECIFIC song they NAME: load acquisition, use find_song "
@@ -351,7 +354,7 @@ def project_state_block(video, index_summary, edl_line, history_lines,
     if song_find.footage_available():
         _broll.append("find_footage finds real VIDEO of a named topic, "
                       "fetch_url downloads the pick as a clip")
-    lines.append("For b-roll on mentions or throughout the film use source_broll; omit moments to plan from timed words.")
+    lines.append("For cutaways across the film, load_tools(names=['source_broll']) then call source_broll() to source and place them on the timed words.")
     if _broll:
         lines.append(
             "For a specific named clip: when the speaker names a concrete "

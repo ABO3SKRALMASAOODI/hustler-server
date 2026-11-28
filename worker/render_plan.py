@@ -109,7 +109,16 @@ def still_input(path, duration, fps):
     A stock image URL can serve a GIF in a .jpg asset. FFmpeg's generic stream
     loop supports both GIF and image2 while preserving the programme frame rate.
     """
-    return ["-stream_loop", "-1", "-t", f"{duration:.3f}", "-r", f"{fps:.3f}", "-i", path]
+    # image2 and png_pipe efficiently repeat their cached frame. A generic
+    # stream loop seeks back through the input on each frame of a still.
+    try:
+        with open(path, "rb") as src:
+            header = src.read(12)
+    except (OSError, TypeError):
+        header = b""
+    ordinary_still = header.startswith((b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n"))
+    loop = ["-loop", "1"] if ordinary_still else ["-stream_loop", "-1"]
+    return [*loop, "-t", f"{duration:.3f}", "-r", f"{fps:.3f}", "-i", path]
 
 
 def insert_input(item, path, fps, *, copy_timestamps=False):

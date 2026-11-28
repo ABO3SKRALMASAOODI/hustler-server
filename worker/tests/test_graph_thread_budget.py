@@ -67,6 +67,7 @@ def test_many_4k_source_windows_bound_decoder_and_scaler_frame_queues(tmp_path):
 
 
 def test_ordinary_sources_keep_their_existing_parallelism():
+    assert renderer._many_video_threads(850, 480, 61) == 1
     assert renderer._many_video_threads(2160, 3840, 1) is None
     assert renderer._many_video_threads(640, 360, 4) is None
 

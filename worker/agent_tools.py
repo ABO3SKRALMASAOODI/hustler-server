@@ -35291,7 +35291,7 @@ TOOL_DOMAINS = {
     # still exposes this exact department for an explicit acquisition pass.
     "acquisition": {
         "list_assets", "find_song", "find_footage", "search_stock", "research_broll",
-        "add_stock_media", "generate_video",
+        "source_broll", "add_stock_media", "generate_video",
     },
     "motion": {
         "suggest_motion_beats",

@@ -74,6 +74,14 @@ def test_rotated_source_and_index_share_coordinates(tmp_path):
     assert idx["video"]["width"] == 96
 
 
+def test_follow_up_supplies_the_batch_picture_tool():
+    import agent_prompt
+    import agent_tools
+    state = agent_prompt.project_state_block("video","index","edl",[],[],follow_up=True)
+    assert "source_broll()" in state
+    assert "source_broll" in agent_tools.TOOL_DOMAINS["acquisition"]
+
+
 def test_broll_keeps_late_pages_when_the_moment_planner_is_unavailable(monkeypatch):
     from tools_ext import broll_tools
     from types import SimpleNamespace
