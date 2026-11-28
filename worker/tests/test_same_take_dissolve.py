@@ -29,3 +29,15 @@ def test_handle_hold_does_not_make_matching_source_pictures_dissolve():
     assert _compose_join(join, order, [(0,3),(5,9)], {}, 30, Mock(), cap) is None
     cap.read.side_effect = [(True, background), (True, 255-background)]
     assert _compose_join(join, order, [(0,3),(5,9)], {}, 30, Mock(), cap) == join
+
+
+def test_background_registration_recognizes_small_camera_push():
+    import cv2
+    import numpy as np
+    from renderer import _same_join_picture
+    src = np.random.default_rng(8).integers(0, 255, (192, 288, 3), dtype=np.uint8)
+    transform = cv2.getRotationMatrix2D((144,96), 0, 1.12)
+    incoming = cv2.warpAffine(src, transform, (288,192))
+    cap = Mock()
+    cap.read.side_effect = [(True, src), (True, incoming)]
+    assert _same_join_picture(cap, 4.7, 5.3) is True

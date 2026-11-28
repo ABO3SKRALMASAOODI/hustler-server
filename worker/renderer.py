@@ -4260,15 +4260,45 @@ def _same_join_picture(cap, before, after):
         ok, frame = cap.read()
         if not ok:
             return None
-        small = cv2.resize(frame, (96, 64), interpolation=cv2.INTER_AREA)
-        frames.append(small.astype(np.float32).reshape(8, 8, 12, 8, 3))
+        frames.append(cv2.resize(frame, (288, 192), interpolation=cv2.INTER_AREA))
+
+    def agreement(first, second, valid=None):
+        a, b = [cv2.resize(f, (96, 64), interpolation=cv2.INTER_AREA)
+                .astype(np.float32).reshape(8, 8, 12, 8, 3) for f in (first, second)]
+        detail = np.maximum(a.std(axis=(1, 3)), b.std(axis=(1, 3))).mean(axis=2) > 6
+        if valid is not None:
+            detail &= cv2.resize(valid, (12, 8), interpolation=cv2.INTER_AREA) > 250
+        if detail.sum() < 8:
+            return None
+        distances = np.abs(a-b).mean(axis=(1, 3, 4))
+        return bool(np.mean(distances[detail] < 12) >= .65)
+
     a, b = frames
-    texture = np.maximum(a.std(axis=(1, 3)), b.std(axis=(1, 3))).mean(axis=2)
-    detail = texture > 6
-    if detail.sum() < 8:
-        return None
-    distances = np.abs(a-b).mean(axis=(1, 3, 4))
-    return bool(np.mean(distances[detail] < 12) >= .65)
+    direct = agreement(a, b)
+    if direct is not False:
+        return direct
+    # The incoming frame may have a small push or a pan relative to the
+    # outgoing one. Register their features before comparing the background.
+    orb = cv2.ORB_create(nfeatures=350, edgeThreshold=10, fastThreshold=12)
+    ka, da = orb.detectAndCompute(cv2.cvtColor(a, cv2.COLOR_BGR2GRAY), None)
+    kb, db = orb.detectAndCompute(cv2.cvtColor(b, cv2.COLOR_BGR2GRAY), None)
+    if da is None or db is None or min(len(da), len(db)) < 8:
+        return False
+    pairs = cv2.BFMatcher(cv2.NORM_HAMMING).knnMatch(da, db, k=2)
+    matches = [m for m,n in pairs if m.distance < .75 * n.distance]
+    if len(matches) < 8:
+        return False
+    src = np.float32([ka[m.queryIdx].pt for m in matches])
+    dst = np.float32([kb[m.trainIdx].pt for m in matches])
+    transform, inliers = cv2.estimateAffinePartial2D(src, dst, ransacReprojThreshold=2)
+    if transform is None or inliers.sum() < 8:
+        return False
+    points = src[inliers.ravel().astype(bool)]
+    if cv2.contourArea(cv2.convexHull(points)) < .06 * 288 * 192:
+        return False
+    aligned = cv2.warpAffine(a, transform, (288,192))
+    valid = cv2.warpAffine(np.full(a.shape[:2], 255, np.uint8), transform, (288,192))
+    return agreement(aligned, b, valid) is True
 
 
 def _compose_join(spec, order, keep, index, fps, plan, capture=None):
