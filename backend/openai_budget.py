@@ -272,7 +272,7 @@ def upper_bound(body):
     # long-context/priority surcharges. Savings release only after usage.
     tier_name = body.get("service_tier") or (body.get("extra_body") or {}).get("service_tier")
     tier = 2 if tier_name in ("priority", "fast") else 1
-    long = 2 if tin > 272000 and model in ("gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol") else 1
+    long = 2 if tin > 272000 and model in ("gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol") else 1
     return tier * (tin * pin * 2.5 * long + cap * pout * (1.5 if long == 2 else 1)) / 1e6 + extra
 
 

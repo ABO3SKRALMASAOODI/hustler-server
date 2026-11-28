@@ -32,13 +32,14 @@ def describe_missing(ctx, hits):
             paths.append(path)
             ids.append(h['id'])
         if paths:
-            prompt = ('Describe only the visible content of each search thumbnail: subject, action, '
+            rubric = ('Describe only the visible content of each search thumbnail: subject, action, '
                       'framing and visible text. Do not infer identity or relevance from a query. '
                       'A thumbnail proves one frame, not the whole clip. Return a JSON array of '
                       '{"id": exact id, "description": concise factual description}; use null '
-                      'if unreadable. Images in order: ' + json.dumps(ids))
+                      'if unreadable.')
+            prompt = 'Images in order: ' + json.dumps(ids)
             try:
-                reply = llm.ask_vision(prompt, paths, max_tokens=2000,
+                reply = llm.ask_vision(prompt, paths, max_tokens=2000, system=rubric,
                                        purpose='search_descriptions',
                                        image_names=ids, reasoning_effort='low')
                 rows = llm.extract_json_array(reply or '') or []
@@ -53,7 +54,7 @@ def describe_missing(ctx, hits):
                 print(f'[search] descriptions: no answer from the vision provider '
                       f'({str(llm.last_error() or "empty reply")[:200]}); asking the turn lane',
                       flush=True)
-                rows = _second_look(prompt, paths, ids)
+                rows = _second_look(rubric + " " + prompt, paths, ids)
             descriptions = {r.get('id'): r.get('description') for r in rows
                             if isinstance(r, dict) and isinstance(r.get('description'), str)}
             for h in missing:

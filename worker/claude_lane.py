@@ -485,7 +485,7 @@ def to_anthropic(messages, tools=None, model=None, tool_refs=None):
         if fn.get("strict") is True:
             tool_defs[-1]["strict"] = True
             tool_defs[-1]["input_schema"] = _strict_schema(schema)
-    return system, out, tool_defs
+    return system, out, sorted(tool_defs, key=lambda tool: tool["name"])
 
 
 def _results_first(msgs):
@@ -529,6 +529,7 @@ def surface_tools(plan, messages, tools):
     if not plan:
         return []
     given = {t["function"]["name"] for t in plan["stable"]}
+    given.update(plan.get("initial_extra", []))
     for names in plan["refs"].values():
         given.update(names)
     known = {t["function"]["name"] for t in plan["catalog"]}
@@ -582,7 +583,8 @@ def _strict_schema(schema):
 
 def _one_shot(msgs, tools):
     """Single reviews do not reuse their project payload after this call."""
-    structured_brief = len(tools) == 1 and tools[0].get("name") == "record_request_contract"
+    structured_brief = len(tools) == 1 and tools[0].get("name") in {
+        "record_request_contract", "record_ask_check", "music_pick_verdict"}
     return (not tools or structured_brief) and all(m["role"] != "assistant" for m in msgs)
 
 
@@ -593,52 +595,50 @@ def _mark_cache(system, msgs, tools, model="", cache_policy=None, prefix_ttl=Non
     # runs multi-step paid edits. Only the caller that actually switches
     # planners may opt out of caching the unique project payload; shared
     # instructions still earn cache reads.
-    if cache_policy == "shared_only" or _one_shot(msgs, tools):
-        # A critic's unique frames are one-shot.
+    if cache_policy in ("shared_only", "trial_planner") or _one_shot(msgs, tools):
+        # A critic's unique frames are one-shot. Critics and checks re-read their
+        # shared prefix within the hour, so it is written for an hour. The trial
+        # planner runs about once a day (30 days of llm_calls: 20 calls, 4 of 19
+        # gaps under an hour), so a 1h write (2x) costs more than the 5m write
+        # (1.25x) it replaces, and the trial meter charges it to the account.
+        ctl = ({"type": "ephemeral"} if cache_policy == "trial_planner"
+               else {"type": "ephemeral", "ttl": "1h"})
         if tools:
-            tools[-1] = dict(tools[-1], cache_control={"type": "ephemeral"})
+            tools[-1] = dict(tools[-1], cache_control=ctl)
         if system:
-            stable = min(1, len(system) - 1) if cache_policy == "shared_only" else 0
-            system[stable] = dict(system[stable], cache_control={"type": "ephemeral"})
+            # The trial planner gets kernel, capabilities and the fixed trial note.
+            shared = {"trial_planner": 3, "shared_only": 2}.get(cache_policy, 1)
+            stable = min(shared, len(system)) - 1
+            system[stable] = dict(system[stable], cache_control=ctl)
         return
     # A large batch of images/observations can put the previous request's
     # write beyond Anthropic's 20-position lookback. Keep an explicit read
     # anchor there in that case, using the otherwise redundant tools slot.
     anchor = _released_pixels_anchor(msgs) or _previous_cache_anchor(msgs)
-    if prefix_ttl:
-        # Paid Opus edits can wait on a render or a preview between tool calls.
-        stable = {"type": "ephemeral", "ttl": prefix_ttl}
+    shared_control = {"type": "ephemeral", "ttl": "1h"}
+    history_control = {"type": "ephemeral"}
+    if prefix_ttl == "1h":
+        history_control["ttl"] = "1h"
+    if tools and anchor is None:
         last = next((i for i in reversed(range(len(tools))) if not tools[i].get("defer_loading")), None)
         if last is not None:
-            tools[last] = dict(tools[last], cache_control=stable)
-        if system:
-            system[-1] = dict(system[-1], cache_control=stable)
-    else:
-        if tools and anchor is None:
-            last = max((i for i, tool in enumerate(tools)
-                        if not tool.get("defer_loading")), default=None)
-            if last is not None:
-                tools[last] = dict(tools[last], cache_control={"type": "ephemeral"})
-        if system:
-            # The editor kernel + capability directory are identical for every
-            # project; one breakpoint after them is a cross-account read point,
-            # the last leading block caches this project's context.
-            stable = min(1, len(system) - 1)
-            system[stable] = dict(system[stable],
-                                  cache_control={"type": "ephemeral"})
-            if len(system) - 1 != stable:
-                system[-1] = dict(system[-1], cache_control={"type": "ephemeral"})
+            tools[last] = dict(tools[last], cache_control=shared_control)
+    if system:
+        shared = min(1, len(system) - 1)
+        system[shared] = dict(system[shared], cache_control=shared_control)
+        if len(system) - 1 != shared:
+            system[-1] = dict(system[-1], cache_control=history_control)
     for msg in reversed(msgs):
         if msg["role"] == "system":
-            continue             # a mid-conversation note cannot carry one
+            continue
         content = msg["content"]
         if content:
             at = _last_kept_block(content)
-            content[at] = dict(content[at], cache_control={"type": "ephemeral"})
+            content[at] = dict(content[at], cache_control=history_control)
         break
     if anchor is not None:
         content, index = anchor
-        content[index] = dict(content[index], cache_control={"type": "ephemeral"})
+        content[index] = dict(content[index], cache_control=history_control)
 
 
 _PIXELS_FROM = ("FILMSTRIPS & STILLS", "Frames for your own eyes")
@@ -901,12 +901,12 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
     if edit_rung.is_rung_model(model):
         return edit_rung.create(
             model, messages, tools=tools, max_tokens=max_tokens, effort=effort,
-            tool_choice=tool_choice, timeout=timeout,
+            tool_choice=tool_choice, timeout=timeout, tool_plan=tool_plan,
             fallback=lambda fb: create(fb, messages, tools=tools,
                                        max_tokens=max_tokens, effort=effort,
                                        tool_choice=tool_choice, timeout=timeout,
                                        cache_policy=cache_policy,
-                                       tool_plan=tool_plan))
+                                       tool_plan=None if (tool_plan or {}).get("initial_extra") is not None else tool_plan))
     if not is_claude_model(model):
         # Anthropic serves only Claude ids: anything else is a 404 not_found_error after a paid
         # round trip (15 Nov 2026: gpt-6-sol sent here removed every first-film cutaway). Say so
@@ -926,15 +926,25 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
         long_prefix = bool(active and model.startswith("claude-opus-5-5"))
         volatile = [m for m in messages if long_prefix and m.get("role") == "system"
                     and m.get("content") == active.get("volatile_system")]
-        history = [m for m in messages if m not in volatile]
+        # The state assembled for the turn is identical on most steps. Keep
+        # its first version in place; only a newly observed version belongs
+        # past the existing conversation. A resumed slice gets its own plan.
+        history = messages
+        if volatile:
+            state = volatile[-1]["content"]
+            initial = active.setdefault("initial_state", state)
+            history = [dict(m, content=initial) if m in volatile else m for m in messages]
+            events = active.setdefault("state_updates", [])
+            if state != (events[-1][1] if events else initial):
+                events.append((len(messages), state))
+            for at, update in reversed(events):
+                history.insert(min(at, len(messages)), {"role": "system", "content": update})
         system, msgs, tool_defs = to_anthropic(
             history, None if active else tools, model, active["refs"] if active else None)
         if active:
             tool_defs = _plan_tools(active, model)
         _mark_cache(system, msgs, tool_defs, model, cache_policy,
-                    active.get("prefix_ttl", "1h") if long_prefix else None)
-        for note in volatile:
-            msgs.append({"role": "system", "content": note["content"]})
+                    active.get("prefix_ttl") if active else None)
         body = {"model": model, "max_tokens": int(max_tokens or 8000),
                 "messages": msgs}
         if system:

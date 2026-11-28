@@ -804,7 +804,7 @@ def load(work):
     out = os.path.join(work, "brief")
     with open(f"{out}/manifest.json") as f:
         man = json.load(f)
-    system = [{"type": "text", "text": prefix_text(), "cache_control": {"type": "ephemeral"}}]
+    system = [{"type": "text", "text": prefix_text(), "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
     with open(f"{out}/film.txt", encoding="utf-8") as f:
         content = [{"type": "text", "text": f.read()}]
     for i in range(1, 5):

@@ -3287,7 +3287,7 @@ def edl_history(conn, project_id, limit=8):
 LLM_PAYLOAD_CAP = 200_000     # bytes of JSON per side, then truncated marker
 
 
-def _capped_payload(obj):
+def _capped_payload(obj, *, preserve_usage=False):
     """Redact secrets and cap the stored JSON. The cap keeps llm_calls
     readable in the admin inspector without ever dropping a call."""
     s = json.dumps(obj, ensure_ascii=False, default=str)
@@ -3302,8 +3302,27 @@ def _capped_payload(obj):
     if getattr(config, "ANTHROPIC_API_KEY", ""):
         s = s.replace(config.ANTHROPIC_API_KEY, "[REDACTED]")
     if len(s) > LLM_PAYLOAD_CAP:
-        return {"_truncated": True, "_original_bytes": len(s),
-                "_prefix": s[:LLM_PAYLOAD_CAP] + "…[truncated]"}
+        capped = {"_truncated": True, "_original_bytes": len(s),
+                  "_prefix": s[:LLM_PAYLOAD_CAP] + "…[truncated]"}
+        if preserve_usage and isinstance(obj, dict):
+            # The inspector can truncate an answer; the billing and cache
+            # queries still need the provider counters as numeric JSON fields.
+            safe = json.loads(s)
+            for name in ("cached_in", "uncached_in", "cache_write_in", "cache_write_total_in",
+                         "cache_write_1h_in", "cache_write_12h_in", "provider_cost_usd",
+                         "credit_cost_usd", "reasoning_out", "audio_in", "audio_out"):
+                if isinstance(safe.get(name), (int, float)):
+                    capped[name] = safe[name]
+            for name in ("provider", "cost_basis", "credit_price_model", "service_tier"):
+                if isinstance(safe.get(name), str):
+                    capped[name] = safe[name][:96]
+            cache = safe.get("prompt_cache")
+            if isinstance(cache, dict):
+                capped["prompt_cache"] = {k: cache[k] for k in
+                    ("version", "key", "model", "provider_model", "policy", "cache_read_reported",
+                     "cached_tokens", "tools_sha", "system_sha")
+                    if isinstance(cache.get(k), (int, float, str)) and len(str(cache[k])) <= 128}
+        return capped
     return json.loads(s)
 
 
@@ -3473,7 +3492,7 @@ def insert_llm_call(conn, project_id, job_id, purpose, model, request,
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
         """, (project_id, job_id, purpose[:32], model,
               Json(_capped_payload(request)),
-              Json(_capped_payload(response) if response is not None else None),
+              Json(_capped_payload(response, preserve_usage=True) if response is not None else None),
               prompt_tokens, completion_tokens))
 
 
