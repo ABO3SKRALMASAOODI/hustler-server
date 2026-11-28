@@ -227,13 +227,14 @@ def test_encoded_window_identity_follows_media_and_device_bytes(tmp_path, monkey
     assert key(1) != original
 
 
-def test_depth_samples_the_first_frame_of_a_photo_at_the_batch_rate(tmp_path, monkeypatch):
+@pytest.mark.parametrize("extension", ["png", "jpg"])
+def test_depth_samples_the_first_frame_of_a_photo_at_the_batch_rate(tmp_path, monkeypatch, extension):
     import cv2
     import analysis_jobs
     import depth_fx
     import depth_track
 
-    photo = tmp_path / "local.png"
+    photo = tmp_path / f"local.{extension}"
     image = np.zeros((48, 64, 3), np.uint8)
     image[:, 32:] = 255
     assert cv2.imwrite(str(photo), image)
@@ -250,3 +251,18 @@ def test_depth_samples_the_first_frame_of_a_photo_at_the_batch_rate(tmp_path, mo
     with np.load(path) as data:
         assert data["depth"].shape == (1, 48, 64)
         assert data["depth"].max() > data["depth"].min()
+
+
+def test_dissolve_handles_reach_across_the_crop_handoff(tmp_path):
+    import renderer
+    import subprocess
+
+    # Three blocks of a single outgoing shot. Its last crop lasts one frame.
+    planes = [(4, 32), (2, 112), (1, 208)]
+    graph = [f"nullsrc=s=8x8:r=25,format=gray,geq=lum={value},trim=end_frame={n}[b{i}]"
+             for i, (n, value) in enumerate(planes)]
+    label = renderer._junction_edge(graph, [n for n, _ in planes], 2, "a", 5,
+                                    lambda i: f"b{i}", "edge")
+    raw = subprocess.check_output(["ffmpeg", "-v", "error", "-filter_complex", ";".join(graph),
+                                   "-map", f"[{label}]", "-pix_fmt", "gray", "-f", "rawvideo", "-"])
+    assert np.frombuffer(raw, "uint8").reshape(-1, 64)[:, 0].tolist() == [32, 32, 112, 112, 208]

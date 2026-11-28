@@ -477,7 +477,10 @@ def _decode(src, start, dur, w, h, fps, n_max):
                 "-reconnect_delay_max", "5"]
     scale = f"scale={w}:{h}:flags=area"
     sample = f"fps={fps:.6f},{scale}" if fps is not None else scale
-    cmd += ["-ss", f"{max(0.0, start):.3f}", "-t", f"{dur:.3f}", "-i",
+    # Seeking even to zero can consume the sole packet of a JPEG stream.
+    if start > 0:
+        cmd += ["-ss", f"{start:.3f}"]
+    cmd += ["-t", f"{dur:.3f}", "-i",
             str(src), "-an", "-sn", "-dn",
             "-vf", sample,
             "-frames:v", str(int(n_max)), "-pix_fmt", "bgr24",

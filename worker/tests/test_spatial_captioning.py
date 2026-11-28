@@ -7,6 +7,7 @@ import tempfile
 
 import cv2
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -456,7 +457,8 @@ def test_mixed_reframe_track_fits_unmeasured_shots_and_maps_geometry():
     assert "trim=start=3.033:end=6.000" in graph
 
 
-def test_reframe_track_marks_no_face_shots_as_safe_fit(tmp_path):
+@pytest.mark.parametrize("middle", [[], [[.05,.2,.23,.48],[.75,.2,.94,.48]]])
+def test_reframe_track_keeps_wide_groups_and_unmeasured_shots(tmp_path, middle):
     class Ctx:
         workdir = str(tmp_path)
         duration = 6.0
@@ -467,7 +469,7 @@ def test_reframe_track_marks_no_face_shots_as_safe_fit(tmp_path):
                       {"start": 4.0, "end": 6.0}],
             "spatial": {"samples": [
                 {"t": 1.0, "faces": [[0.15, 0.2, 0.35, 0.5]]},
-                {"t": 3.0, "faces": []},
+                {"t": 3.0, "faces": middle},
                 {"t": 5.0, "faces": [[0.65, 0.2, 0.85, 0.5]]},
             ]},
         }
@@ -491,7 +493,7 @@ def test_reframe_track_marks_no_face_shots_as_safe_fit(tmp_path):
     assert result.startswith("EDL v1 -> v2")
     assert [span["mode"] for span in ctx.edl["frame"]["focus_track"]] == [
         "crop", "pad_blur", "crop"]
-    assert "had no unambiguous measured face" in result
+    assert ("keep the measured faces" if middle else "had no unambiguous measured face") in result
 
 
 def test_reframe_track_handles_one_face_then_unmeasured_broll(tmp_path):

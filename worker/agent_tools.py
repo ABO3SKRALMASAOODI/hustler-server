@@ -9848,16 +9848,16 @@ def _talking_head(boxes, coverage):
     return widths[len(widths) // 2] >= TALKING_FACE_MIN_W
 
 
-def _spatial_face_boxes(sidecar, windows):
-    """Every single-face box the sidecar measured inside the windows."""
+def _spatial_face_boxes(sidecar, windows, include_groups=False):
+    """Measured face boxes, optionally including people sharing the frame."""
     boxes = []
     for sample in (sidecar or {}).get("samples") or []:
         try:
             t = float(sample.get("t"))
             faces = sample.get("faces") or []
-            if len(faces) == 1 and \
+            if (include_groups or len(faces) == 1) and \
                     any(float(a) <= t <= float(b) for a, b in windows):
-                boxes.append([float(v) for v in faces[0][:4]])
+                boxes.extend([float(v) for v in face[:4]] for face in faces if len(face) >= 4)
         except (TypeError, ValueError, IndexError):
             continue
     return boxes
@@ -11041,7 +11041,7 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
     if len(wins) < 2:
         return None
     from score.source_guard import printed_lines
-    measured, protected_text = [], {}
+    measured, protected_shots = [], {}
     video = (ctx.index or {}).get("video") or {}
     sw, sh = video.get("width"), video.get("height")
     rw, rh = map(float, str(ratio).split(":"))
@@ -11076,8 +11076,11 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
         except Exception:
             pass
         lines = [line for sample in spatial_samples for line in printed_lines(sample)]
-        if lines:
-            boxes = lines + _spatial_face_boxes(sidecar, [w])
+        if lines or ambiguous:
+            boxes = lines + _spatial_face_boxes(sidecar, [w], include_groups=True)
+        else:
+            boxes = []
+        if boxes:
             xmin, ymin = min(b[0] for b in boxes), min(b[1] for b in boxes)
             xmax, ymax = max(b[2] for b in boxes), max(b[3] for b in boxes)
             fits = xmax - xmin <= cw and ymax - ymin <= ch
@@ -11086,12 +11089,12 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
             if fits:
                 pt = (min(xmin + cw/2, max(xmax - cw/2, pt[0])),
                       min(ymin + ch/2, max(ymax - ch/2, pt[1])))
-            protected_text[w[0]] = mode
+            protected_shots[w[0]] = mode
         measured.append([w[0], w[1], pt])
     have = [m for m in measured if m[2]]
     if not have:
         return None
-    if len(have) < 2 and not protected_text and not (preserve_unmeasured and
+    if len(have) < 2 and not protected_shots and not (preserve_unmeasured and
                               len(have) < len(measured)):
         return None
     # A no-face shot is not permission to inherit the prior speaker's crop:
@@ -11108,7 +11111,7 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
             m[2] = prev or nxt or global_pt
             m.append("pad_blur" if preserve_unmeasured else "crop")
         else:
-            m.append(protected_text.get(m[0], "crop"))
+            m.append(protected_shots.get(m[0], "crop"))
     spans = []
     for s, e, pt, span_mode in measured:
         if spans and abs(spans[-1]["x"] - pt[0]) < 0.06 \
@@ -11120,12 +11123,12 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
         spans.append({"t0": round(s, 3), "t1": round(e, 3),
                       "x": round(pt[0], 3), "y": round(pt[1], 3),
                       "mode": span_mode})
-    if len(spans) < 2 and not protected_text:
+    if len(spans) < 2 and not protected_shots:
         return None                      # one aim — the single point serves
     # Each camera position's crop edges are checked on its own frames: an
     # inset or a door frame belongs to one position, not to the whole video.
     edge_notes = []
-    cropped = [sp for sp in spans if sp.get("mode") == "crop" and sp["t0"] not in protected_text]
+    cropped = [sp for sp in spans if sp.get("mode") == "crop" and sp["t0"] not in protected_shots]
     if proxy and cropped and _crops_anything(ctx, ratio):
         rows = [(sp["t0"], sp["t1"], (sp["x"], sp["y"])) for sp in cropped]
         for n, (members, windows) in enumerate(_edge_check_positions(rows)):
@@ -11176,10 +11179,12 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
             "speaking; inspect the shots against the dialogue and override "
             "individual source-time spans with set_frame(focus_track=...).")
     if fitted:
-        res += (f" REVIEW REQUIRED: {fitted} shot span(s) had no unambiguous measured face, so those "
-                "specific spans fit the whole picture over a blurred "
-                "background instead of inheriting a previous crop and "
-                "showing empty/irrelevant space.")
+        if "pad_blur" in protected_shots.values():
+            res += (f" {fitted} shot span(s) fit the whole picture over a blurred background "
+                    "to keep the measured faces and printed content in frame.")
+        else:
+            res += (f" {fitted} shot span(s) had no unambiguous measured face and "
+                    "fit the whole picture over a blurred background.")
     if edge_notes:
         res += "\n" + "\n".join(edge_notes)
     return res

@@ -492,7 +492,7 @@ def test_cuts_skip_pieces_of_one_kept_span():
     frames = {("seg", 0): 50, ("seg", 1): 50, ("ins", 0): 25,
               ("seg", 2): 75}
     cuts = renderer._fx_cuts(order, keep, [[0.0, 4.0], [6.0, 9.0]], frames)
-    assert cuts == [(1, 100, 50, 25), (2, 125, 25, 75)]
+    assert cuts == [(1, 100, 100, 25), (2, 125, 25, 75)]
     assert renderer._fx_cuts(order, keep, [], {}) == []
 
 

@@ -4076,19 +4076,48 @@ def _fx_cuts(order, keep, edl_keep, blk_frames):
                 return ("seg", j)
         return ("local", s_)
 
-    cuts, acc = [], 0
-    for k in range(len(order) - 1):
-        ka, ia, _l = order[k]
-        kb, ib, _l = order[k + 1]
-        na, nb = blk_frames.get((ka, ia)), blk_frames.get((kb, ib))
-        if na is None or nb is None:
+    # A crop or card handoff can leave only one frame of the last render
+    # block at a real cut. The handles belong to the whole authored shot.
+    groups = []
+    for k, (kind, idx, _) in enumerate(order):
+        n = blk_frames.get((kind, idx))
+        if n is None:
             return []
-        acc += na
-        oa, ob = origin(ka, ia), origin(kb, ib)
-        if oa == ob and oa[0] == "seg":
-            continue
-        cuts.append((k, acc, na, nb))
+        key = origin(kind, idx)
+        if groups and key[0] == "seg" and groups[-1][0] == key:
+            groups[-1][1] = k
+            groups[-1][2] += n
+        else:
+            groups.append([key, k, n])
+    cuts, clock = [], 0
+    for (_, last, before), (_, _, after) in zip(groups, groups[1:]):
+        clock += before
+        cuts.append((last, clock, before, after))
     return cuts
+
+
+def _junction_edge(parts, frames, start, side, count, tap, label):
+    """Take the last/first count post-composition frames of a shot in order."""
+    pieces = []
+    k, remaining = start, count
+    while remaining:
+        length = min(remaining, frames[k])
+        if length:
+            first = frames[k] - length if side == "a" else 0
+            name = f"{label}_{k}"
+            parts.append(f"[{tap(k)}]trim=start_frame={first}:end_frame={first+length},"
+                         f"setpts=PTS-STARTPTS[{name}]")
+            pieces.append(name)
+            remaining -= length
+        k += -1 if side == "a" else 1
+    if side == "a":
+        pieces.reverse()
+    if len(pieces) == 1:
+        return pieces[0]
+    inputs = "".join(f"[{piece}]" for piece in pieces)
+    parts.append(f"{inputs}concat=n={len(pieces)}:v=1:a=0[{label}]")
+    return label
+
 
 
 # Junction windows laid over the program each cost a full program of padding:
@@ -5893,6 +5922,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # compiled window replaces program frames [cut-h, cut+h) after concat.
     # No junction items: nothing here runs.
     fx_windows = []
+    junction_block_frames = [blk_frames[o[:2]] for o in order] if fx_juncs else []
     pm_blk_taps = {}
 
     def pm_blk_tap(lab, kind, idx):
@@ -5917,17 +5947,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         kind, idx, _L = order[k]
         f3 = round(float(fps), 3)
         uu = f"pmpj{ka}{side}"
-        own = pm_blk_tap(lab, kind, idx).take()
-        nb = blk_frames[(kind, idx)]
-        sel = (f"trim=start_frame={max(0, nb - h)}" if side == "a"
-               else f"trim=end_frame={h}")
-        parts.append(f"[{own}]{sel},setpts=PTS-STARTPTS[{uu}o]")
+        own = _junction_edge(parts, junction_block_frames, k, side, h,
+                             lambda j: pm_blk_tap(lab, *order[j][:2]).take(), f"{uu}o")
         src = spec.get(f"{side}_src")
         tail = f"fps={f3:.3f},setpts=PTS-STARTPTS,setsar=1,format=yuv420p"
         if not src:
             pad = (f"tpad=stop_mode=clone:stop={h}" if side == "a"
                    else f"tpad=start_mode=clone:start={h}")
-            parts.append(f"[{uu}o]{pad},{tail},format=gray[{uu}m]")
+            parts.append(f"[{own}]{pad},{tail},format=gray[{uu}m]")
             return f"{uu}m"
         i = src["seg"]
         if side == "a":
@@ -5958,7 +5985,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          picture=(edl.get("frame") or {}).get("picture"),
                          grade=None, src_size=main_src_size)
         _mask_kernels(parts, mark)
-        pair = (f"[{uu}o][{uu}h]" if side == "a" else f"[{uu}h][{uu}o]")
+        pair = (f"[{own}][{uu}h]" if side == "a" else f"[{uu}h][{own}]")
         parts.append(f"{pair}concat=n=2:v=1:a=0,{tail},format=gray[{uu}m]")
         return f"{uu}m"
 
@@ -6017,17 +6044,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         tail = f"fps={f3:.3f},setpts=PTS-STARTPTS,setsar=1,format=yuv420p"
 
         def _own(k, side):
-            vlab, alab, bd = blocks[k]
-            parts.append(f"[{vlab}]split[{vlab}{u}{side}][{u}{side}t]")
-            blocks[k] = (f"{vlab}{u}{side}", alab, bd)
-            nb = blk_frames[order[k][:2]]
-            if side == "a":
-                parts.append(f"[{u}at]trim=start_frame={max(0, nb - h)},"
-                             f"setpts=PTS-STARTPTS[{u}ao]")
-            else:
-                parts.append(f"[{u}bt]trim=end_frame={h},"
-                             f"setpts=PTS-STARTPTS[{u}bo]")
-            return f"{u}{side}o"
+            def tap(j):
+                vlab, alab, bd = blocks[j]
+                retained, edge = f"{u}{side}{j}keep", f"{u}{side}{j}tap"
+                parts.append(f"[{vlab}]split[{retained}][{edge}]")
+                blocks[j] = (retained, alab, bd)
+                return edge
+            return _junction_edge(parts, junction_block_frames, k, side, h, tap,
+                                  f"{u}{side}o")
 
         def _handle(src, side):
             # the block's own frame grid: same trim start, same fps, so
@@ -6125,11 +6149,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         _shared_handles(handle_batch)
         fxgraph.flush_junctions(parts, fx_plan)
 
-    if _weaves_windows(fx_windows, pm, card_runs):
-        # Many windows are woven in, not laid over: see _weave_windows.
-        _weave_windows(parts, blocks, [blk_frames[o[:2]] for o in order],
-                       fx_windows, fps)
-        fx_windows = []
+    # A handle spanning an internal crop handoff overlays the joined blocks.
+    # The other junctions can use the cheaper per-block weave as usual.
+    local_windows = [w for w in fx_windows
+                     if w[1] <= min(junction_block_frames[w[3]:w[3] + 2])]
+    if _weaves_windows(local_windows, pm, card_runs):
+        _weave_windows(parts, blocks, junction_block_frames, local_windows, fps)
+        woven_cuts = {w[3] for w in local_windows}
+        fx_windows = [w for w in fx_windows if w[3] not in woven_cuts]
     else:
         pairs = "".join(f"[{v}][{a}]" for v, a, _d in blocks)
         parts.append(f"{pairs}concat=n={len(blocks)}:v=1:a=1[vc][ac]")
