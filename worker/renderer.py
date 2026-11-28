@@ -8364,8 +8364,7 @@ def _overlay_input(item, local, fps, *, copy_timestamps=False):
     encoding and came back 24.73 s long for a 37.69 s edit (on Cloudflare
     both files are streamed, and the starved main read ended early)."""
     if item["kind"] == "image" or str(local).endswith(IMAGE_EXTS):
-        return (["-loop", "1", "-t", f"{item['duration_s']:.3f}",
-                 "-r", f"{fps:.3f}", "-i", local], item)
+        return render_plan.still_input(local, item["duration_s"], fps), item
     # the screen-takeover supply pad and the PIP clone tail read past the
     # window; insert_input's one-second tail covers both
     return render_plan.insert_input(item, local, fps,

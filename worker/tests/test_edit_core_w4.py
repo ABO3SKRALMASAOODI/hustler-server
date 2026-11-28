@@ -18,6 +18,23 @@ def test_light_devices_keep_their_own_length_in_a_142_frame_beat():
         assert patch["items"][0]["f"] == expected
 
 
+def test_stock_gif_with_jpeg_filename_plays_for_its_full_window(tmp_path):
+    from PIL import Image
+    import renderer
+    import render_plan
+    import subprocess
+    path = tmp_path / "stock.jpg"
+    Image.new("RGB", (16, 16), "blue").save(path, format="GIF")
+    item = {"kind": "image", "duration_s": .8}
+    for build in (render_plan.insert_input, renderer._overlay_input):
+        args, _ = build(item, str(path), 25)
+        rgb = subprocess.check_output(["ffmpeg", "-v", "error", *args, "-an",
+                                       "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
+        frames = np.frombuffer(rgb, np.uint8).reshape(-1, 16, 16, 3)
+        assert len(frames) == 20
+        assert frames[:, :, :, 2].min() > 240
+
+
 def test_rotated_source_and_index_share_coordinates(tmp_path):
     import media
     import w0b_probe

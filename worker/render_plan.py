@@ -103,6 +103,15 @@ def canonical_program(edl):
     return result
 
 
+def still_input(path, duration, fps):
+    """Loop a bounded visual input regardless of which demuxer identified it.
+
+    A stock image URL can serve a GIF in a .jpg asset. FFmpeg's generic stream
+    loop supports both GIF and image2 while preserving the programme frame rate.
+    """
+    return ["-stream_loop", "-1", "-t", f"{duration:.3f}", "-r", f"{fps:.3f}", "-i", path]
+
+
 def insert_input(item, path, fps, *, copy_timestamps=False):
     """Input options and graph item for a bounded, accurate source read.
 
@@ -114,8 +123,7 @@ def insert_input(item, path, fps, *, copy_timestamps=False):
     graph_item = dict(item)
     duration = float(item["duration_s"])
     if item["kind"] == "image":
-        return (["-loop", "1", "-t", f"{duration:.3f}",
-                 "-r", f"{fps:.3f}", "-i", path], graph_item)
+        return still_input(path, duration, fps), graph_item
     start = max(0.0, float(item.get("source_start_s") or 0))
     rate = float(item.get("rate") or 1)
     seek = max(0.0, start - 1.0)
