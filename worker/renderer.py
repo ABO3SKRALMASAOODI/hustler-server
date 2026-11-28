@@ -4248,6 +4248,30 @@ def _joined_in_source(a, b, keep):
     return abs(float(keep[a[1]][1]) - float(keep[b[1]][0])) < 0.02
 
 
+def _compose_join(spec, order, keep, index, fps, plan):
+    """Resolve a dissolve to a straight cut when both source handles
+    belong to the same measured shot. Other devices may share the join."""
+    import taste
+    (ak, ai, _), (bk, bi, _) = order[spec["k"]:spec["k"] + 2]
+    if ak != "seg" or bk != "seg":
+        return spec
+    shots = (index or {}).get("shots") or []
+    a0, a1 = keep[ai]
+    b0, b1 = keep[bi]
+    half_frame = 0.5 / fps
+    left = taste._shot_id_at(shots, max((a0+a1)/2, a1-half_frame))
+    right = taste._shot_id_at(shots, min((b0+b1)/2, b0+half_frame))
+    if left is None or left != right:
+        return spec
+    items = []
+    for item in spec["items"]:
+        if item.get("style") == "dissolve" and not item.get("hold"):
+            plan.note(item, "full", "straight cut between frames of the same indexed shot")
+        else:
+            items.append(item)
+    return dict(spec, items=items) if items else None
+
+
 def _index_shot_starts(index):
     out = []
     for sh in (index or {}).get("shots") or []:
@@ -4815,6 +4839,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     if fx_plan is not None and fx_plan.junction_items:
         fx_juncs = fxgraph.junction_specs(
             fx_plan, _fx_cuts(order, keep, edl.get("keep"), blk_frames))
+        fx_juncs = [join for spec in fx_juncs
+                    if (join := _compose_join(spec, order, keep, index, fps, fx_plan))]
         shot_starts = _index_shot_starts(index)
         for spec in fx_juncs:
             ka, kb = spec["k"], spec["k"] + 1
