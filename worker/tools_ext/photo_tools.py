@@ -250,7 +250,7 @@ def _needs_fill(row, aspect, pm):
     x0, y0, x1, y1 = row.get("rect") or (0.0, 0.0, 1.0, 1.0)
     w = (x1 - x0) * float(pm["width"])
     h = (y1 - y0) * float(pm["height"])
-    return h > 0 and abs(w / h / aspect - 1.0) > 0.02
+    return bool(row.get("bars")) or (h > 0 and abs(w / h / aspect - 1.0) > 0.02)
 
 
 def _in_a_card(edl, p0, p1):
@@ -291,7 +291,8 @@ def set_photo_fill(ctx, start=None, end=None, at=None, mode="blur", blur=None,
     current = next((i for i in edl.get("fx") or [] if isinstance(i, dict)
                     and i.get("type") == "photo_fill"), None)
     held = list((current or {}).get("spans") or [])
-    rows = _shots_in(edl, pm["shots"], *span, whole_range=at is None)
+    shots = pm.get("fill_shots") or pm["shots"]
+    rows = _shots_in(edl, shots, *span, whole_range=at is None)
     aspect = _frame_aspect(edl, pm)
 
     def covers(sp):
@@ -300,7 +301,7 @@ def set_photo_fill(ctx, start=None, end=None, at=None, mode="blur", blur=None,
 
     spans = [sp for sp in held if not covers(sp)]
     added = hidden = 0
-    everywhere = _shots_in(edl, pm["shots"], 0.0, program)
+    everywhere = _shots_in(edl, shots, 0.0, program)
     if mode == "blur":
         for row, p0, p1, a, z in rows:
             if _needs_fill(row, aspect, pm) and _in_a_card(edl, p0, p1):

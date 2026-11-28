@@ -36,7 +36,7 @@ import numpy as np
 
 # 2: cuts measured over the footage's drawn steps (p6311, ticket 1844); a
 # version-1 map is measured again.
-VERSION = 2
+VERSION = 3
 # The analysis frame. Rectangles are read on it, so its width is what they
 # are good to: 1/640 of the frame, under two pixels of a 1080p export.
 ANALYSIS_W = 640
@@ -223,6 +223,54 @@ def find_rect(lo, hi):
             round(1.0 - mx / W, 5), round(1.0 - my / H, 5)]
 
 
+def _active_rect(frame):
+    """Measure each near-black edge independently; phone edits can be off-centre."""
+    H, W = frame.shape
+    rect = find_rect(frame, frame)
+    for axis, rows in ((1, frame), (0, frame.T)):
+        for far, edge in ((False, rows), (True, rows[::-1])):
+            level = float(np.median(edge[0]))
+            if level > 16:
+                continue
+            # Encoded black is flat, even when a night shot's sky is dark.
+            flat = np.mean(np.abs(edge.astype(np.int16) - level) <= 3, axis=1)
+            content = np.flatnonzero(flat < 0.985)
+            if not content.size:
+                continue
+            share = float(content[0]) / len(edge)
+            if BARS_MIN_SHARE <= share < 0.49:
+                if far:
+                    rect[axis + 2] = min(rect[axis + 2], round(1 - share, 5))
+                else:
+                    rect[axis] = max(rect[axis], round(share, 5))
+    return rect
+
+
+def _fill_rows(shot, samples, fps):
+    """Follow persistent format changes even across a slow cut the visual
+    index groups as one shot. A single dark frame cannot move a band edge."""
+    if not samples:
+        return [shot]
+    rects = np.array([_active_rect(frame) for _, frame in samples])
+    start = shot["start"]
+    groups = []
+    stable = []
+    for i, (frame, _) in enumerate(samples):
+        rect = np.median(rects[max(0, i-1):min(len(rects), i+2)], axis=0)
+        if stable and np.max(np.abs(rect - stable[0])) > 0.025:
+            end = min(shot["end"], max(start, frame / fps))
+            groups.append((start, end, stable))
+            start, stable = end, []
+        stable.append(rect)
+    groups.append((start, shot["end"], stable))
+    rows = []
+    for a, b, values in groups:
+        rect = np.median(values, axis=0).round(5).tolist()
+        rows.append(dict(shot, start=a, end=b, rect=rect,
+                         bars=rect != [0.0, 0.0, 1.0, 1.0]))
+    return rows
+
+
 def _shot_row(first, last, fps, duration, lo, hi, peak, best):
     rect = find_rect(lo, hi) if lo is not None else [0.0, 0.0, 1.0, 1.0]
     return {"start": cut_grid(first, fps) if first else 0.0,
@@ -291,7 +339,7 @@ def measure(src, *, ffmpeg=None, info=None):
     duration = float(info.get("duration") or i / fps)
     edges = [0] + cuts + [i]
     d = np.asarray(diffs, dtype=np.float32)
-    shots = []
+    shots, fill_shots = [], []
     pos = 0
     for a, b in zip(edges, edges[1:]):
         lo = hi = None
@@ -314,7 +362,8 @@ def measure(src, *, ffmpeg=None, info=None):
         peak = float(inner.max()) if inner.size else 0.0
         shots.append(_shot_row(a, b if b < i else None, fps, duration,
                                lo, hi, peak, best))
-    return {"v": VERSION, "fps": round(fps, 3), "frames": i,
+        fill_shots.extend(_fill_rows(shots[-1], wanted, fps))
+    return {"v": VERSION, "fill_shots": fill_shots, "fps": round(fps, 3), "frames": i,
             "duration": round(duration, 3), "width": W, "height": H,
             "cuts": [cut_grid(c, fps) for c in cuts], "shots": shots}
 
