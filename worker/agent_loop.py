@@ -6440,12 +6440,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     model, compact=True, names=set(agent_tools.TOOLS),
                     engine=agent_tools.engine_on(ctx)),
                 "low" if model.startswith("claude-opus-5-5") else config.CLAUDE_TRIAL_EFFORT)
-            try:
-                tool_plan["prefix_ttl"] = worker_db.run(_editing_cache_ttl, ctx.project_id)
-            except dbx.JobLeaseLost:
-                raise
-            except Exception as exc:
-                print(f"[edit-cache] using the short history TTL ({type(exc).__name__})", flush=True)
+            # Opus edits wait on long renders between steps. Haiku's history
+            # writes are re-read within 5 minutes: on 14 days of llm_calls a 1h
+            # history (2x writes) would cost about 3.4x what it could save.
+            if model.startswith("claude-opus-5-5"):
+                try:
+                    tool_plan["prefix_ttl"] = worker_db.run(_editing_cache_ttl, ctx.project_id)
+                except dbx.JobLeaseLost:
+                    raise
+                except Exception as exc:
+                    print(f"[edit-cache] using the short history TTL ({type(exc).__name__})", flush=True)
         else:
             # Resumed slices rebuild messages. References belonged to the previous history.
             tool_plan["refs"] = {}

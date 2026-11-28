@@ -362,7 +362,9 @@ def request_body(model, messages, tools=None, max_tokens=None, effort=None, tool
     conversation = not single_review and (bool(rt) or any(
         msg.get("role") == "assistant" for msg in messages))
     count = (tool_plan or {}).get("static_messages", 2)
-    result = openai_cache.responses(body, _cache_key(), conversation=conversation, static_messages=count)
+    # The wire key stays the shared editor role so every session reads the
+    # 12h kernel write; _cache_key() still names this session's stored history.
+    result = openai_cache.responses(body, "editor", conversation=conversation, static_messages=count)
     if (tool_plan or {}).get("last_input_tokens", 0) >= config.CLAUDE_HISTORY_COMPACT_TOKENS:
         tool_plan.pop("previous_body", None)
     prior = (tool_plan or {}).get("previous_body")

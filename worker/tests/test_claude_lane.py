@@ -724,7 +724,16 @@ def test_trial_planner_reuses_fixed_trial_instructions_across_projects():
                   for text in ("kernel", "capabilities", "trial instructions", project)]
         claude_lane._mark_cache(system, [], [], "claude-opus-5-5", "trial_planner")
         assert [i for i, block in enumerate(system) if "cache_control" in block] == [2]
-        assert system[2]["cache_control"]["ttl"] == "1h"
+        # About one planner call a day: the 5m write (1.25x) beats the 1h write (2x).
+        assert system[2]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_rung_model_lists_agree_between_plans_and_worker_config(monkeypatch):
+    monkeypatch.delenv("EDIT_RUNG_MODELS", raising=False)
+    import importlib
+    import claude_plans
+    importlib.reload(claude_plans)
+    assert {"gpt-6.1-sol", "gpt-6.2-sol"} <= set(claude_plans.rung_models())
 
 
 @pytest.mark.parametrize("model", ["claude-haiku-5-5", "claude-opus-5-5"])

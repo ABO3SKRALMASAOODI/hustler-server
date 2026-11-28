@@ -89,7 +89,7 @@ def _parse_time(value):
 # 2026). The worker's config.EDIT_RUNG_MODELS reads the same variable.
 def rung_models():
     return frozenset(m.strip().lower() for m in
-                     os.getenv("EDIT_RUNG_MODELS", "gpt-6.1-sol").split(",")
+                     os.getenv("EDIT_RUNG_MODELS", "gpt-6.1-sol,gpt-6.2-sol").split(",")
                      if m.strip())
 
 

@@ -51,6 +51,8 @@ def _late_cost(model, snap, elapsed):
         input_tokens = int(getattr(raw, "input_tokens", 0) or 0)
         cache_read_input_tokens = int(getattr(raw, "cache_read_input_tokens", 0) or 0)
         cache_creation_input_tokens = int(getattr(raw, "cache_creation_input_tokens", 0) or 0)
+        # The 1h share of the write, so a late stream is priced like a finished one.
+        cache_creation = getattr(raw, "cache_creation", None)
         output_tokens = out
         service_tier = None
     return claude_lane._Usage(model, U)

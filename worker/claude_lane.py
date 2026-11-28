@@ -596,14 +596,20 @@ def _mark_cache(system, msgs, tools, model="", cache_policy=None, prefix_ttl=Non
     # planners may opt out of caching the unique project payload; shared
     # instructions still earn cache reads.
     if cache_policy in ("shared_only", "trial_planner") or _one_shot(msgs, tools):
-        # A critic's unique frames are one-shot.
+        # A critic's unique frames are one-shot. Critics and checks re-read their
+        # shared prefix within the hour, so it is written for an hour. The trial
+        # planner runs about once a day (30 days of llm_calls: 20 calls, 4 of 19
+        # gaps under an hour), so a 1h write (2x) costs more than the 5m write
+        # (1.25x) it replaces, and the trial meter charges it to the account.
+        ctl = ({"type": "ephemeral"} if cache_policy == "trial_planner"
+               else {"type": "ephemeral", "ttl": "1h"})
         if tools:
-            tools[-1] = dict(tools[-1], cache_control={"type": "ephemeral", "ttl": "1h"})
+            tools[-1] = dict(tools[-1], cache_control=ctl)
         if system:
             # The trial planner gets kernel, capabilities and the fixed trial note.
             shared = {"trial_planner": 3, "shared_only": 2}.get(cache_policy, 1)
             stable = min(shared, len(system)) - 1
-            system[stable] = dict(system[stable], cache_control={"type": "ephemeral", "ttl": "1h"})
+            system[stable] = dict(system[stable], cache_control=ctl)
         return
     # A large batch of images/observations can put the previous request's
     # write beyond Anthropic's 20-position lookback. Keep an explicit read
