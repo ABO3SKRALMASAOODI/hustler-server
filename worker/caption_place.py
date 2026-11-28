@@ -593,9 +593,31 @@ def _mapped(edl, index, tl, W, H, a, b, field):
     video = (index or {}).get("video") or {}
     if not video.get("width") or not video.get("height") or (edl or {}).get("canvas"):
         return []
-    src_mid, sample = _near_sample(index, tl, a, b)
-    if sample is None:
+    try:
+        geo = keepout.Geometry(edl, video, W, H, float(tl.out_duration),
+                               zooms=keepout.camera_zooms(edl, index, tl))
+    except Exception:  # noqa: BLE001
         return []
+    spans = [(a, b)]
+    if a < b and hasattr(tl, "offsets"):
+        spans = [(max(a, off), min(b, off + length))
+                 for off, length in zip(tl.offsets, tl.seg_out_len)
+                 if off < b and off + length > a]
+    out = []
+    for start, end in spans:
+        src_mid, sample = _near_sample(index, tl, start, end)
+        if sample is None:
+            continue
+        for bx in _sample_boxes(index, sample, field):
+            try:
+                visible = geo.visible_rects((start + end) / 2., src_mid, [float(v) for v in bx[:4]])
+            except (KeyError, IndexError, TypeError, ValueError):
+                continue
+            out.extend(r for r in visible if r not in out)
+    return out
+
+
+def _sample_boxes(index, sample, field):
     if field == "text":
         boxes = _reliable_text(sample)
     elif field in ("scene", "scene_only"):
@@ -607,21 +629,7 @@ def _mapped(edl, index, tl, W, H, a, b, field):
             boxes = [bx for bx in boxes if tuple(bx) not in lines]
     else:
         boxes = list(sample.get(field) or [])
-    if not boxes:
-        return []
-    mid = (a + b) / 2.0
-    try:
-        geo = keepout.Geometry(edl, video, W, H, float(tl.out_duration),
-                               zooms=keepout.camera_zooms(edl, index, tl))
-    except Exception:  # noqa: BLE001
-        return []
-    out = []
-    for bx in boxes:
-        try:
-            out.extend(geo.visible_rects(mid, src_mid, [float(v) for v in bx[:4]]))
-        except Exception:  # noqa: BLE001 — an unmappable box
-            continue
-    return out
+    return boxes
 
 
 def text_boxes(edl, index, tl, W, H, a, b):

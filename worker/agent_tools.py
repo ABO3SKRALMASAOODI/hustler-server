@@ -5043,29 +5043,34 @@ def _get_motion(ctx):
     return ctx._motion
 
 
+def _source_canvas(ctx, edl):
+    """The kept programme clock and the same per-frame geometry used by the renderer."""
+    import keepout
+    from score.asks import output_size
+    index = getattr(ctx, "index", None) or {}
+    video = index.get("video") or {}
+    film = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed"))
+    size = output_size(edl, index)
+    geometry = (keepout.Geometry(edl, video, *size, film.out_duration,
+                                 zooms=keepout.camera_zooms(edl, index, film))
+                if size and video.get("width") and video.get("height") else None)
+    return film, geometry
+
+
+def _visible_source_boxes(canvas, source_t, boxes):
+    film, geometry = canvas
+    if geometry is None:
+        return []
+    # A layout under construction can be inspected before its keeps are set.
+    t = film.src_to_out(source_t) if film.segs else source_t
+    if t is None:
+        return []
+    return [rect for box in boxes for rect in geometry.visible_rects(t, source_t, box)]
+
+
 def _source_box_to_output(ctx, edl, source_t, box):
-    """A source-frame box clipped/mapped into the rendered output frame."""
-    video = ctx.index.get("video") or {}
-    try:
-        sw, sh = float(video["width"]), float(video["height"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    frame = edl.get("frame") or {}
-    W, H = renderer.frame_dims(sw, sh, frame.get("ratio") or "source")
-    src, dest = renderer.picture_mapping(
-        sw, sh, W, H, _frame_mode_at_source(edl, source_t),
-        _frame_focus_at_source(edl, source_t), frame.get("picture"))
-    fx0, fy0, fx1, fy1 = src
-    dx0, dy0, dx1, dy1 = dest
-    x0, y0, x1, y1 = (float(v) for v in box)
-    x0, y0, x1, y1 = (max(x0, fx0), max(y0, fy0),
-                      min(x1, fx1), min(y1, fy1))
-    if x1 <= x0 or y1 <= y0:
-        return None
-    return [round(dx0 + (x0-fx0)/(fx1-fx0)*(dx1-dx0), 4),
-            round(dy0 + (y0-fy0)/(fy1-fy0)*(dy1-dy0), 4),
-            round(dx0 + (x1-fx0)/(fx1-fx0)*(dx1-dx0), 4),
-            round(dy0 + (y1-fy0)/(fy1-fy0)*(dy1-dy0), 4)]
+    boxes = _visible_source_boxes(_source_canvas(ctx, edl), source_t, [box])
+    return [round(v, 4) for v in boxes[0]] if boxes else None
 
 
 _CAPTION_ZONES = {
@@ -5116,24 +5121,11 @@ def _box_zone_overlap(box, zone):
     return inter / area
 
 
-def _caption_picture_bounds(ctx, edl, source_t):
-    """Visible foreground-picture bounds in output-frame fractions.
-
-    A pad/pad_blur render has a full output canvas but only part of it is the
-    actual shot.  Caption composition must stay attached to that foreground
-    picture instead of selecting an apparently empty blurred band.
-    """
-    video = ctx.index.get("video") or {}
-    try:
-        sw, sh = float(video["width"]), float(video["height"])
-    except (KeyError, TypeError, ValueError):
-        return (0.0, 1.0)
-    frame = edl.get("frame") or {}
-    W, H = renderer.frame_dims(sw, sh, frame.get("ratio") or "source")
-    _src, dest = renderer.picture_mapping(
-        sw, sh, W, H, _frame_mode_at_source(edl, source_t),
-        _frame_focus_at_source(edl, source_t), frame.get("picture"))
-    return float(dest[1]), float(dest[3])
+def _caption_picture_bounds(ctx, edl, source_t, canvas=None):
+    """Vertical extent of the visible foreground picture, including camera and cards."""
+    boxes = _visible_source_boxes(canvas or _source_canvas(ctx, edl), source_t,
+                                  [(0., 0., 1., 1.)])
+    return (min(r[1] for r in boxes), max(r[3] for r in boxes)) if boxes else (0., 1.)
 
 
 def _caption_zones_for_bounds(bounds):
@@ -5245,17 +5237,16 @@ def _stabilize_caption_positions(picks, switch_cost=1.15):
 def _caption_placement_track(ctx, edl, sidecar, preferred="bottom"):
     """Measured source-time placement spans plus unsafe/analyzed counts."""
     keep = [(float(a), float(b)) for a, b in (edl.get("keep") or [])]
+    canvas = _source_canvas(ctx, edl)
     picks = []
     for sample in (sidecar or {}).get("samples") or []:
         t = float(sample.get("t", 0))
         span = next(((a, b) for a, b in keep if a <= t <= b), None)
         if span is None:
             continue
-        faces = [m for box in sample.get("faces") or []
-                 if (m := _source_box_to_output(ctx, edl, t, box))]
-        text_boxes = [m for box in _caption_source_text_boxes(sample)
-                      if (m := _source_box_to_output(ctx, edl, t, box))]
-        bounds = _caption_picture_bounds(ctx, edl, t)
+        faces = _visible_source_boxes(canvas, t, sample.get("faces") or [])
+        text_boxes = _visible_source_boxes(canvas, t, _caption_source_text_boxes(sample))
+        bounds = _caption_picture_bounds(ctx, edl, t, canvas)
         pos, scores = _safe_caption_position(
             faces, text_boxes, bool(sample.get("dense_ui")), preferred,
             zones=_caption_zones_for_bounds(bounds))
@@ -5328,14 +5319,11 @@ def _fixed_text_band(ctx, edl, out_start, out_end, preferred="middle",
         return None, 0, 0, f"could not map timeline: {str(exc)[:120]}"
 
     rows = []
+    canvas = _source_canvas(ctx, edl)
 
     def _scores(source_t, sample):
-        faces = [mapped for box in (sample.get("faces") or [])
-                 if (mapped := _source_box_to_output(
-                     ctx, edl, source_t, box)) is not None]
-        text_boxes = [mapped for box in _caption_source_text_boxes(sample)
-                      if (mapped := _source_box_to_output(
-                          ctx, edl, source_t, box)) is not None]
+        faces = _visible_source_boxes(canvas, source_t, sample.get("faces") or [])
+        text_boxes = _visible_source_boxes(canvas, source_t, _caption_source_text_boxes(sample))
         _pos, scores = _safe_caption_position(
             faces, text_boxes, bool(sample.get("dense_ui")), preferred)
         return scores
@@ -12586,15 +12574,7 @@ REGION_MODES = ("blur", "pixelate", "black")
 def _source_region_report(ctx, edl, start, end, region):
     """Report each kept showing on the same clock and canvas as caption avoidance.
     Repaints and censors travel through this transform with the underlying pixels."""
-    import keepout
-    from score.asks import output_size
-    film = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed"))
-    index = getattr(ctx, "index", None) or {}
-    video = index.get("video") or {}
-    size = output_size(edl, index)
-    geo = (keepout.Geometry(edl, video, *size, film.out_duration,
-                            zooms=keepout.camera_zooms(edl, index, film))
-           if size and video.get("width") and video.get("height") else None)
+    film, geo = _source_canvas(ctx, edl)
     x, y, w, h = (region[k] for k in ("x", "y", "w", "h"))
     rows = []
     for a, b in film.span_to_out(start, end):

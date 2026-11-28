@@ -30,3 +30,27 @@ def test_coloured_letters_on_an_equal_luma_field_are_measured():
     mask = inpaint.ink_mask(field, colour=True)
     assert mask[70:120, 20:240].any()
     assert inpaint._line_mask(field)[90:105].any()
+
+
+def test_caption_avoidance_and_region_share_the_camera_after_a_trim():
+    from pytest import approx
+    edl = {"keep": [[10, 30]], "frame": {"ratio": "9:16", "mode": "crop", "focus_x": .38},
+           "effects": {"zooms": [{"id": "z", "start": 5, "end": 8, "mode": "punch",
+                                  "strength": .1, "ramp_s": 0, "cy": .3, "cx": .5}]}}
+    ctx = SimpleNamespace(index={"video": {"width": 1920, "height": 1080}})
+    box = (.32, .2, .48, .5)
+    before = agent_tools._source_box_to_output(ctx, edl, 14., box)
+    during = agent_tools._source_box_to_output(ctx, edl, 16., box)
+    assert (during[3] - during[1]) == approx(1.1 * (before[3] - before[1]), abs=.002)
+    note = agent_tools._source_region_report(ctx, edl, 15., 17., dict(x=.32,y=.2,w=.16,h=.3))
+    assert str(tuple(round(v, 3) for v in during)) in note
+
+
+def test_caption_avoidance_reads_each_kept_segment_across_a_cut():
+    import caption_place
+    from timeline import Timeline
+    edl = {"keep": [[2, 3], [14, 15]]}
+    left, right = (.1, .2, .3, .4), (.6, .7, .8, .9)
+    index = {"video": {"width": 640, "height": 640}, "spatial": {"samples": [
+        {"t": 2.5, "props": [left]}, {"t": 14.5, "props": [right]}]}}
+    assert caption_place._mapped(edl, index, Timeline(edl["keep"]), 640, 640, 0., 2., "props") == [left, right]
