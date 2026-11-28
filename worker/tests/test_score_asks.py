@@ -389,6 +389,7 @@ def test_incomplete_ledger_retries_and_empty_followup_carries_unfinished_work(mo
     ctx.previous_ask_ledger = {"asks": [dict(ledger["asks"][0], state="partly")]}
     carried = asks.build(ctx, "that still looks the same")
     assert carried["asks"][0]["said"] == ledger["asks"][0]["said"]
+    assert asks.summary(carried)["previous"] == [{"id": "a1", "status": "carried", "ask_id": "a1"}]
 
 
 def test_the_customers_alternative_rides_with_its_ask_to_the_editor_and_the_check(monkeypatch, tmp_path):

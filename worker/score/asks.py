@@ -558,14 +558,23 @@ def build(ctx, request, history=None, edl=None):
         value, usage = {}, {}
     current = value.get("asks") or []
     decisions = {d["id"]: d for d in value.get("previous") or [] if isinstance(d, dict) and d.get("id")}
-    current_ids = {a.get("id") for a in current}
+    positions = {a["id"]: n for n, a in enumerate(current, 1) if a.get("id")}
     for old in previous:
-        decision = decisions.get(old["id"], {})
-        if (decision.get("status") == "dropped" or decision.get("ask_id") in current_ids or
-                any(a.get("said") == old.get("said") and a.get("want") == old.get("want") for a in current)):
+        old_id = old["id"]
+        decision = decisions.get(old_id, {})
+        if decision.get("status") == "dropped":
             continue
-        if old.get("state") in (*OPEN_STATES, "unchecked", "open") or decision.get("status") == "reopened":
-            current.append(dict(old, want=old.get("want") or old.get("said"), **{"pass": old.get("pass") or old.get("said")}))
+        position = positions.get(decision.get("ask_id"))
+        if position is None:
+            position = next((n for n, a in enumerate(current, 1)
+                             if a.get("said") == old.get("said") and a.get("want") == old.get("want")), None)
+        if position is None:
+            if old.get("state") not in (*OPEN_STATES, "unchecked", "open") and decision.get("status") != "reopened":
+                continue
+            current.append(dict(old, want=old.get("want") or old.get("said"),
+                                **{"pass": old.get("pass") or old.get("said")}))
+            position = len(current)
+        decisions[old_id] = {"id": old_id, "ask_id": f"a{position}", "status": decision.get("status") or "carried"}
     if not current:
         for req in requirements:
             if not req.get("quote") or str(req.get("id", "")).startswith("system:"):
@@ -575,6 +584,9 @@ def build(ctx, request, history=None, edl=None):
                             "kind": {"preserve": "keep", "inspect": "answer"}.get(req.get("action"), "edit")})
     ledger = settle(dict(value, asks=current), edl, usage)
     ledger["previous"] = list(decisions.values())
+    if ledger["previous"]:
+        print("[asks] prior asks: " + ", ".join(
+            f"{d['id']} {d.get('status', 'unspecified')} {d.get('ask_id') or ''}".rstrip() for d in ledger["previous"]), flush=True)
     if track_titles:
         ledger["soundtrack_options"] = track_titles
     return ledger
@@ -1596,7 +1608,7 @@ def summary(ledger, verdict=None):
     seen = {r["id"]: str(r.get("seen") or "")[:200] for r in (verdict or {}).get("asks") or []}
     return {"route": ledger.get("route"), "lang": ledger.get("lang"), "repairs": ledger.get("repairs", 0),
             "start": ledger.get("start"), "reset": ledger.get("reset"),
-            "routed": ledger.get("routed"), "usd": round(sum(float((c or {}).get("usd") or 0) for c in
+            "routed": ledger.get("routed"), "previous": ledger.get("previous") or [], "usd": round(sum(float((c or {}).get("usd") or 0) for c in
                                                              [ledger.get("usage"), (ledger.get("routed") or {}).get("usage")]
                                                              + [x.get("usage") for x in ledger.get("checks") or []]), 6),
             "asks": [{**a,
