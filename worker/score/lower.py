@@ -185,13 +185,16 @@ class Bake:
 
     def pool(self, W, H):
         """A soft dark ellipse. Placed and scaled as an overlay."""
-        key, p = self.path("pool", W)
+        key, p = self.path("pool", W, H)
         if not os.path.exists(p):
-            n = 512
-            yy, xx = np.mgrid[0:n, 0:n].astype(np.float32)
-            d = np.hypot((xx - n / 2) / (n / 2), (yy - n / 2) / (n / 2))
+            # Overlay scale specifies width. Preserve the authored ellipse's
+            # display aspect in the raster so that scaling also lands its height.
+            scale = min(1.0, 512 / max(W, H))
+            w, h = max(2, round(W * scale)), max(2, round(H * scale))
+            yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+            d = np.hypot((xx + 0.5 - w / 2) / (w / 2), (yy + 0.5 - h / 2) / (h / 2))
             a = np.exp(-(d * 1.9) ** 2) * (d < 1)
-            rgba = np.zeros((n, n, 4), np.uint8)
+            rgba = np.zeros((h, w, 4), np.uint8)
             rgba[..., 3] = (a * 255).astype(np.uint8)
             Image.fromarray(rgba).save(p)
         return self.done(key, p)
@@ -710,17 +713,15 @@ def lower_flashes(l1, bake, rep):
         else:
             rep.setdefault("flash_modes_dropped", collections.Counter())[mode] += 1
     overlays = []
-    key = None
     for p in pools:
         dur = (p["b"] - p["a"]) / fps
         if dur < OV_MIN_S:
             rep["pools_too_short"] = rep.get("pools_too_short", 0) + 1
             continue
-        key = key or bake.pool(W, H)
         x0, y0, x1, y1 = p["rect"]
-        # a square still stretched to the rect's width: the ellipse keeps its centre, not its height
+        key = bake.pool(max(2, round((x1 - x0) * W)), max(2, round((y1 - y0) * H)))
         overlays.append({"id": f"pl.{p['id']}"[:60], "asset_key": key, "kind": "image", "start": r2(p["a"] / fps), "duration_s": r2(dur),
-                         "x": round((x0 + x1) / 2, 4), "y": round((y0 + y1) / 2, 4), "scale": round(max(x1 - x0, 0.1), 4), "opacity": round(min(p["alpha"] * 1.3, 1.0), 3), "z_index": 1})
+                         "x": round((x0 + x1) / 2, 4), "y": round((y0 + y1) / 2, 4), "scale": round(max(x1 - x0, 0.05), 4), "opacity": round(min(p["alpha"], 1.0), 3), "z_index": 1})
     return fx, vectors, overlays + glows
 
 
