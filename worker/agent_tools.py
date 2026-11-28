@@ -76,6 +76,7 @@ import subject
 import taste
 import treatment_judge
 import videogen
+import videorestyle
 import cursor as cursorlib
 import screendet
 import screenframe
@@ -8632,7 +8633,7 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
             programme_lufs = levels.get("source")
         track_lufs = levels.get(storage_key)
     lead = (role == "lead" if role else speech_s < 1.0 and
-            (programme_lufs is None or programme_lufs < -45))
+            (programme_lufs is not None and programme_lufs < -45))
     if gain_db is None:
         g = -4.0 if lead else -18.0
         if track_lufs is not None and programme_lufs is not None and programme_lufs > -60:
@@ -33387,6 +33388,11 @@ TOOLS = {
                         "aspect": {"type": "string",
                                    "enum": ["16:9", "9:16", "1:1",
                                             "4:3", "3:4"]}}),
+    "restyle_video": (videorestyle.restyle, "Change the appearance of a subject in moving footage using a project reference "
+                      "image. Supply the visual instruction, the reference image key and a start and end in programme seconds. "
+                      "Places the returned video over that window and preserves the programme's audio and timing.",
+                      {"instruction": {"type": "string"}, "reference_asset_key": {"type": "string"},
+                       "start": {"type": "number"}, "end": {"type": "number"}}),
     "generate_video": (generate_video, "Generate a VIDEO clip with AI — real "
                         "moving footage. To show a reference character or look in the moving film, animate the reference, "
                        "then add_overlay over the original window, keeping its sound and duration. Animate an "
@@ -35296,7 +35302,7 @@ TOOL_DOMAINS = {
     # still exposes this exact department for an explicit acquisition pass.
     "acquisition": {
         "list_assets", "find_song", "find_footage", "search_stock", "research_broll",
-        "source_broll", "add_stock_media", "generate_video",
+        "source_broll", "add_stock_media", "generate_video", "restyle_video",
     },
     "motion": {
         "suggest_motion_beats",
@@ -35441,6 +35447,7 @@ REQUIRED_ARGS = {
     "search_stock": ["query"],
     "research_broll": ["moments"],
     "generate_video": ["prompt"],
+    "restyle_video": ["instruction", "reference_asset_key", "start", "end"],
     "add_stock_media": ["id"],
     "insert_media": ["asset_key", "at_output_s"],
     "start_media_sequence": ["asset_key"],
@@ -35571,6 +35578,8 @@ def _tool_disabled(name, model=None):
         return True
     if name == "review_audio":
         return not llm.audio_review_available()
+    if name == "restyle_video":
+        return not videorestyle.available()
     if name == "generate_video":
         return not videogen.video_gen_available()
     if name == "fetch_url":

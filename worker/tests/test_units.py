@@ -4497,7 +4497,9 @@ check("outro music: only the completed mix fades over the final 0.75s",
       and "afade=t=out:st=19.75" not in _g_tail)
 check("outro music: smooth ducking releases into a silent reference",
       "apad,atrim=end=25.000[acard]" in _g_tail
-      and "[acard]asplit=2[aduckm][dref0]" in _g_tail
+      and "[acard]asplit=2[aduckm][dialoguekey]" in _g_tail
+      and "[dialoguekey]highpass=f=250,lowpass=f=3500,volume=0:enable='not(" in _g_tail
+      and ",asplit=1[dref0]" in _g_tail
       and "[mus0][dref0]sidechaincompress=" in _g_tail
       and "release=550" in _g_tail)
 _tail_vo_chain = _g_tail.split("[2:a]", 1)[1].split("[vo0]", 1)[0]
@@ -5340,17 +5342,16 @@ try:
     ctx_m2 = EdlStubCtx(_idx_mute, 20.0, {"keep": [[0.0, 20.0]]})
     _r2 = agent_tools.add_music(ctx_m2, "library:x")
     _m2 = ctx_m2.latest_edl()["json"]["music"][0]
-    check("music with no speech becomes the LEAD audio (-4dB, no duck)",
-          _m2["gain_db"] == -4.0 and not _m2["duck"]
-          and "LEAD audio" in _r2)
+    check("missing transcript and loudness data keep an unclassified recording as a bed",
+          _m2["gain_db"] == -18.0 and _m2["duck"])
     ctx_m3 = EdlStubCtx(_idx_mute, 20.0, {"keep": [[0.0, 20.0]]})
     _r3 = agent_tools.add_music(ctx_m3, "library:x", gain_db=-14.0)
-    check("an explicit low gain on a speechless video is honored but flagged",
-          ctx_m3.latest_edl()["json"]["music"][0]["gain_db"] == -14.0
-          and "far below" in _r3)
+    check("an explicit gain on a speechless video is preserved",
+          ctx_m3.latest_edl()["json"]["music"][0]["gain_db"] == -14.0)
     ctx_m4 = EdlStubCtx(_idx_speech, 20.0, {"keep": [[10.0, 20.0]]})
+    ctx_m4._music_levels = {"source": -65.0, "library:x": None}
     agent_tools.add_music(ctx_m4, "library:x")
-    check("speech the cut removed does not count — music still leads",
+    check("a measured quiet programme with the speech removed lets the music lead",
           ctx_m4.latest_edl()["json"]["music"][0]["gain_db"] == -4.0)
 finally:
     agent_tools._resolve_music = _saved_resolve

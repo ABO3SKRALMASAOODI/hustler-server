@@ -323,7 +323,7 @@ _READ_ONLY_EXACT = {
 # a generation provider, a live web page.
 _OPEN_WORLD = {
     "search_stock", "add_stock_media", "fetch_url", "download_url",
-    "generate_image", "generate_video", "generate_sfx",
+    "generate_image", "generate_video", "restyle_video", "generate_sfx",
     "record_website", "record_website_demo", "showcase_demo",
     # Wave 4 (4C): the B-roll director searches public libraries
     "source_broll",

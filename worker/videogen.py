@@ -31,6 +31,10 @@ class ProviderFailure(str):
         return value
 
 
+class TerminalVideoFailure(str):
+    """The queue confirmed it has finished this request without a video."""
+
+
 def video_gen_available():
     return bool(config.FAL_KEY) and config.VIDEO_PROVIDER == "fal"
 
@@ -123,27 +127,41 @@ def generate_video(prompt, out_path, image_url=None, duration_s=5):
                        "frame first, then animate it"), 0.0
     seconds = _snap_seconds(model, duration_s)
     body = _build_body(model, prompt, image_url, seconds)
+    return run_queue(model, body, seconds, out_path)
+
+
+def submit_request(model, body):
+    """Submit once, preserving a known provider HTTP status on failure."""
     submit_url = f"{config.FAL_QUEUE_URL.rstrip('/')}/{model}"
     try:
         llm.fence(model)
     except llm.SpendFenceReached as exc:
-        return False, str(exc), 0.0
+        return None, ProviderFailure(str(exc), 0)
     try:
-        r = requests.post(submit_url, json=body, headers=_headers(),
-                          timeout=30)
+        r = requests.post(submit_url, json=body, headers=_headers(), timeout=30)
     except requests.RequestException as e:
-        return False, f"video provider unreachable ({str(e)[:160]})", 0.0
+        return None, f"video provider unreachable ({str(e)[:160]})"
     if r.status_code not in (200, 201, 202):
-        detail = ""
         try:
             detail = r.json().get("detail") or r.text[:200]
         except Exception:
             detail = (r.text or "")[:200]
-        return False, ProviderFailure(f"video provider returned {r.status_code}: {detail}", r.status_code), 0.0
+        return None, ProviderFailure(f"video provider returned {r.status_code}: {detail}", r.status_code)
     try:
         sub = r.json()
-    except Exception:
-        return False, "video provider returned an unreadable response", 0.0
+        if not isinstance(sub, dict):
+            return None, "video provider returned an unreadable response"
+        return sub, None
+    except ValueError:
+        return None, "video provider returned an unreadable response"
+
+
+def run_queue(model, body, seconds, out_path, submit=None):
+    """Poll a submitted or resumed FAL video job and fetch its output."""
+    sub, error = (submit or submit_request)(model, body)
+    if error:
+        return False, error, 0.0
+    submit_url = f"{config.FAL_QUEUE_URL.rstrip('/')}/{model}"
     status_url = sub.get("status_url")
     response_url = sub.get("response_url")
     req_id = sub.get("request_id")
@@ -172,10 +190,12 @@ def generate_video(prompt, out_path, image_url=None, duration_s=5):
         if state in ("COMPLETED", "OK", "SUCCESS"):
             break
         if state in ("ERROR", "FAILED", "CANCELLED"):
-            return False, f"video generation failed on the provider ({state})", 0.0
+            return False, TerminalVideoFailure(f"video generation failed on the provider ({state})"), 0.0
 
     try:
         res = requests.get(response_url, headers=_headers(), timeout=30)
+        if res.status_code >= 500 or res.status_code in (408, 429):
+            return False, f"the finished video could not be retrieved yet (HTTP {res.status_code})", 0.0
         result = res.json()
     except Exception as e:
         return False, f"could not read the finished video ({str(e)[:120]})", 0.0
@@ -194,7 +214,7 @@ def generate_video(prompt, out_path, image_url=None, duration_s=5):
             if not detail:
                 detail = (" (response keys: "
                           + ", ".join(sorted(result)[:8]) + ")")
-        return False, f"the provider finished but returned no video{detail}", 0.0
+        return False, TerminalVideoFailure(f"the provider finished but returned no video{detail}"), 0.0
 
     # Download to disk immediately — the fal URL is temporary; the caller
     # re-hosts to our own R2 (never hand the fal URL to the player).

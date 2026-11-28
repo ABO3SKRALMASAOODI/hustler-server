@@ -551,6 +551,9 @@ VIDEO_PROVIDER = os.getenv("VIDEO_PROVIDER", "fal")
 VIDEO_GEN_MODEL = os.getenv(
     "VIDEO_GEN_MODEL", "fal-ai/kling-video/v2.5-turbo/pro/image-to-video")
 FAL_QUEUE_URL = os.getenv("FAL_QUEUE_URL", "https://queue.fal.run")
+# A video-edit endpoint and its per-second price are selected together by the owner.
+VIDEO_RESTYLE_MODEL = os.getenv("VIDEO_RESTYLE_MODEL", "").strip()
+VIDEO_RESTYLE_USD_PER_SECOND = os.getenv("VIDEO_RESTYLE_USD_PER_SECOND", "").strip()
 VIDEO_MAX_SECONDS = float(os.getenv("VIDEO_MAX_SECONDS", "10"))
 # Kept UNDER AGENT_TURN_TIMEOUT_S (default 720) so a slow fal job fails inside
 # the turn instead of pinning a scarce agent slot past the turn budget on the
