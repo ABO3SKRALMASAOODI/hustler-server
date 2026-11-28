@@ -41,3 +41,18 @@ def test_background_registration_recognizes_small_camera_push():
     cap = Mock()
     cap.read.side_effect = [(True, src), (True, incoming)]
     assert _same_join_picture(cap, 4.7, 5.3) is True
+
+
+def test_range_read_source_uses_bounded_frame_reads(monkeypatch):
+    import cv2
+    from renderer import _join_capture, _same_join_picture
+    cap = Mock()
+    open_video = Mock(return_value=cap)
+    monkeypatch.setattr(cv2, "VideoCapture", open_video)
+    url = "https://example.test/clip.mp4"
+    assert _join_capture(url) is cap
+    open_video.assert_called_once_with(url, cv2.CAP_FFMPEG, [
+        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 4000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 4000])
+    cap.set.return_value = False
+    assert _same_join_picture(cap, 2., 7.) is None
+    cap.read.assert_not_called()

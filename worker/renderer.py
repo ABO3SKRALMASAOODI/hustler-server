@@ -4248,6 +4248,17 @@ def _joined_in_source(a, b, keep):
     return abs(float(keep[a[1]][1]) - float(keep[b[1]][0])) < 0.02
 
 
+def _join_capture(path):
+    """Open the render's source once for all joins, including ranged media."""
+    import cv2
+    import http_inputs
+    if http_inputs.is_url(path):
+        return cv2.VideoCapture(path, cv2.CAP_FFMPEG, [
+            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 4000,
+            cv2.CAP_PROP_READ_TIMEOUT_MSEC, 4000])
+    return cv2.VideoCapture(path) if path and os.path.isfile(path) else None
+
+
 def _same_join_picture(cap, before, after):
     """Compare the environment on both sides of a join. Texture-bearing
     tiles discount featureless walls and black borders. A speaker can move
@@ -4256,7 +4267,8 @@ def _same_join_picture(cap, before, after):
     import numpy as np
     frames = []
     for t in (before, after):
-        cap.set(cv2.CAP_PROP_POS_MSEC, 1000 * t)
+        if not cap.set(cv2.CAP_PROP_POS_MSEC, 1000 * t):
+            return None
         ok, frame = cap.read()
         if not ok:
             return None
@@ -4902,10 +4914,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             fx_plan, _fx_cuts(order, keep, edl.get("keep"), blk_frames))
         capture = None
         src_path = (fx_plan.media or {}).get("src_path")
-        if src_path and os.path.isfile(src_path) and any(
-                it.get("style") == "dissolve" for it in fx_plan.junction_items):
-            import cv2
-            capture = cv2.VideoCapture(src_path)
+        if src_path and any(it.get("style") == "dissolve" for it in fx_plan.junction_items):
+            capture = _join_capture(src_path)
         try:
             fx_juncs = [join for spec in fx_juncs if (join := _compose_join(
                 spec, order, keep, index, fps, fx_plan, capture))]
