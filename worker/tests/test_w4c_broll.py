@@ -620,6 +620,30 @@ def test_source_broll_places_licensed_matched_cutaways(project, monkeypatch):
 
 
 @needs_ffmpeg
+def test_required_subject_uses_checked_stock_and_survives_reentry(project, monkeypatch):
+    import broll_source
+    from tools_ext import broll_tools
+    ctx, clip, _store = project
+    monkeypatch.setenv("VALMERA_BROLL_LOCAL", "1")
+    monkeypatch.setattr(broll_tools, "UNMATCHABLE_DE", 99.0)
+    monkeypatch.setattr(broll_source, "status", lambda: {"nasa": "on"})
+    monkeypatch.setattr(broll_source, "search", lambda *a, **k: pytest.fail("duplicate search"))
+    raw = _cands(clip)[0]
+    handle = "required:picture1:" + raw["id"]
+    ctx.stock_results = {handle: dict(raw, id=handle, _provider_result_id=raw["id"])}
+    ctx.ask_ledger = {"required_pictures": [{"id": "picture1", "subject": "rocket",
+        "query": "rocket", "must_show": "Rocket launch", "candidates": [handle],
+        "source_words": [{"t0": 2.1, "t1": 2.6}]}]}
+    note = broll_tools.source_broll(ctx)
+    items = [it for it in ctx._edl["fx"] if it["type"] == "broll"]
+    assert len(items) == 1, note
+    assert items[0]["start"] <= 2.35 < items[0]["end"]
+    assert items[0]["moment"] == "Rocket launch"
+    assert "No additional" in broll_tools.source_broll(ctx)
+    assert len(ctx._edl["fx"]) == 1
+
+
+@needs_ffmpeg
 def test_research_only_writes_nothing(project, monkeypatch):
     import broll_source
     from tools_ext import broll_tools

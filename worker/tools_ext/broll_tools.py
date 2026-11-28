@@ -197,7 +197,7 @@ def _moment_window(ctx, edl, m, prog, taken):
             raise ValueError("at must be program seconds")
     else:
         raise ValueError("name the moment by word or at")
-    start = max(HOOK_S, start)
+    start = max(0.0 if m.get('_required_picture') else HOOK_S, start)
     end = min(prog, start + dur)
     if end - start < MIN_SPAN:
         raise ValueError(f"no room for a cutaway at {start:g}s (the program "
@@ -527,10 +527,42 @@ def _board(ctx, rows, W, H):
         return None
 
 
+def _required_moments(pictures, edl):
+    """Seat checked subjects on surviving mentions in the editor's current cut."""
+    import required_broll
+    duration = _program_s(edl)
+    placed = [it for it in edl.get("fx") or [] if it.get("type") == "broll"]
+    moments = []
+    for i, picture in enumerate(pictures):
+        purpose = picture["must_show"]
+        times = required_broll.anchors(picture, edl)
+        if not picture.get("source_words"):
+            times = [duration * (i + .5) / len(pictures)]
+        for at in times:
+            if any(it.get("moment") == purpose[:160] and it["start"] <= at < it["end"]
+                   for it in placed):
+                continue
+            if any(m["purpose"] == purpose and m["at"] <= at < m["at"] + m["duration_s"]
+                   for m in moments):
+                continue
+            start = max(0., min(at - .25, duration - MIN_SPAN))
+            moments.append({"id": picture["id"], "query": picture["query"],
+                            "depicts": picture["subject"], "purpose": purpose,
+                            "at": start, "duration_s": DEFAULT_SPAN,
+                            "_required_picture": True,
+                            "_candidates": picture.get("candidates") or []})
+    return sorted(moments, key=lambda m: m["at"])
+
+
 def source_broll(ctx, moments=None, max=None, providers=None, place=True):
     # ``max`` is the tool's argument name; the work happens where the
     # builtin is not shadowed
     import llm
+    pictures = (getattr(ctx, "ask_ledger", None) or {}).get("required_pictures")
+    if moments is None and pictures:
+        moments = _required_moments(pictures, _edl(ctx)[0])
+        if not moments:
+            return "No additional checked subject has an uncovered mention in the current cut."
     if moments is None:
         import device_planner
         from quality_verifier import request_text_for
@@ -623,7 +655,8 @@ def _source_broll(ctx, moments, limit, providers, place):
                       "purpose": str(m.get("purpose") or "")[:160],
                       "archival": bool(m.get("archival")), "start": s,
                       "end": e, "bind": bind,
-                      "query": qs[0], "duration_s": e - s})
+                      "query": qs[0], "duration_s": e - s,
+                      "candidates": m.get("_candidates") or []})
     if not specs:
         return _rejected("no usable moment. " + "; ".join(errors))
 
@@ -652,6 +685,14 @@ def _source_broll(ctx, moments, limit, providers, place):
         kinds = {"video": ["video"], "photo": ["photo"],
                  "any": ["video", "photo"]}[spec["kind"]]
         cands, errs = [], []
+        known = getattr(ctx, "stock_results", {}) or {}
+        for handle in spec["candidates"]:
+            item = known.get(handle)
+            if item and item.get("kind") in kinds and (providers is None or item.get("provider") in providers):
+                cands.append(dict(item, id=item.get("_provider_result_id") or item["id"]))
+        ranked = broll_source.prerank(cands, spec["queries"], W, H, need_s=spec["duration_s"])
+        if ranked:
+            return spec, ranked, errs
         for q in spec["queries"]:
             for k in kinds:
                 hit = pf.search(q, k, providers) if (
@@ -698,6 +739,10 @@ def _source_broll(ctx, moments, limit, providers, place):
         stage["hero"] += _time.monotonic() - _t
         short = _interleave([c for c in ranked
                              if c.get("page_url") not in used], SHORTLIST)
+        if not short and spec["candidates"]:
+            # A repeated named subject may have just one licensed photograph.
+            # Reusing it on the later mention preserves that requested identity.
+            short = _interleave(ranked, SHORTLIST)
         if not short:
             misses.append((spec, "no licensed match" + (
                 f" ({'; '.join(errs)[:120]})" if errs else "")))

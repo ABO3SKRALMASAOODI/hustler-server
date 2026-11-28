@@ -33,7 +33,8 @@ def test_rejected_generic_pictures_trigger_archive_retry_without_relaxing_subjec
          'must_show': 'Real mining hardware', 'source_words': []}
     ctx = NS(workdir=str(tmp_path), stock_results={}, index={'video': {'width': 1920, 'height': 1080}},
              latest_edl=lambda: {'json': {'frame': {'ratio': '16:9'}}})
-    required_broll.supply(ctx, {'required_pictures': [p], 'picture_frame_ratio': '9:16'})
+    note = required_broll.supply(ctx, {'required_pictures': [p], 'picture_frame_ratio': '9:16'})
+    assert 'source_broll()' in note
     assert len(queries) == 2
     assert queries[1]['name'] == 'Cryptocurrency mining'
     assert queries[1]['searches'] == ['Bitcoin mining hardware']
@@ -248,3 +249,16 @@ def test_followup_picture_scope_receives_the_selection_conversation(monkeypatch)
     monkeypatch.setattr(asks, '_call', observe)
     ledger = {'asks': [{'want': 'Use the selected track.'}], 'soundtrack_options': ['Northern Lights']}
     assert required_broll.record(NS(request_contract_history=history), ledger, 'Northern Lights') == []
+
+
+def test_editorial_coverage_does_not_invent_an_obligation_for_every_mention(monkeypatch):
+    def identify(ctx, name, schema, system, content, **kw):
+        assert name == 'identify_picture_subjects'
+        assert 'editor_chooses_examples' in schema['required']
+        return {'pictures': [], 'spoken_categories': [], 'editor_chooses_examples': True}, {}
+    monkeypatch.setattr(asks, '_call', identify)
+    ledger = {'asks': [{'id': 'a1', 'want': 'illustrate the speech'}]}
+    ctx = NS(index={'words': [{'w': 'chest', 't0': 1., 't1': 1.5}]})
+    assert required_broll.record(ctx, ledger, 'acrescente brolls referentes a minha fala') == []
+    assert [ask['id'] for ask in ledger['asks']] == ['a1']
+    assert 'source_broll()' in required_broll.supply(ctx, ledger)
