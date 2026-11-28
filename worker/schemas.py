@@ -1491,6 +1491,10 @@ class RegionItem(BaseModel):
     start: Optional[float] = None
     end: Optional[float] = None
 
+    # A measurement on the original follows later trims and insertions.
+    # Existing EDLs use start/end on the programme clock.
+    source_span: Optional[tuple[float, float]] = None
+
     _mode = field_validator("mode", mode="before")(_coerce_mode)
 
 

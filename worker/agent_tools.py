@@ -12583,7 +12583,32 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
 REGION_MODES = ("blur", "pixelate", "black")
 
 
-def blur_region(ctx, x, y, w, h, mode="blur", start=None, end=None):
+def _source_region_report(ctx, edl, start, end, region):
+    """Report each kept showing on the same clock and canvas as caption avoidance.
+    Repaints and censors travel through this transform with the underlying pixels."""
+    import keepout
+    from score.asks import output_size
+    film = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed"))
+    index = getattr(ctx, "index", None) or {}
+    video = index.get("video") or {}
+    size = output_size(edl, index)
+    geo = (keepout.Geometry(edl, video, *size, film.out_duration,
+                            zooms=keepout.camera_zooms(edl, index, film))
+           if size and video.get("width") and video.get("height") else None)
+    x, y, w, h = (region[k] for k in ("x", "y", "w", "h"))
+    rows = []
+    for a, b in film.span_to_out(start, end):
+        row = f"{a:.2f}-{b:.2f}s"
+        if geo:
+            t = (a + b) / 2
+            boxes = geo.visible_rects(t, film.out_to_src(t), (x, y, x+w, y+h))
+            coords = ", ".join(str(tuple(round(v, 3) for v in box)) for box in boxes)
+            row += f" (at {t:.2f}s: {coords or 'outside crop'})"
+        rows.append(row)
+    return ", ".join(rows) or "outside current cut"
+
+
+def blur_region(ctx, x, y, w, h, mode="blur", start=None, end=None, time_space="source"):
     p = (mode or "blur").strip().lower()
     if p not in REGION_MODES:
         return (f"REJECTED: mode must be one of {', '.join(REGION_MODES)}. "
@@ -12608,7 +12633,7 @@ def blur_region(ctx, x, y, w, h, mode="blur", start=None, end=None):
                 "touching the right edge use x = 1 - w; for the bottom, "
                 "y = 1 - h.")
     if (start is None) != (end is None):
-        return ("REJECTED: pass both start and end (output-timeline "
+        return ("REJECTED: pass both start and end (source "
                 "seconds), or neither to censor the whole video.")
     item = {"id": None, "x": round(rx, 3), "y": round(ry, 3),
             "w": round(rw, 3), "h": round(rh, 3)}
@@ -12624,19 +12649,22 @@ def blur_region(ctx, x, y, w, h, mode="blur", start=None, end=None):
     fx = dict(edl.get("effects") or {})
     regions = [dict(r) for r in (fx.get("regions") or [])]
     item["id"] = _next_item_id(regions, "rg")
+    span = "whole source"
+    if start is not None:
+        a, b = item["start"], item["end"]
+        if time_space == "source":
+            item["source_span"] = (item.pop("start"), item.pop("end"))
+            mapped = _source_region_report(ctx, edl, a, b, item)
+            span = f"source {a:g}-{b:g}s, programme {mapped}"
+        else:
+            span = f"programme {a:g}-{b:g}s"
     regions.append(item)
     fx["regions"] = regions
     edl["effects"] = fx
-    span = (f" from {item['start']}s to {item['end']}s (output time)"
-            if start is not None else " for the whole video")
-    result = ctx.write_edl(
-        edl, f"{p} region at x={item['x']},y={item['y']} "
-             f"size {item['w']}x{item['h']} (frame fractions){span} "
-             f"[{item['id']}]")
+    result = ctx.write_edl(edl, f"{p} on source rectangle {(rx, ry, rw, rh)} "
+                               f"({span}) [{item['id']}]")
     if result.startswith("EDL v"):
-        result += ("\nThe rectangle is FIXED on screen — render_preview and "
-                   "CHECK the sheet: if the text still shows anywhere, "
-                   "remove_blur this region and place a bigger one.")
+        result += "\nCHECK the sheet at the mapped programme times."
     return result
 
 
@@ -13130,7 +13158,7 @@ def find_burned_text(ctx, scope="all", start=None, end=None):
             covered += 1
         lines.append(
             f"{i}. {r['kind']}: x={r['x']} y={r['y']} w={r['w']} h={r['h']} "
-            f"— visible {r['first_s']}-{r['last_s']}s, in "
+            f"— source {r['first_s']}-{r['last_s']}s, in "
             f"{int(r['coverage'] * 100)}% of sampled frames"
             + (", content changes between frames"
                if r["changes"] > 6 else ", identical in every frame")
@@ -13433,10 +13461,18 @@ def erase_burned_text(ctx, scope="captions", start=None, end=None):
             w1 = min(ctx.duration, float(w1) + _PATCH_PAD_S * 2)
             if w1 - w0 >= ctx.duration - 2.0:
                 w0 = w1 = None            # seen throughout: whole video
+        if start is not None or end is not None:
+            lo = max(float(start or 0), w0 if w0 is not None else 0.)
+            hi = min(float(end if end is not None else ctx.duration),
+                     w1 if w1 is not None else ctx.duration)
+            w0, w1 = lo, hi
         dup = any(abs(q.get("x", 9) - r["x"]) < 0.02
                   and abs(q.get("y", 9) - r["y"]) < 0.02
                   and abs(q.get("w", 9) - r["w"]) < 0.04
                   and abs(q.get("h", 9) - r["h"]) < 0.04
+                  and (q.get("start") or 0) <= (w0 or 0)
+                  and (q.get("end") if q.get("end") is not None else ctx.duration)
+                      >= (w1 if w1 is not None else ctx.duration)
                   for q in prior + added)
         if dup:
             continue
@@ -13467,6 +13503,9 @@ def erase_burned_text(ctx, scope="captions", start=None, end=None):
     what = ("erased " + ", ".join(f"{a['kind']} at y={a['y']:g} [{a['id']}]"
                                   for a in added)
             + " from the source pixels")
+    what += "; programme " + "; ".join(
+        _source_region_report(ctx, edl, r["start"] or 0, r["end"] or ctx.duration, r)
+        for r in added)
     try:
         result = _apply_patches(
             ctx, added, what,
@@ -33928,7 +33967,7 @@ TOOLS = {
                     "the video asking exactly where the text sits (corner? "
                     "edge? how big?), then blur_region, then render_preview "
                     "and CHECK the sheet — if text still shows, remove_blur "
-                    "and place a bigger region. start/end (output seconds) "
+                    "and place a bigger region. start/end (SOURCE seconds by default) "
                     "optionally limit when it applies; omit both for the "
                     "whole video. mode: 'blur' (soft, default), 'pixelate' "
                     "(mosaic), 'black' (solid bar). The rectangle does NOT "
@@ -33938,6 +33977,7 @@ TOOLS = {
                      "w": {"type": "number"}, "h": {"type": "number"},
                      "mode": {"type": "string",
                               "enum": ["blur", "pixelate", "black"]},
+                     "time_space": {"type": "string", "enum": ["source", "program"]},
                      "start": {"type": "number"},
                      "end": {"type": "number"}}),
     "remove_blur": (remove_blur, "Remove one censor region by its id (see "

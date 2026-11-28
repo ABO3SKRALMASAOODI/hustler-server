@@ -618,13 +618,9 @@ def _mapped(edl, index, tl, W, H, a, b, field):
     out = []
     for bx in boxes:
         try:
-            ms = geo.to_outputs(mid, src_mid, [float(v) for v in bx[:4]])
+            out.extend(geo.visible_rects(mid, src_mid, [float(v) for v in bx[:4]]))
         except Exception:  # noqa: BLE001 — an unmappable box
             continue
-        for m in ms:
-            x0, y0, x1, y1 = (max(m[0], m[4]), max(m[1], m[5]), min(m[2], m[6]), min(m[3], m[7]))
-            if x1 > x0 and y1 > y0:
-                out.append((x0, y0, x1, y1))
     return out
 
 

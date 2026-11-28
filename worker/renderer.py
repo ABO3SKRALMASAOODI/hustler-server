@@ -4560,7 +4560,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     stack_windows = stacked_card_windows(edl)
     if stack_windows and zooms:
         zooms = _zooms_outside(zooms, stack_windows)
-    regions = fx.get("regions") or []
+    regions = []
+    for region in fx.get("regions") or []:
+        if region.get("source_span") is None:
+            regions.append(region)
+        else:
+            regions.extend(dict(region, start=a, end=b)
+                           for a, b in tl.span_to_out(*region["source_span"]))
     speed = edl.get("speed") or []
     stylize = fx.get("stylize") or []
     custom_filters = fx.get("custom") or []

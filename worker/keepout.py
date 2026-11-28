@@ -719,6 +719,12 @@ class Geometry:
         out = self._program_output(prog_t, src_t, box)
         return [out] if out else []
 
+    def visible_rects(self, prog_t, src_t, box):
+        """Clip each mapped source box to the part of its panel on screen."""
+        return [(max(x0, cx0), max(y0, cy0), min(x1, cx1), min(y1, cy1))
+                for x0, y0, x1, y1, cx0, cy0, cx1, cy1 in
+                self.to_outputs(prog_t, src_t, box)]
+
     def _source_card_at(self, prog_t):
         import picture_cards
         for card in self.cards:

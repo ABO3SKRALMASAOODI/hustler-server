@@ -82,7 +82,7 @@ PLATE_STATIC_MAD = 7.0       # mean abs deviation (0-255) for "same shot"
 # came out sandy). The erase is then judged by how much of the box's own
 # picture survives (pattern_kept), not by stroke ink, which read that sand
 # as surviving text.
-REPAINT_VERSION = 2
+REPAINT_VERSION = 3
 PLATE_FRAME_DIFF = 8.0       # mean abs diff (0-255) of a frame's context from the plate
 MEMBRANE_PX = 60000          # the membrane is solved at most this many pixels
 
@@ -129,7 +129,13 @@ def _stroke_response(gray, scale):
     return cv2.max(top, bot)
 
 
-def ink_mask(bgr, *, dilate=2, min_response=28):
+def _ink_response(bgr, scale):
+    # Equal-luma colours (red ink on a blue shirt, for example) still have
+    # opposite edges in at least one colour channel.
+    return np.maximum.reduce([_stroke_response(c, scale) for c in cv2.split(bgr)])
+
+
+def ink_mask(bgr, *, dilate=2, min_response=28, colour=False):
     """Per-pixel mask of TEXT-LIKE ink in a frame or crop.
 
     min_response is the floor that keeps Otsu honest: on a flat, textless crop
@@ -139,11 +145,12 @@ def ink_mask(bgr, *, dilate=2, min_response=28):
     """
     if bgr.size == 0:
         return np.zeros(bgr.shape[:2], np.uint8)
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    h = gray.shape[0]
-    resp = _stroke_response(gray, _odd(max(3, h * 0.10), 3))
+    h = bgr.shape[0]
+    scale = _odd(max(3, h * 0.10), 3)
+    resp = (_ink_response(bgr, scale) if colour else
+            _stroke_response(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), scale))
     if float(resp.max()) < min_response:
-        return np.zeros(gray.shape, np.uint8)
+        return np.zeros(resp.shape, np.uint8)
     _, m = cv2.threshold(resp, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     m[resp < min_response] = 0
     if dilate:
@@ -155,8 +162,7 @@ def ink_mask(bgr, *, dilate=2, min_response=28):
 def _line_mask(bgr):
     """Mask of text LINES in a full frame — glyphs merged, noise dropped."""
     H, W = bgr.shape[:2]
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    resp = _stroke_response(gray, _odd(H * 0.018))
+    resp = _ink_response(bgr, _odd(H * 0.018))
     resp = cv2.GaussianBlur(resp, (3, 3), 0)
     if float(resp.max()) < 30:
         return np.zeros((H, W), np.uint8)
@@ -376,8 +382,8 @@ class _Region:
         if self.fill == "box":
             m[self.iy0:self.iy1, self.ix0:self.ix1] = 255
         else:
-            m[self.iy0:self.iy1, self.ix0:self.ix1] = ink_mask(inner,
-                                                               dilate=dilate)
+            m[self.iy0:self.iy1, self.ix0:self.ix1] = ink_mask(
+                inner, dilate=dilate, colour=(self.repaint or 0) >= 3)
         return m
 
     def repaint_mask(self, band):
