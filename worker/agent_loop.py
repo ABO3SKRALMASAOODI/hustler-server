@@ -6169,7 +6169,7 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
     if getattr(ctx, "ask_ledger", None) or getattr(ctx, "ask_check_required", False):
         _asks_check(ctx, final_text, allow_repair=False)
         final_text, outcome = _asks_settle(ctx, final_text, outcome,
-            **({"delivery_summary": True} if status == "blocked" and ctx.versions_written else {}))
+            **({"delivery_summary": True} if status in ("blocked", "budget") and ctx.versions_written else {}))
         latest = ctx.latest_edl()
         quality = _quality_handoff(ctx)
         if isinstance(honesty, dict) and getattr(ctx, "ask_ledger", None):

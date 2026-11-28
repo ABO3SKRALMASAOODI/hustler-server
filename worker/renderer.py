@@ -4284,7 +4284,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       picture_card_inputs=None, main_video_inputs=None,
                       loudness="auto", dialogue_gain=None,
                       dialogue_probe=False, focus_origin=None,
-                      program_edges=None, fx_plan=None, ambient_bed=False):
+                      program_edges=None, fx_plan=None, ambient_bed=False, delivery_dims=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -7195,6 +7195,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # Free-tier mark on the PROGRAM stream, before any end card is
     # concatenated — the card is already branded, and marking it would stack
     # two logos on one frame.
+    if delivery_dims and delivery_dims != (W, H):
+        # Finish the picture on its delivery raster before compositing the
+        # existing brand layers. Their pixel geometry belongs to the export.
+        W, H = delivery_dims
+        parts.append(f"[{vlabel}]{upscale_filter(W, H)}[delivery_picture]")
+        vlabel = "delivery_picture"
     if robot_idx is not None:
         parts.extend(_watermark_parts(vlabel, "vwm", robot_idx,
                                       wm_ass_path, W, H, wm_anchor_y))
@@ -8968,8 +8974,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     fps = max(1.0, min(float(info["fps"]) or 30.0, 60.0))
     if preview:
         W, H, fps = preview_geometry(W, H, fps)
+        delivery_dims = (W, H)
     wm_anchor_y = watermark_anchor_y(
-        edl, info["width"], info["height"], W, H, wm_settings)
+        edl, info["width"], info["height"], *delivery_dims, wm_settings)
 
     inserts = edl.get("inserts") or []
     voiceover = edl.get("voiceover") or []
@@ -9311,7 +9318,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # Same deal for the free-tier mark: a looped still input, held for the
     # PROGRAM's length (not the outro's — the mark stops before the card).
     robot_idx, wm_ass_path = None, None
-    mark_img = watermark_image(workdir, W, H) if want_wm else None
+    mark_img = watermark_image(workdir, *delivery_dims) if want_wm else None
     if mark_img:
         extra_inputs += ["-loop", "1",
                          "-t", f"{tl.out_duration + 5.0:.3f}",
@@ -9640,7 +9647,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                  main_video_inputs=main_video_inputs,
                                  focus_origin=focus_origin,
                                  program_edges=program_edges,
-                                 fx_plan=fx_box[0],
+                                 fx_plan=fx_box[0], delivery_dims=delivery_dims,
                                  **extra)
 
     # Mastered mixes level the dialogue first, from one measurement pass of
@@ -9691,7 +9698,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # cost); config.FINAL_CRF sets the delivered quality (see config),
         # under the export's rate ceiling (final_video_encode).
         # An export size or bitrate target (EDL export) lowers the ceiling.
-        encode = [*final_video_encode(W, H, fps, export_video_kbps(
+        encode = [*final_video_encode(*delivery_dims, fps, export_video_kbps(
                       edl, program_render_s(tl, fps)
                       + music_tail_ext(edl, tl.out_duration) + outro_s)),
                   "-c:a", "aac", "-b:a", "192k"]
@@ -9707,9 +9714,6 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         readers = len(set(re.findall(r"\[(\d+):v(?::\d+)?\]", g)))
         bounded_threads = (2 if overlay_folder else
                            _many_video_threads(info["width"], info["height"], readers))
-        if (W, H) != delivery_dims and not preview:
-            g = g.replace("[vout]", "[working_picture]") + (
-                f";[working_picture]{upscale_filter(*delivery_dims)}[vout]")
         return ["ffmpeg", "-y", *_filter_thread_args(g),
                 *_stable_video_inputs(main_input_args + extra_inputs,
                                       decoder_threads=bounded_threads),
@@ -9732,7 +9736,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             shutil.rmtree(overlay_folder)
     _require_whole_picture(out_path, expected_out_s)
     if mark_img and not preview:
-        adaptive_ink_pass(out_path, workdir, W, H, fps, tl.out_duration, wm_anchor_y)
+        adaptive_ink_pass(out_path, workdir, *delivery_dims, fps, tl.out_duration, wm_anchor_y)
     return media.duration_of(out_path)
 
 

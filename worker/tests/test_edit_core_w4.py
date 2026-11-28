@@ -178,7 +178,7 @@ def test_final_with_seven_cutaways_decodes_each_one(tmp_path, monkeypatch):
     monkeypatch.setattr(renderer, "_render_media_run", constrained)
     info = media.probe(main)
     renderer.render_edl(edl, {"video": info, "words": []}, main, out, str(tmp_path),
-                        preview=False, want_wm=False, suppress_outro=True, asset_locals={key: str(still)})
+                        preview=False, want_wm=True, suppress_outro=True, asset_locals={key: str(still)})
     import subprocess
     pixels = subprocess.check_output(["ffmpeg", "-v", "error", "-i", out, "-an", "-vf",
                                       "scale=1:1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
@@ -189,7 +189,13 @@ def test_final_with_seven_cutaways_decodes_each_one(tmp_path, monkeypatch):
         assert b > max(r, g) + 100
     assert kills and max(kills) > 2
     assert 0 < max(decoder_counts) <= 2
-    assert media.probe(out)["has_audio"]
+    delivered = media.probe(out)
+    assert delivered["has_audio"]
+    import render_qc
+    import time
+    geometry = render_qc.plan(edl, {}, W=delivered["width"], H=delivered["height"],
+                              fps=25, want_wm=True)
+    assert render_qc.robot_match(out, geometry, time.monotonic()+30) >= render_qc.ROBOT_MIN_NCC
 
 
 def test_callback_draws_the_planned_take_when_stock_covers_the_opening(tmp_path, monkeypatch):
