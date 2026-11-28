@@ -298,6 +298,84 @@ def listen_windows(verify_times, duration, max_windows=2, halo_s=2.5,
     return out
 
 
+def _mono(path, seconds, offset=0.0, loop=False, sample_rate=8000):
+    import numpy as np
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-threads", "1"]
+    if loop:
+        cmd += ["-stream_loop", "-1"]
+    if offset:
+        cmd += ["-ss", str(offset)]
+    cmd += ["-i", path, "-vn", "-t", str(seconds), "-map", "0:a:0", "-ac", "1",
+            "-ar", str(sample_rate), "-f", "f32le", "pipe:1"]
+    data = subprocess.run(cmd, capture_output=True, check=True, timeout=max(45, seconds)).stdout
+    return np.frombuffer(data, dtype="<f4")
+
+
+def matched_layer(mix, source, start, duration, rate=8000):
+    """Fit a delayed copy of the named stem against the delivered PCM, per half second.
+    Report recovered energy against the residual programme; uncorrelated windows
+    are below the detection floor, even if they contain unrelated loud sound."""
+    import numpy as np
+    from scipy.signal import correlate
+    origin = round(start * rate)
+    count = min(round(duration * rate), max(0, len(mix) - origin))
+    block, lag = rate // 2, round(.045 * rate)
+    hit_samples = 0
+    recovered = residual = 0.
+    for off in range(0, min(len(source), count), block):
+        n = min(block, count - off, len(source) - off)
+        if n < 80:
+            continue
+        x = source[off:off+n].astype("float64")
+        x -= x.mean()
+        xx = float(x @ x)
+        if xx < 1e-10:
+            continue
+        lo = max(0, origin + off - lag)
+        y = mix[lo:min(len(mix), origin+off+n+lag)].astype("float64")
+        if len(y) < n:
+            continue
+        cross = correlate(y, x, mode="valid", method="fft")
+        k = int(np.argmax(np.abs(cross)))
+        aligned = y[k:k+n] - y[k:k+n].mean()
+        yy = float(aligned @ aligned)
+        power = min(yy, cross[k]**2 / xx)
+        # Multiple-lag noise significance plus a relative masking threshold.
+        detected = power > yy * max(16/n, .00397)
+        residual += max(0., yy - power) if detected else yy
+        if detected:
+            hit_samples += n
+            recovered += power
+    return {"audible_pct": round(100 * hit_samples / count, 1) if count else None,
+            "relative_db": round(10*math.log10(recovered/max(residual, 1e-12)), 1) if recovered else None,
+            "span_s": round(count/rate, 3)}
+
+
+def layer_levels(path, edl, duration, resolve):
+    """Measure music and SFX on their output clock using their actual source files."""
+    rows = []
+    items = [(kind, it) for kind in ("music", "sfx") for it in edl.get(kind) or []]
+    if not items:
+        return rows
+    mix = _mono(path, duration)
+    for kind, item in items:
+        start = float(item.get("start") if kind == "music" else item.get("at"))
+        end = min(duration, float(item["end"]) if kind == "music" else
+                  start + float(item.get("dur_s") or duration))
+        if end <= start:
+            continue
+        row = {"id": item.get("id"), "kind": kind, "start": start}
+        try:
+            reference = _mono(resolve(item["storage_key"]), end-start,
+                              float(item.get("offset_s") or 0), bool(item.get("loop")))
+            span = end-start if kind == "music" else min(end-start, len(reference)/8000)
+            row.update(matched_layer(mix, reference, start, span))
+        except (subprocess.SubprocessError, OSError, ValueError) as exc:
+            row["measurement_error"] = type(exc).__name__
+        rows.append(row)
+    return rows
+
+
 def summary_line(qc):
     """One compact measurement line for the render note, or ''."""
     if not qc or qc.get("i") is None:
@@ -305,4 +383,7 @@ def summary_line(qc):
     tp = qc.get("tp")
     return (f" Mix measured: {qc['i']:.1f} LUFS integrated"
             + (f", true peak {tp:.1f} dBTP" if tp is not None else "")
-            + ".")
+            + "." + "".join(
+                f" {r.get('id')}: audible {r['audible_pct']}% of span"
+                + (f", {r['relative_db']:+g} dB against the programme." if r.get("relative_db") is not None else ".")
+                for r in qc.get("layers") or [] if r.get("audible_pct") is not None))

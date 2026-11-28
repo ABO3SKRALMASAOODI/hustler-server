@@ -150,6 +150,8 @@ class FontSpec:
         axes = self.face["axes"]
         if "wght" in axes:
             var["wght"] = _clampax(self.weight, axes["wght"])
+        if "opsz" in axes:
+            var["opsz"] = axes["opsz"][1]
         if "wdth" in axes:
             var["wdth"] = _clampax(self.stretch, axes["wdth"])
         for tag, v in self.extra.items():
@@ -160,9 +162,26 @@ class FontSpec:
     def key(self):
         return (self.face["path"], tuple(sorted(self.variations.items())))
 
+    def covering(self, text):
+        """Use the same installed face for measurement, outlines and the browser."""
+        def covers(spec):
+            font = _font(spec)
+            if _hb is not None:
+                return all(c.isspace() or font.font.get_nominal_glyph(ord(c)) for c in text)
+            return all(c.isspace() or ord(c) in _cmap(spec.face["path"]) for c in text)
+        if covers(self):
+            return self
+        serif = "serif" in family_classes().get(self.family, ())
+        for family in (("Playfair Display", "Inter") if serif else ("Montserrat", "Inter", "Manrope")):
+            spec = FontSpec(family, self.weight, self.style, self.stretch, self.extra)
+            if covers(spec):
+                return spec
+        return self
+
     def css(self):
         """The page's font properties for this spec (dict of CSS props)."""
-        out = {"font-family": f"'{self.family}'",
+        out = {"font-family": (f"'{self.family}', 'Inter'" if self.family != "Inter" else "'Inter'"),
+               "font-optical-sizing": "none",
                "font-weight": f"{self.weight:g}",
                "font-style": self.style}
         if self.face["stretch"] != (100.0, 100.0):
@@ -178,6 +197,13 @@ class FontSpec:
                                          self.variations.items()},
                 "style": self.style, "weight": round(self.weight, 1),
                 "stretch": round(self.stretch, 1)}
+
+
+@functools.lru_cache(maxsize=64)
+def _cmap(path):
+    from fontTools.ttLib import TTFont
+    with TTFont(path, lazy=True) as font:
+        return frozenset(font.getBestCmap())
 
 
 def _clampax(v, ax):

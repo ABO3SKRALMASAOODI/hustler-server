@@ -17,8 +17,7 @@ refused by the EDL), which is the same thing.
 Monotonic by construction (every factor > 0, spans contiguous and sorted).
 Frame duplication: a source at ``fps_src`` slowed to ``f`` shows a fresh
 source frame every output frame only while ``f * fps_src >= fps_out``;
-``floor(...)`` reports it and the planner clamps to it unless told
-otherwise (interpolation is Wave 4A).
+Below that floor the plan marks the steps whose missing frames need interpolation.
 """
 
 import math

@@ -142,7 +142,7 @@ def test_the_backend_reads_the_rules_from_renders_and_answers():
                             "../../backend/routes/video.py")).read()
     assert "meta -> 'rules' AS rules" in bev            # the deployed rules
     assert "result -> 'rules' AS rules" in bev          # each answer's rules
-    gate = bev[bev.index("def _final_gate"):bev.index("def final_degraded_hold")]
+    gate = bev[bev.index("def _final_gate"):bev.index("def list_edls")]
     assert "_deployed_render_rules(cur)" in gate
     assert "_rules_vouched(meta, answer, deployed)" in gate
 

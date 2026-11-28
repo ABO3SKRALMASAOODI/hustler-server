@@ -888,6 +888,40 @@ def enqueue_agent_continuation(conn, project_id, user_id, root_job_id,
         return cur.fetchone()["id"]
 
 
+def _update_final_device_note(cur, job_id, result):
+    """Keep the reply attached to this EDL version consistent with its final film."""
+    cur.execute("""SELECT m.id, m.content, m.meta FROM video_jobs j
+                   JOIN projects p ON p.id=j.project_id
+                   JOIN chat_messages m ON m.session_id=p.chat_session_id
+                   WHERE j.id=%s AND j.type='final' AND m.role='assistant'
+                     AND m.meta->>'edl_version'=j.payload->>'edl_version'
+                     AND m.meta ? 'preview'
+                   ORDER BY m.id DESC LIMIT 1 FOR UPDATE OF m""", (job_id,))
+    row = cur.fetchone()
+    if not row:
+        return
+    meta = row["meta"] or {}
+    preview = meta.get("preview") or {}
+    seen = {r.get("id"): r.get("rung") for r in preview.get("devices") or []}
+    changes = [r for r in result.get("devices") or []
+               if r.get("rung") != seen.get(r.get("id"), "full")]
+    def label(device):
+        name = device.get("id") or device.get("device") or "effect"
+        return f"{name} ({device.get('rung')})"
+    note = ("Final export — " + ", ".join(map(label, changes)) + ".") if changes else ""
+    old = meta.get("final_device_note") or ""
+    if note == old:
+        return
+    body = row["content"] or ""
+    if old:
+        body = body.removesuffix("\n\n" + old)
+    if note:
+        body += "\n\n" + note
+    cur.execute("""UPDATE chat_messages SET content=%s,
+                       meta=meta || %s::jsonb WHERE id=%s""",
+                (body, Json({"final_device_note": note, "final_devices": changes}), row["id"]))
+
+
 def finish_job(conn, job_id, state, error=None, result=None,
                total_claims=None):
     """Finish only the execution lease that produced this result.
@@ -912,6 +946,8 @@ def finish_job(conn, job_id, state, error=None, result=None,
                         WHERE id = %s AND state = 'running'{lease_where}""",
                     tuple(params))
         committed = cur.rowcount > 0
+        if committed and state == "done" and isinstance(result, dict) and result.get("variant") == "final":
+            _update_final_device_note(cur, job_id, result)
     if (committed and total_claims is not None
             and state in {"done", "failed"}
             and remote_executions_table_ready(conn)):

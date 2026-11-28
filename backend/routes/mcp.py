@@ -65,7 +65,7 @@ from mcp_directory_metadata import directory_tool_metadata
 import routes.mcp_oauth as mcp_oauth
 from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
-from routes.video import complete_upload_core, record_client_event, vdb, wschemas, apply_edit_batch_core, _request_final, _final_gate, final_degraded_hold, final_hold_message
+from routes.video import complete_upload_core, record_client_event, vdb, wschemas, apply_edit_batch_core, _request_final, _final_gate
 from routes.video import wtimeline
 from video_services import held_request
 from video_services import mcp_fast_reads
@@ -3282,7 +3282,7 @@ _ADVISORY_FINDING_CODES = frozenset({
     "scene_unaware_reframe", "duplicate_broll_window",
     "music_missing_treatment_purpose", "sfx_missing_trigger",
     "mechanical_sfx_pattern", "taste_advisory", "sound_off_gap",
-    "earn_its_place", "speaker_stutter",
+    "earn_its_place", "speaker_stutter", "device_degraded",
 })
 
 
@@ -3793,13 +3793,6 @@ def _t_download_url(tok, args):
             gate = _final_gate(cur, project_id, tok["user_id"])
         if row and kind == "final" and not gate(
                 row["id"], row.get("meta") or {}, (row.get("meta") or {}).get("edl_version")):
-            held = final_degraded_hold(row.get("meta") or {})
-            if held:
-                return _session_error(
-                    final_hold_message(held) + " Fix the cause in a new edit, "
-                    "or justify_verification_findings(['device_degraded'], "
-                    "...) saying why it is acceptable, then export_final "
-                    "again.")
             return _session_error("This export needs refreshing. Call export_final with this project_id and reviewed edl_version.")
         pending = missing = None
         if not row and kind == "final":

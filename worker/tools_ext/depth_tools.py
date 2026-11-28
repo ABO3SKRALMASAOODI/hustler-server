@@ -481,12 +481,10 @@ def add_time_effect(ctx, kind, start=None, end=None, word=None,
             return _rejected("the window is too short (>= 0.2 s)")
     except (TypeError, ValueError) as x:
         return _rejected(str(x))
-    if kind in ("reverse", "remap", "stutter", "ramp") and not allow_speech:
+    if kind in ("reverse", "remap", "stutter") and not allow_speech:
         talk = spoken_in(edl, index, s, e, pad=0.0)
         if len(talk) >= 2:
-            why = ("a ramp slows the SOUND with the picture (speed spans "
-                   "retime both): his voice would drag" if kind == "ramp"
-                   else "the audio keeps playing forward")
+            why = "the audio keeps playing forward"
             return _rejected(f"{kind} on {len(talk)} spoken words breaks the "
                              f"speech ({why}). Use it on B-roll, a gesture, "
                              "a walk or a pause — or pass allow_speech true "
@@ -497,6 +495,9 @@ def add_time_effect(ctx, kind, start=None, end=None, word=None,
             return _rejected(f"a ramp's factor is its slowest speed, "
                              f"{RAMP_MIN_FACTOR:g}-{RAMP_MAX_FACTOR:g} "
                              "(0.5 = half speed)")
+        if spoken_in(edl, index, s, e, pad=0.0) and not allow_speech:
+            from tools_ext.montage_tools import set_speed_ramp
+            return set_speed_ramp(ctx, start=s, end=e, low=f, id=id or "ramp", audio_mode="original")
         try:
             spans = _speed_ramp_ops(edl, s, e, f, prefix=str(id or "ramp"))
         except ValueError as x:

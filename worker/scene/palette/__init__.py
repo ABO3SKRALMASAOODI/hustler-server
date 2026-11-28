@@ -609,6 +609,7 @@ def apply(l1, work, asks=None, pool=None):
     cur = copy.deepcopy({k: v for k, v in l1.items() if k not in ("devices", "alien")})
     from .picks import stamp_ranges
     stamp_ranges(cur)            # each clip's checked slice, kept on its asset before any device carves its shots away
+    cur.setdefault("opening_shots", [it for it in cur.get("items") or [] if it.get("k") == "shot"])
     sense = Sense(cur, work, pool=pool)
     log, events, made, seats = [], [], set(), []
 
@@ -710,6 +711,7 @@ def apply(l1, work, asks=None, pool=None):
             for m in row.get("marks", []) if isinstance(m.get("f"), int)
         ]
     cur["device_events"] = sorted(events, key=lambda e: (int(e.get("f", 0)), str(e.get("id"))))
+    cur.pop("opening_shots", None)
     cur["device_log"] = log
     return cur, log
 

@@ -462,6 +462,13 @@ def pot_args():
 
 # ── the boot probe: the answer to "is it working", asked from the box ────
 
+def network_unreachable(stderr):
+    detail = (stderr or "").casefold()
+    return any(message in detail for message in (
+        "network is unreachable", "no route to host", "connection timed out",
+        "cannot assign requested address"))
+
+
 def _probe_cmd(url, run_jar, strategy=None):
     strategy = strategy or {"client": "mweb", "cookies": False}
     cmd = [sys.executable, "-m", "yt_dlp",
@@ -525,12 +532,15 @@ def probe(url=None, timeout_s=120.0):
             base, _ = _probe_cmd(url, run_jar, strategy)
             progressive = strategy.get("format") == "progressive"
             selector = "b[height<=360]/b" if progressive else "ba/b"
-            proc = subprocess.run(
-                base + ["-f", selector, "--simulate",
-                        "--print", "probe_ok id=%(id)s fmt=%(format_id)s"]
-                + target,
-                capture_output=True, text=True, errors="replace",
-                timeout=timeout_s)
+            def probe_route(args):
+                return subprocess.run(
+                    args + ["-f", selector, "--simulate",
+                            "--print", "probe_ok id=%(id)s fmt=%(format_id)s"] + target,
+                    capture_output=True, text=True, errors="replace", timeout=timeout_s)
+            proc = probe_route(base)
+            if proc.returncode and network_unreachable(proc.stderr):
+                base = [*base, "--force-ipv4"]
+                proc = probe_route(base)
             err = proc.stderr or ""
             extract_ok = (proc.returncode == 0 and
                           "probe_ok" in (proc.stdout or ""))

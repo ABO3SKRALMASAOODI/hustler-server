@@ -193,3 +193,42 @@ def apply(l1, index, perception, *, views=None):
         report.append({"id": item["id"], "source": [start, end], "reason": reason,
                        "subject_boxes": len(boxes), "crop": item.get("crop")})
     return report
+
+
+ROW_OVERLAP = .5        # two boxes share a row: this share of the lower one's height
+WORD_GAP_H = 1.2        # ... and sit at most this many line heights apart
+
+
+def _line_boxes(row):
+    """A spatial sample's line-shaped text boxes (geometry only)."""
+    out = []
+    for b in row.get("text") or []:
+        try:
+            x0, y0, x1, y1 = (float(v) for v in b[:4])
+        except (TypeError, ValueError):
+            continue
+        w, h = x1 - x0, y1 - y0
+        if w > 0 and 0 < h <= .2:
+            out.append((x0, y0, x1, y1))
+    return out
+
+
+def printed_lines(row):
+    """The sample's text boxes joined into printed lines: boxes on one row
+    (vertical overlap) whose horizontal gap is a word gap (a line height or
+    so). Returns [(x0, y0, x1, y1)]. Geometry only."""
+    boxes = sorted(_line_boxes(row))
+    lines = []
+    for b in boxes:
+        for i, l in enumerate(lines):
+            h = min(b[3] - b[1], l[3] - l[1])
+            overlap = min(b[3], l[3]) - max(b[1], l[1])
+            gap = b[0] - l[2]
+            if overlap >= ROW_OVERLAP * h and gap <= WORD_GAP_H * max(
+                    b[3] - b[1], l[3] - l[1]):
+                lines[i] = (min(l[0], b[0]), min(l[1], b[1]),
+                            max(l[2], b[2]), max(l[3], b[3]))
+                break
+        else:
+            lines.append(b)
+    return lines

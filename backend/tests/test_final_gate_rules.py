@@ -178,10 +178,10 @@ def test_the_probe_is_one_query_per_ttl_not_one_per_poll():
     assert sum("render_asset_id" in c for c in cur.calls) == 3
 
 
-def test_held_and_undersized_finals_stay_hidden_whatever_the_rules():
+def test_a_current_final_with_a_legacy_device_hold_is_available():
     ok = _gate(rendered=LIVE)
     held = [{"device": "x", "rung": "substitute"}]
-    assert not ok(600, dict(S23_META, rules=TODAY, degraded_hold=held), 5)
+    assert ok(600, dict(S23_META, rules=TODAY, degraded_hold=held), 5)
 
 
 # ── export_final: a hidden final is a new job, not the old file ─────────────

@@ -413,6 +413,8 @@ class FxPlan:
         self.bus = {}
         self.inputs = []            # [(key, args)]
         self._input_idx = {}
+        self.input_owners = {}
+        self.preparing_id = None
         self.notes = []
         self.rungs = {}
         # The resolver's full answer per device item ({rung, reason,
@@ -462,6 +464,7 @@ class FxPlan:
     def add_input(self, key, args):
         """Ask for one more ffmpeg input (a precomputed mask clip, a map, a
         still); ``input_label(key)`` names its video stream once bound."""
+        self.input_owners.setdefault(key, set()).add(self.preparing_id)
         if key not in dict(self.inputs):
             self.inputs.append((key, list(args)))
         return key
@@ -723,11 +726,13 @@ def prepare(edl, *, tl, W, H, fps, preview, workdir, source=None,
     if any(i.get("device") for i in items):
         plan.budget_ms = _device_budget(plan, edl)
     for item in items:
+        plan.preparing_id = item.get("id")
         try:
             _prepare_item(plan, item)
         except Exception as e:  # noqa: BLE001 — degrade, never fail
             plan.note(item, "omit", f"could not be prepared "
                       f"({type(e).__name__}: {str(e)[:120]})")
+    plan.preparing_id = None
     return plan
 
 
@@ -1305,6 +1310,9 @@ def without_fx(plan, item_ids):
     selected = copy.copy(plan)
     def keep(rows):
         return [row for row in rows if row.get("id") not in item_ids]
+    selected.inputs = [(key, args) for key, args in plan.inputs
+                       if not plan.input_owners.get(key, {None}).issubset(item_ids)]
+    selected._input_idx = {}
     selected.by_stage = {stage: keep(items) for stage, items in plan.by_stage.items()}
     selected.junction_items = keep(plan.junction_items)
     selected.bus = {key: keep(items) for key, items in plan.bus.items()}

@@ -314,7 +314,7 @@ class _Broll:
         # cutaway retain another full-resolution decode.
         out = build(ctx.parts, None, u)
         positioned = ctx.uid("brw")
-        ctx.parts.append(f"[{out}]settb=AVTB,setpts='round((N+{f0})/{ctx.fps3:.3f}/TB)-2'[{positioned}]")
+        ctx.parts.append(f"[{out}]tpad=stop=1:stop_mode=clone,settb=AVTB,setpts='round((N+{f0})/{ctx.fps3:.3f}/TB)-2'[{positioned}]")
         result = ctx.uid("brout")
         overlay = fxprims.composite_overlay(ctx.parts, label)
         ctx.parts.append(f"[{label}][{positioned}]{overlay}:enable='{fxprims.enable_expr([(f0, f1)])}'[{result}]")
