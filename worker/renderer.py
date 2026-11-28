@@ -4248,12 +4248,36 @@ def _joined_in_source(a, b, keep):
     return abs(float(keep[a[1]][1]) - float(keep[b[1]][0])) < 0.02
 
 
-def _compose_join(spec, order, keep, index, fps, plan):
+def _same_join_picture(cap, before, after):
+    """Compare the environment on both sides of a join. Texture-bearing
+    tiles discount featureless walls and black borders. A speaker can move
+    while the background stays in place."""
+    import cv2
+    import numpy as np
+    frames = []
+    for t in (before, after):
+        cap.set(cv2.CAP_PROP_POS_MSEC, 1000 * t)
+        ok, frame = cap.read()
+        if not ok:
+            return None
+        small = cv2.resize(frame, (96, 64), interpolation=cv2.INTER_AREA)
+        frames.append(small.astype(np.float32).reshape(8, 8, 12, 8, 3))
+    a, b = frames
+    texture = np.maximum(a.std(axis=(1, 3)), b.std(axis=(1, 3))).mean(axis=2)
+    detail = texture > 6
+    if detail.sum() < 8:
+        return None
+    distances = np.abs(a-b).mean(axis=(1, 3, 4))
+    return bool(np.mean(distances[detail] < 12) >= .65)
+
+
+def _compose_join(spec, order, keep, index, fps, plan, capture=None):
     """Resolve a dissolve to a straight cut when both source handles
     belong to the same measured shot. Other devices may share the join."""
     import taste
     (ak, ai, _), (bk, bi, _) = order[spec["k"]:spec["k"] + 2]
-    if ak != "seg" or bk != "seg":
+    if ak != "seg" or bk != "seg" or not any(
+            it.get("style") == "dissolve" for it in spec["items"]):
         return spec
     shots = (index or {}).get("shots") or []
     a0, a1 = keep[ai]
@@ -4261,12 +4285,19 @@ def _compose_join(spec, order, keep, index, fps, plan):
     half_frame = 0.5 / fps
     left = taste._shot_id_at(shots, max((a0+a1)/2, a1-half_frame))
     right = taste._shot_id_at(shots, min((b0+b1)/2, b0+half_frame))
-    if left is None or left != right:
+    measured = None
+    if capture is not None:
+        # Sample beyond the authored blend. Neighbouring frames right on
+        # a baked transition can look alike even across different scenes.
+        before = max((a0+a1)/2, a1-.25)
+        after = min((b0+b1)/2, b0+.25)
+        measured = _same_join_picture(capture, before, after)
+    if measured is False or (measured is None and (left is None or left != right)):
         return spec
     items = []
     for item in spec["items"]:
-        if item.get("style") == "dissolve" and not item.get("hold"):
-            plan.note(item, "full", "straight cut between frames of the same indexed shot")
+        if item.get("style") == "dissolve" and (measured or not item.get("hold")):
+            plan.note(item, "full", "straight cut between matching shots")
         else:
             items.append(item)
     return dict(spec, items=items) if items else None
@@ -4839,8 +4870,18 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     if fx_plan is not None and fx_plan.junction_items:
         fx_juncs = fxgraph.junction_specs(
             fx_plan, _fx_cuts(order, keep, edl.get("keep"), blk_frames))
-        fx_juncs = [join for spec in fx_juncs
-                    if (join := _compose_join(spec, order, keep, index, fps, fx_plan))]
+        capture = None
+        src_path = (fx_plan.media or {}).get("src_path")
+        if src_path and os.path.isfile(src_path) and any(
+                it.get("style") == "dissolve" for it in fx_plan.junction_items):
+            import cv2
+            capture = cv2.VideoCapture(src_path)
+        try:
+            fx_juncs = [join for spec in fx_juncs if (join := _compose_join(
+                spec, order, keep, index, fps, fx_plan, capture))]
+        finally:
+            if capture is not None:
+                capture.release()
         shot_starts = _index_shot_starts(index)
         for spec in fx_juncs:
             ka, kb = spec["k"], spec["k"] + 1
