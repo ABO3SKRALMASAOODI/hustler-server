@@ -145,12 +145,12 @@ def test_recorded_composed_reviews_cost_under_a_third_of_their_calls(tmp_path, m
     pass, packed MAX_PLACEMENTS / MAX_IMAGES a call: 72 calls on the Jensen run's three made shorts become 21."""
     pc, calls, call = _counting(monkeypatch, None)
     film = tmp_path / 'film.mp4'
-    film.write_bytes(b'render')
     got = {}
     for short, reviews in JENSEN_RENDER.items():
         before = len(calls)
         for n, frames in enumerate(reviews):
-            # each recorded review was a fresh render: no frame of it is reused here
+            # Each new set of composed pixels comes from a distinct encoded master.
+            film.write_bytes(f'{short}-{n}'.encode())
             _, report = pc.check(_rows(film, frames, tag=f'{short}-{n}'), dict(segments=[dict(say='word')]), _Clock(),
                                  str(tmp_path / short), 'unused', call=call, review='composed')
             assert report['accepted'] == len(frames)
@@ -175,6 +175,7 @@ def test_a_rerender_reuses_the_verdicts_of_unchanged_frames_and_checks_changed_o
     pc.check(_rows(film, frames), *args, call=call, review='composed')
     assert len(calls) == first
     rows = _rows(film, frames)
+    film.write_bytes(b'render three, one changed placement')
     rows[4][4]['tag'] = 'render-2'                                  # one placement's pixels changed
     _, report = pc.check(rows, *args, call=call, review='composed')
     assert len(calls) == first + 1 and calls[-1]['ids'] == [4] and report['accepted'] == len(frames)
@@ -227,8 +228,8 @@ def test_a_wide_clip_is_judged_on_its_full_frame_and_the_slice_the_film_shows(tm
     assert abs(sizes[3][0] / sizes[3][1] - 9 / 16) < 0.01
     labels = pc.frame_labels([0, 30, "clip", "Susan Li", rec], 4)
     assert labels[0].startswith("full source frame") and labels[3].startswith("the phone-shaped slice")
-    # the frames span the whole clip, not the slice the proposal happened to cut
-    assert pc.sample_times(rec) == [0.3, 1.0, 1.7]
+    # The full-width identity evidence comes from inside the selected source seconds.
+    assert pc.sample_times(rec) == [0.72, 1.0, 1.28]
 
 
 def _clock():

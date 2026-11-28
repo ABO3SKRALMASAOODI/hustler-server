@@ -38,65 +38,27 @@ def test_publishers_read_over_exact_retained_insets_without_scouting_neighbour(t
     assert sc["beats"]["research_windows"] == [1]
 
 
-def test_a_cached_source_reading_reuses_its_publisher_pixels_and_dates(tmp_path,monkeypatch):
-    import wf1_documents as docs
-    import wf1_publisher_reading as reading
-    from PIL import Image
-    sources = [dict(url="https://example.org/"+key, publisher="Company",publication_date=date)
-               for key,date in [("plan","2025-11-21"),("update","2026-09-03")]]
-    pages = [dict(first=0,last=1,facts=[dict(source=sources[0],supporting_sources=sources,
-                 perspective=dict(stance="concern"))])]
-    coverage = dict(words=[dict(w=w,start=i,end=i+1) for i,w in enumerate(("these","concerns"))],windows=[])
-    calls=[]
-    def download(url, work):
-        calls.append(url)
-        return b"<p>We will change the ranking.</p>",url
-    def capture(url,folder,**kw):
-        assert kw["offline"] and b"We will" in kw["cached"]
-        image=Image.new("RGB",(40,20))
-        image.info["selected_words"]=kw["words"]
-        return [image]
-    monkeypatch.setattr(docs,"download",download)
-    monkeypatch.setattr(docs,"webpage",capture)
-    answer=dict(readings=[dict(first=0,last=1,page=0,url=sources[0]["url"],quote="We will change the ranking.",
-                               followup=sources[1]["url"])])
-    llm=SimpleNamespace(ask=lambda *a,**kw:(json.dumps(answer),{"seconds":2}),json_block=json.loads)
-    plan,cost=reading.read(pages,coverage,tmp_path,llm)
-    assert plan["readings"][0]["followup"]["publication_date"] == "2026-09-03"
-    assert cost and reading.read(pages,coverage,tmp_path,None)==(plan,[])
-    (tmp_path/"pack.json").write_text(json.dumps(dict(pack=dict(coverage=coverage))))
-    legacy = dict(beats=dict(publisher_reading="Andrew Lear"), publisher_read=True)
-    ctx = SimpleNamespace(supply=str(tmp_path))
-    wf.restore_publisher_reading(ctx, legacy, pages)
-    assert legacy["beats"]["publisher_reading"] == plan
-    for cache in (tmp_path/"publisher-readings").glob("*.json"):
-        cache.unlink()
-    excerpt = plan["readings"][0]
-    legacy["beats"] = dict(display_facts=[dict(publisher_excerpt=excerpt)])
-    wf.restore_publisher_reading(ctx, legacy, pages)
-    assert legacy["beats"]["publisher_reading"] == dict(readings=[excerpt])
-    assert calls==[s["url"] for s in sources]
+def test_saved_reading_stays_on_the_exact_transcript_window():
+    saved = dict(first=3, last=6, say="they changed the ranking")
+    plan = dict(readings=[dict(first=3, last=6, evidence="source receipt")], windows=[saved])
+    window = dict(saved, name="Ranking", t0=1, t1=3)
+    assert local_coverage({"windows": [window]}, plan)["windows"][0]["publisher_camera"]
+    revised = dict(window, say="they proposed a ranking")
+    assert local_coverage({"windows": [revised]}, plan)["windows"] == [revised]
 
 
-def test_selected_publisher_inset_keeps_the_exact_image(tmp_path, monkeypatch):
-    import wf1_documents as docs
-    import wf1_publisher_reading as reading
-    from PIL import Image
-
-    source = dict(url="https://example.org/record", publisher="Publisher", publication_date="2025-11-21")
-    pages = [dict(first=0,last=0,facts=[dict(source=source,perspective=dict(stance="concern"))])]
-    coverage = dict(words=[dict(w="Ranking",start=0,end=1)],windows=[])
-    original = tmp_path/"approved.png"
-    Image.new("RGB",(60,20)).save(original)
-    doc = dict(url=source["url"],words="We will prioritize original reporting.",sha256="publisher-original")
-    stock = {"record":[dict(document=doc,provider="primary-document",path=str(original))]}
-    answer = dict(readings=[dict(page=0,first=0,last=0,url=source["url"],quote="prioritize original reporting")])
-    llm = SimpleNamespace(ask=lambda *a,**kw:(json.dumps(answer),{}),json_block=json.loads)
-    def no_lookup(*args, **kwargs):
-        raise AssertionError("Already have the approved publisher crop")
-    monkeypatch.setattr(docs,"download",no_lookup)
-    monkeypatch.setattr(docs,"webpage",no_lookup)
-    plan,_ = reading.read(pages,coverage,tmp_path,llm,stock)
-    assert plan["readings"][0]["path"] == str(original)
-    assert plan["readings"][0]["quote"] == doc["words"]
-    assert reading.read(pages,coverage,tmp_path,None,stock) == (plan,[])
+def test_legacy_camera_plan_keeps_the_approved_image_and_ignores_replaced_pixels(tmp_path):
+    path = tmp_path / "approved.png"
+    path.write_bytes(b"approved")
+    snapshot = dict(first=0, last=2, say="read the record")
+    window = dict(snapshot, name="Record", t0=0., t1=3., must_show="page")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    inset = dict(path=str(path), sha256=digest, approved_media=digest, approved_crop=[.1,.2,.8,.9],
+                 f=[10,60], clause=window["say"], clause_t=[0.,3.], source="publication")
+    coverage = local_coverage(dict(windows=[window], passed_placements={"0":[inset]}),
+                              dict(camera_windows=[0], windows=[snapshot]))
+    photos = {"Record":[dict(path=str(path), page="publication")]}
+    rows = proposals(coverage, {}, photos)
+    assert [(row[4]["path"], row[4]["approved_crop"]) for row in rows] == [(str(path), inset["approved_crop"])]
+    path.write_bytes(b"replaced")
+    assert proposals(coverage, {}, photos) == []

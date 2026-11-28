@@ -1634,21 +1634,6 @@ def pauses(path, lo, hi, min_s=0.15, below_db=28.0):
     return out
 
 
-def proof_span(visible, window):
-    """Measured picture receipts inside the chosen spoken comparison, in export seconds."""
-    seen = [t for row in visible for t in row.get("seconds", []) if window[0] <= t <= window[1]]
-    return (min(seen), max(seen)) if seen else None
-
-
-def proof_push_at(span, hook):
-    """Export second the split's push onto the proof starts from: inside the proof's whole stretch, with room for the
-    push and a hold before the split ends (devices.split)."""
-    if not span:
-        return None
-    f_room = (D.PROOF_PUSH_F + 8) / F.FPS
-    return round(min(max(float(span[0]), float(hook[0]) + 6 / F.FPS), float(hook[1]) - f_room), 3)
-
-
 def caption_example(edl, words, visible, body):
     """Find a checked line of burned captions in the kept speech, on the export clock.
 
@@ -2007,7 +1992,7 @@ def showcase_supply(ctx, script, sup_dir, pk):
                 voices=[], screen_voices=voices, programme_segments=turns, work=os.path.join(sup_dir, "finish"), fit=[],
                 product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, before=before, after=after, later=later_label(rec) if len(rec.get("asks") or []) <= 1 else None,
                              upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=(mk["site"][1]-mk["site"][0])/F.FPS, cta_said=None,
-                             caption_proof=caption, proof_at=proof_push_at(proof_span(visible, hook), hook)))
+                             caption_proof=caption))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
                 format="showcase", studio_ui=bool(ui), site=bool(ui and ui.get("site")))
     jsave(pk, dict(pack=pack, record=rec_))
@@ -3732,7 +3717,7 @@ def showcase_score(ctx, script, pack):
         raise RuntimeError("the showcase needs the recording's Studio photographs (studio.py, phone view): record it again")
     page = ui.get("site") or dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
     l1, beats = D.showcase(upload=upload, export=body, edl_b=edl, typed=typed_line(script["receipts"]), window=prod["window"], hook=prod["hook"],
-                           ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"), proof_at=prod.get("proof_at"), caption_proof=prod.get("caption_proof"),
+                           ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"), caption_proof=prod.get("caption_proof"),
                            marks=prod.get("marks"), before=prod.get("before"), after=prod.get("after"))
     out = os.path.join(ctx.supply, "l1.json")
     jsave(out, l1)

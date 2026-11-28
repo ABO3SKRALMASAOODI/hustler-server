@@ -954,10 +954,6 @@ def showcase_marks(hook, window, n_words, lead_f=3, site_s=None, over_s=0.0, boa
 
 
 
-PROOF_W = 0.84                 # the export card's width once the proof is complete: its titles read at phone size
-PROOF_PUSH_F = 14
-
-
 def tone_region(edl, start, end):
     """A stationary local grade covering these export seconds, in the export's own coordinates."""
     start, end = float(start), float(end)
@@ -1049,7 +1045,7 @@ def matched_grade(l1, *, f0, f1, upload, export, edl, export_at, region, lib, wi
                 labels=labels, export_crop=detail)
 
 
-def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42), land_f=None, proof_f=None, caption_proof=None):
+def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42), land_f=None, caption_proof=None):
     """Compare the simultaneous source and edit in equal full-width panes."""
     region = tone_region(edl_b, export_at, export_at+(f1-f0)/FPS)
     if region and not caption_proof and land_f is None:
@@ -1269,12 +1265,13 @@ def site(l1, *, f0, f1, page, export, lib, src0=0.0, url="valmera.io", action_me
 
 
 def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="wf2", focus=(0.5, 0.42), lead_f=3, later=None,
-             site_s=None, proof_at=None, over_s=0.0, caption_proof=None, marks=None, before=None, after=None):
+             site_s=None, over_s=0.0, caption_proof=None, marks=None, before=None, after=None):
     """The whole programme of a film with no narrator (owner, 17 Nov: "an extremely powerful edit ... then the CTA";
     "show the website directly"): split, studio, export, site (see above). `hook` / `window`: export seconds of the
     split and of the export's own stretch; `ui`: the recording's Studio photographs; `page`: its photograph of the
     site. Returns (l1, beats)."""
-    mk = marks or showcase_marks(hook, window, len(typed.split()), lead_f=lead_f, site_s=site_s, over_s=over_s)
+    mk = marks or showcase_marks(hook, window, len(typed.split()), lead_f=lead_f, site_s=site_s, over_s=over_s,
+                                before=before, after=after)
     e0, e1 = float(window[0]), float(window[1])
     l1 = dict(l1=1, sid=sid, seed=1117, fps=FPS, frame=[W, H], dur_f=mk["dur_f"], spine=[], voices={}, assets={}, items=[], sound=[],
               film=dict(grain=0.0, vignette=0.0, over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0)))
@@ -1295,9 +1292,8 @@ def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="
             src = [r4(src[0]), r4(src[0] + (span[1] - span[0]) / FPS)]
             l1["items"].append(dict(id=name, k="shot", f=span, pic=key, src=src))
             pictures.append(dict(path=media["path"], f=span, src=src, name=name, role=name))
-    proof_f = int(round((float(proof_at) - float(hook[0])) * FPS)) if proof_at is not None else None
     rec_s = split(l1, f0=0, f1=mk["split"][1], upload=upload, export=export, edl_b=edl_b, export_at=float(hook[0]), lib=lib, focus=focus,
-                  proof_f=proof_f, caption_proof=caption_proof)
+                  caption_proof=caption_proof)
     rec_u = studio_screen(l1, marks=dict(mk, export_t0=after[0] if after else e0), ui=ui, typed=typed, export=export, lib=lib, later=later, upload=upload,
                           upload_t0=rec_s["upload_at"] + mk["split"][1] / FPS)
     rec_c = site(l1, f0=f_e, f1=mk["dur_f"], page=page, export=export, lib=lib, src0=e0 + (f_e - f_p) / FPS)

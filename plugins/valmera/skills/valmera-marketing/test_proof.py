@@ -421,10 +421,7 @@ def _line_words(segs):
     return dict(words=words, duration=round(t, 2))
 
 
-def test_an_unanswered_ranking_still_fills_short_lines_with_unshown_export_shots(tmp_path, monkeypatch):
-    """20 Nov review: on an outage product_windows returned ranked={} and the fill read it as 'every line ranked
-    nothing', so no line got a proof fill and each recording line looped its one owed shot. Now an unanswered call
-    leaves the ranking out and the cut's proof tier plays export shots no file has shown, each second once."""
+def test_unranked_export_keeps_each_lines_fitted_take_without_unverified_filler(tmp_path, monkeypatch):
     from types import SimpleNamespace
     monkeypatch.setattr(P, 'still', lambda path, t, w: 'aW1hZ2U=')
     monkeypatch.setattr(P, 'ask', lambda *a, **k: (_ for _ in ()).throw(RuntimeError("503 from the proxy")))
@@ -446,16 +443,9 @@ def test_an_unanswered_ranking_still_fills_short_lines_with_unshown_export_shots
     sp = P.R.Supply({}, footage, fit={c["path"]: {0: [i]} for i, v in footage.items() for c in v})
     clock = P.F.Clock(_line_words(segs), sc)
     tl = P.R.cut_fit(sc, clock, sp, P.F.Clock.f(clock.dur) + 15, stress=[], proof_fill=[fill])
-    proof = [r[4] for r in tl if r[4].get("tier") == "proof"]
-    assert proof                                                             # the fill is on, not off for the whole film
-    own = [(r["start"], r["end"]) for r in rows]
-    played = sorted(tuple(p["src"]) for p in proof)
-    for a, b in played:
-        assert any(x <= a and b <= y for x, y, _ in fill["shots"])          # whole export shots, never a 1 s slice
-        assert not (a < 19.0 and b > 16.0)                                  # never the after's seconds
-        assert not any(a < y and b > x for x, y in own)                      # never a second a line's own file plays
-    assert all(p_[1] <= q[0] for p_, q in zip(played, played[1:]))           # each export second once
-    assert len({p["take_i"] for p in proof}) == len(proof)                   # each shot one picture
+    assert {r[4]["path"] for r in tl if r[2] == "clip"} == {clips[0]["path"] for clips in footage.values()}
+    assert all(r[4].get("path") != str(body) for r in tl)
+    assert tl[0][0] == 0 and tl[-1][1] == P.F.Clock.f(clock.dur) + 15
 
 
 def _frames(kind, n=6, w=640, h=480):
@@ -692,12 +682,18 @@ def test_verified_export_titles_fill_their_own_anchors_and_only_missing_lines_re
     words = [dict(t0=t, t1=t+.2) for t in (23.355, 23.87, 23.98, 24.18, 24.5, 25.15, 25.58, 27.92)]
     scene = dict(items=[], assets={}, voices={})
     shots = P.lay_recorded_titles(scene, SimpleNamespace(seg_words=lambda i: words, f=P.F.Clock.f), titles, [[701, 705]])
-    assert [s["frames"] for s in shots] == [[705, 747], [767, 812]]
+    assert [s["frames"] for s in shots] == [[767, 812]]
     assert all(s["path"] == str(video) for s in shots)
-    assert shots[0]["src"][0] > 46.73 and shots[1]["src"] == [48.3, 49.8]
+    assert shots[0]["src"] == [48.3, 49.8]
+    free = P.lay_recorded_titles(dict(items=[], assets={}, voices={}),
+                                 SimpleNamespace(seg_words=lambda i: words, f=P.F.Clock.f), titles, [])
+    assert [shot["title"] for shot in free] == [item["text"] for item in segments[5]["show"]]
 
-    cached = dict(lines=[3, 5], subjects={"3": [dict(name="crowd")], "5": [dict(name="Millions of people caption")]})
-    (tmp_path / "footage_subjects.json").write_text(json.dumps(cached))
+    def subjects(ctx, script, lines, context):
+        assert lines == [0, 1, 2, 3]
+        return {3: [dict(name="crowd")]}, []
+
+    monkeypatch.setattr(P, "footage_subjects", subjects)
     calls = []
 
     def acquire(ctx, request, durs, anchors, lines, **options):

@@ -53,147 +53,63 @@ def test_the_hook_landing_and_the_close_are_measured_on_the_word_times():
     assert m2["over"] == {} and timing.overage(m2) == 0
 
 
-def test_the_rewrite_goes_back_to_the_writer_with_the_seconds_and_recovers_an_unanswered_call():
-    sc = _sc()
-    m = timing.measure(_words(sc), sc)
-    seen, slept = [], []
-
-    def ask(system, content):
-        seen.append(content)
-        if len(seen) == 1:
-            raise TimeoutError("no answer")
-        return json.dumps(dict(segments=[dict(i=0, say=SHARP_HOOK, facts=["b1"], emphasis=["booed"], lands="booed"),
-                                         dict(i=2, say=SHORT_CLOSE, facts=["b1", "zz"], emphasis=["comeback."]),
-                                         dict(i=1, say="never asked for")])), dict(usd=0.01)
-    out, uses, changed = timing.rewrite(sc, m, ask=ask, log=lambda *_: None, sleep=slept.append)
-    assert len(seen) == 2 and slept == [timing.BACKOFF_S]                       # an outage is retried with backoff
-    rows = json.loads(seen[-1].split("# The beats to rewrite (measured on the narration)\n")[1].split("\n\n#")[0])
-    assert {r["beat"] for r in rows} == {"hook", "close"} and all(r["seconds"] > r["budget_s"] and r["budget_words"] > 0 for r in rows)
-    assert changed == [0, 2] and out["segments"][1]["say"] == sc["segments"][1]["say"]
-    assert out["segments"][0]["say"] == SHARP_HOOK and out["segments"][0]["lands"] == "booed" and out["hook_line"] == SHARP_HOOK
-    assert out["segments"][2]["facts"] == ["b1"] and out["close_line"] == SHORT_CLOSE      # only bank facts are cited
-    assert "date" in timing.REWRITE_SYSTEM and "ONE landing line" in timing.REWRITE_SYSTEM
-
-
-def test_the_script_stage_reads_rewrites_and_keeps_the_read_that_lands(tmp_path):
-    import wf3
-    ctx = types.SimpleNamespace(run_dir=str(tmp_path), supply=str(tmp_path / "supply"), tmp=str(tmp_path), args={}, run_id="t",
-                                log=lambda *_: None)
-    reads, finals = [], []
-
-    def narrate(sc_, out):
-        os.makedirs(out, exist_ok=True)
-        w = _words(sc_)
-        json.dump(w, open(os.path.join(out, "words.json"), "w"))
-        reads.append(sc_["segments"][0]["say"])
-        return dict(words=os.path.join(out, "words.json"))
-
-    def rewrite(sc_, m, notes):
-        out = json.loads(json.dumps(sc_))
-        out["segments"][0].update(say=SHARP_HOOK, lands="booed")
-        out["segments"][-1].update(say=SHORT_CLOSE)
-        return out, [dict(usd=0.02)], [0, 2]
-
-    def final(sc_, rep_):
-        finals.append(sc_["segments"][-1]["say"])
-        return sc_, dict(rep_, judged=True)
-    spend = []
-    sc2, rep2 = wf3.timed(ctx, _sc(), dict(ok=True), spend, narrate=narrate, rewrite=rewrite, final=final)
-    assert reads == [DATE_HOOK, SHARP_HOOK] and finals == [SHORT_CLOSE]            # judged on its quotes before it is read
-    assert sc2["segments"][0]["say"] == SHARP_HOOK and rep2["judged"] and sc2["timing"]["kept"] == 1
-    assert [r["overage_s"] > 0 for r in sc2["timing"]["rounds"]] == [True, False]
-    assert os.path.exists(os.path.join(ctx.supply, "narration", "words.json"))     # supply reuses the read it was timed on
-    assert not any(n.startswith("narration_t") for n in os.listdir(ctx.supply))
-    assert spend == [dict(stage="timing", usd=0.02)]
-
-
-def test_a_rewrite_the_fact_check_cannot_stand_keeps_the_script_and_tells_the_writer(tmp_path):
-    import wf3
-    ctx = types.SimpleNamespace(run_dir=str(tmp_path), supply=str(tmp_path / "supply"), tmp=str(tmp_path), args={}, run_id="t",
-                                log=lambda *_: None)
-    notes = []
-
-    def narrate(sc_, out):
-        os.makedirs(out, exist_ok=True)
-        json.dump(_words(sc_), open(os.path.join(out, "words.json"), "w"))
-        return dict(words=os.path.join(out, "words.json"))
-
-    def rewrite(sc_, m, n):
-        notes.append(n)
-        out = json.loads(json.dumps(sc_))
-        out["segments"][0]["say"] = SHARP_HOOK
-        return out, [], [0]
-
-    def final(sc_, rep_):
-        raise RuntimeError("the final support pass does not stand: hook unsupported")
-    sc0 = _sc()
-    sc2, _ = wf3.timed(ctx, sc0, dict(ok=True), [], narrate=narrate, rewrite=rewrite, final=final)
-    assert sc2["segments"][0]["say"] == DATE_HOOK and notes[0] is None and "could not stand" in notes[1]
-    assert len(notes) == timing.TIMING_ASKS and len(sc2["timing"]["rounds"]) == 1      # every refused ask, one read
-
-
 def _ctx(tmp_path):
-    return types.SimpleNamespace(run_dir=str(tmp_path), supply=str(tmp_path / "supply"), tmp=str(tmp_path), args={}, run_id="t",
-                                 log=lambda *_: None)
+    return types.SimpleNamespace(run_dir=str(tmp_path), supply=str(tmp_path / "supply"),
+                                 args={}, run_id="test", log=lambda *_: None)
 
 
-def _reader(reads):
-    def narrate(sc_, out):
-        os.makedirs(out, exist_ok=True)
-        json.dump(_words(sc_), open(os.path.join(out, "words.json"), "w"))
-        reads.append(tuple(s_["say"] for s_ in sc_["segments"]))
-        return dict(words=os.path.join(out, "words.json"))
-    return narrate
-
-
-def test_unchanged_words_are_never_read_twice(tmp_path):
-    """A refused or empty rewrite narrated the same words into a new narration_t folder: a second full Phonon read of
-    identical text. The last read's measure stands; the writer is asked again with the reason."""
+def test_draft_clock_measures_the_meaning_before_a_coda(tmp_path):
     import wf3
-    reads, notes, finals = [], [], []
-
-    def rewrite(sc_, m, n):
-        notes.append(n)
-        out = json.loads(json.dumps(sc_))
-        if len(notes) == 2:
-            return out, [], []                                                      # an answer that changes nothing
-        out["segments"][0].update(say=SHARP_HOOK, lands="booed")
-        out["segments"][-1].update(say=SHORT_CLOSE)
-        return out, [], [0, 2]
-
-    def final(sc_, rep_):
-        finals.append(1)
-        if len(finals) == 1:
-            raise RuntimeError("the final support pass does not stand: hook unsupported")
-        return sc_, dict(rep_, judged=True)
-    sc2, rep2 = wf3.timed(_ctx(tmp_path), _sc(), dict(ok=True), [], narrate=_reader(reads), rewrite=rewrite, final=final)
-    assert len(reads) == len(set(reads)) == 2                                       # no words read twice
-    assert reads[0][0] == DATE_HOOK and reads[1][0] == SHARP_HOOK
-    assert notes[0] is None and "could not stand" in notes[1] and "changed none" in notes[2] and len(notes) == 3
-    assert sc2["segments"][0]["say"] == SHARP_HOOK and rep2["judged"] and sc2["timing"]["kept"] == 1
-    assert [a["read"] for a in sc2["timing"]["asks"]] == [False, False, True]
+    sc = _sc()
+    sc["beats"] = {"meaning": 2}
+    sc["segments"].append(dict(say="Find out more.", beat="coda"))
+    read = wf3.timed(_ctx(tmp_path), sc, narrate=lambda ctx, sample, out: {"words": _words(sample)})
+    assert read["segment_indexes"] == [0, 2]
+    assert read["over"] == timing.measure(_words(sc), sc)["over"]
+    assert sc["segments"][2]["say"] == LONG_CLOSE
 
 
-def test_script_final_is_the_kept_script(tmp_path, monkeypatch):
-    """timed's rewrites ran final_gate, which overwrote script_final.json with a rewrite later dropped (its read lost
-    to round 0). Each rewrite's gate has its own record; script_final.json is the kept script's."""
+def test_cpu_read_failure_falls_back_to_the_production_reader(tmp_path, monkeypatch):
+    import wf3
+    import subprocess
+
+    def fail(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, "draft reader")
+
+    monkeypatch.setattr(wf3.subprocess, "run", fail)
+    monkeypatch.setattr(wf3, "narrate_script", lambda ctx, sample, out: {"words": _words(sample)})
+    result = wf3.timed(_ctx(tmp_path), _sc())
+    assert result["source"] == "production reader"
+    assert set(result["over"]) == {"hook", "close"}
+
+
+def test_supplied_final_read_is_reserved_for_the_final_script(tmp_path):
     import wf3
     ctx = _ctx(tmp_path)
-    monkeypatch.setattr(wf3.writer, "final_support", lambda sc_, **kw: (sc_, dict(ok=True, verify=dict(ok=True), mark=sc_["segments"][0]["say"]), []))
-    sc0, rep0 = wf3.final_gate(ctx, _sc(SHARP_HOOK, LONG_CLOSE), dict(ok=True), [])
+    ctx.args["narration"] = "/saved/final"
+    assert wf3.timed(ctx, _sc())["available"] is False
+    assert not os.path.exists(ctx.supply)
+
+
+def test_cached_draft_read_is_reused_only_for_its_landing_lines(tmp_path, monkeypatch):
+    from pathlib import Path
+    import wf3
     reads = []
 
-    def rewrite(sc_, m, n):                                                          # a longer close: its read is worse
-        out = json.loads(json.dumps(sc_))
-        out["segments"][0]["say"] = DATE_HOOK
-        out["segments"][-1]["say"] = LONG_CLOSE + " " + LONG_CLOSE
-        return out, [], [0, 2]
-    sc2, _ = wf3.timed(ctx, sc0, rep0, [], narrate=_reader(reads), rewrite=rewrite)
-    assert len(reads) == 2 and sc2["timing"]["kept"] == 0                           # its repeat is the same words: not read again
-    rec = json.load(open(tmp_path / "script_final.json"))
-    assert rec["script"]["segments"] == sc2["segments"] and rec["script"]["segments"][0]["say"] == SHARP_HOOK
-    assert rec["report"]["mark"] == SHARP_HOOK and rec["record"] == "script_final.json"
-    assert json.load(open(tmp_path / "script_timing_final1.json"))["script"]["segments"][0]["say"] == DATE_HOOK
+    def take(command, **kwargs):
+        sample_file, folder = map(Path, command[-2:])
+        sample = json.loads(sample_file.read_text())
+        reads.append([s["say"] for s in sample["segments"]])
+        clock = dict(_words(sample), request=timing.signature(sample), source="draft", voice="actor")
+        (folder / "draft-words.json").write_text(json.dumps(clock))
+
+    monkeypatch.setattr(wf3.subprocess, "run", take)
+    ctx = _ctx(tmp_path)
+    first = wf3.timed(ctx, _sc())
+    assert wf3.timed(ctx, _sc()) == first
+    edited = wf3.timed(ctx, _sc(close=SHORT_CLOSE))
+    assert reads == [[DATE_HOOK, LONG_CLOSE], [DATE_HOOK, SHORT_CLOSE]]
+    assert edited["close_s"] < first["close_s"] and edited["hook_land_s"] == first["hook_land_s"]
 
 
 def test_the_ear_keeps_a_rewrite_that_cuts_the_close():
@@ -204,9 +120,9 @@ def test_the_ear_keeps_a_rewrite_that_cuts_the_close():
     assert "hook (the first segment)" in inspect.getsource(ear.rewrite)
 
 
-def test_the_writer_and_the_spine_are_given_the_beat_budgets():
-    assert "never on a date" in writer.BANK_WRITE_RULES and str(writer.CLOSE_WORDS) in writer.BANK_WRITE_RULES
-    assert "ONE fact" in writer.SPINE_CLAIMS_SYSTEM and "never a date" in writer.SPINE_CLAIMS_SYSTEM
+def test_research_and_revision_share_the_hook_and_meaning_line():
+    assert "measured hook and close seconds" in writer.BANK_WRITE_RULES
+    assert "one payoff figure that answers the hook" in writer.SPINE_CLAIMS_SYSTEM
 
 
 def test_beat_names_are_never_offered_as_chapter_titles():
@@ -216,7 +132,7 @@ def test_beat_names_are_never_offered_as_chapter_titles():
     content = writer._ann_content(sc, {})
     assert "beat=" not in content and "role in the story: where the story turns" in content
     assert "(the turn, the low point, the payoff)" not in writer.ANNOTATE_SYSTEM and "a chapter at each turn" not in writer.ANNOTATE_SYSTEM
-    assert "private notes" in writer.ANNOTATE_SYSTEM and "never words for the screen" in writer.REEL_DATA
+    assert "Anchor each existing show item to its spoken word_i" in writer.ANNOTATE_SYSTEM
 
 
 def test_annotate_keeps_which_prompt_wrote_each_item(monkeypatch):

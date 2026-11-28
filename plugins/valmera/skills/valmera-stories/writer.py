@@ -403,23 +403,17 @@ REEL_DATA = (
     'that thing as this line means it, a year plus its version (e.g. "the finished 1995 release, not the 1993 test reel"), '
     '"must_show": one sentence, what a picture must plainly show to carry THIS line, "moment": the scene or event the line '
     'describes when it describes one (e.g. "the window fall in the finished film"), else null}, in the order the line says '
-    'them; "pictures" is then just the list of those things. "finish" in each segment: bw|gate|crt|none, and "finish_rank": '
-    '1 for the segment that most needs it, 2 next, and so on: black and white, a film gate or scanlines are a device for a '
-    'memory, the past cut in, a low point, never a look for the whole film; the device budget is 12 to 25 percent of the voice '
-    'time, never on the payoff or the close. "colour_turn": the index of the one segment from which the film stays in colour '
-    '(the turn or the release). In this style each item of "show" is {"text": as printed, "role": figure|name|key|chapter|ordinal}: the '
+    'them; "pictures" lists those subjects. The picture editor chooses the finish after placement. In this style each item of "show" is {"text": as printed, "role": figure|name|key|chapter|ordinal}: the '
     'payoff carries its figure (role figure), each person (is=person) gets a name item at the line that first says them, at '
     'most one key word on the turn, a chapter title only where the story truly changes subject (a film of about a minute and a half '
     'needs none, at most one), made of the words that segment itself speaks or the name of the thing it turns on: the beat marks '
     '(hook, turn, low, payoff, close) are the editor\'s private notes on the structure, never words for the screen; "ordinal" only for the numbers of a list the film '
     'itself counts out ("1.", "2.", "3." on its items, one number each, from 1), never a rank, a date or a quantity: a rank ("#1", '
-    '"No. 1") is a figure. "collage": true on the two to four segments '
-    'that name or list several things at once: their pictures land as stacked prints. Mark beats truthfully: one "low" where '
-    'the story is at its worst, one "turn", the "payoff" with its figure. Name in "named" every person, place, company, '
+    '"No. 1") is a figure. For a list, name the items in spoken order. Name in "named" every person, place, company, '
     'product and event a camera filmed, with Commons searches; the footage engine finds the video of each.')
 STYLE_DATA = {
     "reel": REEL_DATA,
-    "pinboard": REEL_DATA + ' This style stacks prints on most lines: mark "collage": true on more segments, about half.',
+    "pinboard": REEL_DATA,
     "archive": REEL_DATA,
     "window": REEL_DATA,
     "character-sheet": (

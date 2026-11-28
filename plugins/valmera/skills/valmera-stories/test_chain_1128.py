@@ -53,7 +53,8 @@ def test_measurements_share_one_draft_and_only_writer_revises(tmp_path, monkeypa
 
     def write(*args, notes, sheet):
         calls.append((notes,sheet))
-        return copy.deepcopy(draft), {}
+        revised = {"segments": [{"say": "She left because of the cost."}]}
+        return (copy.deepcopy(draft) if notes is None else revised), {}
 
     monkeypatch.setattr(writer, "write_from_bank", write)
     monkeypatch.setattr(writer, "verify", lambda sc, **kw: {"ok":True})
@@ -63,14 +64,15 @@ def test_measurements_share_one_draft_and_only_writer_revises(tmp_path, monkeypa
     monkeypatch.setattr(writer, "judge_spine", lambda *a: ({"close":{"carried":True}}, {}))
     ctx = SimpleNamespace(run_dir=str(tmp_path), args={}, log=lambda m: None)
     got = wf3.from_spine(ctx, {"title":"The toll"}, {}, [], 0)
-    assert got["ok"] and got["script"] == draft
+    assert got["ok"] and got["script"]["segments"][0]["say"] == "She left because of the cost."
+    assert json.loads((tmp_path / "script_final.json").read_text()) == {"script": got["script"], "report": got["verify"]}
     assert len(calls) == 2 and calls[0] == (None,sheet)
     revision = json.loads(calls[1][0])
     assert revision["draft"] == draft and calls[1][1] == sheet
     assert set(revision["measurements"]) == {"support","repeats","spine","timing","facts"}
     assert revision["measurements"]["timing"]["close_s"] == 6
     again = wf3.from_spine(ctx, {"title":"The toll"}, {}, [], 0)
-    assert again["script"] == draft and len(calls) == 2
+    assert again["script"] == got["script"] and len(calls) == 2
 
 
 def test_timing_reads_only_the_hook_and_meaning_and_keeps_their_positions(tmp_path):

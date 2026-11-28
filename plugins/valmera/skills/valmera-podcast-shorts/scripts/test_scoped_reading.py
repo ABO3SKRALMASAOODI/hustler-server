@@ -1,7 +1,8 @@
 import hashlib
 import json
 
-from wf1_publisher_reading import read, local_coverage
+from wf1_publisher_reading import local_coverage
+from wf1_scoped_reading import read
 from wf1_short import hold_windows
 
 
@@ -79,7 +80,7 @@ def test_accepted_projection_settles_its_own_frames_without_claiming_motion(tmp_
     assert hold_windows(measured,pack["coverage"],[dict(pic,f=[33,41])]) == [0]
 
 
-def test_live_source_panel_clears_the_mark_and_comparison_keeps_the_camera(tmp_path, monkeypatch):
+def test_legacy_source_plan_does_not_overlay_a_second_reading_on_the_interview(tmp_path, monkeypatch):
     from test_wf1_display_facts import material
     from placement_check import CONTRACT
     import wf1_short as wf
@@ -95,11 +96,7 @@ def test_live_source_panel_clears_the_mark_and_comparison_keeps_the_camera(tmp_p
     comparison = dict(first=23,change=28,last=32,speaker="Interviewee",left="10 years",right="40 years")
     plan = dict(readings=[reading],comparison=comparison)
     scene, beats = wf.wf1_film.build(script,pack,"footage-cut",dict(publisher_reading=plan,display_facts=[page]))
-    lo,hi = next(p["f"] for p in beats["display_facts"] if p.get("publisher_excerpt"))
-    for f in range(lo,hi):
-        live = next(it for it in scene["items"] if it.get("speaker_panel") and it["f"][0] <= f < it["f"][1])
-        assert live["y"] - live["h"]/2 > wf.F.MARK[3]
-    ages = [it for it in scene["items"] if it.get("text_group","").startswith("comparison-age")]
-    for f in range(min(it["f"][0] for it in ages),max(it["f"][1] for it in ages)):
-        assert any(it.get("speaker_panel") and it.get("crop")==[0,0,1,1] and
-                   it["f"][0] <= f < it["f"][1] for it in scene["items"])
+    assert beats["publisher_reading"] == {}
+    assert not any(page.get("publisher_excerpt") for page in beats["display_facts"])
+    assert not any(it.get("text_group", "").startswith("comparison-age") for it in scene["items"])
+    assert any(it["k"] == "shot" for it in scene["items"])
