@@ -199,3 +199,20 @@ def test_at_0b_3_one_fx_edit_reencodes_only_its_window(tmp_path):
     diff = [i for i in range(n) if r1["frames"][i] != r2["frames"][i]]
     assert diff and all(int(round(12.0 * f)) <= i < int(round(12.9 * f))
                         for i in diff)
+
+def test_scattered_repair_broll_reuses_the_rest_of_a_long_program():
+    # Real p5711 v29 -> v32. Twelve isolated changes formerly sent all
+    # 464.71 seconds back through the encoder at three separate stages.
+    span = 464.71
+    windows = [(14.7, 18.3), (34.57, 36.93), (78.35, 82.), (223.95, 229.),
+               (258.3, 261.7), (297.13, 300.39), (312.3, 315.7), (326.4, 329.8),
+               (375.5, 378.9), (394.05, 397.65), (452.69, 456.29), (461.31, 464.25)]
+    keys = list(range(465))
+    expanded = stitch.expand(windows, [], [], [], [], span)
+    assert expanded == windows
+    snapped = stitch.snap_windows(expanded, keys, span)
+    assert len(snapped) == 12
+    assert sum(b-a for a,b in snapped) < 60
+    copies = stitch.carve_runs([(0., span, 0.)], expanded)
+    parts = stitch.snap_parts(expanded, copies, keys, span, [], [])
+    assert sum(part[2] - part[1] for part in parts if part[0] == "copy") > 400

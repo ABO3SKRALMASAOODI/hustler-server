@@ -59,7 +59,6 @@ _FX_JUNCTION_PAD_S = 1.0
 # snap to is inside the piece, and no piece ends where the full render would
 # not hold. 4 frames at 23.976 fps is 0.167 s.
 _ZOOM_CUT_PAD_S = 0.2
-_MAX_WINDOWS = 4
 _MAX_COVER = 0.65          # beyond this share of the program, full render wins
 
 
@@ -319,7 +318,7 @@ def expand(windows, all_item_spans, event_spans, junction_zones, fade_zones,
             if a < w[1] and b > w[0]:
                 return None                    # window reaches into a fade
     total = sum(b - a for a, b in ws)
-    if len(ws) > _MAX_WINDOWS or total > _MAX_COVER * out_duration:
+    if total > _MAX_COVER * out_duration:
         return None
     return [(round(a, 3), round(b, 3)) for a, b in ws]
 
@@ -1598,8 +1597,7 @@ def snap_parts(windows, runs, kfs, out_duration, forbidden_new,
     also refuses to land inside any forbidden zone on either clock. Copies
     shorter than _MIN_COPY_S dissolve into the windows around them.
 
-    Returns None when the result stops being worth it (window cap /
-    coverage cap), and the full render runs."""
+    Returns None when the result stops being worth it (coverage cap), and the full render runs."""
     if not kfs:
         return None
     kfs = sorted(kfs)
@@ -1638,7 +1636,7 @@ def snap_parts(windows, runs, kfs, out_duration, forbidden_new,
 
     win = _merge_spans(win, gap=0.05)
     total_win = sum(b - a for a, b in win)
-    if len(win) > _MAX_WINDOWS or total_win > _MAX_COVER * out_duration:
+    if total_win > _MAX_COVER * out_duration:
         return None
 
     parts, cursor = [], 0.0
@@ -1768,8 +1766,7 @@ def snap_windows(windows, kfs, file_dur, forbidden=()):
             merged[-1][1] = max(merged[-1][1], w[1])
         else:
             merged.append(list(w))
-    if len(merged) > _MAX_WINDOWS or \
-            sum(b - a for a, b in merged) > _MAX_COVER * file_dur:
+    if sum(b - a for a, b in merged) > _MAX_COVER * file_dur:
         return None
     return [(round(a, 5), round(b, 5)) for a, b in merged]
 
