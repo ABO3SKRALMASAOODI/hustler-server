@@ -51,3 +51,21 @@ def test_writer_cannot_request_an_unseen_subject():
     inventory = {"pictures": {"lamps": []}}
     assert not V.script_problems({"segments": [{"pictures": ["lamps", "THE EXPORT"]}]}, inventory)
     assert V.script_problems({"segments": [{"pictures": ["phone preview"]}]}, inventory)
+
+
+def test_resume_adds_recorded_studio_to_an_already_inspected_inventory(tmp_path):
+    ctx = SimpleNamespace(supply=tmp_path)
+    original = tmp_path / "lamp.png"
+    original.write_bytes(b"lamp")
+    row = V.distinct_files({"lamp": [{"path": str(original)}]})[0]
+    manifest = tmp_path / "visual_inventory/inventory.json"
+    V._save(manifest, {"subjects": [{"name": "lamp"}], "pictures": {"lamp": [row]}})
+    sent = tmp_path / "type_00_sent.png"
+    sent.write_bytes(b"sent")
+    studio = [dict(path=str(sent), name="THE STUDIO", title="type_00_sent")]
+    got = V.prepare(ctx, {}, {}, None, None, None, studio=studio)
+    assert got["pictures"]["lamp"] == [row]
+    assert got["pictures"]["THE STUDIO"][0]["path"] == str(sent)
+    assert got["pictures"]["THE STUDIO"][0]["inventory_id"] != row["inventory_id"]
+    assert sum(subject["name"] == "THE STUDIO" for subject in got["subjects"]) == 1
+    assert V.prepare(ctx, {}, {}, None, None, None, studio=studio) == json.loads(manifest.read_text()) == got

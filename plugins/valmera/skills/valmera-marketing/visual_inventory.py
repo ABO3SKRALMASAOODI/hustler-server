@@ -49,6 +49,15 @@ def studio_photos(record):
     return rows
 
 
+def include_studio(subjects, pictures, studio, first_id):
+    subjects[:] = [subject for subject in subjects if subject["name"] != "THE STUDIO"]
+    subjects.append(dict(name="THE STUDIO", must_show="The recorded session", **{"is": "product"}))
+    pictures["THE STUDIO"] = [
+        dict(row, inventory_id=first_id + i, sha256=hashlib.sha256(Path(row["path"]).read_bytes()).hexdigest())
+        for i, row in enumerate(studio)
+    ]
+
+
 def prepare(ctx, idea, receipts, ask, pictures, still, studio=()):
     root = Path(ctx.supply) / "visual_inventory"
     manifest = root / "inventory.json"
@@ -56,6 +65,10 @@ def prepare(ctx, idea, receipts, ask, pictures, still, studio=()):
         cached = json.loads(manifest.read_text())
         if all(Path(p["path"]).is_file() and hashlib.sha256(Path(p["path"]).read_bytes()).hexdigest() == p["sha256"]
                for rows in cached["pictures"].values() for p in rows):
+            if studio and "THE STUDIO" not in cached["pictures"]:
+                first_id = 1 + max((row["inventory_id"] for rows in cached["pictures"].values() for row in rows), default=-1)
+                include_studio(cached["subjects"], cached["pictures"], studio, first_id)
+                _save(manifest, cached)
             return cached
         raise RuntimeError("the cached visual inventory no longer matches its source files")
     root.mkdir(parents=True, exist_ok=True)
@@ -121,9 +134,7 @@ def prepare(ctx, idea, receipts, ask, pictures, still, studio=()):
         row = dict(readable[k], shows=verdict.get("shows"), visual_group=group)
         selected.setdefault(row["name"], []).append(row)
     if studio:
-        subjects.append(dict(name="THE STUDIO", must_show="The recorded session", **{"is":"product"}))
-        selected["THE STUDIO"] = [dict(row, inventory_id=len(candidates)+i,
-            sha256=hashlib.sha256(Path(row["path"]).read_bytes()).hexdigest()) for i,row in enumerate(studio)]
+        include_studio(subjects, selected, studio, len(candidates))
     if not selected:
         raise RuntimeError("no distinct, readable pictures survived inventory inspection")
     result = dict(subjects=[s for s in subjects if s["name"] in selected], pictures=selected,
