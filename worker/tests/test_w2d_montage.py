@@ -365,11 +365,12 @@ def test_a_ramp_is_contiguous_monotonic_and_never_one():
     assert rep["out_s"] == pytest.approx(exact, rel=0.01)
 
 
-def test_a_ramp_holds_the_clean_floor_unless_told():
-    _s, rep = ramps.plan(0.0, 4.0, ramps.swing(0.3, 0.3), fps_src=59.94,
+def test_a_ramp_supplies_missing_frames_below_the_clean_floor():
+    spans, rep = ramps.plan(0.0, 4.0, ramps.swing(0.3, 0.3), fps_src=59.94,
                          fps_out=30.0)
-    assert rep["clamped"] and rep["dup_frames"] == 0
-    assert min(rep["factors"]) >= ramps.floor(59.94, 30.0) - 1e-3
+    assert not rep["clamped"] and rep["dup_frames"] > 0
+    assert min(rep["factors"]) == pytest.approx(.3, abs=.02)
+    assert all(bool(s.get("interpolate")) == (s["factor"]*59.94 < 30) for s in spans)
 
 
 def test_an_insert_ramp_is_contiguous_pieces_of_whole_frames():
@@ -391,16 +392,11 @@ def test_an_insert_ramp_is_contiguous_pieces_of_whole_frames():
 
 def test_set_speed_ramp_writes_spans_and_moves_the_program(monkeypatch):
     ctx = S.Ctx(S.edl())
-    # over speech a ramp drags the voice and its joins are audible: refused
-    # unless the user wants it there (integration: Wave 4's time-ramp rule)
     out = MT.set_speed_ramp(ctx, 3.0, 7.0, low=0.6)
-    assert out.startswith("REJECTED") and "spoken words" in out, out
-    # in a pause it needs no permission (a 25 fps source in a 25 fps
-    # program has no clean slow motion: said)
-    assert MT.set_speed_ramp(ctx, 15.0, 19.0, low=0.6).startswith(
-        "NO CHANGE")
-    assert MT.set_speed_ramp(ctx, 3.0, 7.0, low=0.6,
-                             allow_speech=True).startswith("NO CHANGE")
+    assert out.startswith("EDL v3 -> v4") and "original sound plays at 1x" in out
+    assert all(sp.get("audio_mode") == "original" for sp in ctx.edl["speed"])
+    assert any(sp.get("interpolate") for sp in ctx.edl["speed"])
+    ctx = S.Ctx(S.edl())
     out = MT.set_speed_ramp(ctx, 3.0, 7.0, low=0.6, hold=0.3,
                             allow_duplicates=True, allow_speech=True)
     assert out.startswith("EDL v3 -> v4"), out

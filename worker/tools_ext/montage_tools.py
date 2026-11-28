@@ -776,6 +776,8 @@ def ramp_insert_pieces(item, spans_rep, fps_out):
                      split_parent=pid)
         if abs(f - 1.0) >= 0.01:
             piece["rate"] = round(f, 4)
+            if any(sp["start"] == a and sp.get("interpolate") for sp in spans):
+                piece["interpolate"] = True
         out.append(piece)
         src += dur * f
     return out
@@ -823,8 +825,8 @@ def _ramp_insert(ctx, ins_id, low_f, hold, curve, allow_duplicates):
     res += (f"\nProgram length: {old_tl.out_duration:.2f}s -> "
             f"{new_tl.out_duration:.2f}s; the {fps_src:g} fps clip shows a "
             f"fresh frame on every output frame down to {rep['floor']:g}x")
-    if rep["clamped"]:
-        res += f" (the low was held at {rep['floor']:g}x)"
+    if any(piece.get("interpolate") for piece in pieces):
+        res += "; missing slow-motion frames use motion-compensated interpolation"
     if notes:
         res += "\n" + "\n".join(notes)
     return res

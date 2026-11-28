@@ -1251,7 +1251,14 @@ def timeline_atoms(edl, tl):
         for ps, pe, f in pcs:
             plen = (pe - ps) / f
             if plen > 1e-4:
-                atoms.append((acc, acc + plen, ("src", ps, pe, f) + (((_s, _e),) if tracked else ())))
+                span = next((sp for sp in edl.get("speed") or []
+                             if sp["start"] <= (ps+pe)/2 < sp["end"]), {})
+                content = ("src", ps, pe, f)
+                if span.get("interpolate"):
+                    content += ("interpolated",)
+                if tracked:
+                    content += ((_s, _e),)
+                atoms.append((acc, acc + plen, content))
             acc += plen
     from timeline import insert_windows as _iw
     items = {item["id"]: item for item in edl.get("inserts") or []}

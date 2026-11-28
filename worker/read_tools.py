@@ -666,7 +666,7 @@ def get_kept_transcript(ctx):
                 + "".join(parts))
     else:
         note = "\nNo repeated phrases detected in the output."
-    lang = str(ctx.index.get("language") or "").lower()
+    lang = str(ctx.index.get("language") or (ctx.index.get("video") or {}).get("language") or "").lower()
     if lang and lang not in ("en", "english"):
         # Cache against the actual kept lines, including order and timestamps.
         key = tuple(lines)
@@ -678,7 +678,7 @@ def get_kept_transcript(ctx):
             if gloss and gloss.get("text"):
                 ctx._gloss_lines, ctx._gloss = key, gloss["text"]
         if getattr(ctx, "_gloss_lines", None) == key:
-            note += "\nEnglish gloss:\n" + ctx._gloss
+            header += "\nEnglish gloss:\n" + ctx._gloss
     return _cap(header + "\n" + "\n".join(lines) + note,
                 budget=TRANSCRIPT_CHAR_BUDGET)
 

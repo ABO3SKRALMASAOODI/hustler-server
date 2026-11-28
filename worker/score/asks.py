@@ -542,11 +542,20 @@ def build(ctx, request, history=None, edl=None):
             if r.get("frame"):
                 content.extend([{"type": "text", "text": f"Upload #{r['n']}: {r['name']} ({r['kind']}), key {r['key']}"},
                                 llm.image_part(r["frame"])])
-    value, usage = _call(ctx, "record_ask_ledger", LEDGER_SCHEMA, LEDGER_SYSTEM, content, max_tokens=8000)
-    if "asks" not in value and not previous:
-        value, again = _call(ctx, "record_ask_ledger", LEDGER_SCHEMA, LEDGER_SYSTEM, content, max_tokens=8000)
-        usage = {"usd": round(usage["usd"] + again["usd"], 6), "s": round(usage["s"] + again["s"], 2),
-                 "model": again["model"]}
+    try:
+        value, usage = _call(ctx, "record_ask_ledger", LEDGER_SCHEMA, LEDGER_SYSTEM, content, max_tokens=8000)
+        if "asks" not in value and not previous:
+            value, again = _call(ctx, "record_ask_ledger", LEDGER_SCHEMA, LEDGER_SYSTEM, content, max_tokens=8000)
+            usage = {"usd": round(usage["usd"] + again["usd"], 6), "s": round(usage["s"] + again["s"], 2),
+                     "model": again["model"]}
+    except Exception as exc:
+        if not (previous or requirements):
+            raise
+        import db
+        if isinstance(exc, db.JobLeaseLost):
+            raise
+        print(f"[asks] ledger call unavailable ({type(exc).__name__}), restoring prior evidence", flush=True)
+        value, usage = {}, {}
     current = value.get("asks") or []
     decisions = {d["id"]: d for d in value.get("previous") or [] if isinstance(d, dict) and d.get("id")}
     current_ids = {a.get("id") for a in current}

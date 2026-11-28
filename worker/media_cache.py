@@ -178,3 +178,29 @@ def lease(storage_key, dest_dir, name):
         print(f"[media-cache] {storage_key}: {str(exc)[:160]} — "
               "falling back to a direct download", flush=True)
         return None
+
+
+def remember_file(key, path):
+    """Publish a completed local encode in the existing byte/age-bounded cache."""
+    import shutil
+    root = cache_dir()
+    entry = os.path.join(root, _entry_name(key))
+    tmp = entry + ".part" + uuid.uuid4().hex
+    try:
+        os.makedirs(root, exist_ok=True)
+        size = os.path.getsize(path)
+        if size <= 0 or size > min(config.TOOL_MEDIA_CACHE_MAX_BYTES, config.TOOL_MEDIA_CACHE_MAX_ITEM_BYTES):
+            return
+        with _key_lock(entry):
+            if os.path.isfile(entry):
+                return
+            _, free = prune(need_bytes=size)
+            if free is not None and free-size < config.TOOL_MEDIA_CACHE_MIN_FREE_BYTES:
+                return
+            shutil.copyfile(path, tmp)
+            os.replace(tmp, entry)
+            prune(protect=entry)
+    except OSError:
+        pass
+    finally:
+        _unlink(tmp)

@@ -11085,7 +11085,7 @@ def _reframe_with_track(ctx, ratio, global_pt, preserve_unmeasured=True,
     have = [m for m in measured if m[2]]
     if not have:
         return None
-    if len(have) < 2 and not (preserve_unmeasured and
+    if len(have) < 2 and not protected_text and not (preserve_unmeasured and
                               len(have) < len(measured)):
         return None
     # A no-face shot is not permission to inherit the prior speaker's crop:
