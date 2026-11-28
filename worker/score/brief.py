@@ -686,6 +686,15 @@ def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None, spe
             out.append("Customer, verbatim: " + json.dumps(p["text"], ensure_ascii=False))
     else:
         out.append("The customer uploaded and typed nothing.")
+    if idx.get("first_film"):
+        out.append("Open on the strongest action with the title over its picture. End the title "
+                   "at its shot boundary. Give each chapter one centred seat clear of picture "
+                   "text. Write the opening and the last beat together: when a measured time, "
+                   "quantity or resolution pays off in a counter, establish that same fact in "
+                   "the hook. Hold the exact final value on a sharp payoff shot for 1.5 seconds. "
+                   "Use a hard cut between faces. Select clean source frames either side of a "
+                   "baked transition. For a desktop, name the relevant dialog or reading column "
+                   "as a source view for the shot, using its measured bounds.")
     if idx.get("first_film") and not idx.get("words"):
         out.append("Build this highlight from the visible moments alone. Write each beat's exact "
                    "source in and out, and its finite picture lengths in frames. End when the "

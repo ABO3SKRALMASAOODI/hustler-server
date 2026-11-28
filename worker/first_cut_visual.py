@@ -957,8 +957,15 @@ def screen_keyframes(targets, prog, hook_end):
     travel to each new region (held SCREEN_HOLD_S at least; a region that
     mostly overlaps the held one is no move), held to the end."""
     targets = sorted(targets)
-    if not targets or prog < 4:
+    if not targets or prog <= 0:
         return []
+    if prog < 4:
+        # A short UI clip still needs a legible detail. Start close, ease
+        # onto the target, and spend the rest of the slot there.
+        _, rect, zoom = targets[0]
+        return [{"t": 0., "rect": rect, "strength": max(0., .8*zoom-1.)},
+                {"t": round(prog*.24, 3), "rect": rect, "strength": zoom-1.},
+                {"t": round(prog, 3), "rect": rect, "strength": zoom-1.}]
     held = [targets[0]]
     for t, win, z in targets[1:]:
         if t - held[-1][0] < SCREEN_HOLD_S + SCREEN_MOVE_S:

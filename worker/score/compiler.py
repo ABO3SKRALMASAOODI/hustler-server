@@ -2951,14 +2951,21 @@ def final_type_clearance(ctx, l1):
     cuts = {s["f"][0] for s in final.shots}
     for key, members, a, z in rows:
         r = bounds(members)
+        if ctx.index.get("first_film") and any(it.get("chapter") for it in members):
+            dx = .5 - (r[0]+r[2])/2
+            for it in members:
+                _shift_x(it, dx)
+            r = bounds(members)
         obstacles = []
         for f in sorted(set(range(a, z, step)) | {z - 1} | {f for f in cuts if a <= f < z}):
             s = shot_at(final, f)
             if s:
                 obstacles += taste._heads_near(final, s, f) + marks_of(final, s, f)
-        if not any(rects_touch(r, q) for q in obstacles):
+        if not ctx.index.get("first_film") and not any(rects_touch(r, q) for q in obstacles):
             continue
         obstacles += [bounds(ms) for k, ms, b, e in rows if k != key and a < e and b < z]
+        if not any(rects_touch(r, q) for q in obstacles):
+            continue
         obstacles.append(list(KEEPOUT))
         if ctx.H > ctx.W:
             obstacles.append(list(taste.BUTTONS))
@@ -3075,6 +3082,8 @@ def mend_type(ctx, l1):
             if s:
                 obstacles += taste._heads_near(final, s, f) + marks_of(final, s, f)
         obstacles += [q for o in others if o["f"][0] < z and a < o["f"][1] and (q := type_rect(final, o)) is not None]
+        if not any(rects_touch(r, q) for q in obstacles):
+            continue
         obstacles.append(list(KEEPOUT))
         if ctx.H > ctx.W:
             obstacles.append(list(taste.BUTTONS))
@@ -3982,7 +3991,12 @@ def display(ctx, iid, text, a, z, opt, b=None):
             peak0 = 1 / SETTLE["s_inf"] if opt.get("in") == "settle" else 1.0
             fits = lines_that_read(ctx, iid, [dict(l) for l in display_lines(ctx, text, opt)], float(opt.get("fit", 1 - 2 * SAFE_X - 0.02)) / peak0, opt.get("_room"), quiet=True) is not None
         if not fits:
-            end = title_page(ctx, iid, a, z, b)
+            if ctx.index.get("first_film") and a == 0 and off_take(ctx, a, z) is None:
+                opt = {k: v for k, v in opt.items() if k not in ("_want", "_noseat", "_room")}
+                opt.update(seat=[.5, .68], pool=.65)
+                end = None
+            else:
+                end = title_page(ctx, iid, a, z, b)
             if end is not None:
                 z = end
     opt, z = seat_for(ctx, iid, opt, a, z)
@@ -4760,13 +4774,25 @@ def g_counter(ctx, b, g, i):
     if ctx.governed and v0 == v1:
         g = dict(g, size=max(float(g.get("size") or 0.055), 0.055))
         g.setdefault("font", "grotesk-bold")
+    first = bool(ctx.index.get("first_film"))
     step = max(1, int(g.get("step", 3)))
-    n = 1 if v0 == v1 else max(1, (z - a) // step)
+    run_end = z
+    if first and v0 != v1:
+        # Text items need a readable slot on the delivery timeline. Reserve
+        # the destination before dividing the remaining frames among ticks.
+        step = max(step, math.ceil(.34 * ctx.fps))
+        hold = min(round(1.5 * ctx.fps), max(step, (z-a)//2))
+        run_end = max(a, z-hold)
+    n = max(1, (run_end - a) // step + int(first)) if v0 != v1 else 1
+    if first and v0 == v1 and g.get("chapter"):
+        label = counter_text(str(g.get("fmt", "{n}")), v1, True)
+        reading = math.ceil((.65 + len(label) / 14) * ctx.fps)
+        z = min(ctx.dur_f, max(z, a + reading))
     fmt = str(g.get("fmt", "{n}"))
     whole = v0 == int(v0) and v1 == int(v1)
     held = None                     # one counter, one seat: solved on its first tick and kept across cuts
     for j in range(n):
-        p = (j + 1) / n
+        p = j / (n - 1) if first and n > 1 else (j + 1) / n
         p = 1 - (1 - p) ** 2.2
         v = v0 + (v1 - v0) * p
         s = counter_text(fmt, v, whole, g.get("sep"))
@@ -4777,6 +4803,12 @@ def g_counter(ctx, b, g, i):
         opt = {k: v2 for k, v2 in g.items() if k in ("size", "seat", "font", "ink", "fit", "blend", "case", "_room", "_want", "_fit0", "_noseat")}
         if g.get("chapter") is True and v0 == v1:
             opt["_chapter"] = (g["_gid"], fmt, int(v0))
+        if first and (v0 != v1 or g.get("chapter")):
+            # A numeric display occupies one seat for its complete run. Per-tick
+            # page and taste decisions used to remove its start and destination.
+            opt = {k: val for k, val in opt.items() if k not in ("_want", "_noseat", "_room")}
+            if g.get("chapter"):
+                opt.update(seat=[.5, .66], font="grotesk-bold", align="centre")
         if held:
             opt["seat"] = held
         r = display(ctx, f"{g['_gid']}.{j}", s, f, q, opt, b)
@@ -7020,7 +7052,10 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
             m["move"] = rep
         except Exception as e:  # noqa: BLE001 - the film stands as the Score framed it
             m["move"] = {"fault": f"{type(e).__name__}: {str(e)[:160]}"}
-    from . import source_guard
+    from . import source_guard, picture_cuts
+    baked = (ctx.index.get("director_cut_measure") or {}).get("baked_dissolves")
+    if ctx.index.get("first_film") and baked:
+        picture_cuts.cut_dissolves(l1, baked, ctx.src_dur, ctx.index["video"].get("fps") or ctx.fps)
     m["source_guard"] = source_guard.apply(l1, ctx.index, ctx.perc, views=ctx.views)
     m["final_type_clearance"] = final_type_clearance(ctx, l1)
     for key in m["final_type_clearance"]["unresolved"]:

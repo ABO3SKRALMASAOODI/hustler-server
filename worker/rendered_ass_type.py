@@ -21,14 +21,20 @@ def samples(texts, duration, limit=12):
     rows = []
     for n, item in enumerate(texts):
         a, b = max(0., float(item.get('start') or 0)), min(duration, float(item.get('end') or 0))
-        if b-a < .8 or item.get('behind'):
+        if b-a < .3 or item.get('behind'):
             continue
         # Stay out of the requested entrance/exit fades. The three settled
         # moments catch a moving bright background under otherwise static ink.
         for fraction in (.25, .5, .75):
             rows.append((n, a+(b-a)*fraction))
     if len(rows) > limit:
-        rows = [rows[int(i*len(rows)/limit)] for i in range(limit)]
+        # Sample the opening and closing lockups before intermediate ticks.
+        first, last = min(t for _, t in rows), max(t for _, t in rows)
+        edges = sorted({n for n, t in rows if t < first+.4 or t > last-.4})
+        chosen = [next(q for q in rows if q[0] == n) for n in edges[:limit]]
+        rest = [q for q in rows if q[0] not in edges]
+        slots = min(len(rest), limit-len(chosen))
+        rows = chosen + [rest[int(i*len(rest)/slots)] for i in range(slots)]
     return rows
 
 
@@ -53,7 +59,7 @@ def _filter_path(path):
     return os.fspath(path).replace('\\', '\\\\').replace("'", "'\\''").replace(':', '\\:')
 
 
-def measure(path, texts, W, H, duration, deadline, visible=None):
+def measure(path, texts, W, H, duration, deadline, visible=None, moments=None):
     """Bounded offline samples; return failures and explicitly skipped reads."""
     failures, skipped = [], []
     w = min(720, int(W))
@@ -85,6 +91,11 @@ def measure(path, texts, W, H, duration, deadline, visible=None):
                 result = contrast(images[1], images[0])
                 if visible is not None and result and result.get('pass'):
                     text = texts[n].get('text')
+                    if moments is not None and text:
+                        item = texts[n]
+                        group = ".".join(str(item.get("id") or "").split(".")[:3])
+                        moments[n] = {"text": text, "start": item["start"], "end": item["end"],
+                                      "group": group}
                     if text and text not in visible:
                         visible.append(text)
                 if result and result.get('pass') is False:

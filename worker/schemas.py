@@ -2729,8 +2729,17 @@ class Master(BaseModel):
     ships. 'natural' is the explicit opt-out: the mix ships at its own level.
     None (unset) resolves by format — see master_loudness."""
     loudness: Optional[Literal["social", "natural"]] = None
+    # Measure arranged music at the placed attacks when rendering a first cut.
+    measure_cue_bed: Optional[bool] = None
     # Fader for music recorded in the original, after dialogue levelling.
     recorded_music_gain_db: Optional[float] = Field(default=None, ge=-12, le=0)
+
+    @model_serializer(mode="wrap")
+    def _dump_cue_mix(self, handler):
+        data = handler(self)
+        if self.measure_cue_bed is None:
+            data.pop("measure_cue_bed", None)
+        return data
 
 
 # Export file targets (16 Nov 2026, p5857): "make the download less than

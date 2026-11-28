@@ -127,6 +127,74 @@ def soft_transitions(frames, fps):
     return spans
 
 
+def baked_dissolves(frames, fps, soft):
+    """Confirm both endpoint images coexist during a measured loss of detail."""
+    spans = []
+    for start, end in soft:
+        a, b = max(0, round(start*fps)-1), min(len(frames)-1, round(end*fps))
+        if b-a < 4:
+            continue
+        lo = np.asarray(frames[a], dtype=np.float32)
+        diff = np.asarray(frames[b], dtype=np.float32) - lo
+        energy = float(np.mean(diff**2))
+        if energy < 64:
+            continue
+        weights, errors = [], []
+        for i in range(a+1, b):
+            observed = np.asarray(frames[i], dtype=np.float32) - lo
+            w = float(np.mean(observed*diff)) / energy
+            weights.append(w)
+            errors.append(float(np.mean((observed-w*diff)**2)) / energy)
+        if (max(weights)-min(weights) > .45 and np.min(np.diff(weights)) >= -.06
+                and np.quantile(errors, .75) < .12):
+            spans.append([a/fps, b/fps])
+    return spans
+
+
+def cut_dissolves(l1, spans, source_duration, source_fps):
+    """Replace the mixed source frames with a cut between the two clean pictures.
+
+    Only the mixed frames change. The surviving dialogue, captions and every
+    later visual event retain their exact programme clock.
+    """
+    out = []
+    for it in l1["items"]:
+        if it.get("k") != "shot" or it.get("pic") != "main" or not it.get("src"):
+            out.append(it)
+            continue
+        s, e = it["src"]
+        a, b = it["f"]
+        if e <= s:
+            out.append(it)
+            continue
+        frame_at = lambda t: min(b, max(a, round(a+(b-a)*(t-s)/(e-s))))
+        stops = {a, b}
+        for lo, hi in spans:
+            if lo < e and hi > s:
+                stops.update(frame_at(t) for t in (lo, (lo+hi)/2, hi))
+        if len(stops) == 2 and not any(lo <= s and e <= hi for lo, hi in spans):
+            out.append(it)
+            continue
+        times = sorted(stops)
+        for i, (f, z) in enumerate(zip(times, times[1:])):
+            src = [s+(e-s)*(v-a)/(b-a) for v in (f, z)]
+            mid = sum(src)/2
+            row = dict(it, id=f"{it['id']}.cut{i}", f=[f,z], src=src)
+            for k in ("crop", "rect", "x", "y", "s", "op", "rot", "blur"):
+                v = it.get(k)
+                if isinstance(v, list) and len(v) == b-a and (k not in ("crop","rect") or isinstance(v[0], list)):
+                    row[k] = v[f-a:z-a]
+            interval = next(((lo, hi) for lo, hi in spans if lo < mid < hi), None)
+            if interval:
+                lo, hi = interval
+                frame = 1/source_fps
+                t = lo-frame if mid < (lo+hi)/2 else hi
+                t = min(max(0., t), max(0., source_duration-frame))
+                row.update(src=[t, min(t+frame, source_duration)], source_hold=True)
+            out.append(row)
+    l1["items"] = out
+
+
 def measure(path, video, timeout=12.0):
     dur = float(video['duration']); W, H = int(video['width']), int(video['height'])
     fps = min(FPS, MAX_FRAMES / max(dur, 1.0))
@@ -141,8 +209,9 @@ def measure(path, video, timeout=12.0):
         raise ValueError('source cut measurement has fewer than three frames')
     frames = np.frombuffer(raw[:n*w*h*3], np.uint8).reshape(n, h, w, 3)
     cuts, flashes = boundaries(frames, fps)
+    soft = soft_transitions(frames, fps)
     return dict(method='judge3_pixel_cuts', fps=fps, frames=n, cuts=cuts, flashes=flashes,
-                soft_transitions=soft_transitions(frames, fps),
+                soft_transitions=soft, baked_dissolves=baked_dissolves(frames, fps, soft),
                 blank_intervals=[[a, min(b, dur)] for a, b in blank_intervals(frames, fps)
                                  if a < dur])
 

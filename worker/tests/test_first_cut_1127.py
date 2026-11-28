@@ -118,9 +118,9 @@ def test_reindex_refreshes_full_size_player_once(monkeypatch, has_audio):
 
 def test_reply_only_uses_facts_of_delivered_file():
     from reply_truth import first_cut_summary
-    assert first_cut_summary({"duration_s":8.3, "shots":42, "sfx":9}) == "an 8-second edit"
+    assert first_cut_summary({"duration_s":8.3, "shots":42, "sfx":9}) == "The cut runs 8 seconds"
     assert first_cut_summary({"duration_s":15., "width":720, "height":1280,
-                              "craft_report":{"silent":False}}) == "a 15-second vertical edit with sound"
+                              "craft_report":{"silent":False}}) == "The cut runs 15 seconds"
 
 
 def test_silent_cutaway_places_by_picture_time_without_a_transcript(monkeypatch):

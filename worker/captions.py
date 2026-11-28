@@ -1197,7 +1197,8 @@ def events_from_transcript(out_words, max_words=None, line_chars=MAX_LINE_CHARS,
         # It is shown as consecutive events instead, never losing a word: a
         # group that fits (every group, almost always) is unchanged.
         for part in _fit_lines(group, line_chars, max_lines):
-            text = " ".join(w["w"] for w in part)
+            from script_words import join_tokens
+            text = join_tokens(w["w"] for w in part)
             lines = _wrap(text, line_chars)[:max_lines]
             start = part[0]["t0"]
             end = _hold_to_cut(max(part[-1]["t1"], start + MIN_EVENT_S),

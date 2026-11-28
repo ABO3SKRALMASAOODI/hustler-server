@@ -199,6 +199,37 @@ def _named_detail(item, views, rects, ratio, shots, boxes):
     return True
 
 
+def reading_window(row, ratio, subject, view=None):
+    """Frame a measured line or named detail with its adjacent lines and subjects."""
+    lines = printed_lines({"text": row.get("text_geometry")})
+    if not lines or not row.get("visible_text") or ratio >= 1:
+        return None
+    # Edge detectors also outline windows and photographs. A text line has
+    # a baseline and is wider than it is tall in the original landscape.
+    lines = [b for b in lines if b[2]-b[0] > 1.4*(b[3]-b[1])]
+    if not lines:
+        return None
+    target = view or max(lines, key=lambda b: b[2]-b[0])
+    cx = (target[0]+target[2])/2
+    if row.get("dense_ui"):
+        # A column of chat and the sidebar are separate reading surfaces.
+        # A named dialog selects its column even when it is off centre.
+        lines = [b for b in lines if b[0] <= cx <= b[2]]
+    boxes = lines + [target] + subject
+    return enclosing_window(boxes, ratio, minimum=.22)
+
+
+def enclosing_window(boxes, ratio, minimum):
+    """A portrait window can move off centre and grow to include both people."""
+    left, right = min(b[0] for b in boxes), max(b[2] for b in boxes)
+    top, bottom = min(b[1] for b in boxes), max(b[3] for b in boxes)
+    width = min(1., max(minimum, right-left+.025, ratio*(bottom-top+.05)))
+    height = width / ratio
+    x = max(0., min(1.-width, (left+right-width)/2))
+    y = max(0., min(1.-height, (top+bottom-height)/2)) if height <= 1 else (1.-height)/2
+    return [x, y, x+width, y+height]
+
+
 def apply(l1, index, perception, *, views=None):
     if not index.get("_first_film_source_guard"):
         return []
@@ -220,6 +251,8 @@ def apply(l1, index, perception, *, views=None):
     if (evidence.get("status") == "verified" and
             end_limit >= float(evidence.get("source_duration_s") or float("inf"))):
         end_limit += .01
+    board = [r for r in (index.get("visual_storyboard") or {}).get("evidence", [])
+             if r.get("representative_t") is not None and "visible_text" in r]
     report = []
     for item in l1.get("items") or []:
         if item.get("pic") != "main" or not item.get("src"):
@@ -258,7 +291,22 @@ def apply(l1, index, perception, *, views=None):
         reason = "named_detail_crop" if detail else "subject_boxes_contained"
         # A verified named view is already a model-selected source detail;
         # unrelated desktop headings must not replace it with the whole screen.
-        if not detail and text_needs_fit(perception, start, end, w, h, samples):
+        mid = (start + end) / 2
+        readings = [r for r in board if any(sh["start"] <= r["representative_t"] < sh["end"]
+                                             for sh in overlaps)]
+        scene = min(readings, key=lambda r: abs(r["representative_t"] - mid), default=None)
+        if scene and item.get("k") == "shot" and not detail:
+            view = (views or {}).get(str(item.get("view"))) or {}
+            region = view.get("box") if view.get("t0", end+1) <= mid <= view.get("t1", -1) else None
+            subjects = _boxes(scene)
+            crop = reading_window(scene, ratio, subjects, region)
+            if crop:
+                item["crop"] = crop
+                item["source_full_frame"] = crop[1] < 0
+                report.append({"id": item["id"], "source": [start, end],
+                               "reason": "measured_reading_window", "crop": crop})
+                continue
+        if not detail and scene is None and text_needs_fit(perception, start, end, w, h, samples):
             # Lowering already supports a source rectangle extending past
             # the canvas: the on-spine source is fitted over its blurred
             # backdrop. Do not override that geometry with a saliency crop.
@@ -280,13 +328,18 @@ def apply(l1, index, perception, *, views=None):
                 shot = next((sh for sh in overlaps if sh["start"] <= t < sh["end"]), None)
                 local = [s for s in samples if shot and shot["start"] <= s["t"] < shot["end"]
                          and abs(s["t"]-t) <= .75 and (_boxes(s) or s.get("focus"))]
-                nearby = sorted(local, key=lambda s: (abs(s["t"]-t), not bool(_boxes(s))))
+                nearby = sorted(local, key=lambda s: (not bool(_boxes(s)), abs(s["t"]-t)))
                 if not nearby:
                     nearby = sorted((s for s in samples if shot and
-                        shot["start"] <= s["t"] < shot["end"] and s.get("focus")),
-                        key=lambda s: abs(s["t"]-t))
+                        shot["start"] <= s["t"] < shot["end"] and (_boxes(s) or s.get("focus"))),
+                        key=lambda s: (not bool(_boxes(s)), abs(s["t"]-t)))
                 row = nearby[0] if nearby and _boxes(nearby[0]) else None
                 if row is not None:
+                    if scene and ratio < 1. and item.get("k") == "shot":
+                        subjects = _boxes(row)
+                        points.append(enclosing_window(subjects, ratio, minimum=ratio))
+                        reason = "local_subject_crop"
+                        continue
                     box = max(_boxes(row), key=lambda b: (b[2]-b[0])*(b[3]-b[1]))
                     point = [(box[0]+box[2])/2, (box[1]+box[3])/2]
                     reason = "local_subject_crop"
@@ -303,7 +356,12 @@ def apply(l1, index, perception, *, views=None):
                     reason = "last_known_subject_crop"
                 points.append(centered(point, ratio))
             item["crop"] = points if track else points[0]
-        item.pop("source_full_frame", None)
+        item.setdefault("crop", full)
+        actual = item["crop"] if isinstance(item["crop"][0], (list, tuple)) else [item["crop"]]
+        if any(c[1] < -.001 or c[3] > 1.001 for c in actual):
+            item["source_full_frame"] = True
+        else:
+            item.pop("source_full_frame", None)
         report.append({"id": item["id"], "source": [start, end], "reason": reason,
                        "subject_boxes": len(boxes), "crop": item.get("crop")})
     return report

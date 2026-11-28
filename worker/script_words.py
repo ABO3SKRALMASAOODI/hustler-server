@@ -10,6 +10,22 @@ FAMILIES = {"th": "Noto Sans Thai", "ja": "Noto Sans JP", "zh": "Noto Sans SC"}
 LANGUAGES = set(FAMILIES)
 
 
+def join_tokens(tokens):
+    """Join timed words without inserting a Latin space between Thai/CJK units."""
+    import unicodedata
+    def unspaced(char):
+        name = unicodedata.name(char, "")
+        return name.startswith(("THAI ", "CJK ", "HIRAGANA ", "KATAKANA ", "IDEOGRAPHIC "))
+    out = ""
+    for token in tokens:
+        if not token:
+            continue
+        if out and not (unspaced(out[-1]) and unspaced(token[0])):
+            out += " "
+        out += token
+    return out
+
+
 def caption_family(language):
     return FAMILIES.get((language or "").lower().split("-")[0])
 

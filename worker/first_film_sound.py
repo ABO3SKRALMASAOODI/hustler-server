@@ -10,7 +10,7 @@ import numpy as np
 # Reference-led hierarchy, measured over the ear's transient integration
 # window. A counter still sits below an accent; all retain their own timbre.
 RELATIVE_DB = {'hero': 0.0, 'accent': -2.0, 'body': -3.0, 'tick': -6.0}
-BACKGROUND_DB = {'hero': 10.0, 'accent': 8.0, 'body': 7.0, 'tick': 5.0}
+BACKGROUND_DB = {'hero': 10.0, 'accent': 8.0, 'body': 7.0, 'tick': 6.0}
 
 
 def renderer_source(signal, rate):
@@ -95,7 +95,12 @@ def level(sounds, voice, fps, shift_db=0.0, *, speaks=True, bed=None):
         # Matching only the silence at the exact hit made gap cues disappear.
         a, b = max(0, int((hit - 1.5) * sound.AR)), min(len(v), int((hit + 1.5) * sound.AR))
         vp = peak_power(v[a:b], sound.AR, min(.4, max(1, b-a)/sound.AR))
-        sp = peak_power(raw, sound.AR, .05)
+        # Level the transient that actually lands on the picture. The
+        # recording's loudest 50 ms can be a second, unrelated hit later.
+        peak_s = float(sound.library()[it["s"]].get("hit_s") or 0)
+        pos = max(0, round((peak_s - float(it.get("trim_s") or 0)) * sound.AR))
+        transient = raw[max(0, pos - sound.AR//12):pos + sound.AR//8]
+        sp = peak_power(transient, sound.AR, .05)
         if sp <= 1e-12:
             out.append(it)
             continue
@@ -192,6 +197,125 @@ def bed_space(song, sounds, fps, rate):
         curve[a:b] = np.minimum(curve[a:b], env)
     out *= curve[:, None] if out.ndim == 2 else curve
     return out
+
+
+def rendered_bed(path, track, reference, duration):
+    """Identify the placed music by matching two passages against the encoded mix."""
+    from score import sound
+    import cv2
+    a, b = float(track.get("start") or 0), min(float(track.get("end") or duration), duration)
+    if not reference or b-a < .5 or track.get("mute"):
+        return False
+    rate = sound.AR
+    length = min(.4, (b-a)/4)
+    for u in (.2, .7):
+        t = a + (b-a-length)*u
+        offset = float(track.get("offset_s") or 0) + t-a
+        # These short reads stay run-local; no extra media fetch or separation pass.
+        ref = sound.pcm(reference, rate, 1, t0=offset, dur=length)
+        actual = sound.pcm(path, rate, 1, t0=max(0., t-.04), dur=length+.08)
+        if len(ref) < .1*rate or len(actual) < len(ref) or np.mean(ref**2) < 1e-9:
+            return False
+        corr = cv2.matchTemplate(actual, ref, cv2.TM_CCORR_NORMED)
+        k = int(corr.argmax())
+        gain = float(np.sum(actual[k:k+len(ref)]*ref) / np.sum(ref**2))
+        if float(corr[k, 0]) < .25 or np.mean((gain*ref)**2) < 1e-6:
+            return False
+    return True
+
+
+def rendered_accents(path, cues):
+    """Match library attacks to the delivered audio, including the first sample."""
+    import subprocess
+    import sound_library
+    import cv2
+    from score import sound
+    rate = sound.AR
+    found = []
+    for cue in cues:
+        sid = sound_library.id_for_key(cue["storage_key"])
+        if not sid:
+            continue
+        at = float(cue.get("at") or 0)
+        offset = float(cue.get("offset_s") or 0)
+        start = max(0., sound_library.hit_at(cue)-at-.04)
+        length = min(.12, float(cue.get("dur_s") or (start+.12))-start)
+        if length < .05:
+            continue
+        ref = sound.sample_pcm(sid)[round((offset+start)*rate):round((offset+start+length)*rate)]
+        if len(ref) < rate//20 or np.mean(ref**2) < 1e-8:
+            continue
+        lo = max(0., at+start-.045)
+        seek = ["-ss", str(lo)] if lo > 0 else []
+        cmd = ["ffmpeg", "-v", "error", "-nostdin", *seek, "-i", path,
+               "-t", str(length+.09), "-vn", "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"]
+        raw = np.frombuffer(subprocess.check_output(cmd, timeout=8), np.float32)
+        if len(raw) < len(ref):
+            continue
+        ref = np.asarray(ref, np.float32).reshape(-1, 1)
+        corr = cv2.matchTemplate(raw.reshape(-1, 1), ref, cv2.TM_CCORR_NORMED)
+        k = int(corr.argmax())
+        if corr[k, 0] < .75:
+            continue
+        x = raw[k:k+len(ref)]
+        r = ref[:, 0]
+        fitted = r * (np.dot(x, r) / np.dot(r, r))
+        power = float(np.mean(fitted**2))
+        over = 10 * math.log10(max(power, 1e-12) / max(float(np.mean((x-fitted)**2)), 1e-12))
+        if power > 1e-5 and over >= 3:
+            found.append({"role": sound_library.get(sid)["role"], "at": sound_library.hit_at(cue),
+                          "over_residual_db": round(over, 1)})
+    return found
+
+
+def delivery_music_windows(music, sounds, paths):
+    """Compare the decoded, gained recordings at the mixer input, on their actual clocks."""
+    import subprocess
+    import sound_library
+    rate = 12000
+    def decode(path, start, length):
+        seek = ["-ss", f"{start:.6f}"] if start > 0 else []
+        cmd = ["ffmpeg", "-v", "error", "-nostdin", *seek, "-i", path, "-t", f"{length:.6f}", "-vn", "-ac", "1",
+               "-ar", str(rate), "-f", "f32le", "-"]
+        return np.frombuffer(subprocess.check_output(cmd, timeout=10), np.float32)
+
+    hits = []
+    for _, cue, _ in sounds:
+        sid = sound_library.id_for_key(cue["storage_key"])
+        if not sid:
+            continue
+        at = sound_library.hit_at(cue)
+        pos = max(0., at-float(cue.get("at") or 0))
+        left = max(0., pos-.06)
+        length = min(pos+.12, float(cue.get("dur_s") or (pos+.12))) - left
+        if length <= 0:
+            continue
+        path = paths[cue["storage_key"]]
+        wave = decode(path, float(cue.get("offset_s") or 0)+left, length)
+        power = peak_power(wave, rate, .05)
+        if power:
+            hits.append((at, 10*math.log10(power) + float(cue.get("gain_db", -6))))
+    result = []
+    for idx, track, duration in music:
+        windows = []
+        for at, level_db in hits:
+            if not track["start"] <= at < track["end"]:
+                continue
+            offset = float(track.get("offset_s") or 0)
+            if duration and offset >= duration-.05:
+                offset = 0.
+            pos = offset + at-track["start"]
+            if duration and track.get("loop"):
+                pos %= duration
+            wave = decode(paths[track["storage_key"]], max(0., pos-.1), .35)
+            power = peak_power(wave, rate, .05)
+            if power > 1e-10:
+                bed_db = 10*math.log10(power) + float(track.get("gain_db", -18))
+                depth = min(18., bed_db + 8. - level_db)
+                if depth > .5:
+                    windows.append((at, round(depth, 1)))
+        result.append((idx, dict(track, _cue_windows=windows), duration))
+    return result
 
 
 def chain(ctx):
@@ -303,6 +427,7 @@ def chain(ctx):
         placed.append(cue)
     if placed:
         edl['sfx'] = placed
+        edl['master'] = dict(edl.get('master') or {}, measure_cue_bed=True)
         if report.get("recorded_music_gain_db"):
             edl["master"] = dict(edl.get("master") or {}, recorded_music_gain_db=report["recorded_music_gain_db"])
         result = ctx.apply_score(edl, 'sound design on the first film’s picture and graphic events')

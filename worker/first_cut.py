@@ -3881,6 +3881,7 @@ def run(worker_db, job, project, index_row):
     ctx.credit_budget = None
     ctx.first_cut_db, ctx.first_cut_session = worker_db, session_id
     if getattr(ctx, "index", None) and not payload.get("url"):
+        ctx.upload_duration = ctx.duration
         ctx.first_cut_original_audio = (ctx.index.get("video") or {}).get("has_audio") is False
         import script_words
         ctx.index = script_words.first_cut_index(ctx.index)
@@ -4069,10 +4070,10 @@ def run(worker_db, job, project, index_row):
     if delivered:
         duration = float(preview.get("duration_s") or 0)
         if url:
-            summary = _summary(applied, duration, url)
+            summary = "Here's your first cut: " + _summary(applied, duration, url)
         else:
             import reply_truth
-            summary = reply_truth.first_cut_summary(preview, getattr(ctx, 'duration', None))
+            summary = reply_truth.first_cut_summary(preview, getattr(ctx, 'upload_duration', None) or getattr(ctx, 'duration', None))
         admission = project_admission_safe(worker_db, project["id"])
         trial = bool(admission and admission.get("kind") == "trial")
         facts = getattr(ctx, "first_cut_brief", None) if url else None
@@ -4083,7 +4084,7 @@ def run(worker_db, job, project, index_row):
         else:
             # Q8: "on the right" is wrong on a phone, where the player sits
             # above the chat
-            text = (f"Here's your first cut: {summary}. It's playing in the "
+            text = (f"{summary}. It's playing in the "
                     "player."
                     + (" Now I'm working through the rest of your brief."
                        if follow_up else " Tell me what to change.")
@@ -4189,7 +4190,8 @@ def _render_cut(ctx, steps, picked):
     row = ctx.latest_edl() or {}
     frame = (row.get("json") or {}).get("frame") or {}
     ratio = frame.get("ratio", "source")
-    fit = readable_screen and (frame.get("mode") not in ("pad", "pad_blur") or
+    director_frame = picked and picked.get("how") == "director" and ratio == "9:16"
+    fit = readable_screen and not director_frame and (frame.get("mode") not in ("pad", "pad_blur") or
                                any(s.get("mode") == "crop" for s in frame.get("focus_track") or []))
     if fit or (ratio != "9:16" and not (ratio == "source" and _orientation(index) == "vertical")):
         result = agent_tools.execute(ctx, "auto_reframe",
@@ -4438,7 +4440,7 @@ def _director_upgrade(ctx, worker_db, job, session_id, started, steps,
         latest = ctx.latest_edl()
         preview = getattr(ctx, "last_preview", None) or {}
         import reply_truth
-        text = f"The updated cut is playing now. It's {reply_truth.first_cut_summary(preview, getattr(ctx, 'duration', None))}."
+        text = f"The updated cut is playing now. {reply_truth.first_cut_summary(preview, getattr(ctx, 'upload_duration', None) or getattr(ctx, 'duration', None))}."
         more = dict(meta, edl_version=latest["version"], preview=preview)
         more["first_cut"] = dict(meta.get("first_cut") or {}, footage={
             "clips": got.get("clips"), "sources": got.get("sources")})

@@ -264,18 +264,31 @@ def first_cut_summary(preview, source_seconds=None):
     seconds = round(float(preview.get("duration_s") or 0))
     if not seconds:
         return "your edited video"
-    article = "an" if seconds in (8, 11, 18) or 80 <= seconds <= 89 else "a"
-    width, height = preview.get("width"), preview.get("height")
-    shape = ""
-    if width and height:
-        shape = "vertical " if height > width else "landscape " if width > height else "square "
-    audio = preview.get("craft_report") or {}
-    sound = " with sound" if audio.get("silent") is False else ""
-    summary = f"{article} {seconds}-second {shape}edit{sound}"
+    picture = preview.get("picture_qc") or {}
+    moments = sorted(picture.get("visible_title_moments") or [], key=lambda row: row["start"])
+    lines = []
+    if moments:
+        # The two lines of a title share a gesture and a time. Count ticks
+        # describe a changing value, so never quote one as a settled fact.
+        titles = [m for m in moments if not m["group"].split(".")[-1].startswith("counter")]
+        if titles:
+            head = titles[0]
+            lines = list(dict.fromkeys(m["text"] for m in titles
+                         if m["group"] == head["group"] and abs(m["start"]-head["start"]) < .04))
+    else:
+        lines = (picture.get("visible_titles") or [])[:2]
+    facts = []
+    if lines:
+        facts.append("The title reads “" + " / ".join(lines) + "”")
     if source_seconds and round(source_seconds) > seconds + 1:
-        summary += f", cut down from {round(source_seconds)} seconds"
-    titles = (preview.get("picture_qc") or {}).get("visible_titles") or []
-    if titles:
-        quoted = [f'“{t}”' for t in titles[:2]]
-        summary += " featuring " + " and ".join(quoted)
-    return summary
+        facts.append(f"I cut the {round(source_seconds)} seconds of footage to {seconds} seconds")
+    else:
+        facts.append(f"The cut runs {seconds} seconds")
+    sound = preview.get("craft_report") or {}
+    if sound.get("music_present"):
+        facts.append("There’s a music bed under the footage")
+    accents = sound.get("audible_accents") or []
+    if accents:
+        cue = accents[0]
+        facts.append(f"You can hear the {cue['role']} at {cue['at']:.2f} seconds")
+    return ". ".join(facts)

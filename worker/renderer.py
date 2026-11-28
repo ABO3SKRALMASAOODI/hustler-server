@@ -6477,7 +6477,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                      f"fps={fps}:round=up:start_time=0,trim=duration={duration:.6f},"
                      f"tpad=stop_mode=clone:stop_duration=0.15[{tag}raw]")
         look = cutaway_look_chain(edl, start, duration)
-        _normalize_video(parts, tag + "raw", tag + "fit", W, H, fps,
+        if item.get("source_crop"):
+            left, top, right, bottom = item["source_crop"]
+            parts.append(f"[{tag}raw]crop=w='trunc(iw*{right-left:.8f}/2)*2':"
+                         f"h='trunc(ih*{bottom-top:.8f}/2)*2':"
+                         f"x='iw*{left:.8f}':y='ih*{top:.8f}'[{tag}region]")
+        _normalize_video(parts, tag + ("region" if item.get("source_crop") else "raw"), tag + "fit", W, H, fps,
                          "pad_blur", tag, grade=",".join(look) if look else None)
         # The Score is frame-authored while old EDLs store centiseconds.
         a, b = round(start * fps), round((start + duration) * fps)
@@ -6846,7 +6851,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         if item.get('_cover_windows') is not None:
             # This internal input already contains the authored per-shot
             # crop and look. Gaps expose the original picture, never black.
-            enabled = '+'.join(f'gte(t,{a:.9f})*lt(t,{b:.9f})'
+            enabled = '+'.join(f'gte(n,{round(a*fps)})*lt(n,{round(b*fps)})'
                                for a, b in item['_cover_windows']) or '0'
             # Like a normal cutaway, keep its last frame through a
             # fractional-rate framesync handoff. EOF must not reveal the
@@ -6996,7 +7001,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             rad = float(rot) * 3.14159265 / 180.0
             chain.append(f"rotate={rad:.4f}:c=black@0.0"
                          f":ow=rotw({rad:.4f}):oh=roth({rad:.4f})")
-        chain.append(f"setpts=PTS+{o_start:.3f}/TB")
+        first_frame = round(o_start * fps)
+        end_frame = round((o_start + o_dur) * fps)
+        chain.append(f"fps={fps}:start_time=0,settb=AVTB,setpts=PTS+{first_frame}/{fps:.9f}/TB")
         parts.append(f"[{ov_src}]{','.join(chain)}[ovp{j}]")
         # position: keyframed fractions of the MAIN frame, center-anchored.
         # Slide entrance/exit rides the position expression (quadratic ease
@@ -7026,7 +7033,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(
             f"[{vlabel}][ovp{j}]overlay=x='{xe}':y='{ye}'"
             f":eof_action=pass"
-            f":enable='gte(t,{o_start:.3f})*lt(t,{o_start + o_dur:.3f})'"
+            f":enable='gte(n,{first_frame})*lt(n,{end_frame})'"
             f"[vov{j}]")
         vlabel = f"vov{j}"
     # Picture design precedes typography: captions, labels, and branding keep
@@ -7370,6 +7377,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # after its own fit and fades, before ducking and the mix.
             mus = fxgraph.apply_music_bus(parts, f"mus{j}", item.get("id"),
                                           fx_plan)
+            windows = item.get("_cue_windows") or []
+            if windows:
+                # Concurrent hits share a single dip on the bed.
+                terms = [f"{db:.1f}*clip((t-({t-.10:.4f}))/.10,0,1)*"
+                         f"clip(({t+.32:.4f}-t)/.20,0,1)" for t, db in windows]
+                while len(terms) > 1:
+                    terms = [f"max({terms[i]},{terms[i+1]})" if i+1 < len(terms)
+                             else terms[i] for i in range(0, len(terms), 2)]
+                parts.append(f"[{mus}]volume='pow(10,-({terms[0]})/20)':eval=frame[seat{j}]")
+                mus = f"seat{j}"
             if smooth:
                 # After adelay both streams share the program clock, so the
                 # compressor reacts to the words playing at that instant.
@@ -8781,7 +8798,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # delivery_upscale applies after the render: no geometry here
         frame = None
     W, H = frame_dims(info["width"], info["height"],
-                      (frame or {}).get("ratio"), delivery=not preview)
+                      (frame or {}).get("ratio"), delivery=not preview or (_FIRST_CUT_ORIGINAL.get() and _PREVIEW_QUALITY.get() == "approval"))
     frame_mode = (frame or {}).get("mode", "crop") if frame else None
     if not preview and (W, H) != (info["width"], info["height"]) and not frame_mode:
         frame_mode = "pad"
@@ -8954,6 +8971,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         silence_idx = next_idx
         next_idx += 1
 
+    mix_paths = {}
     for item in edl.get("music", []):
         # Muted and wholly out-of-program pieces stay on the workbench but do
         # not need fetching or an ffmpeg input for this render.
@@ -8988,6 +9006,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                 and (track_dur - offset) < span - 0.05):
             extra_inputs += ["-stream_loop", "-1"]
         extra_inputs += ["-i", local]
+        mix_paths[item["storage_key"]] = local
         music_inputs.append((next_idx, item, track_dur))
         next_idx += 1
 
@@ -9001,8 +9020,16 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # that is then discarded. add_sfx warns about an over-long tail at
         # write time, where the duration is already known.
         extra_inputs += ["-i", local]
+        mix_paths[item["storage_key"]] = local
         sfx_inputs.append((next_idx, item, None))
         next_idx += 1
+
+    if music_inputs and sfx_inputs and (edl.get("master") or {}).get("measure_cue_bed"):
+        import first_film_sound
+        try:
+            music_inputs = first_film_sound.delivery_music_windows(music_inputs, sfx_inputs, mix_paths)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"[render] using arranged cue levels: {type(exc).__name__}", flush=True)
 
     insert_locals = {}           # asset key -> local file (the plate probe)
     for item in inserts:
@@ -10059,7 +10086,7 @@ def _composition_geometry(edl, src_local, preview):
     else:
         info = media.probe(src_local)
         W, H = frame_dims(info["width"], info["height"],
-                          (edl.get("frame") or {}).get("ratio"), delivery=not preview)
+                          (edl.get("frame") or {}).get("ratio"), delivery=not preview or (_FIRST_CUT_ORIGINAL.get() and _PREVIEW_QUALITY.get() == "approval"))
     fps = max(1., min(float(info.get("fps") or 30.), 60.))
     return preview_geometry(W, H, fps) if preview else (W, H, fps)
 
@@ -10912,7 +10939,10 @@ def run_render_job(worker_db, job):
     if quality not in ("draft", "approval"):
         raise dbx.PermanentJobError("Unknown preview quality")
     token = _PREVIEW_QUALITY.set(quality)
-    original_token = _FIRST_CUT_ORIGINAL.set(bool((job.get("payload") or {}).get("first_cut_original")))
+    payload = job.get("payload") or {}
+    full_first_cut = (job.get("type") == "preview" and quality == "approval"
+                      and (payload.get("first_film") or payload.get("first_film_source_screen")))
+    original_token = _FIRST_CUT_ORIGINAL.set(bool(payload.get("first_cut_original") or full_first_cut))
     paid_token = _PREVIEW_PAID.set(False)
     plan_token = _RENDER_PLAN.set("free")
     long_token = _PREVIEW_LONG.set(False)
@@ -12064,9 +12094,22 @@ def _run_render_job(worker_db, job):
                         import mcp_craft
                         craft_report = mcp_craft.measure(out_local, edl_row["json"],
                                                          audio_qc_res, out_dur)
+                        if first_film:
+                            import first_film_sound
+                            craft_report["audible_accents"] = first_film_sound.rendered_accents(
+                                out_local, edl_row["json"].get("sfx") or [])
+                            for track in edl_row["json"].get("music") or []:
+                                key = track.get("storage_key") or ""
+                                digest = hashlib.sha256(key.encode()).hexdigest()[:32]
+                                local = os.path.join(workdir, f"cached_{digest}{os.path.splitext(key)[1].lower()}")
+                                if os.path.isfile(local) and first_film_sound.rendered_bed(
+                                        out_local, track, local, craft_report["program_s"]):
+                                    craft_report["music_present"] = True
+                                    break
                     except Exception as exc:
-                        craft_report = {"measurement_error": type(exc).__name__,
-                                        "silent": None, "no_motion_detected": None}
+                        if craft_report is None:
+                            craft_report = {"silent": None, "no_motion_detected": None}
+                        craft_report["measurement_error"] = type(exc).__name__
 
             def run_checks():
                 active_stage[0] = "qc_s"

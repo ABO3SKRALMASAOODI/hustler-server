@@ -320,6 +320,8 @@ def lower_spine(l1, bake, rep):
 
 def on_spine(l1, it, fps):
     """Does this shot of main show what the spine is playing at that moment?"""
+    if it.get("source_hold"):
+        return False
     a = it["f"][0]
     for s in l1.get("spine") or []:
         if s["f"][0] <= a < s["f"][1]:
@@ -454,7 +456,7 @@ def lower_pictures(l1, work, bake, rep):
     win, rep["frame"] = base_window(l1)
     for it, a, b, merged in runs:
         pid = it["id"]
-        start, dur = r2(a / fps), r2((b - a) / fps)
+        start, dur = a / fps, (b - a) / fps
         pic = it.get("pic")
         if merged > 1:
             rep["merged_shots"] = rep.get("merged_shots", 0) + merged - 1
@@ -512,7 +514,7 @@ def lower_pictures(l1, work, bake, rep):
             # This source picture shares the take's background and reading
             # camera. Ordinary overlays are screen-locked above that camera.
             ov["fit"] = "source_blur"
-            ov.pop("source_crop", None)
+            # Keep the measured reading column when fitting a wide detail.
         overlays.append(ov)
         gain = float((it.get("grade") or {}).get("gain", 1.0))
         if gain < 0.85 and pic != "plate":        # an overlay has no grade today. dna.match lands as black laid over it at the right strength
@@ -623,7 +625,7 @@ def lower_cards(l1, work, bake, rep):
             rep["cards_too_short"] = rep.get("cards_too_short", 0) + 1
             continue
         asset = assets.get(it.get("pic"))
-        ov = {"id": f"cd.{it['id']}", "start": r2(a / fps), "duration_s": r2((b - a) / fps)}
+        ov = {"id": f"cd.{it['id']}", "start": a / fps, "duration_s": (b - a) / fps}
         if asset is None or asset.get("kind") == "image":
             key, width = bake.card(it, W, H, work, asset)
             ov.update(asset_key=key, kind="image", scale=round(width, 4))
@@ -811,14 +813,15 @@ def lower_captions(l1, rep, src_dur=0.0):
         style = {"preset": "clean", "font": font, "color": first[0].get("ink") or "#FFFFFF", "uppercase": False, "animation": anim,
                  "anchor_y": round(min(max(y, 0.02), 0.98), 4), "size_scale": round(min(max(libass_px(v, px) / (base_size * f), 0.5), 3.0), 3), "single_line": len(lines) == 1,
                  "emphasis": "none", "outline_width": 0.0, "shadow": 1.0}
-        text = "\n".join(" ".join(w["t"] for w in ln) for ln in lines) if len(lines) > 1 else " ".join(w["t"] for w in lines[0])
+        from script_words import join_tokens
+        text = "\n".join(join_tokens(w["t"] for w in ln) for ln in lines)
         if off_base:
             # A span that plays out of source order is an insert, and a caption is authored in source time against the
             # base: here it would be lost, or land on another second. It goes in as a text item at its programme time,
             # in the caption's own face, size and seat (p5574, 13 Nov: no caption on a cold open, and two on one frame).
             if (b - a) / fps >= TX_MIN_S:
                 rep.setdefault("_cap_texts", []).append({
-                    "id": f"tx.cap.{cid}"[:60], "text": text.replace("\n", " "), "start": r2(a / fps), "end": r2(b / fps), "template": "title", "font": tfont,
+                    "id": f"tx.cap.{cid}"[:60], "text": join_tokens(text.splitlines()), "start": r2(a / fps), "end": r2(b / fps), "template": "title", "font": tfont,
                     "font_size": round(min(max(libass_px(v, px) / min(l1["frame"][0], H), 0.012), 0.3), 4), "text_align": "center", "max_width": 0.72,
                     "color": first[0].get("ink") or "#FFFFFF", "uppercase": False, "shadow": 1.0, "outline_width": 0.0, "entrance": "none", "exit": "none",
                     "x": 0.5, "y": round(min(max(y, 0.02), 0.98), 4),
@@ -872,7 +875,7 @@ def lower_captions(l1, rep, src_dur=0.0):
             s0, s1 = src_at(l1, r[0], fps), src_at(l1, r[1], fps)
             if s0 is None or s1 is None:
                 continue
-            out.append({"text": text.replace("\n", " "), "start": r2(s0), "end": r2(max(s1, s0 + 0.06)), "style": st})
+            out.append({"text": join_tokens(text.splitlines()), "start": r2(s0), "end": r2(max(s1, s0 + 0.06)), "style": st})
     if src_dur:
         for c in out:
             c["end"] = r2(min(c["end"], src_dur))
@@ -976,7 +979,7 @@ def text_item(l1, it, a, b, rep):
         it = dict(it, t=fit, x=0.5)
         w_px = text_w(fit, v) if v.get("font") else len(fit) * px * 0.5
         rep["running_lines_fitted"] = rep.get("running_lines_fitted", 0) + 1
-    tx = {"id": f"tx.{it['id']}"[:60], "text": it["t"], "start": r2(a / fps), "end": r2(b / fps), "template": "title", "font": face[0],
+    tx = {"id": f"tx.{it['id']}"[:60], "text": it["t"], "start": a / fps, "end": b / fps, "template": "title", "font": face[0],
           "font_size": round(min(max(libass_px(v, px) / min(W, H), 0.012), 0.3), 4), "text_align": "center", "max_width": 0.96, "color": it.get("ink") or "#FFFFFF",
           "uppercase": False, "shadow": 1.0 if (v.get("shadow") or {}).get("a") else 0.0, "outline_width": 0.0, "entrance": "none", "exit": "none"}
     if face[1]:
@@ -1109,6 +1112,15 @@ def lower_texts(l1, rep, runs=None):
         for prev, nxt in zip(ticks, ticks[1:]):
             if 0 < nxt["start"] - prev["end"] <= TX_MIN_S + 1 / fps:
                 prev["end"] = nxt["start"]
+    if runs:
+        # The compiler's display may straddle the tail of a shot by a few
+        # frames. End the lockup on the actual compiled picture boundary.
+        cuts = sorted({b/fps for _, _, b, _ in runs})
+        for tx in visible:
+            cut = next((c for c in reversed(cuts) if c <= tx["end"]), None)
+            if cut is not None and 0 < tx["end"]-cut <= .12 and cut-tx["start"] >= TX_MIN_S:
+                tx["end"] = cut
+                _clip_motion(tx)
     return visible
 
 
@@ -1267,6 +1279,8 @@ def lower(l1, work):
            "inserts": inserts, "captions": lower_captions(l1, rep, src_dur), "sfx": sfx, "overlays": overlays + pool_ov + cards + script_type,
            "texts": lower_texts(l1, rep, runs), "vectors": vectors, "fx": tr_fx + flash_fx, "effects": effects, "master": {"loudness": "social"}}
     music_gain = (l1.get("sound_design") or {}).get("recorded_music_gain_db")
+    if sfx and (l1.get("sound_design") or {}).get("foreground"):
+        edl["master"]["measure_cue_bed"] = True
     if sfx and music_gain:
         edl["master"]["recorded_music_gain_db"] = music_gain
     edl["texts"] += rep.pop("_cap_texts", [])

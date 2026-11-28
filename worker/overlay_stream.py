@@ -4,17 +4,11 @@ Twenty-four windows of one 4K file are twenty-four independent decoders,
 not one shared source. Prepare the bottom opaque cover layer sequentially;
 the normal graph still owns all other layers, sound, captions and branding.
 """
-import math
 import os
 import shutil
 import tempfile
 
 import media
-
-
-def _clock(value):
-    # The ordinary overlay graph emits its authored bounds to milliseconds.
-    return float(f'{float(value):.3f}')
 
 
 def plan(items, fps, graph_only=None):
@@ -30,8 +24,8 @@ def plan(items, fps, graph_only=None):
         return []
     # Work on the output frame grid. Last layer wins at rounded overlaps,
     # just as it does in the ordinary ordered overlay chain.
-    spans = [(math.ceil(_clock(x['start']) * fps - 1e-7),
-              math.ceil(_clock(float(x['start']) + float(x['duration_s'])) * fps - 1e-7))
+    spans = [(round(float(x['start']) * fps),
+              round((float(x['start']) + float(x['duration_s'])) * fps))
              for x in prefix]
     edges = sorted({0, *(n for pair in spans for n in pair)})
     pieces = []
@@ -59,8 +53,7 @@ def prepare(items, edl, width, height, fps, workdir, fetch, input_args,
     # Keep the original enable bounds. A frame-grid timestamp rounded to
     # decimal text can be a fraction of a nanosecond later than that frame
     # and incorrectly expose the base picture for one frame after a gap.
-    windows = [(_clock(x['start']), _clock(float(x['start']) + float(x['duration_s'])))
-               for x in prefix]
+    windows = [(a/fps, b/fps) for a, b, owner in pieces if owner is not None]
     try:
         for n, (a, b, owner) in enumerate(pieces):
             duration = (b-a)/fps
@@ -91,7 +84,7 @@ def prepare(items, edl, width, height, fps, workdir, fetch, input_args,
                 chain += look_chain(edl, float(item['start']), dur)
                 # Grade/texture clocks above remain relative to the authored
                 # shot, including a shot partially hidden by a later layer.
-                elapsed = a/fps - _clock(item['start'])
+                elapsed = (a - round(float(item['start'])*fps)) / fps
                 chain += [f'setpts=PTS-{elapsed:.9f}/TB']
             # Overlay framesync holds the preceding source frame. Nearest
             # rounding can advance a VFR source across an internal cut.
