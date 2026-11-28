@@ -159,6 +159,41 @@ def ink_mask(bgr, *, dilate=2, min_response=28, colour=False):
     return m
 
 
+def _colour_strokes(inner):
+    # Opponent-channel top hats find saturated foreground strokes even on a
+    # bright or saturated shirt. A large field of the same hue gives no peak.
+    size = _odd(inner.shape[0] * .10)
+    saturation = inner.max(axis=2) - inner.min(axis=2)
+    lab = cv2.cvtColor(inner, cv2.COLOR_BGR2LAB)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (size, size))
+    peaks = []
+    for channel in cv2.split(lab)[1:]:
+        light = cv2.morphologyEx(channel, cv2.MORPH_TOPHAT, kernel)
+        dark = cv2.morphologyEx(channel, cv2.MORPH_BLACKHAT, kernel)
+        peaks.append(np.where(channel > 128, light, dark))
+    contrast = np.maximum(*peaks)
+    hue = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)[:, :, 0]
+    return hue, saturation > 55, contrast > 25
+
+
+def _caption_hue(views):
+    """Estimate a common foreground hue from narrow strokes across the shot."""
+    counts = np.zeros(180)
+    field = np.zeros(180)
+    population = 0
+    for view in views:
+        hue, coloured, strokes = _colour_strokes(view)
+        counts += np.bincount(hue[coloured & strokes], minlength=180)
+        field += np.bincount(hue[coloured], minlength=180)
+        population += hue.size
+    scores = sum(np.roll(counts, offset) for offset in range(-8, 9))
+    peak = int(scores.argmax())
+    same_colour = sum(field[(peak + offset) % 180] for offset in range(-8, 9))
+    if scores[peak] > max(.005 * population, .55 * counts.sum(), .25 * same_colour):
+        return peak
+    return None
+
+
 def _line_mask(bgr):
     """Mask of text LINES in a full frame — glyphs merged, noise dropped."""
     H, W = bgr.shape[:2]
@@ -333,6 +368,7 @@ class _Region:
         self.plate = None
         self.plate_ok = None        # bool mask: plate is trustworthy here
         self.static_fill_mask = None  # temporal text union, band coordinates
+        self.ink_hue = None
         self.static = False
         self.repaint = None           # REPAINT_VERSION of the caller (None = round 92)
 
@@ -381,6 +417,13 @@ class _Region:
         inner = band[self.iy0:self.iy1, self.ix0:self.ix1]
         if self.fill == "box":
             m[self.iy0:self.iy1, self.ix0:self.ix1] = 255
+        elif self.ink_hue is not None:
+            hue, coloured, strokes = _colour_strokes(inner)
+            distance = np.abs(hue.astype(np.int16) - self.ink_hue)
+            core = (coloured & strokes & (np.minimum(distance, 180 - distance) <= 16)).astype(np.uint8)
+            edge = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            m[self.iy0:self.iy1, self.ix0:self.ix1] = cv2.dilate(
+                core * 255, edge, iterations=max(2, dilate))
         else:
             m[self.iy0:self.iy1, self.ix0:self.ix1] = ink_mask(
                 inner, dilate=dilate, colour=(self.repaint or 0) >= 3)
@@ -392,6 +435,25 @@ class _Region:
         if self.static_fill_mask is not None:
             mask = np.maximum(mask, self.static_fill_mask)
         return mask
+
+
+def _bar_edges(frame, region, colour):
+    """Measure the two horizontal edges of a flat backing across the caption.
+
+    A coat or wall can dominate the median colour. A backing changes colour
+    along a common row across much of the text width, at both ends vertically.
+    Use a small vertical baseline to accommodate antialiasing and soft edges.
+    """
+    strip = frame[:, region.bx0:region.bx1].astype(np.float32)
+    coverage = (np.abs(strip - colour).max(axis=2) < 34).mean(axis=1)
+    delta = max(2, round(frame.shape[0] * .007))
+    coverage = np.pad(coverage, delta)
+    change = coverage[2 * delta:] - coverage[:-2 * delta]
+    middle = (region.by0 + region.by1) // 2
+    height = region.by1 - region.by0
+    top = change[max(0, region.by0 - height):middle]
+    bottom = change[middle:min(len(change), region.by1 + height)]
+    return bool(top.size and bottom.size and top.max() > .45 and bottom.min() < -.45)
 
 
 def _has_backing_bar(path, region, W, H, dur, samples=3):
@@ -441,7 +503,8 @@ def _has_backing_bar(path, region, W, H, dur, samples=3):
         # Measured separation on real styles: a bar scores gap 60-70 /
         # flat 0.58-0.82, captions straight on the picture score gap 1-7 /
         # flat ~0.40.
-        if gap > 25.0 and flat > 0.50:
+        if gap > 25.0 and flat > 0.50 and (
+                (region.repaint or 0) < 3 or _bar_edges(f, region, med)):
             votes += 1
     return seen > 0 and votes >= max(1, seen - 1)
 
@@ -526,16 +589,19 @@ def _build_plate(path, region, W, H, dur, samples=22):
     e = dur if region.end is None else float(region.end)
     e = max(e, s + 0.1)
     step = (e - s) / float(samples + 1)
-    stack, masks = [], []
+    stack = []
     for i in range(samples):
         f = _grab(path, s + step * (i + 1), W, H)
         if f is None:
             continue
         band = region.crop(f).astype(np.uint8)
         stack.append(band)
-        masks.append(region.mask_for(band, dilate=5) > 0)
     if len(stack) < PLATE_MIN_CLEAN:
         return
+    if (region.repaint or 0) >= 3 and region.fill == "text":
+        region.ink_hue = _caption_hue(
+            b[region.iy0:region.iy1, region.ix0:region.ix1] for b in stack[::3])
+    masks = [region.mask_for(b, dilate=5) > 0 for b in stack]
     arr = np.stack(stack).astype(np.float32)
     ink = np.stack(masks)
     clean = ~ink
@@ -575,7 +641,7 @@ def _build_plate(path, region, W, H, dur, samples=22):
     # repainting only the current threshold mask left black outlines and
     # antialias ghosts, while blindly trusting the incomplete median pasted
     # pieces of earlier words back into the picture.
-    if region.static:
+    if region.static and region.ink_hue is None:
         scope = np.zeros(ok.shape, bool)
         scope[region.iy0:region.iy1, region.ix0:region.ix1] = True
         repair = (~ok) & scope
