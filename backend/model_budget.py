@@ -496,7 +496,8 @@ def inflight(conn, cfg, user_id=None, root=None, job_id=None, now=None):
 
 _MIX_SQL = """SUM(COALESCE(l.prompt_tokens, 0)) AS prompt,
               SUM(COALESCE((l.response->>'cached_in')::float, 0)) AS cached,
-              SUM(COALESCE((l.response->>'cache_write_in')::float, 0)) AS written,
+              SUM(COALESCE((l.response->>'cache_write_total_in')::float,
+                           (l.response->>'cache_write_in')::float, 0)) AS written,
               SUM(COALESCE(l.completion_tokens, 0)) AS completion,
               SUM(COALESCE((l.response->>'cache_write_1h_in')::float, 0)) AS written_hour"""
 

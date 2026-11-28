@@ -72,6 +72,9 @@ MODEL_PRICES = {
     # https://developers.openai.com/api/docs/models/gpt-6.1-terra (read 2026-11-14 by lane
     # EDIT-MODEL-OAI): the edit rung's other measured model (worker/edit_rung.py).
     "gpt-6.1-terra": {"in": 1.0, "cached_in": 0.05, "out": 5.0, "reasoning_separate": False},
+    # https://developers.openai.com/api/docs/models/gpt-6.2-sol (2026-11-28), USD per million.
+    "gpt-6.2-sol": {"in": 2.0, "cached_in": 0.1, "cache_write_in": 2.5,
+                    "cache_write_12h_in": 5.0, "out": 10.0, "reasoning_separate": False},
     # https://developers.openai.com/api/docs/models/gpt-6.1-sol (2026-09-30).
     # Preserve GPT-6 Sol below for historical usage; its cache rate differs.
     "gpt-6.1-sol": {"in": 2.0, "cached_in": 0.1, "cache_write_in": 2.5, "out": 10.0, "reasoning_separate": False},
@@ -394,7 +397,7 @@ def row_cost_sql(fallback, model_col="model", response_col="response",
     # rates (provider invoice for xAI, reported tokens at official Luna rates). Historical rows without it retain deterministic token pricing.
     return (f"(CASE WHEN (left(lower(COALESCE({model_col}, '')), 5) = 'grok-' "
             f"OR left(lower(COALESCE({model_col}, '')), 7) = 'claude-' "
-            f"OR lower(COALESCE({model_col}, '')) IN ('gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol')) "
+            f"OR lower(COALESCE({model_col}, '')) IN ('gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.2-sol')) "
             f"AND jsonb_typeof({response_col}->'provider_cost_usd') = 'number' "
             f"THEN CASE WHEN ({response_col}->>'provider_cost_usd')::float >= 0 "
             f"THEN ({response_col}->>'provider_cost_usd')::float ELSE {estimated} END "

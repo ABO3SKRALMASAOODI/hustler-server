@@ -78,6 +78,9 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
             "messages": [{"role": "user", "content": [
                 {k: v for k, v in b.items() if k != "detail"} if isinstance(b, dict) else b
                 for b in content] if isinstance(content, list) else content}]}
+    if isinstance(system, str) and system:
+        body["system"] = [{"type": "text", "text": system,
+                           "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
     if thinking:
         body["thinking"] = THINKING
     t0 = time.monotonic()

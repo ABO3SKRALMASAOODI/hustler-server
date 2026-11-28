@@ -273,3 +273,178 @@ def test_a_fallback_refusal_that_is_not_a_lost_connection_stands(rung):
     with pytest.raises(ValueError):
         claude_lane.create("gpt-6.1-sol", MSGS, tools=TOOLS)
     assert len(rung.posts) == 2
+
+
+def test_sol_62_wire_prefix_grows_across_steps_and_new_job_recorders(monkeypatch):
+    from copy import deepcopy
+    import json
+    model = "gpt-6.2-sol"
+    core = [{"type": "function", "function": {"name": "look", "parameters": {"type": "object"}}}]
+    extra = {"type": "function", "function": {"name": "grade", "parameters": {"type": "object"}}}
+    messages = [{"role": "system", "content": "editor kernel"},
+                {"role": "system", "content": "capabilities"},
+                {"role": "user", "content": "first request"}]
+    plan = claude_lane.tool_plan(core, core + [extra], "high")
+    plan["initial_extra"] = []
+    def wire(job, history, tools, effort):
+        monkeypatch.setattr(llm, "get_recorder", lambda: SimpleNamespace(
+            job_id=job, editor_session_key="edit:17:42"))
+        return edit_rung.request_body(model, history, tools, effort=effort, tool_plan=plan)
+    a = wire(1, messages, core, "high")
+    history = deepcopy(messages) + [
+        {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "look", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "observed subject"}]
+    claude_lane.surface_tools(plan, history, [extra] + core)
+    b = wire(1, history, [extra] + core, "low")
+    c = wire(2, history + [{"role": "assistant", "content": "Done."},
+                            {"role": "user", "content": "Follow-up"}], core + [extra], "low")
+    for before, after in ((a, b), (b, c)):
+        # Compare transmitted JSON bytes, including the position of the tool and effort updates.
+        assert json.dumps(after["input"][:len(before["input"])]).encode() == json.dumps(before["input"]).encode()
+        for field in ("tools", "model", "reasoning", "prompt_cache_key", "prompt_cache_options"):
+            assert before[field] == after[field]
+    assert a["prompt_cache_key"] == "valmera:edit:17:42"
+    assert [i["type"] for i in b["input"] if i.get("type")][-3:] == [
+        "additional_tools", "function_call_output", "configuration_update"]
+    assert a["input"][0]["content"][0]["prompt_cache_breakpoint"]["ttl"] == "12h"
+
+
+def test_sol_reported_reads_and_both_write_lifetimes_survive_llm_record(monkeypatch):
+    rows = []
+    monkeypatch.setattr(llm, "get_recorder", lambda: lambda *args: rows.append(args))
+    u = edit_rung._RespUsage("gpt-6.2-sol", {"input_tokens": 10000, "output_tokens": 100,
+        "input_tokens_details": {"cached_tokens": 8000, "cache_write_tokens": 1500,
+                                "cache_write_tokens_details": {"ttl_12h_tokens": 1000}}})
+    u.prompt_cache = {"key": "valmera:edit:17:42", "cached_tokens": u.cache_read_input_tokens}
+    llm.record("agent", {"model": "gpt-6.2-sol"}, {}, u)
+    row = rows[0][2]
+    assert [row[k] for k in ("cached_in","cache_write_in","cache_write_12h_in","uncached_in")] == [8000,1500,1000,500]
+    assert row["prompt_cache"]["cached_tokens"] == 8000
+    assert row["provider_cost_usd"] == pytest.approx((8000*.1 + 500*2 + 500*2.5 + 1000*5 + 100*10)/1e6)
+
+
+def test_sol_trial_keeps_actual_opus_planner(monkeypatch):
+    from agent_loop import _trial_planner_step
+    monkeypatch.setattr(config, "EDIT_RUNG_MODELS", "gpt-6.2-sol")
+    ctx = SimpleNamespace(claude_trial=SimpleNamespace(
+        planner_model="claude-opus-5-5", remaining_usd=5, planner_effort="xhigh", executor_effort="high"))
+    assert _trial_planner_step(ctx, "gpt-6.2-sol", 0, "medium")[0] == "claude-opus-5-5"
+    assert _trial_planner_step(ctx, "gpt-6.2-sol", 1, "medium")[0] == "gpt-6.2-sol"
+
+
+def test_sol_new_job_rebuilds_changed_project_state_behind_real_previous_wire(monkeypatch):
+    import json
+    import edit_session_history as sessions
+    model = "gpt-6.2-sol"
+    key = "edit:17:99"
+    monkeypatch.setattr(llm, "get_recorder", lambda: SimpleNamespace(editor_session_key=key))
+    spec = [{"type": "function", "function": {"name": "look", "parameters": {"type": "object"}}}]
+    def plan():
+        return dict(claude_lane.tool_plan(spec, spec, "high"), initial_extra=[], static_messages=2)
+    base = [{"role": "system", "content": "kernel"}, {"role": "system", "content": "capabilities"}]
+    first = edit_rung.request_body(model, base + [
+        {"role": "system", "content": "version one"},
+        {"role": "user", "content": "trim"},
+        {"role": "assistant", "tool_calls": [{"id": "a", "function": {"name": "look", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "a", "content": "trim inspected"}], spec, tool_plan=plan())
+    sessions.remember(key, 18, first, 2400)
+    next_plan = plan()
+    next_plan.update(previous_body=sessions.previous(key, 18, 5000), skip_chat_until=3)
+    second = edit_rung.request_body(model, base + [
+        {"role": "user", "content": "trim"}, {"role": "assistant", "content": "Trimmed."},
+        {"role": "system", "content": "version two"}, {"role": "user", "content": "add captions"}],
+        spec, tool_plan=next_plan)
+    assert json.dumps(second["input"][:len(first["input"])]).encode() == json.dumps(first["input"]).encode()
+    assert [m["content"] for m in second["input"][len(first["input"]):]] == ["Trimmed.", "version two", "add captions"]
+    assert sessions.previous("different session", 18, 5000) is None
+    assert sessions.previous(key, 17, 5000) is None
+    assert sessions.previous(key, 18, 50) is None
+
+
+def test_followup_rebuilds_if_a_previously_loaded_tool_is_unavailable():
+    import edit_session_history
+    schema = {"type": "function", "name": "inspect_cut", "parameters": {"type": "object"}}
+    kernel = [{"role": "developer", "content": "stable"}]
+    common = {"model": "gpt-6.2-sol", "tools": [], "reasoning": {"effort": "high"}}
+    previous = dict(common, input=kernel + [{"type": "additional_tools", "tools": [schema]}])
+    current = dict(common, input=kernel + [{"role": "user", "content": "follow up"}])
+    assert edit_session_history.join(current, previous, 1, {}) is None
+    assert edit_session_history.join(current, previous, 1, {"inspect_cut": schema})["input"] == (
+        previous["input"] + current["input"][1:])
+
+
+def test_large_answers_retain_sol_usage_in_inspector_rows(monkeypatch):
+    import db
+    monkeypatch.setattr(db, "LLM_PAYLOAD_CAP", 256)
+    response = {"content": "x" * 1000, "cached_in": 718, "uncached_in": 95,
+                "provider_cost_usd": 0.02, "provider": "openai",
+                "prompt_cache": {"key": "valmera:edit:17:42", "cached_tokens": 718,
+                                 "boundaries": [{"prefix_sha256": "a" * 64}] * 20}}
+    saved = db._capped_payload(response, preserve_usage=True)
+    assert saved["_truncated"]
+    assert saved["cached_in"] == saved["prompt_cache"]["cached_tokens"] == 718
+    assert saved["provider_cost_usd"] == .02
+    assert "cached_in" not in db._capped_payload(response)
+
+
+def test_sol_history_moves_between_workers_and_expires_in_postgres(monkeypatch):
+    import os
+    from pathlib import Path
+    import uuid
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    import edit_session_history as snapshots
+    dsn = os.environ.get("TEST_EDIT_SESSION_DSN")
+    if not dsn:
+        pytest.skip("integration test needs a disposable PostgreSQL database")
+    conn = psycopg2.connect(dsn, cursor_factory=RealDictCursor)
+    schema = "test_sol_history_" + uuid.uuid4().hex
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE SCHEMA {schema}")
+            cur.execute(f"SET LOCAL search_path TO {schema}")
+            for table in ("projects", "chat_sessions", "chat_messages"):
+                cur.execute(f"CREATE TABLE {table} (id integer PRIMARY KEY)")
+                cur.execute(f"INSERT INTO {table} VALUES (11), (12), (13)")
+            migration = Path(__file__).resolve().parents[2] / "backend/migrations/044_edit_session_prefixes.sql"
+            sql = migration.read_text().replace("BEGIN;", "").replace("COMMIT;", "")
+            cur.execute(sql)
+        key = "edit:11:12"
+        body = {"input": [{"role": "user", "content": "original edit"}]}
+        worker_db = SimpleNamespace(run=lambda fn, *args: fn(conn, *args))
+        snapshots.remember(key, 12, body, 620, worker_db=worker_db, scope=(11, 12))
+        # A new process has no local entries. Only the database can answer.
+        monkeypatch.setattr(snapshots, "_entries", {})
+        assert snapshots.previous(key, 12, 700, worker_db=worker_db, scope=(11, 12)) == body
+        assert snapshots.previous(key, 12, 600, worker_db=worker_db, scope=(11, 12)) is None
+        assert snapshots.previous(key, 12, 700, worker_db=worker_db, scope=(13, 12)) is None
+        snapshots._save(conn, 11, 12, 11, 10, b"stale")
+        assert snapshots.previous(key, 12, 700, worker_db=worker_db, scope=(11, 12)) == body
+        with conn.cursor() as cur:
+            cur.execute("UPDATE edit_session_prefixes SET expires_at = now() - interval '1 minute'")
+        assert snapshots.previous(key, 12, 700, worker_db=worker_db, scope=(11, 12)) is None
+        snapshots.expire(conn)
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM edit_session_prefixes")
+            assert cur.fetchone()["n"] == 0
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_missing_sol_cache_counter_stays_unknown_in_reporting(monkeypatch):
+    rows = []
+    monkeypatch.setattr(llm, "get_recorder", lambda: lambda *args: rows.append(args))
+    usage = edit_rung._RespUsage("gpt-6.2-sol", {"input_tokens": 1000, "output_tokens": 2})
+    assert not usage.cache_read_reported
+    llm.record("agent", {"model": "gpt-6.2-sol"}, {}, usage)
+    assert rows[0][2]["cached_in"] is None
+    assert rows[0][2]["uncached_in"] is None
+
+
+def test_session_specific_static_content_uses_the_short_write_rate():
+    import openai_cache
+    inputs = [{"role": "developer", "content": s} for s in ("kernel", "tools manual", "project index")]
+    body = openai_cache.responses({"model": "gpt-6.2-sol", "input": inputs}, "edit:2:3",
+                                  conversation=True, static_messages=3)
+    assert [m["content"][0]["prompt_cache_breakpoint"]["ttl"] for m in body["input"]] == ["12h", "12h", "30m"]
