@@ -385,13 +385,11 @@ def plan_first(ctx, ledger, request, record=None):
     edl = ctx.latest_edl()["json"]
     content, on_source = evidence(ctx, edl, ledger, request)
     value, usage, err = None, {}, None
-    for attempt in (1, 2):
-        try:
-            value, usage = asks._call(ctx, "record_piece_plan", PIECE_SCHEMA, piece_system(), content,
-                                      max_tokens=6000, model=getattr(ctx, "agent_model", None))
-            break
-        except Exception as exc:  # noqa: BLE001 - asked once more, then the editor plans itself
-            err = f"{type(exc).__name__}: {str(exc)[:200]}"
+    try:
+        value, usage = asks._call(ctx, "record_piece_plan", PIECE_SCHEMA, piece_system(), content,
+                                  max_tokens=6000, model=getattr(ctx, "agent_model", None))
+    except Exception as exc:  # The editor can plan with the same evidence.
+        err = f"{type(exc).__name__}: {str(exc)[:200]}"
     if not value:
         return ("\n\nPIECE PLAN: the plan step did not answer (" + str(err) + "). Make the piece yourself: "
                 "plan_piece for the story and cut, direct the beats, dress the words, score it, then render and look.")

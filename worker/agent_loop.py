@@ -2915,9 +2915,10 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
           f"{json.dumps(ledger.get('routed'), default=str)[:240]}", flush=True)
     if reset_note:
         done_by = reset_note + ("\n" + done_by if done_by else "")
-    planned = _plan_piece_first(ctx, worker_db, job, session_id, ledger, request)
-    if planned:
-        done_by = (done_by + "\n" + planned) if done_by else planned
+    if cfg.get("plan_first"):
+        planned = _plan_piece_first(ctx, worker_db, job, session_id, ledger, request)
+        if planned:
+            done_by = (done_by + "\n" + planned) if done_by else planned
     kept = _typed_keep_whole(ctx, ledger, job, request)
     if kept:
         done_by = (done_by + "\n" + kept) if done_by else kept

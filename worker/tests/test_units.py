@@ -4284,7 +4284,7 @@ from agent_tools import (add_sfx, move_sfx, remove_sfx,       # noqa: E402
 # --- the silent-drop guard, applied to sfx ---------------------------------
 # Same lesson as FIT_FIELDS above: a field declared in only SOME layers is
 # dropped without a trace and the agent still reports success.
-SFX_FIELDS = {"id", "storage_key", "at", "gain_db", "purpose", "offset_s", "dur_s"}
+SFX_FIELDS = {"id", "storage_key", "at", "gain_db", "purpose", "offset_s", "dur_s", "source_duck_db"}
 check("sfx: the item model declares exactly the intended fields",
       SFX_FIELDS == set(schemas.SfxItem.model_fields))
 check("sfx: the EDL model carries an sfx list",
@@ -4314,6 +4314,8 @@ _base = {"keep": [[0.0, 30.0]], "captions": None}
 _ok = validate_edl({**_base, "sfx": [
     {"id": "sx1", "storage_key": "sfx:whoosh", "at": 5.0}]}, 30.0)
 check("sfx: a valid one-shot validates", _ok.sfx[0].at == 5.0)
+check("sfx: unmeasured source ducking leaves old one-shots unchanged",
+      "source_duck_db" not in _ok.sfx[0].model_dump())
 check("sfx: gain defaults to -6dB", _ok.sfx[0].gain_db == -6.0)
 # Three layers, one number. A default that drifts between the schema, the tool
 # and the renderer means the stored EDL and the rendered audio disagree.
@@ -5400,8 +5402,8 @@ _gc = _rnd.build_filtergraph(
 check("cover overlay scales to FILL the frame and crops the overflow",
       "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720"
       in _gc)
-check("cover overlay still windows on program time",
-      "enable='gte(t,5.000)*lt(t,9.000)'" in _gc)
+check("cover overlay owns program frames 150 through 269 at 30 fps",
+      "enable='gte(n,150)*lt(n,270)'" in _gc)
 
 # ---- round 36: record_website honesty gates --------------------------------
 import webrecord as _wrec                                     # noqa: E402

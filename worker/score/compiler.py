@@ -4758,8 +4758,9 @@ def number_chapters(items):
         if field:
             prefix = fmt[:field.start()]
             old_prefix = prefix + counter_text(field.group(), old, True)
-            if item["t"].startswith(old_prefix):
-                item["t"] = prefix + counter_text(field.group(), number, True) + item["t"][len(old_prefix):]
+            existing = item["t"][:len(old_prefix)]
+            if existing.casefold() == old_prefix.casefold():
+                item["t"] = existing[:len(prefix)] + counter_text(field.group(), number, True) + item["t"][len(old_prefix):]
 
 
 @gesture("counter", 'from to at step fmt("DIA {n}", "{n:02d}") size seat font. Digits step hard, slowing at the end', lower="text")

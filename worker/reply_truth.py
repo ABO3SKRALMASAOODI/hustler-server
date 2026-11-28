@@ -270,11 +270,12 @@ def first_cut_summary(preview, source_seconds=None):
     if moments:
         # The two lines of a title share a gesture and a time. Count ticks
         # describe a changing value, so never quote one as a settled fact.
-        titles = [m for m in moments if not m["group"].split(".")[-1].startswith("counter")]
+        titles = [m for m in moments if not m["group"].startswith("tx.cap.")
+                  and not any(p.startswith("counter") for p in m["group"].split("."))]
         if titles:
             head = titles[0]
             lines = list(dict.fromkeys(m["text"] for m in titles
-                         if m["group"] == head["group"] and abs(m["start"]-head["start"]) < .04))
+                         if m["group"] == head["group"]))
     else:
         lines = (picture.get("visible_titles") or [])[:2]
     facts = []

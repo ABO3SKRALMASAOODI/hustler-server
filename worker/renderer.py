@@ -1181,8 +1181,6 @@ def _needs_preview_downscale(H):
     that was needed ships a full-resolution file as the "preview" — slower to
     encode and larger than the final it stands in for.
     """
-    if _FIRST_CUT_ORIGINAL.get() and _PREVIEW_QUALITY.get() == "approval":
-        return False
     cap = (config.APPROVAL_MAX_LONG_EDGE if _PREVIEW_QUALITY.get() == "approval"
            else config.PREVIEW_MAX_HEIGHT)
     if not cap:
@@ -1191,6 +1189,7 @@ def _needs_preview_downscale(H):
 
 
 _PREVIEW_QUALITY = ContextVar("preview_quality", default="draft")
+_FRAME_SHIFT_BARS = ContextVar("frame_shift_bars", default=True)
 _FIRST_CUT_ORIGINAL = ContextVar("first_cut_original", default=False)
 # Whether this preview job's programme is long (config.PREVIEW_LONG_PROGRAM_S):
 # set once per job by run_render_job, read by preview_geometry, so every graph
@@ -1282,8 +1281,6 @@ def preview_geometry(W, H, fps):
     resampled.
     """
     approval = _PREVIEW_QUALITY.get() == "approval"
-    if approval and _FIRST_CUT_ORIGINAL.get():
-        return W, H, min(fps, config.PREVIEW_MAX_FPS) if config.PREVIEW_MAX_FPS else fps
     cap = config.APPROVAL_MAX_LONG_EDGE if approval else config.PREVIEW_MAX_LONG_EDGE
     if cap and max(W, H) > cap:
         k = cap / float(max(W, H))
@@ -7095,7 +7092,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # 9:16, anything outside the new window is outside the FRAME, and a caption
     # half-hanging into the letterbox is the single artefact that would give
     # the effect away as a matte rather than a reframe.
-    if shifts:
+    if shifts and _FRAME_SHIFT_BARS.get():
         # NOT drawbox. drawbox evaluates x/y/w/h ONCE, at configuration time —
         # verified against ffmpeg, where a box with w='320*t/2' renders at a
         # constant width for the whole clip (and w=0 means "the input's full
@@ -9864,6 +9861,9 @@ def _caption_index_fp(edl_json, index):
         return None
     h = hashlib.sha256()
     h.update(b"caption-compiler:program-end-clamp-v1;")
+    import script_words
+    if script_words.caption_family(index.get("language")) and not index.get("script_word_boundaries"):
+        h.update(b"caption-words:script-v1;")
     words = index.get("words") or []
     # Renders burned before split-token rejoining showed whisper's tails
     # ("-player", a lone "%"). Only transcripts that contain one change
@@ -11139,7 +11139,7 @@ def _run_render_job(worker_db, job):
     # same EDL is the point: the stored object is what failed them, so serving
     # it back from cache makes every retry a guaranteed no-op. force=1 (set by
     # the studio's "couldn't load" recovery) re-encodes to a FRESH key.
-    force = bool(job["payload"].get("force") or _FIRST_CUT_ORIGINAL.get())
+    force = bool(job["payload"].get("force"))
     # Entitlement is read HERE, once, at render time — not from anything
     # stored on the project. A user who upgraded a minute ago must get a
     # clean file for this export, and a lapsed one must get the mark back.
@@ -11272,6 +11272,7 @@ def _run_render_job(worker_db, job):
             proxy = worker_db.run(dbx.latest_asset, project_id, "proxy")
             if proxy:
                 provisional_audio = ((original.get("meta") or {}).get("client_proxy_key")
+                                     and (original.get("meta") or {}).get("proxy_audio_repair") in ("waiting", "queued")
                                      and (index.get("video") or {}).get("has_audio") is False)
                 if not provisional_audio or not storage.exists(original["storage_key"]):
                     src_asset = proxy

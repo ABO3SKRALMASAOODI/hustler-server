@@ -588,7 +588,7 @@ def _source_broll(ctx, moments, limit, providers, place):
                       "purpose": str(m.get("purpose") or "")[:160],
                       "archival": bool(m.get("archival")), "start": s,
                       "end": e, "bind": bind,
-                      "query": qs[0], "duration_s": e - s})
+                      "query": qs[0], "exclude_url": m.get("exclude_url"), "duration_s": e - s})
     if not specs:
         return _rejected("no usable moment. " + "; ".join(errors))
 
@@ -662,7 +662,8 @@ def _source_broll(ctx, moments, limit, providers, place):
         hero = _hero(ctx, edl, spec["start"], spec["end"])
         stage["hero"] += _time.monotonic() - _t
         short = _interleave([c for c in ranked
-                             if c.get("page_url") not in used], SHORTLIST)
+                             if c.get("page_url") not in used
+                             and not (spec["exclude_url"] and c.get("page_url") == spec["exclude_url"])], SHORTLIST)
         if not short:
             misses.append((spec, "no licensed match" + (
                 f" ({'; '.join(errs)[:120]})" if errs else "")))

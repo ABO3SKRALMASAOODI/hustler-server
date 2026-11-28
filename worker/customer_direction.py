@@ -79,11 +79,21 @@ def materialize(edl, index, source, work, preview, locals_, patches, cancelled):
         plate = os.path.join(folder, "plate.mp4")
         output = os.path.join(folder, "directed.mp4")
         window = stitch.window_edl(clean, tl, a, b, render_fragment=True)
-        window.update(texts=[], vectors=[], motion=[], captions=None)
-        renderer.render_edl(window, index, source, plate, folder, preview,
-                            patch_locals=patches, asset_locals=locals_, cancelled_cb=cancelled,
-                            cap_ass_override="", suppress_outro=True, render_fragment=True,
-                            discard_audio=True)
+        window.update(texts=[t for t in window.get("texts") or [] if t.get("behind")],
+                      vectors=[], motion=[], captions=None)
+        window["effects"] = {k: v for k, v in (window.get("effects") or {}).items()
+                             if k not in {"screen_frame", "picture_cards", "fade_in_s", "fade_out_s"}}
+        # Source zooms happen before the plate, the bars after it.
+        window["fx"] = [fx for fx in window.get("fx") or []
+                        if fx.get("stage") not in {"pre_captions", "over_type"}]
+        bars = renderer._FRAME_SHIFT_BARS.set(False)
+        try:
+            renderer.render_edl(window, index, source, plate, folder, preview,
+                                patch_locals=patches, asset_locals=locals_, cancelled_cb=cancelled,
+                                cap_ass_override="", suppress_outro=True, render_fragment=True,
+                                discard_audio=True)
+        finally:
+            renderer._FRAME_SHIFT_BARS.reset(bars)
         try:
             receipt = draw_plate(plate, output, group, a, folder)
         except SceneFault as exc:

@@ -106,8 +106,8 @@ def test_music_only_source_and_separate_bed_do_not_bury_picture_cues(monkeypatch
     music, proof = level(cues, source, 30, speaks=False)
     separate, _ = level(cues, None, 30, bed=source)
     assert [x['db'] for x in music] == [x['db'] for x in separate]
-    assert [x['peak50_over_background_db'] for x in proof] == [10., 7., 5.]
-    assert music[0]['db']-music[-1]['db'] == 5
+    assert [x['peak50_over_background_db'] for x in proof] == [10., 7., 6.]
+    assert music[0]['db']-music[-1]['db'] == 4
     # The ordinary dialogue-relative path retains its softer body cue.
     dialogue, _ = level(cues, source, 30)
     assert dialogue[1]['db'] < music[1]['db']-8

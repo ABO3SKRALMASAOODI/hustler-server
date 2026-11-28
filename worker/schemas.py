@@ -918,6 +918,13 @@ class SfxItem(BaseModel):
     # event stops; None keeps the one-shot's full natural length.
     dur_s: Optional[float] = None
 
+    @model_serializer(mode="wrap")
+    def _dump_without_unset_source_duck_db(self, handler):
+        data = handler(self)
+        if self.source_duck_db is None:
+            data.pop("source_duck_db", None)
+        return data
+
     @model_validator(mode="after")
     def _valid_dur(self):
         if self.dur_s is not None and (not math.isfinite(self.dur_s) or self.dur_s <= 0):
@@ -936,6 +943,13 @@ class VolumeItem(BaseModel):
     # the upload's own sound ducked under nothing. None (every hand-set level
     # and every EDL written before the field) keeps its signature and render.
     music_id: Optional[str] = None
+
+    @model_serializer(mode="wrap")
+    def _dump_without_unset_music_id(self, handler):
+        data = handler(self)
+        if self.music_id is None:
+            data.pop("music_id", None)
+        return data
 
 
 def sounding_volume(edl):
@@ -2377,6 +2391,13 @@ class TextItem(BaseModel):
     # trimmed, and the subject would be cut out of the wrong second of video.
     behind: Optional["SubjectMatte"] = None
 
+    @model_serializer(mode="wrap")
+    def _dump_without_unset_outline_color(self, handler):
+        data = handler(self)
+        if self.outline_color is None:
+            data.pop("outline_color", None)
+        return data
+
 
 class VectorItem(BaseModel):
     """One renderer-native motion-graphics primitive.
@@ -2737,6 +2758,8 @@ class Master(BaseModel):
     @model_serializer(mode="wrap")
     def _dump_cue_mix(self, handler):
         data = handler(self)
+        if self.recorded_music_gain_db is None:
+            data.pop("recorded_music_gain_db", None)
         if self.measure_cue_bed is None:
             data.pop("measure_cue_bed", None)
         return data

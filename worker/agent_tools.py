@@ -31684,7 +31684,7 @@ CAPTION_FONTS = ["Inter Display Black", "Inter Display ExtraBold",
                  "Inter Display Bold", "Anton", "Bebas Neue", "Archivo Black",
                  "Poppins Black", "Syne ExtraBold", "Playfair Display Black",
                  "Instrument Serif", "DM Serif Display", "Montserrat",
-                 "Plus Jakarta Sans"]
+                 "Plus Jakarta Sans", "Noto Sans Thai", "Noto Sans JP", "Noto Sans SC"]
 CAPTION_ANIMS = ["none", "fade", "pop", "slide_up", "punch", "blur_in",
                  "whip", "flash", "rise", "drop", "elastic", "bounce",
                  "swing", "zoom_blur"]
@@ -31754,9 +31754,8 @@ _ANIM_FLOAT_PROP = {
 }
 _TEXT_MOTION_PROP = {
     "type": "object",
-    "description": ("Element-local motion curves. t is seconds from this "
-                    "text's own start; x/y are frame fractions, scale is "
-                    "relative, rotation is degrees, opacity is 0..1."),
+    "description": ("Seconds from text start. x/y: frame fractions. Relative scale, "
+                    "rotation in degrees, opacity 0..1."),
     "properties": {name: _ANIM_FLOAT_PROP for name in _TEXT_MOTION_FIELDS},
     "additionalProperties": False,
 }
@@ -31774,7 +31773,7 @@ _MOTION_MOTIF_PROP = {
     # "motif", not "motion motif": the property is already motion_motif, and
     # this line sits on 21 core tools (EDIT-CORE A3, 16 Nov: 147 bytes back
     # under the 82,700 core ceiling for clean_noise).
-    "description": "Active Blueprint motif id this event executes; never 'hold'.",
+    "description": "Active Blueprint motif id. Exclude 'hold'.",
 }
 
 # Stable provider-facing department names. Keep the schema enums and the

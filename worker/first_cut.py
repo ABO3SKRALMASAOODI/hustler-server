@@ -2725,7 +2725,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     visual_wishes = getattr(ctx, "first_cut_picture_wishes", None) or []
     if q1 and not talking and not screen_kept and visual_wishes:
         import first_cut_visual as fcv
-        cutaways = fcv.place_broll(ctx, steps, started, _run, visual_wishes, hook_end, visual=True)
+        cutaways = fcv.place_broll(ctx, steps, started, _run, visual_wishes, hook_end, spend, visual=True)
     if q1 and talking:
         # Q1: B-roll on the concrete things the speaker names, first (the
         # slams and cards keep clear of it)
@@ -3882,7 +3882,13 @@ def run(worker_db, job, project, index_row):
     ctx.first_cut_db, ctx.first_cut_session = worker_db, session_id
     if getattr(ctx, "index", None) and not payload.get("url"):
         ctx.upload_duration = ctx.duration
-        ctx.first_cut_original_audio = (ctx.index.get("video") or {}).get("has_audio") is False
+        if (ctx.index.get("video") or {}).get("has_audio") is False:
+            import storage
+            original = worker_db.run(dbx.latest_asset, project["id"], "original") or {}
+            meta = original.get("meta") or {}
+            ctx.first_cut_original_audio = bool(meta.get("client_proxy_key")
+                and meta.get("proxy_audio_repair") != "indexed"
+                and original.get("storage_key") and storage.exists(original["storage_key"]))
         import script_words
         ctx.index = script_words.first_cut_index(ctx.index)
         bound_to_source_screen(ctx, index_row, workdir)
@@ -3993,6 +3999,7 @@ def run(worker_db, job, project, index_row):
         if picked and picked.get("how") == "director":
             early = _director_early_look(ctx, worker_db, job, started, spend,
                                          trial_scope)
+        original_applied = applied
         if early is not None and early[1] is not None:
             applied = early[1]
             picked = dict(picked, edl_version=getattr(
@@ -4006,6 +4013,7 @@ def run(worker_db, job, project, index_row):
             render = _render_cut(ctx, steps, picked)
             if early is not None and early[1] is not None \
                     and not _on_screen(ctx) and _director_first_back(ctx):
+                applied = original_applied
                 render = _render_cut(ctx, steps, picked)
         if early is not None:
             pass                    # the look already read this film
@@ -4021,6 +4029,7 @@ def run(worker_db, job, project, index_row):
                     ctx, "director_version", None), look=True)
                 render = _render_cut(ctx, steps, picked)
                 if not _on_screen(ctx) and _director_first_back(ctx):
+                    applied = original_applied
                     render = _render_cut(ctx, steps, picked)
         elif picked and picked.get("how") == "director":
             _director_close(ctx)
@@ -4073,7 +4082,9 @@ def run(worker_db, job, project, index_row):
             summary = "Here's your first cut: " + _summary(applied, duration, url)
         else:
             import reply_truth
-            summary = reply_truth.first_cut_summary(preview, getattr(ctx, 'upload_duration', None) or getattr(ctx, 'duration', None))
+            summary = reply_truth.first_cut_summary(preview, getattr(ctx, "upload_duration", None) or ctx.duration)
+            if (picked and picked.get("how") == "director" and "captions" in (applied or [])):
+                summary += ". I added captions"
         admission = project_admission_safe(worker_db, project["id"])
         trial = bool(admission and admission.get("kind") == "trial")
         facts = getattr(ctx, "first_cut_brief", None) if url else None
@@ -4166,10 +4177,14 @@ def _compose_reading_screen(ctx, steps):
     edl = ctx.latest_edl()["json"]
     prog = float(schemas.program_duration(edl))
     start = ctx.first_cut_started
+    if prog < 4 or time.monotonic() - start >= config.FIRST_CUT_MAX_S - _RENDER_RESERVE_S - 45:
+        return
     label = getattr(ctx, "first_cut_screen_label", None) or getattr(ctx, "first_cut_hook", None)
     # Put the label in the fitted margin so the page remains readable.
-    opening = [item for group in ("motion", "texts") for item in edl.get(group) or []
-               if float(item.get("start", 0)) < 1.0]
+    opening = [item for group in ("motion", "texts", "overlays") for item in edl.get(group) or []
+               if float(item.get("start", 0)) < 2.5
+               and (group != "overlays" or str(item.get("id", "")).startswith("st.")
+                    or item.get("kind") == "image")]
     if not opening and isinstance(label, str) and label.strip() and prog > 0:
         _run(ctx, steps, "add_text", {"text": label.strip(), "template": "title",
              "y": 0.20, "font_size": 0.066, "start": 0., "end": min(prog, 2.5),
@@ -4182,7 +4197,8 @@ def _render_cut(ctx, steps, picked):
     """The First cut's preview render (the chain's or the Director's film)."""
     keep_whole = bool(picked and picked.get("how") in {"finished_piece", "continuous"})
     index = getattr(ctx, "index", {}) or {}
-    readable_screen = bool(index) and (_text_wider_than_crop(ctx) or _screen_like(index))
+    director = (picked or {}).get("how") == "director"
+    readable_screen = not director and bool(index) and (_text_wider_than_crop(ctx) or _screen_like(index))
     if not (ctx.versions_written or keep_whole or readable_screen):
         return None
     # Also covers early returns such as a finished-piece selection. Never
@@ -4190,10 +4206,9 @@ def _render_cut(ctx, steps, picked):
     row = ctx.latest_edl() or {}
     frame = (row.get("json") or {}).get("frame") or {}
     ratio = frame.get("ratio", "source")
-    director_frame = picked and picked.get("how") == "director" and ratio == "9:16"
-    fit = readable_screen and not director_frame and (frame.get("mode") not in ("pad", "pad_blur") or
+    fit = readable_screen and (frame.get("mode") not in ("pad", "pad_blur") or
                                any(s.get("mode") == "crop" for s in frame.get("focus_track") or []))
-    if fit or (ratio != "9:16" and not (ratio == "source" and _orientation(index) == "vertical")):
+    if fit or (not director and ratio != "9:16" and not (ratio == "source" and _orientation(index) == "vertical")):
         result = agent_tools.execute(ctx, "auto_reframe",
                                      {"ratio": "9:16", "mode": "pad_blur" if readable_screen else "crop"})
         framed = str(result).startswith("NO CHANGE") or not _failed(result)
@@ -4201,7 +4216,10 @@ def _render_cut(ctx, steps, picked):
         if not framed:
             return result
     if readable_screen and getattr(ctx, "first_cut_started", None) is not None:
-        _compose_reading_screen(ctx, steps)
+        try:
+            _compose_reading_screen(ctx, steps)
+        except Exception as exc:
+            steps.append({"tool": "screen_follow", "ok": False, "note": str(exc)[:160]})
     if not picked or picked.get("how") != "director":
         _clear_empty_source_bands(ctx, steps)
     import first_cut_spelling
@@ -4440,7 +4458,10 @@ def _director_upgrade(ctx, worker_db, job, session_id, started, steps,
         latest = ctx.latest_edl()
         preview = getattr(ctx, "last_preview", None) or {}
         import reply_truth
-        text = f"The updated cut is playing now. {reply_truth.first_cut_summary(preview, getattr(ctx, 'upload_duration', None) or getattr(ctx, 'duration', None))}."
+        named = ", ".join(got.get("named") or [])
+        subject = (f"It includes footage of {named}" if named else
+                   reply_truth.first_cut_summary(preview, getattr(ctx, "upload_duration", None)))
+        text = f"The updated cut is playing now. {subject}."
         more = dict(meta, edl_version=latest["version"], preview=preview)
         more["first_cut"] = dict(meta.get("first_cut") or {}, footage={
             "clips": got.get("clips"), "sources": got.get("sources")})

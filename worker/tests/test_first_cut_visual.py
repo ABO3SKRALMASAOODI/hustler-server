@@ -392,6 +392,10 @@ def test_screen_follow_aims_at_the_picture_inside_the_portrait_canvas(monkeypatc
         calls.append((name, args))
         return 'EDL v2'
     assert fcv.screen_follow(ctx, [], 0, run, {'usd': 0}, 2) == 'EDL v2'
+    monkeypatch.setattr(fcv, '_gray_frames', lambda *a: pytest.fail("decoded twice"))
+    monkeypatch.setattr(fcv, '_vision_boxes', lambda *a: pytest.fail("billed twice"))
+    assert fcv.screen_follow(ctx, [], 0, run, {'usd': 0}, 2) == 'EDL v2'
+    assert calls[0] == calls[1]
     keys = calls[0][1]['keyframes']
     # The lower source control is just below the canvas centre, not at
     # the bottom of its blurred padding. Keep the timing/zoom unchanged.

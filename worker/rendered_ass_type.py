@@ -91,9 +91,13 @@ def measure(path, texts, W, H, duration, deadline, visible=None, moments=None):
                 result = contrast(images[1], images[0])
                 if visible is not None and result and result.get('pass'):
                     text = texts[n].get('text')
+                    item = texts[n]
+                    ident = str(item.get("id") or "")
+                    if ident.startswith("tx.cap.") or any(p.startswith("counter") for p in ident.split(".")):
+                        continue
                     if moments is not None and text:
-                        item = texts[n]
-                        group = ".".join(str(item.get("id") or "").split(".")[:3])
+                        stem, _, suffix = ident.rpartition(".")
+                        group = stem if suffix.isdecimal() else ident or f"text.{n}"
                         moments[n] = {"text": text, "start": item["start"], "end": item["end"],
                                       "group": group}
                     if text and text not in visible:

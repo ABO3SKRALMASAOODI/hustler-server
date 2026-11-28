@@ -35,6 +35,7 @@ import first_cut_models
 import json
 import re
 import subprocess
+import time
 
 # --------------------------------------------------------------------------
 #  Who gets it
@@ -256,11 +257,16 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None,
     print(f"[first_cut] b-roll moments: {[(s['at'], s.get('word'), s['query']) for s in specs]}",
           flush=True)
     first = {"moments": specs, "max": len(specs)}
+    keyed = keyed_video_providers() if video or visual else None
+    if visual:
+        if spend is None:
+            spend = getattr(ctx, "first_cut_spend", {"usd": 0.0})
+        if keyed:
+            first["providers"] = keyed
     if video:
         # the curated stock libraries only: the archives' "videos" answered
         # "power plant at night" with a drone strike on Chernobyl and "a
         # computer science lab" with shorebirds (Q5 harness, 30 Oct)
-        keyed = keyed_video_providers()
         if keyed:
             first["providers"] = keyed
     import first_cut
@@ -270,7 +276,7 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None,
         for offset in range(0, len(specs), MAX_MOMENTS):
             batch = specs[offset:offset + MAX_MOMENTS]
             run(ctx, steps, "source_broll", dict(first, moments=batch, max=len(batch)), started)
-        if video:
+        if video and (not visual or keyed):
             got = covered(ctx)
             missed = [dict(s, kind="any", id=s["id"] + "a") for s in specs
                       if not any(a - 0.35 <= s["at"] <= b for a, b in got)]
@@ -279,17 +285,37 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None,
                       "clip, any picture now", flush=True)
                 for offset in range(0, len(missed), MAX_MOMENTS):
                     batch = missed[offset:offset + MAX_MOMENTS]
-                    run(ctx, steps, "source_broll", {"moments": batch,
-                                                     "max": len(batch)}, started)
+                    run(ctx, steps, "source_broll", {"moments": batch, "max": len(batch),
+                        **({"providers": keyed} if visual else {})}, started)
     if spend is not None:
         import first_cut
         with first_cut._timed(ctx, "broll_check"):
+            if visual:
+                deadline = time.monotonic() + BROLL_CHECK_S
+                rejected = []
+                placed = verify_broll(ctx, steps, started, run, spend, visual=True,
+                                      deadline=deadline, rejected=rejected)
+                retry = []
+                for item in rejected:
+                    url = (item.get("credit") or {}).get("page_url")
+                    spec = next((s for s in specs if s["purpose"][:160] == item.get("moment")), None)
+                    if url and spec:
+                        retry.append(dict(spec, kind="any" if keyed else kind, exclude_url=url))
+                if retry and time.monotonic() < deadline:
+                    retained = {it.get("id") for it in ctx.latest_edl()["json"].get("fx") or []}
+                    for offset in range(0, len(retry), MAX_MOMENTS):
+                        batch = retry[offset:offset + MAX_MOMENTS]
+                        run(ctx, steps, "source_broll", dict(first, moments=batch, max=len(batch)), started)
+                    placed = verify_broll(ctx, steps, started, run, spend, visual=True,
+                                          deadline=deadline, retained=retained)
+                return placed
             return verify_broll(ctx, steps, started, run, spend)
     return covered(ctx, ("broll",))
 
 
 _BROLL_CHECK = (
-    "Each numbered cutaway has the exact words spoken over its actual played interval. "
+    "Each numbered cutaway has the words spoken during playback or, for a wordless film, "
+    "the scout's description of the visual moment. Use that description for a wordless film. "
     "Read the programme speech as context: resolve pronouns, roles, relationships, "
     "actions and materials from the surrounding story. A broad noun match alone "
     "is not enough: hospital staff cannot stand for friends visiting a patient. "
@@ -316,7 +342,7 @@ BROLL_CHECK_MODEL = "gpt-6-sol"
 BROLL_CHECK_S = 120.0
 
 
-def _broll_check_openai(parts, spend):
+def _broll_check_openai(parts, spend, deadline=None):
     """The check's answer from OpenAI, or None when OpenAI is not reachable for it."""
     import config
     import openai_credit
@@ -327,7 +353,7 @@ def _broll_check_openai(parts, spend):
     try:
         r = call.stream(BROLL_CHECK_MODEL, _BROLL_CHECK, parts, max_tokens=2000, effort="low",
                         purpose="first_cut_broll_check", thinking=False,
-                        deadline=time.monotonic() + BROLL_CHECK_S)
+                        deadline=deadline or time.monotonic() + BROLL_CHECK_S)
     except Exception as exc:  # noqa: BLE001 - the Claude lane checks instead (its own fence)
         print(f"[first_cut] b-roll check on {BROLL_CHECK_MODEL} unavailable "
               f"({type(exc).__name__}: {str(exc)[:120]}); checking on the Claude lane", flush=True)
@@ -336,7 +362,7 @@ def _broll_check_openai(parts, spend):
     return r.text or ""
 
 
-def _broll_check_claude(parts, spend, pictures):
+def _broll_check_claude(parts, spend, pictures, deadline=None):
     """The check's answer from the Claude lane's fallback model. Raises when the lane is closed."""
     import claude_lane
     import edit_rung
@@ -346,7 +372,8 @@ def _broll_check_claude(parts, spend, pictures):
         raise RuntimeError("picture verifier unavailable")
     resp = claude_lane.create(
         model, [{"role": "system", "content": _BROLL_CHECK},
-                {"role": "user", "content": parts}], max_tokens=2000, effort="low")
+                {"role": "user", "content": parts}], max_tokens=2000, effort="low",
+        timeout=max(.1, deadline - time.monotonic()) if deadline else BROLL_CHECK_S)
     text = resp.choices[0].message.content or ""
     spend["usd"] += float(getattr(resp.usage, "provider_cost_usd", 0) or 0)
     llm.record("first_cut_broll_check", {"model": model, "pictures": pictures},
@@ -363,24 +390,27 @@ def _verdict(text):
     return v if isinstance(v, dict) and ("keep" in v or "drop" in v) else None
 
 
-def verify_broll(ctx, steps, started, run, spend):
+def verify_broll(ctx, steps, started, run, spend, *, visual=False, deadline=None, rejected=None, retained=()):
     """Keep only explicitly approved actual intervals; unavailable checks fail closed."""
     import device_planner
     import media_cache
     edl = ctx.latest_edl()["json"]
     items = [it for it in edl.get("fx") or [] if isinstance(it, dict)
-             and it.get("type") == "broll" and it.get("start") is not None]
+             and it.get("type") == "broll" and it.get("start") is not None and it.get("id") not in retained]
     if not items:
-        return []
+        return covered(ctx)
     approved, ids, parts = set(), {}, []
     try:
-        words = device_planner.program_words(edl, ctx.index or {})
+        words = [] if visual else device_planner.program_words(edl, ctx.index or {})
         context = " ".join(str(w.get("w") or "") for w in words)
         parts.append({"type": "text", "text":
-                      "Programme speech (context for roles and references): " + context[:12000]})
+                      ("Wordless upload. Check each picture against the scout's description of the action."
+                       if visual else "Programme speech (context for roles and references): " + context[:12000])})
         for n, it in enumerate(items, 1):
             key = (it.get("source") or {}).get("asset_key")
             try:
+                if deadline and time.monotonic() >= deadline:
+                    break
                 local = media_cache.lease(key, ctx.workdir, f"broll_check_{n}")
                 if not local:
                     continue
@@ -395,7 +425,7 @@ def verify_broll(ctx, steps, started, run, spend):
                         ["ffmpeg", "-v", "error", "-nostdin", *seek, "-i", local,
                          "-frames:v", "1", "-vf", "scale=384:-2", "-f", "image2",
                          "-c:v", "mjpeg", "-q:v", "6", "-"],
-                        capture_output=True, timeout=30)
+                        capture_output=True, timeout=min(30, max(.1, deadline - time.monotonic())) if deadline else 30)
                     if not result.stdout:
                         raise ValueError("missing picture frame")
                     pictures.append({"type": "image", "source": {
@@ -405,25 +435,30 @@ def verify_broll(ctx, steps, started, run, spend):
                                 if float(w.get("t1", w["t0"])) > a
                                 and float(w["t0"]) < b)
                 parts.append({"type": "text", "text":
-                              f"Picture {n}, words during playback: {said[:300]}"})
+                              (f"Picture {n}, scout description: {it.get('moment', '')}" if visual else
+                               f"Picture {n}, words during playback: {said[:300]}")})
                 parts.extend(pictures)
                 ids[n] = str(it.get("id"))
             except Exception as exc:
                 print(f"[first_cut] b-roll {n} unverified: {type(exc).__name__}", flush=True)
-        if ids:
-            text = _broll_check_openai(parts, spend)
+        if ids and (not deadline or time.monotonic() < deadline):
+            budget = {"deadline": deadline} if deadline else {}
+            text = _broll_check_openai(parts, spend, **budget)
             verdict = _verdict(text) if text is not None else None
             if text is not None and verdict is None:
                 # 15 Nov 2026: an OpenAI answer without a verdict (empty, cut off, prose) is no answer: the Claude
                 # lane checks, instead of every picture being dropped as unverified.
                 print(f"[first_cut] b-roll check on {BROLL_CHECK_MODEL} gave no verdict; checking on the Claude lane", flush=True)
-            if verdict is None:
-                verdict = _verdict(_broll_check_claude(parts, spend, len(ids)))
+            if verdict is None and (not deadline or time.monotonic() < deadline):
+                verdict = _verdict(_broll_check_claude(parts, spend, len(ids), **budget))
             if verdict is None:
                 raise ValueError("the picture check gave no verdict")
             drop = {n for n in verdict.get("drop", []) if type(n) is int}
             approved = {ids[n] for n in verdict.get("keep", [])
                         if type(n) is int and n in ids and n not in drop}
+            if rejected is not None:
+                rejected.extend(it for it in items if str(it.get("id")) in ids.values()
+                                and str(it.get("id")) not in approved)
     except Exception as exc:
         print(f"[first_cut] b-roll verification unavailable: {type(exc).__name__}: "
               f"{str(exc)[:160]}", flush=True)
@@ -1120,6 +1155,10 @@ def screen_follow(ctx, steps, started, run, spend, hook_end):
         keep = edl.get("keep") or []
         tl = Timeline(keep, [], None)
         prog = float(schemas.program_duration(edl))
+        cache_key = json.dumps([keep, edl.get("frame")], sort_keys=True)
+        paths = getattr(ctx, "first_cut_screen_paths", {})
+        if cache_key in paths:
+            return run(ctx, steps, "add_zoom_path", paths[cache_key], started)
         path = ctx.proxy_path()
     except Exception:
         return None
@@ -1196,10 +1235,13 @@ def screen_follow(ctx, steps, started, run, spend, hook_end):
         if rect is None:
             return None
         mapped.append(dict(key, rect=rect))
-    return run(ctx, steps, "add_zoom_path", {
+    args = {
         "keyframes": mapped, "ease": "cubic_in_out",
         "purpose": "the camera travels to the region each sentence is about "
-                   "(2-3x, eased) so the screen text reads"}, started)
+                   "(2-3x, eased) so the screen text reads"}
+    paths[cache_key] = args
+    ctx.first_cut_screen_paths = paths
+    return run(ctx, steps, "add_zoom_path", args, started)
 
 
 # --------------------------------------------------------------------------

@@ -23,7 +23,7 @@ KEY = "typed_asks"
 MODES = ("off", "internal", "on")
 DEFAULTS = {"mode": "on", "user_ids": [], "director": True, "patch": True, "pass": True,
             "check": True, "film_s": 220.0, "pass_s": 600.0, "model": None,
-            "check_model": None}
+            "check_model": None, "plan_first": False}
 # The check decides what the customer is told is done. Round 2 ran it on the turn's model (Haiku on the
 # plans replayed) and it answered both ways on the same film: p5345's music ask "not_done" on one run
 # and "their alternative was taken" on the next, with a line that said the reply gave no reason; its
@@ -57,7 +57,7 @@ def parse(raw):
         out["pass_s"] = max(60.0, min(float(data.get("pass_s", DEFAULTS["pass_s"])), 1200.0))
     except (TypeError, ValueError):
         return dict(DEFAULTS, mode="off")
-    for k in ("director", "patch", "pass", "check"):
+    for k in ("director", "patch", "pass", "check", "plan_first"):
         if k in data:
             out[k] = data[k] is True
     if str(data.get("model") or "").startswith(("claude-", "gpt-")):

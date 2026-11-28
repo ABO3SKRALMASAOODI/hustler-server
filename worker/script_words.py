@@ -5,6 +5,7 @@ import ctypes.util
 import functools
 import itertools
 import os
+import unicodedata
 
 FAMILIES = {"th": "Noto Sans Thai", "ja": "Noto Sans JP", "zh": "Noto Sans SC"}
 LANGUAGES = set(FAMILIES)
@@ -12,7 +13,6 @@ LANGUAGES = set(FAMILIES)
 
 def join_tokens(tokens):
     """Join timed words without inserting a Latin space between Thai/CJK units."""
-    import unicodedata
     def unspaced(char):
         name = unicodedata.name(char, "")
         return name.startswith(("THAI ", "CJK ", "HIRAGANA ", "KATAKANA ", "IDEOGRAPHIC "))
@@ -78,13 +78,31 @@ def _aligned(rows, lang, text):
             words = [row["w"] for row in group]
             joined = "".join(words)
             if latin:
-                words = wordninja.split(joined) if len(words) > 1 and min(map(len, words)) <= 3 else words
+                if len(words) > 1 and min(map(len, words)) <= 3:
+                    split = wordninja.split(joined)
+                    boundaries = set(itertools.accumulate(map(len, words)))
+                    if "".join(split) == joined and boundaries.issuperset(itertools.accumulate(map(len, split))):
+                        words = split
                 joined = " ".join(words)
             runs.append(joined)
         text = " ".join(runs)
     ends = list(itertools.accumulate(map(len, compact)))
     out, pos = [], 0
+    units = []
+    opening = ""
     for unit in _units(text, lang):
+        if unit.isspace():
+            continue
+        if any(c.isalnum() for c in unit):
+            units.append(opening + unit)
+            opening = ""
+        elif opening or not units or unicodedata.category(unit[0]) in {"Ps", "Pi"}:
+            opening += unit
+        else:
+            units[-1] += unit
+    if opening and units:
+        units[-1] += opening
+    for unit in units:
         if unit.isspace():
             continue
         end = pos + len(unit)

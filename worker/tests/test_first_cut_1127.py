@@ -49,7 +49,7 @@ def test_director_shapes_title_with_the_worker_bundled_font(text):
 def test_reading_layout_follows_complete_line_and_keeps_opening_label(monkeypatch):
     import first_cut, first_cut_visual
     edl = {"keep": [[0, 10]], "frame": {"ratio":"9:16", "mode":"pad_blur"}}
-    ctx = NS(first_cut_started=1, first_cut_spend={"usd":0}, first_cut_screen_label="Compare the replies",
+    ctx = NS(first_cut_started=first_cut.time.monotonic(), first_cut_spend={"usd":0}, first_cut_screen_label="Compare the replies",
              latest_edl=lambda: {"json":edl})
     calls = []
     def apply(c, steps, tool, args, started):
@@ -221,7 +221,7 @@ def test_arranged_music_makes_room_without_lowering_speech(monkeypatch):
     assert song[audio.SR//2, 0] == 1.
 
 
-def test_landed_original_repair_keeps_original_raster(monkeypatch):
+def test_landed_original_repair_keeps_approval_caps(monkeypatch):
     import renderer
     monkeypatch.setattr(renderer.config,"APPROVAL_MAX_LONG_EDGE",1280)
     capture = {}
@@ -230,7 +230,7 @@ def test_landed_original_repair_keeps_original_raster(monkeypatch):
         capture["scaled_again"] = renderer._needs_preview_downscale(1920)
     monkeypatch.setattr(renderer,"_run_render_job",encode)
     renderer.run_render_job(None,{"type":"preview","payload":{"quality":"approval","first_cut_original":True}})
-    assert capture == {"frame":(1080,1920), "scaled_again":False}
+    assert capture == {"frame":(720,1280), "scaled_again":True}
     assert renderer._FIRST_CUT_ORIGINAL.get() is False
 
 
@@ -262,7 +262,7 @@ def test_screen_film_reaches_composition_and_player_with_unchanged_timeline(monk
     from contextlib import nullcontext
     import first_cut, first_cut_spelling, first_cut_visual
     edl = {"frame": {"ratio": "9:16", "mode": "pad_blur"}, "keep": [[0, 5]]}
-    ctx = NS(versions_written=0, latest_edl=lambda: {"json": edl}, first_cut_started=1.,
+    ctx = NS(versions_written=0, latest_edl=lambda: {"json": edl}, first_cut_started=first_cut.time.monotonic(),
              index={"video": {"width": 1920, "height": 1080}}, first_cut_screen_label="Open the conversation",
              first_cut_spend={})
     tools = []
@@ -273,7 +273,11 @@ def test_screen_film_reaches_composition_and_player_with_unchanged_timeline(monk
     monkeypatch.setattr(first_cut, "_clear_corner_mark", lambda *args: False)
     monkeypatch.setattr(first_cut, "_timed", lambda *args: nullcontext())
     monkeypatch.setattr(first_cut.agent_tools, "execute", lambda c, tool, body: tools.append((tool, body)) or "rendered")
+    ctx.versions_written = 1
     assert first_cut._render_cut(ctx, [], {"how": "director"}) == "rendered"
+    assert [tool for tool, _ in tools] == ["render_preview"]
+    tools.clear()
+    assert first_cut._render_cut(ctx, [], {"how": "continuous"}) == "rendered"
     assert [tool for tool, _ in tools] == ["add_text", "screen_follow", "render_preview"]
     assert tools[0][1]["text"] == "Open the conversation"
 
@@ -313,3 +317,72 @@ def test_native_song_has_headroom_in_social_master_aac(tmp_path):
         spectrum = abs(np.fft.rfft(frames*np.hanning(len(frames))))**2
         separation.append(10*np.log10(spectrum[89:92].sum()/spectrum[19:22].sum()))
     assert separation[1] > 6 and separation[1] > separation[0]+8
+
+
+def test_legacy_caption_units_keep_punctuation_and_whole_brand_words():
+    import script_words
+    rows = timed_words(["「", "東", "京", "」", "です", "。", "ChatGPT", "and", "OpenAI"])
+    for row in rows:
+        row.update(src_t0=4 + row["t0"], src_t1=4 + row["t1"])
+    words = script_words.timed(rows, "ja")
+    assert [w["w"] for w in words] == ["「東京」", "です。", "ChatGPT", "and", "OpenAI"]
+    assert words[0]["src_t0"] == 4 and words[1]["src_t1"] == pytest.approx(4.6)
+
+
+def test_uppercase_chapters_preserve_rendered_case():
+    from score.compiler import number_chapters
+    items = [{"f": [0, 50], "t": "PART 03: THE START", "chapter": ("a", "Part {n:02d}: The start", 3)}]
+    number_chapters(items)
+    assert items[0]["t"] == "PART 01: THE START"
+
+
+def test_drawing_a_directed_plate_keeps_only_its_picture_layers(monkeypatch, tmp_path):
+    import customer_direction, renderer, stitch
+    edl = {"keep": [[0., 6.]], "direction": [{"start": 1., "end": 3., "device": "accent"}],
+           "texts": [{"id": "title"}, {"id": "behind", "behind": {"asset_key": "matte"}}],
+           "effects": {k: True for k in ("fade_in_s", "fade_out_s", "screen_frame", "picture_cards", "grade")},
+           "fx": [{"stage": stage} for stage in ("screen", "pre_captions", "over_type")]}
+    monkeypatch.setattr(stitch, "window_edl", lambda window, *a, **kw: dict(window))
+    plates = []
+    def render(window, *args, **kw):
+        assert not renderer._FRAME_SHIFT_BARS.get()
+        plates.append(window)
+    monkeypatch.setattr(renderer, "render_edl", render)
+    monkeypatch.setattr(customer_direction, "draw_plate", lambda *a: [])
+    parent, _ = customer_direction.materialize(edl, {}, "src", str(tmp_path), True, {}, {}, None)
+    assert renderer._FRAME_SHIFT_BARS.get()
+    assert plates[0]["texts"] == edl["texts"][1:] and plates[0]["effects"] == {"grade": True}
+    assert plates[0]["fx"] == [{"stage": "screen"}] and parent["fx"] == edl["fx"]
+
+
+def test_wordless_picture_check_uses_scout_and_replaces_missed_subject(monkeypatch):
+    import first_cut_visual as visual
+    import media_cache, stock
+    edl = {"keep": [[0, 20]], "fx": []}
+    ctx = NS(latest_edl=lambda: {"json": edl}, index={}, workdir=".")
+    monkeypatch.setattr(stock, "video_available", lambda: True)
+    monkeypatch.setattr(visual, "keyed_video_providers", lambda: ["pexels"])
+    monkeypatch.setattr(media_cache, "lease", lambda *a: "local.jpg")
+    monkeypatch.setattr(visual.subprocess, "run", lambda *a, **kw: NS(stdout=b"jpg"))
+    checks = []
+    def judge(parts, spend, deadline):
+        checks.append([p["text"] for p in parts if p["type"] == "text"])
+        spend["usd"] += .001
+        return '{"keep":[1]}' if len(checks) == 2 else '{"drop":[1]}'
+    monkeypatch.setattr(visual, "_broll_check_openai", judge)
+    def run(ctx, steps, tool, args, started):
+        if tool == "remove_broll":
+            edl["fx"] = [it for it in edl["fx"] if it["id"] not in args["ids"]]
+            return
+        spec, = args["moments"]
+        assert args["providers"] == ["pexels"]
+        if checks:
+            assert spec["exclude_url"] == "first" and spec["kind"] == "any"
+        edl["fx"].append({"id": "br1", "start": spec["at"], "end": spec["at"] + spec["duration_s"],
+                          "type": "broll", "media": "still", "source": {"asset_key": "local"},
+                          "credit": {"page_url": "second" if checks else "first"}, "moment": spec["purpose"]})
+    spend = {"usd": 0}
+    assert visual.place_broll(ctx, [], 0, run, [(7, 9, "a falling leaf", "maple leaf macro")],
+                              2, spend, visual=True)
+    assert len(checks) == 2 and "a falling leaf" in checks[0][1] and "maple leaf macro" in checks[1][1]
+    assert spend["usd"] == .002 and edl["fx"][0]["credit"]["page_url"] == "second"
