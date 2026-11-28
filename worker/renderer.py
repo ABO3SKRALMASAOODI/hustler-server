@@ -7267,6 +7267,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"[ac]{dialogue_level.volume_filter(dialogue_gain)}"
                      "[alev]")
         alabel = "alev"
+    music_gain = (edl.get("master") or {}).get("recorded_music_gain_db")
+    if sfx_inputs and music_gain:
+        parts.append(f"[{alabel}]volume={music_gain:.2f}dB[arecordedmusic]")
+        alabel = "arecordedmusic"
     for j, (_, item, _) in enumerate(sfx_inputs or []):
         depth = item.get("source_duck_db")
         if depth:

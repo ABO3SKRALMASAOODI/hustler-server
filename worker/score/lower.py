@@ -1266,6 +1266,9 @@ def lower(l1, work):
     edl = {"keep": keep, "frame": dict(rep["frame"]),
            "inserts": inserts, "captions": lower_captions(l1, rep, src_dur), "sfx": sfx, "overlays": overlays + pool_ov + cards + script_type,
            "texts": lower_texts(l1, rep, runs), "vectors": vectors, "fx": tr_fx + flash_fx, "effects": effects, "master": {"loudness": "social"}}
+    music_gain = (l1.get("sound_design") or {}).get("recorded_music_gain_db")
+    if sfx and music_gain:
+        edl["master"]["recorded_music_gain_db"] = music_gain
     edl["texts"] += rep.pop("_cap_texts", [])
     try:                              # the film's bed (score.bed): the chosen track under the whole programme, its drop on the turn
         from . import bed

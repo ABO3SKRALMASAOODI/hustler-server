@@ -158,6 +158,23 @@ def level(sounds, voice, fps, shift_db=0.0, *, speaks=True, bed=None):
     return out, evidence
 
 
+def recorded_music_trim(proof):
+    """Seat the upload's song under the placed accents before mastering.
+
+    A 90 ms source dip makes room at the attack but leaves the surrounding
+    musical phrase at full level. Once the mix hits the master ceiling a
+    louder click no longer buys separation. Reserve summing headroom on the
+    song bus, using the weakest measured cue-to-background contrast.
+    """
+    contrasts = [row["peak50_over_background_db"] for row in proof
+                 if row.get("peak50_over_background_db") is not None]
+    if not contrasts:
+        return 0.
+    # Two equal peaks can sum 6 dB above either component. Allow that
+    # headroom in addition to the 6 dB audible transient over the phrase.
+    return round(max(-12., min(0., min(contrasts) - 12.)), 1)
+
+
 def bed_space(song, sounds, fps, rate):
     """Ease a short 6 dB bed dip at each cue attack, not just hero impacts."""
     out = np.asarray(song, np.float32).copy()
@@ -286,6 +303,8 @@ def chain(ctx):
         placed.append(cue)
     if placed:
         edl['sfx'] = placed
+        if report.get("recorded_music_gain_db"):
+            edl["master"] = dict(edl.get("master") or {}, recorded_music_gain_db=report["recorded_music_gain_db"])
         result = ctx.apply_score(edl, 'sound design on the first film’s picture and graphic events')
         report['write'] = str(result)[:120]
     report['placed_on_chain'] = len(placed)

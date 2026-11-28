@@ -2729,6 +2729,8 @@ class Master(BaseModel):
     ships. 'natural' is the explicit opt-out: the mix ships at its own level.
     None (unset) resolves by format — see master_loudness."""
     loudness: Optional[Literal["social", "natural"]] = None
+    # Fader for music recorded in the original, after dialogue levelling.
+    recorded_music_gain_db: Optional[float] = Field(default=None, ge=-12, le=0)
 
 
 # Export file targets (16 Nov 2026, p5857): "make the download less than

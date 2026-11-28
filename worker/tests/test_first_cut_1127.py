@@ -276,3 +276,40 @@ def test_screen_film_reaches_composition_and_player_with_unchanged_timeline(monk
     assert first_cut._render_cut(ctx, [], {"how": "director"}) == "rendered"
     assert [tool for tool, _ in tools] == ["add_text", "screen_follow", "render_preview"]
     assert tools[0][1]["text"] == "Open the conversation"
+
+
+def test_native_song_has_headroom_in_social_master_aac(tmp_path):
+    import subprocess
+    import numpy as np
+    import first_film_sound, renderer, schemas
+    from timeline import Timeline
+
+    # Both tones are present on the event. The completed AAC must retain
+    # the foreground recording over the song even after the master limiter.
+    rate = 48000
+    edl = {"keep": [[0., 3.]], "master": {"loudness": "social"}}
+    cue = {"storage_key": "click.wav", "id": "click", "at": 1., "gain_db": 0.}
+    edl["sfx"] = [cue]
+    proof = [{"peak50_over_background_db": 3.}]
+    controls = [0., first_film_sound.recorded_music_trim(proof)]
+    separation = []
+    for i, trim in enumerate(controls):
+        edl["master"]["recorded_music_gain_db"] = trim
+        master = schemas.Master.model_validate(edl["master"])
+        assert master.recorded_music_gain_db == trim
+        graph = renderer.build_filtergraph(edl, 3., True, Timeline(edl["keep"]),
+                    None, [], {}, True, W=160, H=90, sfx_inputs=[(1, cue, .15)],
+                    dialogue_gain=[(0., 2.), (3., 2.)])
+        graph = graph.replace("[0:v]", "[2:v]") + ";[vout]nullsink"
+        path = tmp_path / f"mixed-{i}.m4a"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                        "aevalsrc=0.4*sin(2*PI*400*t):s=48000:d=3", "-f", "lavfi",
+                        "-i", "aevalsrc=0.4*sin(2*PI*1800*t):s=48000:d=0.15",
+                        "-f", "lavfi", "-i", "color=s=160x90:d=3", "-filter_complex", graph,
+                        "-map", "[aout]", "-c:a", "aac", str(path)], check=True, capture_output=True)
+        data = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(path),
+                        "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"])
+        frames = np.frombuffer(data, np.float32)[rate+960:rate+3360]
+        spectrum = abs(np.fft.rfft(frames*np.hanning(len(frames))))**2
+        separation.append(10*np.log10(spectrum[89:92].sum()/spectrum[19:22].sum()))
+    assert separation[1] > 6 and separation[1] > separation[0]+8

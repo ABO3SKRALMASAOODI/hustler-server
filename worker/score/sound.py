@@ -2374,6 +2374,11 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
         import first_film_sound
         sounds, proof = first_film_sound.level(sounds, voice, fps, shift, speaks=bool(speaks))
         report["foreground"] = proof
+        from .bed import own_track
+        audio = (perc or {}).get("audio") or {}
+        if not speaks and not (index or {}).get("words") and own_track(
+                audio.get("rms_db"), 0, src_dur, audio.get("music")):
+            report["recorded_music_gain_db"] = first_film_sound.recorded_music_trim(proof)
     report["speaks"] = bool(speaks)
     if level_source:
         report["renderer_source_gain_knots"] = source_knots

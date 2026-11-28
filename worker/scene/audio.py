@@ -245,6 +245,8 @@ def split_audio(plan):
     make_cue_space(voice, source_hits)
     fx = mix.view(Sounds)
     fx.own, fx.ducks = mix.copy(), ducks
+    if report["sounds"]:
+        fx.recorded_music_gain_db = (plan.doc.get("sound_design") or {}).get("recorded_music_gain_db")
     return voice, fx, report
 
 
@@ -320,6 +322,7 @@ def master(voice, fx, out, tmp, dur, bitrate="256k", bed=None, ducks=None):
     gain comes back while the limiter's work leaves the film under -14.2 LUFS, five passes at most. Returns the report.
     A song is dipped under each hero hit (duck_curve): handed apart as `bed` (fx then holds the sounds alone, ducks
     the hits' [(sample, dB)]), or laid by the caller onto split_audio's own track, which remembers what it held."""
+    music_gain = getattr(fx, "recorded_music_gain_db", None)
     own = getattr(fx, "own", None)
     ducks = ducks if ducks is not None else getattr(fx, "ducks", None)
     fx = np.asarray(fx, np.float32)
@@ -335,6 +338,9 @@ def master(voice, fx, out, tmp, dur, bitrate="256k", bed=None, ducks=None):
             g, duck_rep = duck_curve(laid, own, ducks, len(fx))
             fx = own + laid * g[:, None]
     v, rep = level_voice(voice, tmp) if voice is not None and np.abs(voice).max() > 1e-5 else (voice, {"curve": False})
+    if music_gain and v is not None:
+        v = v * (10 ** (music_gain / 20))
+        rep["recorded_music_gain_db"] = music_gain
     if duck_rep is not None:
         rep = dict(rep, ducks=duck_rep)
     mix = (v if v is not None else 0) + fx
