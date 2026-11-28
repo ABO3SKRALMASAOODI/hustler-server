@@ -316,7 +316,6 @@ def matched_layer(mix, source, start, duration, rate=8000):
     Report recovered energy against the residual programme; uncorrelated windows
     are below the detection floor, even if they contain unrelated loud sound."""
     import numpy as np
-    from scipy.signal import correlate
     origin = round(start * rate)
     count = min(round(duration * rate), max(0, len(mix) - origin))
     block, lag = rate // 2, round(.045 * rate)
@@ -335,7 +334,8 @@ def matched_layer(mix, source, start, duration, rate=8000):
         y = mix[lo:min(len(mix), origin+off+n+lag)].astype("float64")
         if len(y) < n:
             continue
-        cross = correlate(y, x, mode="valid", method="fft")
+        size = 1 << (len(y) + n - 2).bit_length()
+        cross = np.fft.irfft(np.fft.rfft(y, size) * np.fft.rfft(x[::-1], size), size)[n-1:len(y)]
         k = int(np.argmax(np.abs(cross)))
         aligned = y[k:k+n] - y[k:k+n].mean()
         yy = float(aligned @ aligned)

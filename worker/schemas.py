@@ -932,15 +932,37 @@ class VolumeItem(BaseModel):
 
 def sounding_volume(edl):
     """Source-time gain automation whose associated layer is playing."""
-    live = {m.get("id") for m in edl.get("music") or [] if not m.get("mute")}
+    live = {m.get("id") for m in edl.get("music") or [] if isinstance(m, dict) and not m.get("mute")}
     return [v for v in edl.get("volume") or []
-            if not v.get("music_id") or v["music_id"] in live]
+            if isinstance(v, dict) and all(isinstance(v.get(k), (int, float)) for k in ("start", "end", "gain_db"))
+            and (not v.get("music_id") or v["music_id"] in live)]
 
 
 def source_voice_gain(edl, t):
     gain = float((edl.get("stem_mix") or {}).get("voice_gain_db") or 0)
     return gain + sum(float(v["gain_db"]) for v in sounding_volume(edl)
                       if v["start"] <= t <= v["end"])
+
+
+def source_gain_stretches(edl):
+    """Combined dialogue-stem and volume gain on each kept source interval."""
+    spans = sounding_volume(edl)
+    bounds = {t for span in spans for t in (span["start"], span["end"])}
+    keep = [k for k in edl.get("keep") or [] if isinstance(k, (list, tuple)) and len(k) == 2
+            and all(isinstance(v, (int, float)) for v in k)]
+    bounds.update(t for span in keep for t in span)
+    edges = sorted(bounds)
+    rows = []
+    for a, b in zip(edges, edges[1:]):
+        mid = (a+b)/2
+        if keep and not any(start <= mid < end for start, end in keep):
+            continue
+        gain = source_voice_gain(edl, mid)
+        if rows and rows[-1]["gain_db"] == gain and rows[-1]["end"] == a:
+            rows[-1]["end"] = b
+        else:
+            rows.append({"start": a, "end": b, "gain_db": gain})
+    return rows
 
 
 FRAME_RATIOS = ("source", "16:9", "9:16", "1:1", "4:5")

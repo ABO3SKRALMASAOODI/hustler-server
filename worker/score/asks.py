@@ -103,7 +103,7 @@ def admitted(cfg, user_id):
 
 # ------------------------------------------------------------------ the film digest
 
-from schemas import sounding_volume, source_voice_gain
+from schemas import source_gain_stretches, source_voice_gain
 
 LANES = ("volume", "texts", "overlays", "inserts", "music", "sfx", "voiceover", "motion", "vectors", "fx")
 
@@ -168,7 +168,7 @@ def sound_layers(edl, index=None):
              else f"noise cleaning on (strength {nc.get('strength')}"
                   + (f", measured noise floor {nc.get('floor_db')} dBFS" if nc.get("floor_db") is not None else "")
                   + ")")
-    vol = sounding_volume(edl)
+    vol = source_gain_stretches(edl)
     gain = "".join(f"; source gain {v['start']:g}-{v['end']:g}s {v['gain_db']:g} dB" for v in vol)
     if edl.get("stem_mix"):
         gain += f"; voice stem {edl['stem_mix'].get('voice_gain_db', 0)} dB"
@@ -1119,7 +1119,7 @@ def facts(edl, preview=None, changes="", shots=None, source_s=None, index=None):
                                               "x", "y", "font_size", "max_width", "text_align")}
                    for t in (edl.get("texts") or [])[:24] if isinstance(t, dict)],
         "measured_audio_layers": (preview.get("audio_qc") or {}).get("layers"),
-        "source_gain_db": sounding_volume(edl),
+        "source_gain_db": source_gain_stretches(edl),
         "source_stems": edl.get("stem_mix"),
         "music": [{k: m.get(k) for k in ("start", "end", "gain_db", "mute", "provenance")}
                   for m in edl.get("music") or [] if isinstance(m, dict)],

@@ -694,6 +694,7 @@ class ToolContext:
         if turn != self._source_rotation:
             self.index = media.oriented_index(self._original_index, turn)
             self._spatial = None
+            self._source_layout = self._source_layout_failed = None
             self._source_rotation = turn
         if cache is not None and row:
             cache.update(gen=gen, row=copy.deepcopy(dict(row)))
@@ -4842,15 +4843,20 @@ def _get_source_layout(ctx, compute=False):
                 failed is not None and time.monotonic() - failed < 600):
             return None
         try:
-            original = ctx.db.run(dbx.latest_asset, ctx.project_id,
-                                  "original")
-            row = (original and original.get("sha256") and
-                   ctx.db.run(dbx.get_index_by_sha, original["sha256"]))
-            if row:
-                layout = source_layout.get_or_compute_for_index(
-                    ctx.db, dbx, row, getattr(ctx, "native_proxy_path", ctx.proxy_path)(), ctx.workdir)
-                if isinstance(index, dict):
-                    index["source_layout"] = layout
+            if getattr(ctx, "_source_rotation", 0):
+                video = index.get("video") or {}
+                layout = source_layout.analyze(
+                    ctx.proxy_path(), video.get("duration"), shots=index.get("shots"),
+                    src_w=video.get("width"), src_h=video.get("height"), spatial=index.get("spatial"))
+            else:
+                original = ctx.db.run(dbx.latest_asset, ctx.project_id, "original")
+                row = (original and original.get("sha256") and
+                       ctx.db.run(dbx.get_index_by_sha, original["sha256"]))
+                if row:
+                    layout = source_layout.get_or_compute_for_index(
+                        ctx.db, dbx, row, ctx.proxy_path(), ctx.workdir)
+            if layout:
+                index["source_layout"] = layout
         except Exception as exc:
             print(f"[source_layout] unavailable: {str(exc)[:160]}",
                   flush=True)

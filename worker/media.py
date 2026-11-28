@@ -485,6 +485,7 @@ def oriented_index(index, clockwise):
     if clockwise % 180:
         video["width"], video["height"] = video.get("height"), video.get("width")
     result = dict(index, video=video)
+    result.pop("source_layout", None)  # These pixel measurements describe the native view.
     def rotate_box(box):
         x, y, right, bottom = box
         for _ in range((clockwise % 360) // 90):

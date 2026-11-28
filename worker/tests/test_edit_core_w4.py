@@ -25,12 +25,24 @@ def test_rotated_source_and_index_share_coordinates(tmp_path):
     native = media.probe(src)
     shown = media.probe(media.oriented_source(src, 90, str(tmp_path)))
     idx = {"video": native, "spatial": {"samples": [{"text": [[.1, .2, .4, .6]]}]}}
+    idx["source_layout"] = {"windows": [{"x": .1}]}
     rotated = media.oriented_index(idx, 90)
+    assert "source_layout" not in rotated and idx["source_layout"]["windows"]
     assert (shown["width"], shown["height"]) == (64, 96)
     assert shown["duration"] == native["duration"]
     assert rotated["video"]["width"] == shown["width"]
     assert rotated["spatial"]["samples"][0]["text"] == [[.4, .1, .8, .4]]
     assert idx["video"]["width"] == 96
+
+
+def test_source_gains_follow_the_mix_and_the_kept_spans():
+    from schemas import source_gain_stretches
+    edl = {"keep": [[0, 2], [4, 6]], "stem_mix": {"voice_gain_db": -4},
+           "volume": [None, {"start": 1, "end": 5, "gain_db": -56},
+                      {"start": 0, "end": 6, "gain_db": -9, "music_id": "off"}]}
+    got = source_gain_stretches(edl)
+    assert [(r["start"], r["end"], r["gain_db"]) for r in got] == [
+        (0, 1, -4), (1, 2, -60), (4, 5, -60), (5, 6, -4)]
 
 
 def test_matched_stem_level_survives_unrelated_programme():
